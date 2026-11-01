@@ -225,12 +225,16 @@ fn date_filters_follow_the_local_display_day() {
     ))
     .unwrap();
 
-    let offset = chrono::Local::now().fixed_offset();
     let t = chrono::NaiveDateTime::parse_from_str("2026-01-05T23:30:00Z", "%Y-%m-%dT%H:%M:%SZ")
         .unwrap();
-    let local_day = (t + offset).date().to_string();
-    let prev_day = ((t + offset).date() - chrono::Duration::days(1)).to_string();
-    let next_day = ((t + offset).date() + chrono::Duration::days(1)).to_string();
+    // Resolve the displayed local day through the machine timezone the same
+    // way the filter layer does (historical offset for the instant).
+    let instant_utc =
+        chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(t, chrono::Utc);
+    let local_date = instant_utc.with_timezone(&chrono::Local).date_naive();
+    let local_day = local_date.to_string();
+    let prev_day = (local_date - chrono::Duration::days(1)).to_string();
+    let next_day = (local_date + chrono::Duration::days(1)).to_string();
 
     let count = |from: &str, to: &str| -> u64 {
         s.search_page(&SearchQuery {
