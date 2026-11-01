@@ -1,0 +1,118 @@
+name: Perf
+
+# Performance benchmarks and the search-latency regression gate.
+#
+# - perf-100k (gate): every PR and push to main. 100k-message fixture,
+#   per-query p95 budgets calibrated ~10x above measured local numbers so
+#   shared-runner variance cannot flake the gate (see tests/perf/BASELINE.md).
+# - perf-1m (informational): nightly and on demand. 1M-message fixture, no
+#   gate; JSON results are uploaded as artifacts for baseline tracking.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Benchmark suite to run"
+        required: false
+        default: "100k"
+        type: choice
+        options: ["100k", "1m"]
+  schedule:
+    # Off-peak (03:23 UTC): fewer noisy neighbors on shared runners.
+    - cron: "23 3 * * *"
+
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  perf-100k:
+    name: "gate: search p95 @ 100k"
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'push' ||
+      inputs.suite == '100k'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: tests/perf
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tests/perf
+
+      - name: Lint harness
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --all-targets -- -D warnings
+
+      - name: Build harness (release)
+        run: cargo build --release
+
+      - name: Bench 100k fixture with latency gate
+        run: |
+          cargo run --release -- bench \
+            --count 100000 \
+            --data-dir "$RUNNER_TEMP/vault-perf" \
+            --gate \
+            --json "$RUNNER_TEMP/results-100k.json"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results-100k
+          path: ${{ runner.temp }}/results-100k.json
+          if-no-files-found: warn
+
+  perf-1m:
+    name: "informational: 1M baseline"
+    if: >-
+      github.event_name == 'schedule' ||
+      inputs.suite == '1m'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: tests/perf
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tests/perf
+
+      - name: Build harness (release)
+        run: cargo build --release
+
+      # No gate: 1M numbers on a shared 2-vCPU runner are for trend
+      # tracking only (compare against previous artifacts, not against
+      # local baselines). Fewer iterations than the default 60 because the
+      # ubiquitous-term query alone runs ~1s per iteration at 1M.
+      - name: Bench 1M fixture (informational)
+        run: |
+          cargo run --release -- bench \
+            --count 1000000 \
+            --iterations 30 \
+            --data-dir "$RUNNER_TEMP/vault-perf" \
+            --json "$RUNNER_TEMP/results-1m.json"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results-1m
+          path: ${{ runner.temp }}/results-1m.json
+          if-no-files-found: warn
