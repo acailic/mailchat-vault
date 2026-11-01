@@ -172,17 +172,14 @@ fn llm_status(state: State<AppState>) -> LlmStatus {
 /// offline and CPU-bound; large first runs can take a moment, so the work
 /// runs off the UI thread.
 #[tauri::command]
-async fn embed_messages(
-    state: State<'_, AppState>,
-    limit: Option<u64>,
-) -> Result<EmbedJobSummary, String> {
+async fn embed_messages(state: State<'_, AppState>) -> Result<EmbedJobSummary, String> {
     let storage = Arc::clone(&state.storage);
     let embedder = state.embedder;
     tauri::async_runtime::spawn_blocking(move || {
         let storage = storage
             .lock()
             .map_err(|e| format!("storage lock poisoned: {e}"))?;
-        vector::run_embedding_job(&storage, &embedder, limit).map_err(|e| e.to_string())
+        vector::run_embedding_job(&storage, &embedder, None).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("embedding task failed: {e}"))?

@@ -227,16 +227,24 @@ function describeEmbedStatus(status: EmbeddingStatus): string {
   return `local embeddings: ${status.embedded}/${status.messages} · ${status.pending} pending (${model})`;
 }
 
+// Sequential embed-status token: a late response from an earlier refresh
+// (e.g. one fired before an embedding job finished) must not overwrite
+// newer status text — the job itself joins the sequence when it starts.
+let embedSeq = 0;
+
 async function refreshEmbedStatus(): Promise<void> {
+  const seq = ++embedSeq;
   try {
     const status = await invoke<EmbeddingStatus>("embed_status");
+    if (seq !== embedSeq) return; // a newer refresh/job superseded this response
     embedStatus.textContent = describeEmbedStatus(status);
   } catch {
-    embedStatus.textContent = "";
+    if (seq === embedSeq) embedStatus.textContent = "";
   }
 }
 
 async function runEmbedJob(): Promise<void> {
+  embedSeq++; // supersede any in-flight embed_status refresh
   embedButton.disabled = true;
   embedStatus.textContent = "Embedding… (local, offline)";
   try {
