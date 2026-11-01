@@ -121,7 +121,8 @@ Any IMAP server with implicit TLS works the same way: host, port (993), username
 
 ```sh
 cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram ingest, filtered/paged search, chat context, 100k perf fixture, IMAP sync (mock server), LLM search pipeline (mock LLM, no network), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations)
-npm test                 # frontend unit + UI-state snapshot tests (vitest)npm run check            # TypeScript type-check
+npm test                 # frontend unit + UI-state snapshot tests (vitest)
+npm run check            # TypeScript type-check
 cargo test --workspace   # also compiles the Tauri app (needs the Linux libs above)
 ```
 

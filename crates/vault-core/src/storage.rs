@@ -416,17 +416,6 @@ impl Storage {
         )?)
     }
 
-    /// Test support: drop every FTS row (leaving `messages` intact) so index
-    /// recovery paths can be exercised. Not used by the app.
-    #[doc(hidden)]
-    pub fn wipe_fts_for_tests(&self) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO messages_fts (messages_fts) VALUES ('delete-all')",
-            [],
-        )?;
-        Ok(())
-    }
-
     /// Load the incremental-sync cursor (UIDVALIDITY + last fetched UID)
     /// for one `(source, folder)`. See [`crate::imap`].
     pub fn get_imap_state(
