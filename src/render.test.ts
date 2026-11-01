@@ -250,6 +250,7 @@ describe("detail panel", () => {
       ctx,
       queryText: "vault",
       onOpenMessage: () => {},
+      onExportChat: () => {},
       onClose: () => {},
     });
     expect(el.innerHTML).toMatchSnapshot();
@@ -291,6 +292,7 @@ describe("detail panel", () => {
       ctx: withMedia,
       queryText: "",
       onOpenMessage: () => {},
+      onExportChat: () => {},
       onClose: () => {},
     });
     expect(el.innerHTML).toMatchSnapshot();
@@ -317,6 +319,7 @@ describe("detail panel", () => {
       ctx: unresolved,
       queryText: "",
       onOpenMessage: () => {},
+      onExportChat: () => {},
       onClose: () => {},
     });
     const unresolvedItems = el2.querySelectorAll(".media-item.unresolved");
@@ -336,6 +339,7 @@ describe("detail panel", () => {
       ctx: evil,
       queryText: "",
       onOpenMessage: () => {},
+      onExportChat: () => {},
       onClose: () => {},
     });
     expect(el.querySelectorAll("img,b").length).toBe(0);
@@ -349,6 +353,7 @@ describe("detail panel", () => {
       ctx,
       queryText: "",
       onOpenMessage: (id) => (opened = id),
+      onExportChat: () => {},
       onClose: () => (closed = true),
     });
     (el.querySelector(".close-btn") as HTMLElement).click();
@@ -368,6 +373,7 @@ describe("detail panel", () => {
       ctx: solo,
       queryText: "message",
       onOpenMessage: () => {},
+      onExportChat: () => {},
       onClose: () => {},
     });
     expect(el.innerHTML).toMatchSnapshot();

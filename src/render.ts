@@ -260,12 +260,14 @@ export interface DetailOptions {
   ctx: ChatContext;
   queryText: string;
   onOpenMessage: (id: number) => void;
+  /** Export the whole chat thread of the opened message. */
+  onExportChat: () => void;
   onClose: () => void;
 }
 
 /** Render the message detail panel: full body, meta, thread neighbors. */
 export function renderDetail(el: HTMLElement, opts: DetailOptions): void {
-  const { ctx, onOpenMessage, onClose } = opts;
+  const { ctx, onOpenMessage, onExportChat, onClose } = opts;
   const terms = splitTerms(opts.queryText);
   const article = document.createElement("article");
   article.className = "detail-card";
@@ -273,12 +275,21 @@ export function renderDetail(el: HTMLElement, opts: DetailOptions): void {
   const header = document.createElement("header");
   const title = document.createElement("h2");
   title.textContent = ctx.message.author || "unknown author";
+  const actions = document.createElement("div");
+  actions.className = "header-actions";
+  const exportChat = document.createElement("button");
+  exportChat.type = "button";
+  exportChat.className = "export-chat-btn";
+  exportChat.textContent = "⤓ Export chat…";
+  exportChat.title = "Export the whole chat thread of this message";
+  exportChat.addEventListener("click", onExportChat);
   const close = document.createElement("button");
   close.type = "button";
   close.className = "close-btn";
   close.textContent = "✕ Close (Esc)";
   close.addEventListener("click", onClose);
-  header.append(title, close);
+  actions.append(exportChat, close);
+  header.append(title, actions);
 
   const thread = document.createElement("ol");
   thread.className = "thread";
