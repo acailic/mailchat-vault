@@ -1,0 +1,82 @@
+From ana@example.com Thu Oct 30 10:00:00 2025
+Message-ID: <e2e-m1@archive.local>
+From: Ana Sender <ana@example.com>
+To: team@example.com
+Subject: Vault kickoff
+Date: Thu, 30 Oct 2025 10:00:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+The vault migration plan starts next week. Granite milestone attached,
+please review before the kickoff call.
+
+From marko@example.com Fri Oct 31 23:59:30 2025
+Message-ID: <e2e-m2@archive.local>
+From: Marko Midnight <marko@example.com>
+To: team@example.com
+Subject: Vault check-in before midnight
+Date: Fri, 31 Oct 2025 23:59:30 +0000
+Content-Type: text/plain; charset=utf-8
+
+Vault status right before midnight on Halloween: all green, obsidian
+milestone closed.
+
+From jelena@example.com Sat Nov  1 00:00:30 2025
+Message-ID: <e2e-m3@archive.local>
+From: Jelena Justafter <jelena@example.com>
+To: team@example.com
+Subject: Vault check-in after midnight
+Date: Sat, 1 Nov 2025 00:00:30 +0000
+Content-Type: text/plain; charset=utf-8
+
+Vault status thirty seconds after midnight: still green, obsidian
+milestone still closed.
+
+From ana@example.com Sun Nov  2 08:15:00 2025
+Message-ID: <e2e-m4@archive.local>
+From: Ana Sender <ana@example.com>
+To: team@example.com
+Subject: Vault follow-up
+Date: Sun, 2 Nov 2025 08:15:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+Vault follow-up with the basalt details discussed last week.
+
+From books@example.com Mon Nov  3 12:00:00 2025
+Message-ID: <e2e-m5@archive.local>
+From: Bookkeeper <books@example.com>
+To: team@example.com
+Subject: November ledger
+Date: Mon, 3 Nov 2025 12:00:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+The ledger for November is ready and reconciled.
+
+From ana@example.com Tue Nov  4 09:30:00 2025
+Message-ID: <e2e-m6@archive.local>
+From: Ana Sender <ana@example.com>
+To: team@example.com
+Subject: Encoded attachment note
+Date: Tue, 4 Nov 2025 09:30:00 +0000
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: base64
+
+VGhlIGhpZGRlbiB6ZXBoeXIgc2lnbmFsIGlzIGVuY29kZWQgaW4gdGhpcyBiYXNl
+NjQgcGF5bG9hZC4=
+
+From ghost@example.com Wed Nov  5 00:00:00 2025
+Message-ID: <e2e-m7@archive.local>
+From: Ghost Writer <ghost@example.com>
+To: team@example.com
+Subject: Undated note
+
+An amber note that carries no Date header at all.
+
+From zz@example.com Wed Nov  5 10:00:00 2025
+Message-ID: <e2e-m8@archive.local>
+From: Zdravko Zima <zz@example.com>
+To: team@example.com
+Subject: Greeting from the winter desk
+Date: Wed, 5 Nov 2025 10:00:00 +0000
+Content-Type: text/plain; charset=utf-8
+
+Hello from zdravko at the winter desk.
