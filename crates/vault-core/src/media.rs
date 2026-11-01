@@ -322,11 +322,26 @@ pub fn extract_whatsapp(
         })
         .collect();
     let mut by_name: HashMap<String, PathBuf> = HashMap::new();
+    let mut by_stem: HashMap<String, PathBuf> = HashMap::new();
     if !wanted.is_empty() {
         let mut lower_wanted: Vec<String> = wanted.iter().map(|w| w.to_lowercase()).collect();
         lower_wanted.sort();
         lower_wanted.dedup();
-        collect_names(export_root, 0, &mut 0, &mut by_name, &lower_wanted);
+        let mut lower_wanted_stems: Vec<String> = wanted
+            .iter()
+            .map(|w| stem_of(w).to_lowercase())
+            .collect();
+        lower_wanted_stems.sort();
+        lower_wanted_stems.dedup();
+        collect_names(
+            export_root,
+            0,
+            &mut 0,
+            &mut by_name,
+            &mut by_stem,
+            &lower_wanted,
+            &lower_wanted_stems,
+        );
     }
 
     for msg in messages.iter_mut() {
@@ -344,7 +359,7 @@ pub fn extract_whatsapp(
             continue;
         }
         summary.referenced += 1;
-        let Some(src) = lookup_attachment(&by_name, name).cloned() else {
+        let Some(src) = lookup_attachment(&by_name, &by_stem, name).cloned() else {
             summary.missing += 1;
             continue;
         };
@@ -366,24 +381,27 @@ pub fn extract_whatsapp(
     Ok(())
 }
 
-/// Find the on-disk file for an export attachment name: exact, then by
-/// stem (export flavors sometimes re-encode `IMG-1.jpg` as `IMG-1.jpeg`),
-/// then the same two case-insensitively.
-fn lookup_attachment<'a>(by_name: &'a HashMap<String, PathBuf>, name: &str) -> Option<&'a PathBuf> {
-    if let Some(hit) = by_name.get(name) {
+/// Find the on-disk file for an export attachment name: by full name
+/// first (ASCII-case-insensitively), then by matching stem-of-disk-file
+/// against stem-of-reference — the fallback for export flavors that
+/// re-encode `IMG-1.jpg` as `IMG-1.jpeg`. A disk file's stem is never
+/// compared against a reference's full name, so `plan.pdf.bak` cannot
+/// answer for a missing `plan.pdf`.
+fn lookup_attachment<'a>(
+    by_name: &'a HashMap<String, PathBuf>,
+    by_stem: &'a HashMap<String, PathBuf>,
+    name: &str,
+) -> Option<&'a PathBuf> {
+    if let Some(hit) = by_name.get(&name.to_lowercase()) {
         return Some(hit);
     }
-    let stem = name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name);
-    if let Some(hit) = by_name.get(stem) {
-        return Some(hit);
-    }
-    let lower = name.to_lowercase();
-    let lower_stem = stem.to_lowercase();
-    by_name
-        .iter()
-        .find(|(k, _)| k.to_lowercase() == lower)
-        .or_else(|| by_name.iter().find(|(k, _)| k.to_lowercase() == lower_stem))
-        .map(|(_, v)| v)
+    by_stem.get(&stem_of(name).to_lowercase())
+}
+
+/// The stem of a file name: everything before the last dot; a name
+/// without a dot is its own stem.
+fn stem_of(name: &str) -> &str {
+    name.rsplit_once('.').map(|(s, _)| s).unwrap_or(name)
 }
 
 /// Most files a WhatsApp export lookup will walk before giving up.
@@ -391,14 +409,18 @@ const MAX_WALK_ENTRIES: usize = 20_000;
 /// How deep under the export root media files are searched.
 const MAX_WALK_DEPTH: usize = 6;
 
-/// Record `path` under its file name when it matches a wanted name
-/// (exact or ASCII-case-insensitive). Bounded depth and entry count.
+/// Record `path` in the two lookup maps when it matches a wanted name:
+/// under its full name (ASCII-case-insensitive) and under its stem.
+/// A disk file's stem key can only be answered by a reference's stem,
+/// never by a reference's full name. Bounded depth and entry count.
 fn collect_names(
     dir: &Path,
     depth: usize,
     seen: &mut usize,
     by_name: &mut HashMap<String, PathBuf>,
+    by_stem: &mut HashMap<String, PathBuf>,
     lower_wanted: &[String],
+    lower_wanted_stems: &[String],
 ) {
     if depth > MAX_WALK_DEPTH || *seen > MAX_WALK_ENTRIES {
         return;
@@ -419,26 +441,25 @@ fn collect_names(
         if file_type.is_dir() {
             let name = entry.file_name().to_string_lossy().into_owned();
             if !name.starts_with('.') {
-                collect_names(&path, depth + 1, seen, by_name, lower_wanted);
+                collect_names(
+                    &path,
+                    depth + 1,
+                    seen,
+                    by_name,
+                    by_stem,
+                    lower_wanted,
+                    lower_wanted_stems,
+                );
             }
         } else if file_type.is_file() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if let Some(stem) = name.rsplit_once('.') {
-                // Match either the full name or the stem: some export
-                // flavors rename IMG-….jpg to IMG-….jpeg on disk.
-                let lower = name.to_lowercase();
-                let lower_stem = stem.0.to_lowercase();
-                if lower_wanted.binary_search(&lower).is_ok()
-                    || lower_wanted.binary_search(&lower_stem).is_ok()
-                {
-                    by_name.entry(name.clone()).or_insert(path.clone());
-                    by_name.entry(stem.0.to_string()).or_insert(path);
-                }
-            } else {
-                let lower = name.to_lowercase();
-                if lower_wanted.binary_search(&lower).is_ok() {
-                    by_name.entry(name.clone()).or_insert(path);
-                }
+            let lower = name.to_lowercase();
+            if lower_wanted.binary_search(&lower).is_ok() {
+                by_name.entry(lower).or_insert(path.clone());
+            }
+            let lower_stem = stem_of(&name).to_lowercase();
+            if lower_wanted_stems.binary_search(&lower_stem).is_ok() {
+                by_stem.entry(lower_stem).or_insert(path);
             }
         }
     }

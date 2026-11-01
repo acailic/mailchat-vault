@@ -432,6 +432,37 @@ fn whatsapp_attachments_are_matched_by_name() {
 }
 
 #[test]
+fn whatsapp_stem_match_never_shadowed_by_foreign_extension() {
+    let sb = Sandbox::new("wa-stem");
+    let chat = sb.export_dir().join("WhatsApp Chat with Ana.txt");
+    fs::write(
+        &chat,
+        "[1.11.2026., 09:00:00] Marko: doc\n\
+         [1.11.2026., 09:01:00] Ana: plan.pdf (file attached)\n\
+         [1.11.2026., 09:02:00] Marko: IMG-1.jpg (file attached)\n",
+    )
+    .unwrap();
+    // A backup whose stem equals the referenced full name must not
+    // answer for the missing plan.pdf…
+    sb.put("media_docs/plan.pdf.bak", "plan.pdf");
+    // …while the documented re-encode flavor still matches by stem.
+    sb.put("IMG-1.jpeg", "photo.jpg");
+    let storage = Storage::open_in_memory().unwrap();
+
+    let outcome = sb.import_picked(&storage, &chat, true);
+    let media = outcome.media.unwrap();
+    assert_eq!(media.referenced, 2);
+    assert_eq!(media.missing, 1, "plan.pdf.bak must not answer for plan.pdf");
+    assert_eq!(media.stored, 1, "IMG-1.jpg matches IMG-1.jpeg by stem");
+    assert_eq!(fs::read_dir(sb.store_dir()).unwrap().count(), 1);
+    let hits = storage
+        .search_filtered(&build_match_query("plan.pdf"), None, None, 10)
+        .unwrap();
+    let raw: serde_json::Value = serde_json::from_str(&hits[0].raw_json).unwrap();
+    assert!(raw.get("media").is_none(), "no link for the backup file");
+}
+
+#[test]
 fn whatsapp_export_without_files_reports_missing_named_attachments() {
     let sb = Sandbox::new("wa-text-only");
     fs::write(
