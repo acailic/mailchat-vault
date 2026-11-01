@@ -9,7 +9,7 @@
 use std::sync::{Mutex, MutexGuard};
 
 use tauri::{Manager, State};
-use vault_core::ingest::{ingest, IngestSummary, Source};
+use vault_core::ingest::{ingest, Collected, IngestSummary, Source};
 use vault_core::mbox::MboxSource;
 use vault_core::search::build_match_query;
 use vault_core::storage::Storage;
@@ -71,8 +71,11 @@ impl Source for DemoSource {
         demo::DEMO_SOURCE
     }
 
-    fn collect(&self) -> CoreResult<Vec<message::NewMessage>> {
-        Ok(demo::messages())
+    fn collect(&self) -> CoreResult<Collected> {
+        Ok(Collected {
+            messages: demo::messages(),
+            failed: 0,
+        })
     }
 }
 

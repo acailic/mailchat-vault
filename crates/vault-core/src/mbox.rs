@@ -6,15 +6,15 @@
 //! `From ` lines as `>From ` (the escaped form does not split a message).
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use chrono::{TimeZone, Utc};
-use mailparse::{parse_mail, MailHeaderMap};
+use mailparse::{parse_mail, MailHeaderMap, ParsedMail};
 use serde_json::json;
 
-use crate::ingest::Source;
+use crate::ingest::{Collected, Source};
 use crate::message::NewMessage;
-use crate::{Error, Result};
+use crate::Result;
 
 /// Source name and dedup namespace for mbox imports.
 pub const MBOX_SOURCE: &str = "mbox";
@@ -36,7 +36,7 @@ impl Source for MboxSource {
         MBOX_SOURCE
     }
 
-    fn collect(&self) -> Result<Vec<NewMessage>> {
+    fn collect(&self) -> Result<Collected> {
         let bytes = fs::read(&self.path)?;
         let chat_id = self
             .path
@@ -53,8 +53,12 @@ impl Source for MboxSource {
 /// mail: `external_id` is the `Message-ID` (falling back to a content hash
 /// when absent), `body` is the decoded text body prefixed with the subject so
 /// both are full-text searchable, and `raw_json` keeps the key headers.
-pub fn parse_mbox(bytes: &[u8], chat_id: &str) -> Result<Vec<NewMessage>> {
+///
+/// Mails that fail to parse are counted in `Collected::failed` rather than
+/// silently dropped.
+pub fn parse_mbox(bytes: &[u8], chat_id: &str) -> Result<Collected> {
     let mut messages = Vec::new();
+    let mut failed: u64 = 0;
     for raw in split_mbox(bytes) {
         // Drop the leading "From sender date" separator line before parsing.
         let raw = match raw.iter().position(|&b| b == b'\n') {
@@ -64,11 +68,12 @@ pub fn parse_mbox(bytes: &[u8], chat_id: &str) -> Result<Vec<NewMessage>> {
         if raw.is_empty() {
             continue;
         }
-        if let Some(msg) = parse_single(raw, chat_id) {
-            messages.push(msg);
+        match parse_single(raw, chat_id) {
+            Some(msg) => messages.push(msg),
+            None => failed += 1,
         }
     }
-    Ok(messages)
+    Ok(Collected { messages, failed })
 }
 
 /// Split on lines starting with `From `, except escaped `>From ` lines.
@@ -105,7 +110,6 @@ fn parse_single(raw: &[u8], chat_id: &str) -> Option<NewMessage> {
     let message_id = mail
         .headers
         .get_first_value("Message-ID")
-        .or_else(|| mail.headers.get_first_value("Message-Id"))
         .map(|v| v.trim().trim_matches(['<', '>']).to_string())
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| format!("generated-{:016x}", fnv1a(raw)));
@@ -130,10 +134,11 @@ fn parse_single(raw: &[u8], chat_id: &str) -> Option<NewMessage> {
         .map(|v| v.trim().to_string())
         .unwrap_or_default();
 
-    // Decoded text body; html-only mails (or decode failures) yield "".
-    let text = mail
-        .get_body()
-        .map(|t| t.trim_end().to_string())
+    // Decoded text body: walk to the text/plain leaf parts (get_body decodes
+    // their transfer encoding), joined; html-only or otherwise text-less
+    // mails fall back to the top-level body, decode failures yield "".
+    let text = extract_text(&mail)
+        .or_else(|| mail.get_body().ok().map(|t| t.trim_end().to_string()))
         .unwrap_or_default();
     let body = if subject.is_empty() {
         text
@@ -158,6 +163,26 @@ fn parse_single(raw: &[u8], chat_id: &str) -> Option<NewMessage> {
     Some(msg)
 }
 
+/// Collect the decoded text of every text/plain leaf part, joined with a
+/// blank line; `None` when the mail has no text/plain leaf at all. Leaf
+/// bodies go through `get_body`, so base64/quoted-printable transfer
+/// encodings are decoded; a leaf whose decode fails contributes "".
+fn extract_text(mail: &ParsedMail<'_>) -> Option<String> {
+    if mail.subparts.is_empty() {
+        return if mail.ctype.mimetype == "text/plain" {
+            Some(mail.get_body().unwrap_or_default().trim_end().to_string())
+        } else {
+            None
+        };
+    }
+    let leaves: Vec<String> = mail.subparts.iter().filter_map(extract_text).collect();
+    if leaves.is_empty() {
+        None
+    } else {
+        Some(leaves.join("\n\n"))
+    }
+}
+
 /// FNV-1a: a tiny, fully deterministic content hash for mails without a
 /// `Message-ID` (so re-importing the same file never duplicates them).
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -167,15 +192,4 @@ fn fnv1a(bytes: &[u8]) -> u64 {
         acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
     }
     acc
-}
-
-/// Path helper for callers that validate user-provided paths.
-pub fn validate_mbox_path(path: &Path) -> Result<()> {
-    if !path.is_file() {
-        return Err(Error::MboxNotReadable(format!(
-            "not a readable file: {}",
-            path.display()
-        )));
-    }
-    Ok(())
 }

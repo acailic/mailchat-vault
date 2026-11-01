@@ -30,6 +30,4 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("email parse error: {0}")]
     MailParse(#[from] mailparse::MailParseError),
-    #[error("mbox source not readable: {0}")]
-    MboxNotReadable(String),
 }

@@ -28,6 +28,7 @@ interface IngestSummary {
   seen: number;
   inserted: number;
   skipped: number;
+  failed: number;
 }
 
 const searchInput = document.querySelector<HTMLInputElement>("#search")!;
@@ -97,9 +98,10 @@ async function importMbox(): Promise<void> {
   importStatus.textContent = `Importing ${path}…`;
   try {
     const summary = await invoke<IngestSummary>("import_mbox", { path });
+    const failedPart = summary.failed > 0 ? `, ${summary.failed} failed to parse` : "";
     importStatus.textContent =
-      `Imported ${summary.inserted} new, ${summary.skipped} already present ` +
-      `(of ${summary.seen} in ${summary.source}).`;
+      `Imported ${summary.inserted} new, ${summary.skipped} already present` +
+      `${failedPart} (of ${summary.seen} in ${summary.source}).`;
     await refreshStats();
   } catch (e) {
     importStatus.textContent = `Import failed: ${e}`;
