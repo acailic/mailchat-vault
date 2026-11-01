@@ -188,6 +188,38 @@ fn telegram_media_is_extracted_hash_named_and_linked() {
 }
 
 #[test]
+fn video_thumbnail_keeps_image_kind_and_file_takes_the_hint() {
+    let sb = Sandbox::new("tg-thumb");
+    fs::create_dir_all(sb.export_dir().join("photos")).unwrap();
+    fs::create_dir_all(sb.export_dir().join("video_files")).unwrap();
+    fs::copy(fixture("photo.jpg"), sb.export_dir().join("photos/thumb.jpg")).unwrap();
+    fs::write(sb.export_dir().join("video_files/clip.mp4"), b"fake-video-bytes").unwrap();
+    fs::write(
+        sb.export_dir().join("result.json"),
+        r#"{"name": "d", "id": 9, "messages": [
+  { "id": 1, "type": "message", "date_unixtime": "1698832800", "from": "A",
+    "media_type": "video_file", "photo": "photos/thumb.jpg", "file": "video_files/clip.mp4", "text": "" }
+]}"#,
+    )
+    .unwrap();
+    let storage = Storage::open_in_memory().unwrap();
+
+    let outcome = sb.import_with_media(&storage);
+    let media = outcome.media.unwrap();
+    assert_eq!(media.stored, 2);
+    assert_eq!(media.deduped, 0);
+
+    let raw: serde_json::Value =
+        serde_json::from_str(&raw_json_of(&storage, "9/1")).unwrap();
+    let thumb = &raw["media"][0];
+    let clip = &raw["media"][1];
+    assert_eq!(thumb["kind"], "image", "thumbnail kind from its own .jpg extension");
+    assert_eq!(thumb["name"], "thumb.jpg");
+    assert_eq!(clip["kind"], "video", "the file ref takes the media_type hint");
+    assert_eq!(clip["name"], "clip.mp4");
+}
+
+#[test]
 fn telegram_reimport_dedups_files_and_rows() {
     let sb = Sandbox::new("tg-reimport");
     write_telegram_export(&sb);

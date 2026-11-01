@@ -492,7 +492,7 @@ async function importChatExport(): Promise<void> {
     importStatus.textContent = `Importing ${picked}${extractMedia ? " (extracting media)" : ""}…`;
     const outcome = await invoke<ChatImportOutcome>("import_chat_export", {
       path: picked,
-      extract_media: extractMedia,
+      extractMedia: extractMedia,
     });
     const summary = outcome.summary;
     const failedPart = summary.failed > 0 ? `, ${summary.failed} failed to parse` : "";

@@ -276,7 +276,9 @@ pub fn extract_telegram(
 }
 
 /// The `photo`/`file` references of one Telegram message object, in a
-/// stable order: `(relative path, media_type hint)`.
+/// stable order: `(relative path, media_type hint)`. The hint rides only
+/// on the `file` ref — `photo` is always the JPEG thumbnail, so its kind
+/// comes from its own extension.
 fn telegram_refs(obj: &Map<String, Value>) -> Vec<(String, Option<String>)> {
     let media_type = obj
         .get("media_type")
@@ -286,7 +288,8 @@ fn telegram_refs(obj: &Map<String, Value>) -> Vec<(String, Option<String>)> {
     for field in ["photo", "file"] {
         if let Some(rel) = obj.get(field).and_then(Value::as_str) {
             if !rel.is_empty() {
-                refs.push((rel.to_string(), media_type.clone()));
+                let hint = (field == "file").then(|| media_type.clone()).flatten();
+                refs.push((rel.to_string(), hint));
             }
         }
     }

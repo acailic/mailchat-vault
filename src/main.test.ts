@@ -636,7 +636,7 @@ describe("chat export import", () => {
     await vi.waitFor(() => expect(importCalls()).toHaveLength(1));
     expect(importCalls()[0].args).toEqual({
       path: "/tmp/tg-export/result.json",
-      extract_media: true,
+      extractMedia: true,
     });
     await vi.waitFor(() =>
       expect($("#import-status").textContent).toBe(
@@ -655,7 +655,7 @@ describe("chat export import", () => {
     }));
     $("#chat-import-btn").click();
     await vi.waitFor(() => expect(importCalls()).toHaveLength(1));
-    expect(importCalls()[0].args).toEqual({ path: "/tmp/chat.txt", extract_media: false });
+    expect(importCalls()[0].args).toEqual({ path: "/tmp/chat.txt", extractMedia: false });
     await vi.waitFor(() =>
       expect($("#import-status").textContent).toBe(
         "Imported 2 new, 0 already present (of 2 in whatsapp).",
