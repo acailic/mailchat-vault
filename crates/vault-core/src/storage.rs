@@ -471,7 +471,6 @@ impl Storage {
         )?;
         Ok(())
     }
-(no-mistakes(review): Exclude empty sent_at from date filters, sweep dead code)
 }
 
 fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {

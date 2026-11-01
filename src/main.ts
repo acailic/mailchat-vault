@@ -495,14 +495,11 @@ async function syncImap(): Promise<void> {
   }
 }
 
-
-||||||| parent of 83d0442 (feat: usable search tool — filtered/paged FTS search UI with highlights, grouping, detail view and 100k perf contract)
 // ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 
 searchButton.addEventListener("click", () => void runSearch(0));
- (feat: usable search tool — filtered/paged FTS search UI with highlights, grouping, detail view and 100k perf contract)
 searchInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") void runSearch(0);
 });

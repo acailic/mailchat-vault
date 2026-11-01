@@ -209,7 +209,9 @@ fn imported_chat_is_full_text_searchable() {
     ingest(&storage, &TelegramSource::new(&path)).unwrap();
 
     for term in ["arhiva", "example.com", "odgovor", "jelena"] {
-        let hits = storage.search_filtered(&build_match_query(term), None, None, 10).unwrap();
+        let hits = storage
+            .search_filtered(&build_match_query(term), None, None, 10)
+            .unwrap();
         assert!(!hits.is_empty(), "no hits for {term:?}");
     }
     // Service entries are not searchable (they were never stored).
