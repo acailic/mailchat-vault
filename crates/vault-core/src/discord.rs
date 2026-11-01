@@ -91,9 +91,10 @@ fn import_directory(root: &Path) -> Result<Collected> {
     let mut messages = Vec::new();
     let mut failed: u64 = 0;
     for file in &files {
-        let bytes = fs::read(file)?;
+        let bytes = fs::read(file).map_err(|e| read_failed(file, e))?;
         let fallback = file_stem_hint(file);
-        let collected = parse_discord_channel(&bytes, &index, &fallback)?;
+        let collected = parse_discord_channel(&bytes, &index, &fallback)
+            .map_err(|e| channel_file_failed(file, e))?;
         messages.extend(collected.messages);
         failed += collected.failed;
     }
@@ -365,6 +366,16 @@ fn id_to_string(v: &Value) -> Option<String> {
             .or_else(|| n.as_i64().map(|i| i.to_string())),
         _ => None,
     }
+}
+
+/// An unreadable or unparseable channel file aborts the directory import;
+/// the error names the file so the bad one can be found in a large package.
+fn read_failed(path: &Path, e: io::Error) -> io::Error {
+    io::Error::new(e.kind(), format!("{}: {e}", path.display()))
+}
+
+fn channel_file_failed(path: &Path, e: crate::Error) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, format!("{}: {e}", path.display()))
 }
 
 /// Import-hint chat key when the file carries no channel id: its stem.

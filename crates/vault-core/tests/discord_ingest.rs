@@ -543,6 +543,31 @@ fn broken_json_and_unreadable_file_report_errors() {
 }
 
 #[test]
+fn directory_import_error_names_the_offending_file() {
+    // A bad channel file aborts the whole package: the error must say
+    // which of the many files is at fault.
+    let dir = tempfile::tempdir().unwrap();
+    let messages = dir.path().join("messages");
+    std::fs::create_dir(&messages).unwrap();
+    std::fs::write(messages.join("900000000000000101.json"), GUILD_CHANNEL_JSON).unwrap();
+    std::fs::write(messages.join("index.json"), "{}").unwrap();
+
+    // Truncated JSON: serde error, but with the file named.
+    let bad = messages.join("900000000000000102.json");
+    std::fs::write(&bad, b"{not json").unwrap();
+    let err = DiscordSource::new(dir.path()).collect().unwrap_err();
+    assert!(err.to_string().contains("900000000000000102.json"), "{err}");
+    std::fs::remove_file(&bad).unwrap();
+
+    // A stray non-channel JSON in the directory: the guard error, with
+    // the file named.
+    let stray = messages.join("notes.json");
+    std::fs::write(&stray, r#"{"a": 1}"#).unwrap();
+    let err = DiscordSource::new(dir.path()).collect().unwrap_err();
+    assert!(err.to_string().contains("notes.json"), "{err}");
+}
+
+#[test]
 fn detection_distinguishes_discord_from_telegram() {
     // Both formats carry a top-level messages array; only the
     // channel/guild object makes it Discord.
