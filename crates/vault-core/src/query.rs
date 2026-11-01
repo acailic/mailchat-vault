@@ -68,7 +68,8 @@ impl SearchQuery {
     pub fn normalize(&mut self) -> Result<()> {
         self.limit = self.limit.clamp(1, MAX_LIMIT);
         self.offset = self.offset.min(MAX_OFFSET);
-        self.sources.retain(|s| !s.trim().is_empty());
+        self.sources = self.sources.iter().map(|s| s.trim().to_string()).collect();
+        self.sources.retain(|s| !s.is_empty());
         self.sources.dedup();
         for (label, date) in [("from_date", &self.from_date), ("to_date", &self.to_date)] {
             if !date.is_empty() && parse_day(date).is_none() {
@@ -198,6 +199,21 @@ mod tests {
         };
         q.normalize().unwrap();
         assert_eq!(q.limit, MAX_LIMIT);
+    }
+
+    #[test]
+    fn normalize_trims_and_dedups_sources() {
+        let mut q = SearchQuery {
+            sources: vec![
+                " mbox ".into(),
+                "mbox ".into(),
+                "  ".into(),
+                "whatsapp".into(),
+            ],
+            ..SearchQuery::default()
+        };
+        q.normalize().unwrap();
+        assert_eq!(q.sources, ["mbox", "whatsapp"]);
     }
 
     #[test]
