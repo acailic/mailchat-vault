@@ -53,6 +53,21 @@ pub struct LlmConfig {
     pub model: String,
 }
 
+/// Whether two endpoint URLs name the same provider endpoint: scheme and
+/// host compared case-insensitively, trailing slashes ignored.
+fn same_endpoint(a: &str, b: &str) -> bool {
+    fn normalize(url: &str) -> String {
+        let (scheme, rest) = url.rsplit_once("://").map_or(("", url), |(s, r)| (s, r));
+        let (host, path) = rest.split_once('/').map_or((rest, None), |(h, p)| (h, Some(p)));
+        let host = host.to_ascii_lowercase();
+        match path {
+            Some(p) => format!("{}://{}/{}", scheme.to_ascii_lowercase(), host, p),
+            None => format!("{}://{}", scheme.to_ascii_lowercase(), host),
+        }
+    }
+    normalize(a.trim_end_matches('/')) == normalize(b.trim_end_matches('/'))
+}
+
 impl LlmConfig {
     pub const DEFAULT_BASE_URL: &'static str = "https://api.z.ai/api/anthropic";
     pub const DEFAULT_MODEL: &'static str = "glm-5";
@@ -82,7 +97,7 @@ impl LlmConfig {
         let (api_key, base_url) = match (anthropic_key, zai_key, base_url) {
             // An Anthropic key is never sent to the z.ai endpoint, even when
             // explicitly paired with it there; only its own endpoint honors it.
-            (Some(_), _, Some(url)) if url == Self::DEFAULT_BASE_URL => {
+            (Some(_), _, Some(url)) if same_endpoint(&url, Self::DEFAULT_BASE_URL) => {
                 return Err(Error::Llm(
                     "ANTHROPIC_API_KEY is paired with the default z.ai endpoint: refusing to \
                      send an Anthropic key to z.ai. Point ANTHROPIC_BASE_URL at the endpoint \
@@ -102,7 +117,9 @@ impl LlmConfig {
                 ))
             }
             // z.ai keys pair with the z.ai endpoint only.
-            (None, Some(key), Some(url)) if url == Self::DEFAULT_BASE_URL => (key, url),
+            (None, Some(key), Some(url)) if same_endpoint(&url, Self::DEFAULT_BASE_URL) => {
+                (key, url)
+            }
             (None, Some(_), Some(url)) => {
                 return Err(Error::Llm(format!(
                     "ANTHROPIC_BASE_URL={url} does not match the z.ai key (ZAI_API_KEY / \
@@ -683,6 +700,44 @@ mod tests {
         .unwrap()
         .expect("explicit z.ai URL matches the z.ai key");
         assert_eq!(cfg.base_url, LlmConfig::DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn url_variants_cannot_bypass_provider_pairing() {
+        // Trailing slash and host case are the same endpoint: an Anthropic
+        // key paired with either spelling is still refused.
+        for variant in [
+            "https://api.z.ai/api/anthropic/",
+            "https://API.Z.AI/api/anthropic",
+            "https://api.z.ai/api/anthropic///",
+        ] {
+            let err = LlmConfig::from_lookup(|name| match name {
+                "ANTHROPIC_API_KEY" => Some("k".into()),
+                "ANTHROPIC_BASE_URL" => Some(variant.into()),
+                _ => None,
+            })
+            .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("refusing to send an Anthropic key to z.ai"),
+                "variant should be refused: {variant}"
+            );
+        }
+
+        // The same variants, paired with a z.ai key, are accepted.
+        for variant in [
+            "https://api.z.ai/api/anthropic/",
+            "https://API.Z.AI/api/anthropic",
+        ] {
+            let cfg = LlmConfig::from_lookup(|name| match name {
+                "ZAI_API_KEY" => Some("k".into()),
+                "ANTHROPIC_BASE_URL" => Some(variant.into()),
+                _ => None,
+            })
+            .unwrap()
+            .expect("variant is the z.ai endpoint");
+            assert_eq!(cfg.base_url, variant);
+        }
     }
 
     #[test]
