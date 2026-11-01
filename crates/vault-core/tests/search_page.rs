@@ -51,7 +51,7 @@ fn seeded() -> Storage {
             "w1",
             "family",
             "mom",
-            "2026-01-20T18:00:00Z",
+            "2026-01-20T12:00:00Z",
             "call me about the vault keys",
         ),
         chat_msg(
@@ -67,7 +67,7 @@ fn seeded() -> Storage {
             "t1",
             "devs",
             "nina",
-            "2026-03-01T12:00:00Z",
+            "2026-03-01T08:00:00Z",
             "shipping the fts search tomorrow",
         ),
         chat_msg(
@@ -75,7 +75,7 @@ fn seeded() -> Storage {
             "t2",
             "devs",
             "ognjen",
-            "2026-03-01T12:01:00Z",
+            "2026-03-01T08:01:00Z",
             "nice, the vault search is fast",
         ),
         chat_msg(
@@ -83,7 +83,7 @@ fn seeded() -> Storage {
             "t3",
             "devs",
             "nina",
-            "2026-03-01T12:02:00Z",
+            "2026-03-01T08:02:00Z",
             "one hundred milliseconds budget",
         ),
     ];
@@ -207,6 +207,48 @@ fn from_date_only_and_to_date_only_both_apply() {
         .map(|h| h.message.external_id.as_str())
         .collect();
     assert!(ids.contains(&"e1") && ids.contains(&"e2"));
+}
+
+#[test]
+fn date_filters_follow_the_local_display_day() {
+    let s = Storage::open_in_memory().unwrap();
+    // Near-midnight message: which local day it "displays" in depends on
+    // the machine offset, so derive the expected day from the same rule
+    // (instant + offset) the filter layer must agree with.
+    s.insert_message(&chat_msg(
+        "mbox",
+        "m1",
+        "c",
+        "a",
+        "2026-01-05T23:30:00Z",
+        "vault near midnight",
+    ))
+    .unwrap();
+
+    let offset = chrono::Local::now().fixed_offset();
+    let t = chrono::NaiveDateTime::parse_from_str("2026-01-05T23:30:00Z", "%Y-%m-%dT%H:%M:%SZ")
+        .unwrap();
+    let local_day = (t + offset).date().to_string();
+    let prev_day = ((t + offset).date() - chrono::Duration::days(1)).to_string();
+    let next_day = ((t + offset).date() + chrono::Duration::days(1)).to_string();
+
+    let count = |from: &str, to: &str| -> u64 {
+        s.search_page(&SearchQuery {
+            text: "vault".into(),
+            from_date: from.into(),
+            to_date: to.into(),
+            limit: 10,
+            ..SearchQuery::default()
+        })
+        .unwrap()
+        .total
+    };
+
+    // The displayed local day must be exactly the filterable day.
+    assert_eq!(count(&local_day, ""), 1, "from = display day includes");
+    assert_eq!(count("", &local_day), 1, "to = display day includes");
+    assert_eq!(count("", &prev_day), 0, "to before the display day excludes");
+    assert_eq!(count(&next_day, ""), 0, "from after the display day excludes");
 }
 
 #[test]

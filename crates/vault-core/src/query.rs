@@ -1,10 +1,14 @@
 //! Paged, filtered search queries and chat-thread context over the archive.
 //!
-//! Date filters exclude messages whose `sent_at` is empty (an unparseable or
-//! missing date): such messages have no defined position on the timeline, so
-//! both date bounds omit them consistently.
+//! Date filters are LOCAL-day bounds, matching what the UI displays: each
+//! `YYYY-MM-DD` bound is translated into the UTC instant of local midnight
+//! (of the day itself for `from_date`, of the following day for `to_date`)
+//! before being compared with the stored UTC `sent_at`. Messages whose
+//! `sent_at` is empty (an unparseable or missing date) are excluded whenever
+//! any date bound is active: they have no defined position on the timeline,
+//! so both bounds omit them consistently.
 
-use chrono::NaiveDate;
+use chrono::{FixedOffset, NaiveDate};
 use serde::{Deserialize, Serialize};
 
 use crate::message::Message;
@@ -21,9 +25,10 @@ pub const SNIPPET_CLOSE_MARK: char = '\u{2}';
 /// One search request: free text plus optional facet filters.
 ///
 /// All filters are conjunctive; every string filter is empty when inactive.
-/// `from_date`/`to_date` are inclusive `YYYY-MM-DD` day bounds compared
-/// against the RFC 3339 `sent_at` column lexicographically (same fixed
-/// format, so text order is time order).
+/// `from_date`/`to_date` are inclusive local-day `YYYY-MM-DD` bounds; each
+/// is translated to the UTC instant of local midnight before being compared
+/// against the RFC 3339 `sent_at` column (same fixed format, so text order
+/// is time order).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchQuery {
     /// Free text; sanitized into an FTS5 MATCH expression when non-empty.
@@ -131,14 +136,14 @@ pub(crate) fn parse_day(input: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(input, "%Y-%m-%d").ok()
 }
 
-/// Inclusive `to_date` → exclusive upper bound for `sent_at` text compare
-/// (the day after `to_date`, so timestamps later on `to_date` itself match).
-pub(crate) fn day_after_exclusive(to_date: &str) -> Option<String> {
-    parse_day(to_date).map(|d| {
-        (d + chrono::Duration::days(1))
-            .format("%Y-%m-%d")
-            .to_string()
-    })
+/// The UTC instant (RFC 3339 `…Z`) of local midnight starting `day` at
+/// `offset` — the shared boundary the date filters compare against, so a
+/// day bound selects exactly what the UI renders as that local day.
+pub(crate) fn local_day_instant_utc(day: NaiveDate, offset: FixedOffset) -> String {
+    let local_midnight = day.and_hms_opt(0, 0, 0).expect("00:00:00 is a valid time");
+    (local_midnight - offset)
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
 }
 
 /// Escape `%`, `_` and `\` for a LIKE pattern with `ESCAPE '\'`.
@@ -214,20 +219,29 @@ mod tests {
     }
 
     #[test]
-    fn day_after_rolls_over_month_and_year() {
+    fn local_midnight_rolls_over_month_and_year() {
+        let plus_one = FixedOffset::east_opt(3600).unwrap();
+        let utc = FixedOffset::east_opt(0).unwrap();
+        // 2026-01-06 local midnight at UTC+1 is 2026-01-05T23:00Z.
         assert_eq!(
-            day_after_exclusive("2026-01-31").as_deref(),
-            Some("2026-02-01")
+            local_day_instant_utc(parse_day("2026-01-06").unwrap(), plus_one),
+            "2026-01-05T23:00:00Z"
         );
+        // At UTC the local midnight is the plain day boundary.
         assert_eq!(
-            day_after_exclusive("2026-12-31").as_deref(),
-            Some("2027-01-01")
+            local_day_instant_utc(parse_day("2026-01-06").unwrap(), utc),
+            "2026-01-06T00:00:00Z"
         );
+        // Month rollover: Feb 1 local midnight at UTC+1 lands in January.
         assert_eq!(
-            day_after_exclusive("2026-02-28").as_deref(),
-            Some("2026-03-01")
+            local_day_instant_utc(parse_day("2026-02-01").unwrap(), plus_one),
+            "2026-01-31T23:00:00Z"
         );
-        assert_eq!(day_after_exclusive("nope"), None);
+        // Year rollover: Jan 1 local midnight at UTC+1 lands in December.
+        assert_eq!(
+            local_day_instant_utc(parse_day("2026-01-01").unwrap(), plus_one),
+            "2025-12-31T23:00:00Z"
+        );
     }
 
     #[test]
