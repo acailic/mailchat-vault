@@ -13,7 +13,7 @@
 //! frequent, rank-2000 is rare.
 
 use chrono::{Datelike, Days, NaiveDate};
-use vault_core::message::NewMessage;
+use vault_core::message::{InsertOutcome, NewMessage};
 use vault_core::storage::Storage;
 
 /// Distinct words in the synthetic vocabulary.
@@ -365,7 +365,7 @@ pub fn generate(
                 raw_json: "{}".into(),
             }
         };
-        if storage.insert_message(&msg)?.was_inserted() {
+        if matches!(storage.insert_message(&msg)?, InsertOutcome::Inserted(_)) {
             inserted += 1;
         }
         if i % 25_000 == 24_999 {
@@ -491,7 +491,12 @@ mod tests {
         // Author-term search finds that author's chat messages (the word
         // can also appear inside sampled email addresses — that is fine).
         let author_hits = storage
-            .search(&format!("\"{}\"", word_at(AUTHOR_HANDLE_RANK)), 2000)
+            .search_filtered(
+                &format!("\"{}\"", word_at(AUTHOR_HANDLE_RANK)),
+                None,
+                None,
+                2000,
+            )
             .unwrap();
         assert!(!author_hits.is_empty(), "author term must hit");
         assert!(author_hits

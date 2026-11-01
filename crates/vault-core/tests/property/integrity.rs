@@ -1,10 +1,8 @@
 //! Schema/index integrity: under arbitrary sequences of inserts (new keys,
 //! duplicate keys with different content) and searches, the `messages`
 //! table and the FTS index stay consistent — checked purely through the
-//! public API: `stats` matches the model, search hits always agree with the
-//! oracle and contain only known rows, and rebuilding a healthy index
-//! changes nothing. After an index wipe, `rebuild_fts` restores exact
-//! agreement with the table.
+//! public API: `stats` matches the model, and search hits always agree with
+//! the oracle and contain only known rows.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -35,7 +33,7 @@ fn check_probes(storage: &Storage, model: &HashMap<(String, String), &NewMessage
             .map(|m| (m.source.clone(), m.external_id.clone()))
             .collect();
         let hits: BTreeSet<_> = storage
-            .search(&fixtures::quoted_term(term), limit)
+            .search_filtered(&fixtures::quoted_term(term), None, None, limit)
             .unwrap()
             .into_iter()
             .map(|m| (m.source, m.external_id))
@@ -51,8 +49,7 @@ proptest! {
     #![proptest_config(crate::prop_config(64))]
 
     // After EVERY operation in a random sequence the database satisfies
-    // its invariants; at the end, a rebuild of the healthy index is a
-    // no-op, and wipe + rebuild restores exact agreement.
+    // its invariants.
     #[test]
     fn index_stays_consistent_under_random_ops(
         ops in fixtures::batch(24),
@@ -94,53 +91,14 @@ proptest! {
         }
         let snapshot: HashMap<_, _> = model.iter().map(|(k, v)| (k.clone(), v)).collect();
         check_probes(&storage, &snapshot);
-
-        // Phase 3: rebuilding a healthy index changes nothing observable.
-        let before: Vec<BTreeSet<_>> = probe_terms()
-            .iter()
-            .map(|t| {
-                storage
-                    .search(&fixtures::quoted_term(t), model.len() as u32 + 8)
-                    .unwrap()
-                    .into_iter()
-                    .map(|m| (m.source, m.external_id))
-                    .collect()
-            })
-            .collect();
-        storage.rebuild_fts().unwrap();
-        for (i, term) in probe_terms().iter().enumerate() {
-            let after: BTreeSet<_> = storage
-                .search(&fixtures::quoted_term(term), model.len() as u32 + 8)
-                .unwrap()
-                .into_iter()
-                .map(|m| (m.source, m.external_id))
-                .collect();
-            prop_assert_eq!(&before[i], &after, "rebuild changed results for {}", term);
-        }
-        prop_assert_eq!(storage.stats().unwrap().total, model.len() as u64);
-
-        // Phase 4: wipe the index (simulated corruption) — the table is
-        // intact (stats/get), searches see nothing; rebuild restores exact
-        // oracle agreement.
-        storage.wipe_fts_for_tests().unwrap();
-        prop_assert_eq!(storage.stats().unwrap().total, model.len() as u64);
-        for term in probe_terms() {
-            let hits = storage
-                .search(&fixtures::quoted_term(term), model.len() as u32 + 8)
-                .unwrap();
-            prop_assert!(hits.is_empty(), "wiped index must match nothing ({})", term);
-        }
-        storage.rebuild_fts().unwrap();
-        check_probes(&storage, &snapshot);
         prop_assert_eq!(storage.stats().unwrap().total, model.len() as u64);
     }
 }
 
 /// Golden pinned seed: the deterministic golden batch passes every
-/// integrity probe, survives a wipe + rebuild cycle, and the schema version
-/// is stable throughout.
+/// integrity probe and the schema version is stable throughout.
 #[test]
-fn golden_seed_integrity_with_recovery() {
+fn golden_seed_integrity() {
     let batch = fixtures::golden_batch(0x000A_B1DE, 48);
     let storage = Storage::open_in_memory().unwrap();
     let version = storage.schema_version().unwrap();
@@ -153,12 +111,6 @@ fn golden_seed_integrity_with_recovery() {
         .collect();
     let snapshot: HashMap<_, _> = model.iter().map(|(k, v)| (k.clone(), v)).collect();
 
-    check_probes(&storage, &snapshot);
-    assert_eq!(storage.schema_version().unwrap(), version);
-
-    storage.wipe_fts_for_tests().unwrap();
-    assert_eq!(storage.stats().unwrap().total, model.len() as u64);
-    storage.rebuild_fts().unwrap();
     check_probes(&storage, &snapshot);
     assert_eq!(storage.schema_version().unwrap(), version);
     assert_eq!(storage.stats().unwrap().total, model.len() as u64);

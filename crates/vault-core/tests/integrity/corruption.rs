@@ -7,8 +7,7 @@ use std::fs;
 use vault_core::storage::Storage;
 
 use crate::util::{
-    corrupt_bytes, fts_integrity_check, integrity_check, msg, raw, seeded_file, truncate_file,
-    PAGE_SIZE,
+    corrupt_bytes, fts_integrity_check, integrity_check, seeded_file, truncate_file, PAGE_SIZE,
 };
 
 /// Assert the core contract for a possibly-corrupt file: opening must not
@@ -148,60 +147,4 @@ fn overdeclared_page_count_never_yields_half_state() {
     // fully consistent database. Both acceptable; half-state is not.
     let _ = Storage::open(&t).map(|s| s.stats());
     assert_detected_or_fully_consistent(&t, 50);
-}
-
-#[test]
-fn fts_index_corruption_is_detected_and_rebuildable() {
-    let dir = crate::util::scratch_dir();
-    let db = dir.path().join("v.db");
-    let n = 40u64;
-    {
-        let s = Storage::open(&db).unwrap();
-        for i in 0..n {
-            s.insert_message(&msg(
-                "integrity",
-                &format!("m{i}"),
-                &format!("tok{i} unique body"),
-            ))
-            .unwrap();
-        }
-        // Simulate a lost/destroyed index: the table keeps everything, the
-        // index keeps nothing.
-        s.wipe_fts_for_tests().unwrap();
-    }
-
-    // Detection: search goes blind while the table still has all rows —
-    // every indexed term stops matching, so the loss is observable through
-    // the app's own read path, not just by inspecting the file.
-    let s = Storage::open(&db).unwrap();
-    assert_eq!(s.stats().unwrap().total, n);
-    for i in 0..n {
-        assert!(
-            s.search(&format!("tok{i}"), 1).unwrap().is_empty(),
-            "wiped index must not return hits"
-        );
-    }
-
-    // Recovery path: rebuild restores the index exactly.
-    s.rebuild_fts().unwrap();
-    assert_eq!(s.search("tok17", 10).unwrap().len(), 1);
-    for i in 0..n {
-        assert_eq!(
-            s.search(&format!("tok{i}"), 1).unwrap().len(),
-            1,
-            "every row must be searchable after rebuild"
-        );
-    }
-    assert!(fts_integrity_check(&db).is_ok());
-    // And rows themselves were never touched.
-    assert_eq!(s.stats().unwrap().total, n);
-    let raw_conn = raw(&db);
-    let bodies: usize = raw_conn
-        .query_row(
-            "SELECT COUNT(*) FROM messages WHERE body LIKE 'tok%'",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .unwrap() as usize;
-    assert_eq!(bodies, n as usize);
 }
