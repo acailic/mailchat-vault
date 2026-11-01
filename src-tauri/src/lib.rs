@@ -291,6 +291,10 @@ fn import_chat_export(
 ///
 /// Only messages new since the last sync are fetched; re-syncing never
 /// duplicates.
+///
+/// The flat argument list mirrors the sync form's fields, like every other
+/// Tauri command here.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn sync_imap(
     state: State<'_, AppState>,
