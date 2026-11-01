@@ -59,7 +59,7 @@ fn endpoint_host(url: &str) -> &str {
     let rest = url.rsplit_once("://").map_or(url, |(_, rest)| rest);
     let authority = rest.split('/').next().unwrap_or_default();
     match authority.rsplit_once(':') {
-        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => host,
+        Some((host, port)) if port.bytes().all(|b| b.is_ascii_digit()) => host,
         _ => authority,
     }
 }
@@ -715,6 +715,7 @@ mod tests {
             "https://api.z.ai/api/anthropic///",
             "https://API.Z.AI/api/anthropic",
             "https://api.z.ai:443/api/anthropic",
+            "https://api.z.ai:/api/anthropic",
             "http://api.z.ai/api/anthropic",
             "api.z.ai/api/anthropic",
             "https://api.z.ai/api/Anthropic",
@@ -739,6 +740,7 @@ mod tests {
             "https://api.z.ai/api/anthropic/",
             "https://API.Z.AI/api/anthropic",
             "https://api.z.ai:443/api/anthropic",
+            "https://api.z.ai:/api/anthropic",
             "http://api.z.ai/api/anthropic",
         ] {
             let cfg = LlmConfig::from_lookup(|name| match name {
