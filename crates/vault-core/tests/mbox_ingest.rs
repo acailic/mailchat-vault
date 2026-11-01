@@ -156,7 +156,10 @@ Content-Transfer-Encoding: quoted-printable
     assert_eq!(collected.failed, 0);
     assert_eq!(collected.messages.len(), 1);
     let msg = &collected.messages[0];
-    assert_eq!(msg.body, "Multipart base64\n\nHello from multipart base64 world.");
+    assert_eq!(
+        msg.body,
+        "Multipart base64\n\nHello from multipart base64 world."
+    );
 
     // End-to-end: the decoded text must be full-text searchable.
     let dir = tempfile::tempdir().unwrap();
@@ -188,19 +191,30 @@ Ključ na premijeri je spreman.
     assert_eq!(collected.failed, 0);
     assert_eq!(collected.messages.len(), 1);
     let msg = &collected.messages[0];
-    assert!(msg.body.contains("Ključ na premijeri je spreman."),
-        "UTF-8 body without declared charset must not become mojibake, got: {:?}", msg.body);
+    assert!(
+        msg.body.contains("Ključ na premijeri je spreman."),
+        "UTF-8 body without declared charset must not become mojibake, got: {:?}",
+        msg.body
+    );
 
     // Legacy true-Latin-1 bytes (0xE9 = 'é') keep decoding correctly via
     // the fallback instead of turning into invalid UTF-8 replacement chars.
     let mut mbox_latin1 = mbox_utf8.as_bytes().to_vec();
     // Replace "č" (bytes c4 8d) with the single Latin-1 byte e9.
-    let kljuc_pos = mbox_latin1.windows(2).position(|w| w == [0xc4, 0x8d]).unwrap();
+    let kljuc_pos = mbox_latin1
+        .windows(2)
+        .position(|w| w == [0xc4, 0x8d])
+        .unwrap();
     mbox_latin1.splice(kljuc_pos..kljuc_pos + 2, [0xe9]);
     let collected = vault_core::mbox::parse_mbox(&mbox_latin1, "inbox").unwrap();
     assert_eq!(collected.messages.len(), 1);
-    assert!(collected.messages[0].body.contains("Kljué na premijeri je spreman."),
-        "Latin-1 0xE9 must decode to 'é', got: {:?}", collected.messages[0].body);
+    assert!(
+        collected.messages[0]
+            .body
+            .contains("Kljué na premijeri je spreman."),
+        "Latin-1 0xE9 must decode to 'é', got: {:?}",
+        collected.messages[0].body
+    );
 
     // End-to-end: the diacritic token must be full-text searchable.
     let dir = tempfile::tempdir().unwrap();
@@ -270,7 +284,9 @@ Ključ na premijeri.
     let msg = &collected.messages[0];
     // B-encoded display name and Q-encoded subject are decoded.
     assert_eq!(msg.author, "Ana Šimic <ana@example.com>");
-    assert!(msg.body.starts_with("Šeta kroz arhivu\n\nKljuč na premijeri."));
+    assert!(msg
+        .body
+        .starts_with("Šeta kroz arhivu\n\nKljuč na premijeri."));
     // raw_json keeps the same header values as storage (decoded header text).
     let raw: serde_json::Value = serde_json::from_str(&msg.raw_json).unwrap();
     assert_eq!(raw["from"], "Ana Šimic <ana@example.com>");
@@ -283,10 +299,7 @@ Ključ na premijeri.
     let storage = Storage::open_in_memory().unwrap();
     ingest(&storage, &MboxSource::new(&path)).unwrap();
     for term in ["premijeri", "Šeta"] {
-        let hits = storage
-            .search(&build_match_query(term), 10)
-            .unwrap();
+        let hits = storage.search(&build_match_query(term), 10).unwrap();
         assert!(!hits.is_empty(), "no hits for {term:?}");
     }
 }
-
