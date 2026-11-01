@@ -96,3 +96,48 @@ fn split_mbox(bytes: &[u8]) -> Vec<&[u8]> {
 fn starts_with_from_line(line: &[u8]) -> bool {
     line.starts_with(b"From ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `depth`-deep nested multipart mail, properly closed.
+    fn nested_multipart(depth: usize) -> Vec<u8> {
+        let mut s = String::new();
+        for d in 0..depth {
+            s.push_str(&format!(
+                "Content-Type: multipart/mixed; boundary=\"b{d}\"\n\n"
+            ));
+            s.push_str(&format!("--b{d}\n"));
+        }
+        s.push_str("Content-Type: text/plain\n\nhi\n");
+        for d in (0..depth).rev() {
+            s.push_str(&format!("--b{d}--\n"));
+        }
+        s.into_bytes()
+    }
+
+    #[test]
+    fn hostile_deep_multipart_is_failed_not_a_crash() {
+        // Regression: before the depth guard this overflowed the stack in
+        // mailparse's recursive multipart descent (SIGABRT, not an error).
+        for depth in [2000usize, 20_000, 100_000] {
+            let mut mail = nested_multipart(depth);
+            let bytes = [b"From a@b.c\n".as_slice(), &mail].concat();
+            mail.clear();
+            let collected = parse_mbox(&bytes, "f").unwrap();
+            assert_eq!(collected.messages.len(), 0, "depth {depth}");
+            assert_eq!(collected.failed, 1, "depth {depth}");
+        }
+    }
+
+    #[test]
+    fn moderate_nesting_still_parses() {
+        let mail = nested_multipart(8);
+        let bytes = [b"From a@b.c\n".as_slice(), &mail].concat();
+        let collected = parse_mbox(&bytes, "f").unwrap();
+        assert_eq!(collected.failed, 0);
+        assert_eq!(collected.messages.len(), 1);
+        assert_eq!(collected.messages[0].body, "hi");
+    }
+}
