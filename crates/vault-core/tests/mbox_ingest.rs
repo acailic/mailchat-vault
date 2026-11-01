@@ -205,3 +205,44 @@ Subject: never parses
         }
     );
 }
+
+#[test]
+fn encoded_words_in_headers_are_decoded_for_storage_but_kept_raw_in_raw_json() {
+    let mbox = "\
+From ana@example.com Sat Nov  1 14:00:00 2026
+From: =?UTF-8?B?QW5hIMWgaW1pYw==?= <ana@example.com>
+To: Bob <bob@example.com>
+Subject: =?UTF-8?Q?=C5=A0eta_kroz_arhivu?=
+Date: Sat, 1 Nov 2026 14:00:00 +0100
+Message-ID: <enc-1@example.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Ključ na premijeri.
+";
+    let collected = vault_core::mbox::parse_mbox(mbox.as_bytes(), "inbox").unwrap();
+    assert_eq!(collected.failed, 0);
+    assert_eq!(collected.messages.len(), 1);
+    let msg = &collected.messages[0];
+    // B-encoded display name and Q-encoded subject are decoded.
+    assert_eq!(msg.author, "Ana Šimic <ana@example.com>");
+    assert!(msg.body.starts_with("Šeta kroz arhivu\n\nKljuč na premijeri."));
+    // raw_json keeps the same header values as storage (decoded header text).
+    let raw: serde_json::Value = serde_json::from_str(&msg.raw_json).unwrap();
+    assert_eq!(raw["from"], "Ana Šimic <ana@example.com>");
+    assert_eq!(raw["subject"], "Šeta kroz arhivu");
+
+    // Decoded text must be full-text searchable.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("encoded.mbox");
+    std::fs::write(&path, mbox).unwrap();
+    let storage = Storage::open_in_memory().unwrap();
+    ingest(&storage, &MboxSource::new(&path)).unwrap();
+    for term in ["premijeri", "Šeta"] {
+        let hits = storage
+            .search(&build_match_query(term), 10)
+            .unwrap();
+        assert!(!hits.is_empty(), "no hits for {term:?}");
+    }
+}
+
