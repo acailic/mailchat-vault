@@ -116,15 +116,21 @@ function refreshChips(stats: Stats): void {
   });
 }
 
+// Sequential stats token: a late response from an earlier refresh (e.g. one
+// fired before an import finished) must not overwrite newer chips/stats.
+let statsSeq = 0;
+
 async function refreshStats(): Promise<void> {
+  const seq = ++statsSeq;
   try {
     const stats = await invoke<Stats>("stats");
+    if (seq !== statsSeq) return; // a newer refresh superseded this response
     const parts = stats.by_source.map((s) => `${s.source}: ${s.count}`).join(", ");
     statsLabel.textContent =
       stats.total === 0 ? "empty archive" : `${stats.total} messages (${parts})`;
     refreshChips(stats);
   } catch {
-    statsLabel.textContent = "";
+    if (seq === statsSeq) statsLabel.textContent = "";
   }
 }
 
