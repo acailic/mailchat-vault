@@ -374,6 +374,7 @@ impl Settings {
                             "provider “{name}”: base URL must be an absolute http(s) URL"
                         )));
                     }
+                    check_no_plaintext_http(name, &p.base_url)?;
                     if p.model.is_empty() {
                         return Err(settings_error(format!(
                             "provider “{name}”: a model name is required for custom providers"
@@ -722,6 +723,17 @@ mod tests {
         )]);
         s.validate().unwrap();
         assert_eq!(s.providers[0].host(), "127.0.0.1");
+
+        // Plaintext http off loopback: refused for custom providers too —
+        // the stored key must never travel unencrypted.
+        let s = settings_with(vec![profile(
+            "mine",
+            ProviderKind::Custom,
+            "http://api.example.com",
+            "m",
+        )]);
+        let err = s.validate().unwrap_err().to_string();
+        assert!(err.contains("plaintext http"), "got: {err}");
     }
 
     #[test]

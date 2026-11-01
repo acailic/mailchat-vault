@@ -65,14 +65,25 @@ pub struct LlmRegistry {
 impl LlmRegistry {
     /// Build from the load-time pieces: settings file contents (or the
     /// error that prevented loading), the env-var configuration (or its
-    /// error), and a loader for stored profile keys.
+    /// error), and a loader for stored profile keys. A parseable but
+    /// invalid settings file is treated like a corrupt one — defaults
+    /// apply and the validation error is surfaced — so the pairing policy
+    /// enforced at save time holds from boot on, for externally edited
+    /// files too.
     pub fn load(
         settings: vault_core::Result<Option<Settings>>,
         env: vault_core::Result<Option<LlmConfig>>,
         load_key: impl Fn(&str) -> Option<String>,
     ) -> Self {
         let (settings, settings_error) = match settings {
-            Ok(settings) => (settings.unwrap_or_default(), None),
+            Ok(settings) => {
+                let mut settings = settings.unwrap_or_default();
+                settings.normalize();
+                match settings.validate() {
+                    Ok(()) => (settings, None),
+                    Err(e) => (Settings::default(), Some(e.to_string())),
+                }
+            }
             Err(e) => (Settings::default(), Some(e.to_string())),
         };
         let (env, env_error) = match env {
@@ -467,21 +478,49 @@ mod tests {
     }
 
     #[test]
-    fn dangling_default_falls_through_to_env_everywhere() {
-        let settings = settings_with(vec![], Some("gone"));
-        let r = registry(settings, &[], Some(env_config()));
+    fn invalid_settings_are_ignored_at_load_with_the_error_surfaced() {
+        let mut settings = settings_with(vec![profile("glm", ProviderKind::Zai)], Some("glm"));
+        settings.providers[0].base_url = "http://attacker.example/api".into();
+        let key_map: HashMap<String, String> =
+            [("glm".to_string(), "stored-zai-key".to_string())].into_iter().collect();
+        let r = LlmRegistry::load(Ok(Some(settings)), Ok(Some(env_config())), |id| {
+            key_map.get(id).cloned()
+        });
+        // The whole file is refused: defaults apply, the validation error is
+        // surfaced, and the stored key is unreachable — nothing selects glm.
+        let view = SettingsView::from(&r);
+        assert!(
+            view.settings_error.as_deref().unwrap().contains("z.ai"),
+            "got: {:?}",
+            view.settings_error
+        );
+        assert!(view.providers.is_empty());
+        match r.select(Some("glm")) {
+            Selection::Local { reason } => assert!(reason.contains("unknown provider")),
+            other => panic!("glm must be unreachable: {other:?}"),
+        }
         match r.select(None) {
             Selection::Provider { id, config, .. } => {
                 assert_eq!(id, ENV_ID);
-                assert_eq!(config.model, "env-model");
+                assert_eq!(config.api_key, "env-key");
+                assert_ne!(config.api_key, "stored-zai-key");
             }
-            other => panic!("env should be selected: {other:?}"),
+            other => panic!("env should be the fallback: {other:?}"),
         }
         assert_eq!(r.default_provider_id(), Some(ENV_ID.into()));
         let status = r.status();
         assert!(status.enabled);
-        assert_eq!(status.default_provider, Some(ENV_ID.into()));
+        assert!(!json_contains(&view, "stored-zai-key"));
     }
+
+    fn json_contains(view: &SettingsView, needle: &str) -> bool {
+        serde_json::to_string(view)
+            .map(|s| s.contains(needle))
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn explicit_selection_and_local_mode() {
 
     #[test]
     fn explicit_selection_and_local_mode() {
