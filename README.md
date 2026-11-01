@@ -30,6 +30,7 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice â€
 crates/vault-core/   # storage (SQLite/FTS5, migrations), filtered/paged search queries, ingest trait, mail parsing, mbox / WhatsApp / Telegram sources, IMAP sync, LLM search pipeline â€” no UI deps
 src-tauri/           # Tauri app shell: commands (search_messages, chat_context, llm_ask, llm_status, import_mbox, import_chat_export, sync_imap, seed_demo, stats) + secret storage
 src/                 # frontend (vanilla TS): search + filters + pagination + detail view, ask UI, import & IMAP sync controls
+(no-mistakes(document): Fix stale README layout, apply cargo fmt)
 index.html           # single-page shell
 ```
 

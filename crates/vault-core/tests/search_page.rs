@@ -229,8 +229,7 @@ fn date_filters_follow_the_local_display_day() {
         .unwrap();
     // Resolve the displayed local day through the machine timezone the same
     // way the filter layer does (historical offset for the instant).
-    let instant_utc =
-        chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(t, chrono::Utc);
+    let instant_utc = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(t, chrono::Utc);
     let local_date = instant_utc.with_timezone(&chrono::Local).date_naive();
     let local_day = local_date.to_string();
     let prev_day = (local_date - chrono::Duration::days(1)).to_string();
@@ -251,8 +250,16 @@ fn date_filters_follow_the_local_display_day() {
     // The displayed local day must be exactly the filterable day.
     assert_eq!(count(&local_day, ""), 1, "from = display day includes");
     assert_eq!(count("", &local_day), 1, "to = display day includes");
-    assert_eq!(count("", &prev_day), 0, "to before the display day excludes");
-    assert_eq!(count(&next_day, ""), 0, "from after the display day excludes");
+    assert_eq!(
+        count("", &prev_day),
+        0,
+        "to before the display day excludes"
+    );
+    assert_eq!(
+        count(&next_day, ""),
+        0,
+        "from after the display day excludes"
+    );
 }
 
 #[test]
