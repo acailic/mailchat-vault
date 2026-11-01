@@ -13,7 +13,7 @@ use crate::util::{msg, raw};
 
 /// The schema version this build knows; bump expectation when a migration
 /// is added (the assertions below are version-agnostic where possible).
-const KNOWN_VERSION: i64 = 5;
+const KNOWN_VERSION: i64 = 6;
 
 fn migrations_rows(db: &std::path::Path) -> Vec<i64> {
     let conn = raw(db);
@@ -168,8 +168,9 @@ fn v1_database_with_data_upgrades_in_place_to_current() {
     let db = dir.path().join("v1.db");
     version1_db_with_data(&db, 7);
 
-    // Opening with the current build applies every newer migration (2–5:
-    // IMAP sync state, embeddings, the canonical store, watched folders)
+    // Opening with the current build applies every newer migration (2–6:
+    // IMAP sync state, embeddings, the canonical store, watched folders,
+    // the stats counters)
     // on top of the untouched v1 schema - in place, keeping every row (ids
     // included) in the canonical store.
     let s = Storage::open(&db).unwrap();
@@ -242,6 +243,30 @@ fn v1_database_with_data_upgrades_in_place_to_current() {
         s.watched_folders().unwrap(),
         vec!["/tmp/exports".to_string()]
     );
+
+    // The v6 additions are live too: the counter tables exist and their
+    // backfilled counts match the migrated rows.
+    let raw_conn = raw(&db);
+    let tables: Vec<String> = {
+        let mut stmt = raw_conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'stats_%'")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    for expected in ["stats_source", "stats_day", "stats_chat", "stats_author"] {
+        assert!(
+            tables.iter().any(|n| n == expected),
+            "migration 6 must create {expected}, got {tables:?}"
+        );
+    }
+    drop(raw_conn);
+    let dash = s.archive_stats(10).unwrap();
+    assert_eq!(dash.total, 7);
+    assert_eq!(dash.first_sent_at.as_deref(), Some("2026-01-01T00:00:00Z"));
+    assert_eq!(dash.by_source.len(), 1);
 
     // Idempotence: reopening applies nothing new and everything is still there.
     drop(s);

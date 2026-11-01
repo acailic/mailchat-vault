@@ -4,7 +4,13 @@
 /// snapshots in render.test.ts.
 
 import { formatSentAt, humanSize, snippet as truncateBody } from "./format";
-import type { ChatContext, Message, SearchHit, SourceCount } from "./types";
+import type {
+  ArchiveStats,
+  ChatContext,
+  Message,
+  SearchHit,
+  SourceCount,
+} from "./types";
 import {
   type HitGroup,
   type MessageMedia,
@@ -12,6 +18,10 @@ import {
   type Segment,
   type ThreadEntry,
   attachmentOf,
+  barHeightPct,
+  dayBars,
+  dashboardSummary,
+  formatCount,
   highlightSegments,
   mediaOf,
   parseSnippet,
@@ -286,4 +296,104 @@ export function renderDetail(el: HTMLElement, opts: DetailOptions): void {
   if (media) article.append(media);
   article.append(thread, hint);
   el.replaceChildren(article);
+}
+
+// ---------------------------------------------------------------------------
+// Statistics dashboard
+// ---------------------------------------------------------------------------
+
+/** One row of a count table: a label, its count, and an inline bar. */
+interface CountRow {
+  label: string;
+  count: number;
+}
+
+function dayChart(days: ArchiveStats["by_day"]): HTMLElement {
+  const chart = document.createElement("div");
+  chart.className = "day-chart";
+  chart.setAttribute("role", "img");
+  chart.setAttribute("aria-label", "Messages per day histogram");
+  const bars = dayBars(days, 180);
+  const max = Math.max(0, ...bars.map((b) => b.count));
+  for (const bar of bars) {
+    const col = document.createElement("div");
+    col.className = "day-bar";
+    col.style.height = `${barHeightPct(bar.count, max)}%`;
+    col.title = `${bar.label}: ${formatCount(bar.count)}`;
+    chart.append(col);
+  }
+  return chart;
+}
+
+function countTable(caption: string, rows: CountRow[]): HTMLElement {
+  const card = document.createElement("div");
+  card.className = "stat-table";
+  const heading = document.createElement("h3");
+  heading.textContent = caption;
+  const table = document.createElement("table");
+  const max = Math.max(0, ...rows.map((r) => r.count));
+  const body = document.createElement("tbody");
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    const label = document.createElement("td");
+    label.className = "label";
+    label.textContent = row.label;
+    label.title = row.label;
+    const num = document.createElement("td");
+    num.className = "num";
+    num.textContent = formatCount(row.count);
+    const bar = document.createElement("td");
+    bar.className = "bar";
+    const fill = document.createElement("div");
+    fill.style.width = `${barHeightPct(row.count, max)}%`;
+    bar.append(fill);
+    tr.append(label, num, bar);
+    body.append(tr);
+  }
+  table.append(body);
+  card.append(heading, table);
+  return card;
+}
+
+export interface DashboardOptions {
+  stats: ArchiveStats;
+}
+
+/**
+ * Render the statistics dashboard: a summary line, the per-day histogram
+ * (CSS bars, no chart library), and count tables for sources, top chats,
+ * and top authors. An empty archive renders the summary only.
+ */
+export function renderDashboard(el: HTMLElement, opts: DashboardOptions): void {
+  const { stats } = opts;
+  const summary = document.createElement("p");
+  summary.className = "meta";
+  summary.textContent = dashboardSummary(stats);
+  if (stats.total === 0) {
+    el.replaceChildren(summary);
+    return;
+  }
+  const grid = document.createElement("div");
+  grid.className = "stat-grid";
+  grid.append(
+    countTable(
+      "By source",
+      stats.by_source.map((s) => ({ label: s.source, count: s.count })),
+    ),
+    countTable(
+      "Top chats",
+      stats.top_chats.map((c) => ({
+        label: `${c.source} · ${c.chat_id}`,
+        count: c.count,
+      })),
+    ),
+    countTable(
+      "Top authors",
+      stats.top_authors.map((a) => ({
+        label: a.author || "(unknown)",
+        count: a.count,
+      })),
+    ),
+  );
+  el.replaceChildren(summary, dayChart(stats.by_day), grid);
 }

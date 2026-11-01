@@ -4,12 +4,13 @@
 // textContent — reading innerHTML back is safe for snapshots).
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  renderDashboard,
   renderDetail,
   renderPagination,
   renderResults,
   renderSourceChips,
 } from "./render";
-import type { ChatContext, Message, SearchHit, SourceCount } from "./types";
+import type { ArchiveStats, ChatContext, Message, SearchHit, SourceCount } from "./types";
 import { groupHits, pageModel } from "./viewmodel";
 
 // Snapshots must not depend on the machine timezone: render the raw
@@ -373,5 +374,104 @@ describe("detail panel", () => {
     expect(el.querySelectorAll(".thread-row").length).toBe(1);
     expect(el.querySelector(".thread-row.current")).not.toBeNull();
     expect(el.querySelectorAll(".thread-row.link").length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Statistics dashboard
+// ---------------------------------------------------------------------------
+
+function archiveStats(over: Partial<ArchiveStats> = {}): ArchiveStats {
+  return {
+    total: 1234,
+    first_sent_at: "2026-01-01T08:00:00Z",
+    last_sent_at: "2026-03-31T22:00:00Z",
+    by_source: [
+      { source: "mbox", count: 900 },
+      { source: "whatsapp", count: 334 },
+    ],
+    by_day: [
+      { day: "2026-01-01", count: 10 },
+      { day: "2026-02-01", count: 20 },
+      { day: "2026-03-31", count: 5 },
+    ],
+    top_chats: [
+      { source: "whatsapp", chat_id: "family", count: 300 },
+      { source: "mbox", chat_id: "thread-a", count: 90 },
+    ],
+    top_authors: [
+      { author: "Ana <ana@example.com>", count: 500 },
+      { author: "", count: 12 },
+    ],
+    ...over,
+  };
+}
+
+describe("dashboard", () => {
+  it("renders summary, day bars, and count tables (snapshot)", () => {
+    const el = document.createElement("div");
+    renderDashboard(el, { stats: archiveStats() });
+    expect(el.innerHTML).toMatchSnapshot();
+    expect(el.querySelector("p.meta")?.textContent).toBe(
+      "1,234 messages · 2 sources · 2026-01-01 → 2026-03-31",
+    );
+    expect(el.querySelectorAll(".day-bar").length).toBe(3);
+    // Bar heights scale against the tallest day (20).
+    expect((el.querySelectorAll(".day-bar")[0] as HTMLElement).style.height).toBe("50%");
+    expect((el.querySelectorAll(".day-bar")[1] as HTMLElement).style.height).toBe("100%");
+    expect((el.querySelectorAll(".day-bar")[2] as HTMLElement).style.height).toBe("25%");
+    expect(el.querySelectorAll(".stat-table").length).toBe(3);
+    expect(el.querySelectorAll(".stat-table tbody tr").length).toBe(6);
+    // The unknown author gets a readable label.
+    const authorRows = [...el.querySelectorAll(".stat-table")[2].querySelectorAll("td.label")];
+    expect(authorRows.map((td) => td.textContent)).toEqual([
+      "Ana <ana@example.com>",
+      "(unknown)",
+    ]);
+  });
+
+  it("an empty archive renders the summary only", () => {
+    const el = document.createElement("div");
+    renderDashboard(el, {
+      stats: archiveStats({
+        total: 0,
+        first_sent_at: null,
+        last_sent_at: null,
+        by_source: [],
+        by_day: [],
+        top_chats: [],
+        top_authors: [],
+      }),
+    });
+    expect(el.textContent).toBe("empty archive");
+    expect(el.querySelectorAll(".day-chart,.stat-table").length).toBe(0);
+  });
+
+  it("never interpolates archive content as HTML", () => {
+    const el = document.createElement("div");
+    renderDashboard(el, {
+      stats: archiveStats({
+        by_source: [{ source: '<script>alert(1)</script>', count: 1 }],
+        top_chats: [
+          { source: "wa", chat_id: '<img src=x onerror="alert(1)">', count: 1 },
+        ],
+        top_authors: [{ author: "<b>bold</b>", count: 1 }],
+      }),
+    });
+    expect(el.querySelectorAll("script,img,b").length).toBe(0);
+    // The hostile strings survive only as escaped text/attribute content,
+    // never as elements (title attributes may legitimately contain the
+    // literal characters — they are not markup).
+    expect(el.querySelector("td.label")?.textContent).toBe("<script>alert(1)</script>");
+  });
+
+  it("downsamples long day series into month buckets", () => {
+    const by_day = Array.from({ length: 200 }, (_, i) => ({
+      day: `2026-${String((i % 12) + 1).padStart(2, "0")}-15`,
+      count: 1,
+    }));
+    const el = document.createElement("div");
+    renderDashboard(el, { stats: archiveStats({ by_day }) });
+    expect(el.querySelectorAll(".day-bar").length).toBe(12); // month buckets
   });
 });

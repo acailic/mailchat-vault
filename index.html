@@ -30,7 +30,7 @@
       input[type="text"].short { flex: 0 1 14em; }
       button { padding: 6px 12px; font: inherit; cursor: pointer; }
       #filters { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-      #filters .spacer { flex: 1; }
+      .row .spacer { flex: 1; }
       #source-chips { display: flex; gap: 6px; flex-wrap: wrap; }
       .chip {
         padding: 3px 10px;
@@ -157,6 +157,56 @@
       .media-name { word-break: break-all; }
       .media-item .meta { word-break: break-all; }
       .media-item.unresolved .media-name { text-decoration: line-through; }
+
+      /* Statistics dashboard: pure CSS bars + tables, no chart library. */
+      #dashboard { margin-top: 4px; }
+      .day-chart {
+        display: flex;
+        align-items: flex-end;
+        gap: 1px;
+        height: 72px;
+        margin: 10px 0 14px;
+        border-bottom: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+      }
+      .day-bar {
+        flex: 1 1 0;
+        min-width: 1px;
+        background: color-mix(in srgb, Highlight 70%, transparent);
+        border-radius: 1px 1px 0 0;
+      }
+      .stat-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+        gap: 10px 24px;
+      }
+      .stat-table h3 {
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: gray;
+        margin: 0 0 4px;
+      }
+      .stat-table table { border-collapse: collapse; width: 100%; font-size: 13px; }
+      .stat-table td {
+        padding: 3px 4px;
+        border-bottom: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+        vertical-align: top;
+      }
+      .stat-table td.label {
+        max-width: 15em;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .stat-table td.num { text-align: right; white-space: nowrap; color: gray; }
+      .stat-table td.bar { width: 30%; }
+      .stat-table td.bar > div {
+        height: 6px;
+        border-radius: 3px;
+        min-width: 1px;
+        background: color-mix(in srgb, Highlight 55%, transparent);
+      }
     </style>
   </head>
   <body>
@@ -202,6 +252,16 @@
       <div id="answer" hidden></div>
       <div id="ask-notes" hidden></div>
       <ul id="ask-results"></ul>
+    </section>
+
+    <section id="dashboard-section">
+      <h2>Statistics</h2>
+      <div class="row">
+        <div id="dashboard-status" class="meta" style="margin: 0"></div>
+        <div class="spacer"></div>
+        <button id="stats-refresh" type="button">Refresh</button>
+      </div>
+      <div id="dashboard"></div>
     </section>
 
     <section id="import">

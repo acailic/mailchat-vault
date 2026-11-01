@@ -10,7 +10,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Window } from "happy-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChatContext, Message, SearchHit, SearchPage, Stats, WatchSnapshot } from "./types";
+import type { ArchiveStats, ChatContext, Message, SearchHit, SearchPage, Stats, WatchSnapshot } from "./types";
 
 // Timestamps must render timezone-independently here (same approach as
 // render.test.ts); formatSentAt itself is covered by format.test.ts.
@@ -60,6 +60,24 @@ const STATS: Stats = {
   by_source: [
     { source: "mbox", count: 6 },
     { source: "demo", count: 3 },
+  ],
+};
+
+const ARCHIVE_STATS: ArchiveStats = {
+  total: 9,
+  first_sent_at: "2026-01-01T10:00:00Z",
+  last_sent_at: "2026-01-03T10:00:00Z",
+  by_source: STATS.by_source,
+  by_day: [
+    { day: "2026-01-01", count: 3 },
+    { day: "2026-01-02", count: 4 },
+    { day: "2026-01-03", count: 2 },
+  ],
+  top_chats: [{ source: "demo", chat_id: "project-chat", count: 4 }],
+  top_authors: [
+    { author: "marko", count: 2 },
+    { author: "jelena", count: 2 },
+    { author: "ana", count: 1 },
   ],
 };
 
@@ -688,6 +706,82 @@ describe("chat export import", () => {
     tauri.handlers.set("import_chat_export", () => Promise.reject("bad export"));
     $("#chat-import-btn").click();
     await vi.waitFor(() => expect($("#import-status").textContent).toBe("Import failed: bad export"));
+||||||| parent of d72107e (feat: statistics dashboard — archive aggregates + CSS-bar dashboard UI)
+// Statistics dashboard
+// ---------------------------------------------------------------------------
+
+describe("statistics dashboard", () => {
+  it("renders summary, day bars, and tables on boot", async () => {
+    tauri.handlers.set("archive_stats", () => ARCHIVE_STATS);
+    await boot();
+    await vi.waitFor(() => expect($("#dashboard p.meta")).toBeTruthy());
+    expect($("#dashboard p.meta").textContent).toBe("9 messages · 2 sources · 2026-01-01 → 2026-01-03");
+    expect(win.document.querySelectorAll("#dashboard .day-bar").length).toBe(3);
+    expect(win.document.querySelectorAll("#dashboard .stat-table").length).toBe(3);
+    expect(win.document.querySelectorAll("#dashboard .stat-table tbody tr").length).toBe(6);
+    expect($("#dashboard-status").textContent).toBe("");
+  });
+
+  it("an empty archive renders the summary only", async () => {
+    tauri.handlers.set("archive_stats", () => ({
+      total: 0,
+      first_sent_at: null,
+      last_sent_at: null,
+      by_source: [],
+      by_day: [],
+      top_chats: [],
+      top_authors: [],
+    }));
+    await boot();
+    await vi.waitFor(() => expect($("#dashboard").textContent).toBe("empty archive"));
+  });
+
+  it("a failure shows the error but leaves search usable", async () => {
+    tauri.handlers.set("archive_stats", () => Promise.reject("db locked"));
+    await boot();
+    await vi.waitFor(() => expect($("#dashboard-status").textContent).toContain("db locked"));
+    expect(win.document.querySelectorAll("#dashboard .day-bar").length).toBe(0);
+
+    searchRespondsWith(() => pageOf(HITS, 3));
+    await runQuery("vault");
+    await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
+  });
+
+  it("the Refresh button re-fetches the dashboard", async () => {
+    let calls = 0;
+    tauri.handlers.set("archive_stats", () => {
+      calls += 1;
+      return ARCHIVE_STATS;
+    });
+    await boot();
+    await vi.waitFor(() => expect($("#dashboard p.meta")).toBeTruthy());
+    const before = tauri.calls.filter((c) => c.cmd === "archive_stats").length;
+    $("#stats-refresh").click();
+    await vi.waitFor(() =>
+      expect(tauri.calls.filter((c) => c.cmd === "archive_stats").length).toBe(before + 1),
+    );
+    expect(calls).toBeGreaterThanOrEqual(2);
+  });
+
+  it("a late response from an earlier refresh never overwrites the newest", async () => {
+    const slow = deferred<ArchiveStats>();
+    let n = 0;
+    tauri.handlers.set("archive_stats", () => {
+      n += 1;
+      return n === 1 ? slow.promise : ARCHIVE_STATS;
+    });
+    await boot(); // first (slow) dashboard fetch in flight
+    $("#stats-refresh").click(); // newer refresh wins
+    await vi.waitFor(() => expect($("#dashboard p.meta")).toBeTruthy());
+
+    const stale: ArchiveStats = {
+      ...ARCHIVE_STATS,
+      total: 999999,
+    };
+    slow.resolve(stale);
+    await flush();
+    expect($("#dashboard p.meta").textContent).toContain("9 messages");
+    expect($("#dashboard p.meta").textContent).not.toContain("999,999");
   });
 });
 

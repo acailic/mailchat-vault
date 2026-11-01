@@ -23,6 +23,7 @@ use crate::message::{InsertOutcome, Message, NewMessage, SourceCount, Stats};
 use crate::query::{
     ChatContext, SearchHit, SearchPage, SearchQuery, SNIPPET_CLOSE_MARK, SNIPPET_OPEN_MARK,
 };
+use crate::stats::{ArchiveStats, AuthorCount, ChatCount, DayCount};
 use crate::vector::VectorHit;
 use crate::{Error, Result};
 
@@ -338,6 +339,99 @@ const MIGRATIONS: &[(i64, &str)] = &[
             path     TEXT PRIMARY KEY,
             added_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
+        "#,
+    ),
+    (
+        6,
+        // Materialized counters for the statistics dashboard, maintained by
+        // triggers on every write so reads stay O(number of groups) instead
+        // of GROUP BY scans over every message row — the dashboard answers
+        // within its 100 ms budget on million-message archives (asserted by
+        // tests/stats_perf.rs). The `''` day (unknown sent_at) and `''`
+        // chat_id groups are stored too and filtered on read, so the
+        // counters always sum to COUNT(*).
+        r#"
+        // Materialized counters for the statistics dashboard, maintained by
+        // triggers on every write so reads stay O(number of groups) instead
+        // of GROUP BY scans over every message row — the dashboard answers
+        // within its 100 ms budget on million-message archives (asserted by
+        // tests/stats_perf.rs). The `''` day (unknown sent_at) and `''`
+        // chat_id groups are stored too and filtered on read, so the
+        // counters always sum to COUNT(*).
+        r#"
+        CREATE TABLE stats_source (
+            source TEXT PRIMARY KEY,
+            n      INTEGER NOT NULL
+        );
+        CREATE TABLE stats_day (
+            day    TEXT PRIMARY KEY,
+            n      INTEGER NOT NULL
+        );
+        CREATE TABLE stats_chat (
+            source  TEXT NOT NULL,
+            chat_id TEXT NOT NULL,
+            n       INTEGER NOT NULL,
+            PRIMARY KEY (source, chat_id)
+        );
+        CREATE TABLE stats_author (
+            author TEXT PRIMARY KEY,
+            n      INTEGER NOT NULL
+        );
+        -- Top-N reads (ORDER BY n DESC ... LIMIT) stream off these.
+        CREATE INDEX idx_stats_chat_n ON stats_chat (n DESC, source, chat_id);
+        CREATE INDEX idx_stats_author_n ON stats_author (n DESC, author);
+
+        CREATE TRIGGER stats_ai AFTER INSERT ON messages BEGIN
+            INSERT INTO stats_source (source, n) VALUES (NEW.source, 1)
+                ON CONFLICT (source) DO UPDATE SET n = n + 1;
+            INSERT INTO stats_day (day, n) VALUES (substr(NEW.sent_at, 1, 10), 1)
+                ON CONFLICT (day) DO UPDATE SET n = n + 1;
+            INSERT INTO stats_chat (source, chat_id, n) VALUES (NEW.source, NEW.chat_id, 1)
+                ON CONFLICT (source, chat_id) DO UPDATE SET n = n + 1;
+            INSERT INTO stats_author (author, n) VALUES (NEW.author, 1)
+                ON CONFLICT (author) DO UPDATE SET n = n + 1;
+        END;
+        CREATE TRIGGER stats_ad AFTER DELETE ON messages BEGIN
+            INSERT INTO stats_source (source, n) VALUES (OLD.source, -1)
+                ON CONFLICT (source) DO UPDATE SET n = n - 1;
+            INSERT INTO stats_day (day, n) VALUES (substr(OLD.sent_at, 1, 10), -1)
+                ON CONFLICT (day) DO UPDATE SET n = n - 1;
+            INSERT INTO stats_chat (source, chat_id, n) VALUES (OLD.source, OLD.chat_id, -1)
+                ON CONFLICT (source, chat_id) DO UPDATE SET n = n - 1;
+            INSERT INTO stats_author (author, n) VALUES (OLD.author, -1)
+                ON CONFLICT (author) DO UPDATE SET n = n - 1;
+        END;
+        -- The app only ever inserts messages, but the counters track
+        -- UPDATEs too so the invariant (sums == COUNT(*)) holds under any
+        -- write path. Fires only when a counter-relevant column changes.
+        CREATE TRIGGER stats_au AFTER UPDATE OF source, chat_id, author, sent_at ON messages BEGIN
+            INSERT INTO stats_source (source, n) VALUES (OLD.source, -1)
+                ON CONFLICT (source) DO UPDATE SET n = n - 1;
+            INSERT INTO stats_day (day, n) VALUES (substr(OLD.sent_at, 1, 10), -1)
+                ON CONFLICT (day) DO UPDATE SET n = n - 1;
+            INSERT INTO stats_chat (source, chat_id, n) VALUES (OLD.source, OLD.chat_id, -1)
+                ON CONFLICT (source, chat_id) DO UPDATE SET n = n - 1;
+            INSERT INTO stats_author (author, n) VALUES (OLD.author, -1)
+                ON CONFLICT (author) DO UPDATE SET n = n - 1;
+            INSERT INTO stats_source (source, n) VALUES (NEW.source, 1)
+                ON CONFLICT (source) DO UPDATE SET n = n + 1;
+            INSERT INTO stats_day (day, n) VALUES (substr(NEW.sent_at, 1, 10), 1)
+                ON CONFLICT (day) DO UPDATE SET n = n + 1;
+            INSERT INTO stats_chat (source, chat_id, n) VALUES (NEW.source, NEW.chat_id, 1)
+                ON CONFLICT (source, chat_id) DO UPDATE SET n = n + 1;
+            INSERT INTO stats_author (author, n) VALUES (NEW.author, 1)
+                ON CONFLICT (author) DO UPDATE SET n = n + 1;
+        END;
+
+        -- Backfill pre-existing archives (fresh databases are empty).
+        INSERT INTO stats_source (source, n)
+            SELECT source, COUNT(*) FROM messages GROUP BY source;
+        INSERT INTO stats_day (day, n)
+            SELECT substr(sent_at, 1, 10), COUNT(*) FROM messages GROUP BY 1;
+        INSERT INTO stats_chat (source, chat_id, n)
+            SELECT source, chat_id, COUNT(*) FROM messages GROUP BY 1, 2;
+        INSERT INTO stats_author (author, n)
+            SELECT author, COUNT(*) FROM messages GROUP BY author;
         "#,
     ),
 ];
@@ -735,28 +829,126 @@ impl Storage {
             .map_err(Into::into)
     }
 
-    /// Archive counts: total and per source (by legacy namespace).
+    /// Archive counts: total and per source.
+    ///
+    /// Reads the trigger-maintained `stats_source` counters (migration 6)
+    /// instead of grouping over every message row, so this stays instant
+    /// on million-message archives; the numbers are identical by
+    /// construction because every write path maintains the counters.
     pub fn stats(&self) -> Result<Stats> {
-        let total: u64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM archive_messages", [], |row| {
-                    row.get(0)
-                })?;
-        let mut stmt = self.conn.prepare(
-            "SELECT COALESCE(si.legacy_namespace, si.id) AS source, COUNT(*) \
-             FROM archive_messages AS m \
-             JOIN source_instances AS si ON si.id = m.source_instance_id \
-             GROUP BY si.id ORDER BY COUNT(*) DESC, source",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT source, n FROM stats_source WHERE n > 0 ORDER BY n DESC, source")?;
         let by_source = stmt
             .query_map([], |row| {
                 Ok(SourceCount {
                     source: row.get(0)?,
-                    count: row.get(1)?,
+                    count: row.get::<_, i64>(1)?.max(0) as u64,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+        let total = by_source.iter().map(|s| s.count).sum();
         Ok(Stats { total, by_source })
+    }
+
+    /// Full dashboard statistics (see [`crate::stats::ArchiveStats`]):
+    /// total, date range, per-source counts, the per-day histogram, and
+    /// the heaviest chats and authors, all in one call.
+    ///
+    /// The grouped counts stream straight off the trigger-maintained
+    /// counter tables of migration 6 — O(number of groups), never a scan
+    /// over the messages — and the date range resolves as two O(log n)
+    /// index lookups, so the whole dashboard answers within its 100 ms
+    /// budget on million-message archives (asserted by
+    /// `tests/stats_perf.rs`). Messages with an unknown (`empty`)
+    /// `sent_at` are excluded from the date range and the day histogram;
+    /// messages without a `chat_id` are excluded from `top_chats`.
+    pub fn archive_stats(&self, top: u32) -> Result<ArchiveStats> {
+        let top = top.clamp(1, crate::stats::MAX_TOP) as i64;
+
+        let total: u64 =
+            self.conn
+                .query_row("SELECT COALESCE(SUM(n), 0) FROM stats_source", [], |row| {
+                    row.get::<_, i64>(0).map(|n| n.max(0) as u64)
+                })?;
+
+        // Date range: two single-aggregate lookups ride the min/max
+        // optimization over idx_messages_sent_at. They must stay separate
+        // statements — combining MIN and MAX in one query (or spelling the
+        // filter `!= ''`) degrades to a full index scan. `> ''` skips the
+        // empty-string prefix of unknown timestamps.
+        let first_sent_at: Option<String> = self.conn.query_row(
+            "SELECT MIN(sent_at) FROM messages WHERE sent_at > ''",
+            [],
+            |row| row.get(0),
+        )?;
+        let last_sent_at: Option<String> = self.conn.query_row(
+            "SELECT MAX(sent_at) FROM messages WHERE sent_at > ''",
+            [],
+            |row| row.get(0),
+        )?;
+
+        let mut source_stmt = self
+            .conn
+            .prepare("SELECT source, n FROM stats_source WHERE n > 0 ORDER BY n DESC, source")?;
+        let by_source = source_stmt
+            .query_map([], |row| {
+                Ok(SourceCount {
+                    source: row.get(0)?,
+                    count: row.get::<_, i64>(1)?.max(0) as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        // The counter table keeps one `''` row for unknown timestamps;
+        // filter it here so the histogram starts at the first dated day.
+        let mut day_stmt = self
+            .conn
+            .prepare("SELECT day, n FROM stats_day WHERE day != '' AND n > 0 ORDER BY day")?;
+        let by_day = day_stmt
+            .query_map([], |row| {
+                Ok(DayCount {
+                    day: row.get(0)?,
+                    count: row.get::<_, i64>(1)?.max(0) as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut chat_stmt = self.conn.prepare(
+            "SELECT source, chat_id, n FROM stats_chat WHERE chat_id != '' AND n > 0 \
+             ORDER BY n DESC, source, chat_id LIMIT ?1",
+        )?;
+        let top_chats = chat_stmt
+            .query_map([top], |row| {
+                Ok(ChatCount {
+                    source: row.get(0)?,
+                    chat_id: row.get(1)?,
+                    count: row.get::<_, i64>(2)?.max(0) as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut author_stmt = self.conn.prepare(
+            "SELECT author, n FROM stats_author WHERE n > 0 ORDER BY n DESC, author LIMIT ?1",
+        )?;
+        let top_authors = author_stmt
+            .query_map([top], |row| {
+                Ok(AuthorCount {
+                    author: row.get(0)?,
+                    count: row.get::<_, i64>(1)?.max(0) as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(ArchiveStats {
+            total,
+            first_sent_at,
+            last_sent_at,
+            by_source,
+            by_day,
+            top_chats,
+            top_authors,
+        })
     }
 
     /// Currently applied schema version.
