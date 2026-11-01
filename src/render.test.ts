@@ -54,7 +54,6 @@ describe("results list", () => {
     ];
     const list = document.createElement("ul");
     renderResults(list, {
-      hits,
       groups: groupHits(hits),
       activeIndex: 1,
       terms: ["vault"],
@@ -72,7 +71,6 @@ describe("results list", () => {
     const hits = [hit(message(1, "demo", "chat", "the Vault body text"), null)];
     const list = document.createElement("ul");
     renderResults(list, {
-      hits,
       groups: groupHits(hits),
       activeIndex: -1,
       terms: ["vault"],
@@ -85,7 +83,6 @@ describe("results list", () => {
     const evil = message(1, "mbox", "<script>x</script>", '<img src=x onerror="alert(1)">');
     const list = document.createElement("ul");
     renderResults(list, {
-      hits: [hit(evil, "ok \x01body\x02")],
       groups: groupHits([hit(evil, "ok \x01body\x02")]),
       activeIndex: -1,
       terms: [],
@@ -100,7 +97,6 @@ describe("results list", () => {
     const hits = [hit(message(7, "mbox", "t", "b"), null)];
     const list = document.createElement("ul");
     renderResults(list, {
-      hits,
       groups: groupHits(hits),
       activeIndex: -1,
       terms: [],

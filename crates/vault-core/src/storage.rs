@@ -336,7 +336,7 @@ impl Storage {
                  FROM messages_fts \
                  JOIN messages AS m ON m.id = messages_fts.rowid \
                  WHERE messages_fts MATCH ?3 {} \
-                 ORDER BY rank LIMIT ? OFFSET ?",
+                 ORDER BY rank, m.id LIMIT ? OFFSET ?",
                 filters.sql
             );
             let mut stmt = self.conn.prepare(&sql)?;
