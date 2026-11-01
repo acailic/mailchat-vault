@@ -3,16 +3,23 @@
 //! Commands exposed to the frontend:
 //! - `search_messages` — full-text search hitting SQLite FTS5.
 //! - `import_mbox` — manual `.mbox` import (the demo ingest source).
+//! - `import_chat_export` — WhatsApp `.txt` / Telegram `result.json`
+//!   import with format auto-detection (the frontend picks the file via
+//!   the dialog plugin).
 //! - `seed_demo` — insert the built-in sample messages (idempotent).
 //! - `stats` — archive counts per source.
 
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
 use tauri::{Manager, State};
+use vault_core::chat_export::{detect_chat_format, ChatFormat};
 use vault_core::ingest::{ingest, Collected, IngestSummary, Source};
 use vault_core::mbox::MboxSource;
 use vault_core::search::build_match_query;
 use vault_core::storage::Storage;
+use vault_core::telegram::TelegramSource;
+use vault_core::whatsapp::WhatsappSource;
 use vault_core::{demo, message, Error, Result as CoreResult};
 
 /// Shared app state: one open storage handle guarded by a mutex.
@@ -50,6 +57,38 @@ fn import_mbox(state: State<AppState>, path: String) -> Result<IngestSummary, St
     ingest(&storage, &source).map_err(|e: Error| e.to_string())
 }
 
+/// Import a chat export: a WhatsApp `.txt` export or a Telegram
+/// `result.json` (a directory containing `result.json` works too). The
+/// format is detected from the file contents. Re-importing skips
+/// already-stored messages.
+#[tauri::command]
+fn import_chat_export(state: State<AppState>, path: String) -> Result<IngestSummary, String> {
+    let picked = PathBuf::from(&path);
+    let file = if picked.is_dir() {
+        let result_json = picked.join("result.json");
+        if !result_json.is_file() {
+            return Err(format!("no result.json found in {}", picked.display()));
+        }
+        result_json
+    } else {
+        picked
+    };
+
+    let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
+    let source: Box<dyn Source> = match detect_chat_format(&bytes) {
+        Some(ChatFormat::Telegram) => Box::new(TelegramSource::new(&file)),
+        Some(ChatFormat::WhatsApp) => Box::new(WhatsappSource::new(&file)),
+        None => {
+            return Err(format!(
+                "unrecognized chat export format: {} (expected a WhatsApp .txt export or a Telegram result.json)",
+                file.display()
+            ))
+        }
+    };
+    let storage = lock(&state)?;
+    ingest(&storage, source.as_ref()).map_err(|e: Error| e.to_string())
+}
+
 /// Insert the built-in demo messages so a fresh install has searchable data.
 #[tauri::command]
 fn seed_demo(state: State<AppState>) -> Result<IngestSummary, String> {
@@ -81,6 +120,7 @@ impl Source for DemoSource {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
             std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
@@ -93,6 +133,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             search_messages,
             import_mbox,
+            import_chat_export,
             seed_demo,
             stats
         ])
