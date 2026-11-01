@@ -409,6 +409,87 @@ pub fn mbox_cases() -> Cases {
     cases
 }
 
+/// Hand-crafted Signal conversation export edge cases.
+pub fn signal_cases() -> Cases {
+    let mut cases = vec![
+        case(
+            "well-formed incoming and outgoing",
+            r#"[{"id": "a", "type": "incoming", "conversationId": "c", "source": "+385912345678.2", "sent_at": 1793525400000, "body": "hello"},
+{"id": "b", "type": "outgoing", "conversationId": "c", "sent_at": 1793525460000, "body": "hi"}]"#.as_bytes(),
+        ),
+        case("empty array", b"[]"),
+        case("array of non-objects", b"[1, 2, 3]"),
+        case(
+            "entries with only service types",
+            b"[{\"type\": \"call-history\"}, {\"type\": \"keychange\"}]",
+        ),
+        case(
+            "type is not a string",
+            b"[{\"type\": 7, \"sent_at\": 1, \"body\": \"x\"}]",
+        ),
+        case(
+            "timestamps as strings, floats, and null",
+            b"[{\"type\": \"incoming\", \"sent_at\": \"1793525400000\"}, {\"type\": \"incoming\", \"sent_at\": 1.5}, {\"type\": \"incoming\", \"sent_at\": null}, {\"type\": \"incoming\", \"sent_at\": \"garbage\"}]",
+        ),
+        case(
+            "timestamp beyond chrono range",
+            b"[{\"type\": \"incoming\", \"sent_at\": 9223372036854775807, \"body\": \"x\"}]",
+        ),
+        case(
+            "negative timestamp",
+            b"[{\"type\": \"incoming\", \"sent_at\": -1793525400000, \"body\": \"x\"}]",
+        ),
+        case(
+            "unicode body and lone surrogates",
+            r#"[{"type": "incoming", "sent_at": 1, "body": "čevapi 🎉 \ud800 مركبا"}]"#.as_bytes(),
+        ),
+        case(
+            "bidi marks in body and source",
+            "[{\"type\": \"incoming\", \"sent_at\": 1, \"source\": \"\\u200e+385912345678\\u200f\", \"body\": \"\\u200ehello\\u200f\"}]"
+                .as_bytes(),
+        ),
+        case(
+            "quote with null id and missing author",
+            b"[{\"type\": \"incoming\", \"sent_at\": 1, \"quote\": {\"id\": null, \"text\": \"t\"}}]",
+        ),
+        case(
+            "deeply nested attachments",
+            {
+                let mut s = String::from("[{\"type\": \"incoming\", \"sent_at\": 1, \"attachments\": [");
+                for _ in 0..2000 {
+                    s.push_str("{\"fileName\": \"f.jpg\", \"contentType\": \"image/jpeg\"},");
+                }
+                s.push_str("null]}");
+                s.into_bytes()
+            },
+        ),
+        case(
+            "huge body string",
+            format!(
+                "[{{\"type\": \"incoming\", \"sent_at\": 1, \"body\": \"{}\"}}]",
+                "x".repeat(2_000_000)
+            )
+            .into_bytes(),
+        ),
+        case(
+            "duplicate keys, last wins",
+            b"[{\"type\": \"call-history\", \"type\": \"incoming\", \"sent_at\": 1}]",
+        ),
+        case(
+            "array with trailing comma",
+            b"[{\"type\": \"incoming\", \"sent_at\": 1},]",
+        ),
+        case(
+            "device suffix shapes in source",
+            b"[{\"type\": \"incoming\", \"source\": \"+385912345678.2\", \"sent_at\": 1}, {\"type\": \"incoming\", \"source\": \"a.b.c\", \"sent_at\": 1}, {\"type\": \"incoming\", \"source\": \"\", \"sent_at\": 1}]",
+        ),
+        case("only a BOM", "\u{feff}".as_bytes()),
+    ];
+    let mut tr = truncations("signal export", &valid_signal());
+    cases.append(&mut tr);
+    cases
+}
+
 /// Cross-format mixups for format detection: each format's bytes glued to
 /// or wrapped inside another's.
 pub fn mixed_format_cases() -> Cases {
@@ -447,7 +528,43 @@ pub fn mixed_format_cases() -> Cases {
             v.extend_from_slice(&valid_mbox());
             v
         }),
+        case(
+            "signal array with telegram-shaped element inside",
+            b"[{\"messages\": [{\"id\": 1, \"type\": \"message\", \"text\": \"x\"}], \"type\": \"incoming\", \"sent_at\": 1}]",
+        ),
+        case(
+            "telegram export with signal-shaped message fields",
+            b"{\"name\": \"A\", \"messages\": [{\"id\": 1, \"type\": \"incoming\", \"sent_at\": 1000, \"body\": \"x\"}]}",
+        ),
+        case(
+            "whatsapp stamp inside signal body",
+            b"[{\"type\": \"incoming\", \"sent_at\": 1000, \"body\": \"[1.11.2026., 09:00] A: hi\"}]",
+        ),
+        case(
+            "signal array after json object glued",
+            b"{}[{\"type\": \"incoming\", \"sent_at\": 1000, \"body\": \"x\"}]",
+        ),
+        case("all four glued", {
+            let mut v = valid_whatsapp();
+            v.extend_from_slice(&valid_telegram());
+            v.extend_from_slice(&valid_signal());
+            v.extend_from_slice(&valid_mbox());
+            v
+        }),
     ]
+}
+
+/// A realistic Signal conversation export used as the truncation seed:
+/// a top-level array of raw Signal Desktop message objects.
+fn valid_signal() -> Vec<u8> {
+    r#"[
+  {"id": "0ea0b5fd-9f2a-4c73-8f8e-2f8ce6f22a11", "type": "incoming", "conversationId": "e7e0e0e3-1111-4a2b-9d3c-2a9d4b1e5c01", "source": "+385912345678.2", "sent_at": 1793525400000, "timestamp": 1793525400000, "body": "Zdravo ekipa! 👋"},
+  {"id": "3c7b5d3a-2f1e-4a6b-8c9d-0e1f2a3b4c5d", "type": "outgoing", "conversationId": "e7e0e0e3-1111-4a2b-9d3c-2a9d4b1e5c01", "sent_at": 1793525460000, "body": "vidimo se"},
+  {"type": "call-history", "conversationId": "e7e0e0e3-1111-4a2b-9d3c-2a9d4b1e5c01", "callId": "4f6e8a2b", "sent_at": 1793525500000},
+  {"id": "5d9c1e4f-6a7b-4c8d-9e0f-1a2b3c4d5e6f", "type": "incoming", "conversationId": "e7e0e0e3-1111-4a2b-9d3c-2a9d4b1e5c01", "source": "+385912345678", "sent_at": 1793525550000, "attachments": [{"fileName": "signal-2026-11-01-110050.jpg", "contentType": "image/jpeg", "size": 284119}]}
+]"#
+    .as_bytes()
+    .to_vec()
 }
 
 /// A properly closed `depth`-deep nested multipart mail behind a From
@@ -475,6 +592,7 @@ mod tests {
         for (name, cases) in [
             ("whatsapp", whatsapp_cases()),
             ("telegram", telegram_cases()),
+            ("signal", signal_cases()),
             ("mbox", mbox_cases()),
             ("mixed", mixed_format_cases()),
         ] {

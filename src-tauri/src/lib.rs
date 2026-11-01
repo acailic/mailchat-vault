@@ -8,9 +8,9 @@
 //!   optional date range + RAG answer over the top results.
 //! - `llm_status` — LLM availability for the UI (never the key).
 //! - `import_mbox` — manual `.mbox` import (the demo ingest source).
-//! - `import_chat_export` — WhatsApp `.txt` / Telegram `result.json`
-//!   import with format auto-detection (the frontend picks the file via
-//!   the dialog plugin).
+//! - `import_chat_export` — WhatsApp `.txt` / Telegram `result.json` /
+//!   Signal `.json` import with format auto-detection (the frontend picks
+//!   the file via the dialog plugin).
 //! - `sync_imap` — incremental IMAP/Gmail sync (first live mail source).
 //! - `seed_demo` — insert the built-in sample messages (idempotent).
 //! - `stats` — archive counts per source (drives the source filter chips).
@@ -29,6 +29,7 @@ use vault_core::llm::{
 };
 use vault_core::mbox::MboxSource;
 use vault_core::query::{ChatContext, SearchPage, SearchQuery};
+use vault_core::signal::SignalSource;
 use vault_core::storage::Storage;
 use vault_core::telegram::TelegramSource;
 use vault_core::whatsapp::WhatsappSource;
@@ -156,30 +157,75 @@ fn import_mbox(state: State<AppState>, path: String) -> Result<IngestSummary, St
     ingest(&storage, &source).map_err(|e: Error| e.to_string())
 }
 
-/// Import a chat export: a WhatsApp `.txt` export or a Telegram
-/// `result.json` (a directory containing `result.json` works too). The
-/// format is detected from the file contents. Re-importing skips
-/// already-stored messages.
+/// Import a chat export: a WhatsApp `.txt` export, a Telegram
+/// `result.json`, or a Signal conversation `.json` (e.g. from
+/// `sigtop export-messages -f json`). The format is detected from the
+/// file contents. A picked directory works too: a `result.json` inside is
+/// imported as a Telegram export, otherwise every Signal conversation
+/// `.json` in it is imported. Re-importing skips already-stored messages.
 #[tauri::command]
 fn import_chat_export(state: State<AppState>, path: String) -> Result<IngestSummary, String> {
     let picked = PathBuf::from(&path);
-    let file = if picked.is_dir() {
+    let (file, signal_dir) = if picked.is_dir() {
         let result_json = picked.join("result.json");
-        if !result_json.is_file() {
-            return Err(format!("no result.json found in {}", picked.display()));
+        if result_json.is_file() {
+            (result_json, false)
+        } else {
+            (picked, true)
         }
-        result_json
     } else {
-        picked
+        (picked, false)
     };
+
+    if signal_dir {
+        // A directory of Signal conversation exports (sigtop writes one
+        // .json per conversation): import every file that detects as one.
+        let mut files: Vec<PathBuf> = Vec::new();
+        let entries =
+            std::fs::read_dir(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") && path.is_file() {
+                let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+                if vault_core::signal::is_signal_export(&bytes) {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+        if files.is_empty() {
+            return Err(format!(
+                "no Signal .json exports found in {}",
+                file.display()
+            ));
+        }
+        let storage = lock(&state)?;
+        let mut summary = IngestSummary {
+            source: vault_core::signal::SIGNAL_SOURCE.to_string(),
+            seen: 0,
+            inserted: 0,
+            skipped: 0,
+            failed: 0,
+        };
+        for path in &files {
+            let s = ingest(&storage, &SignalSource::new(path)).map_err(|e: Error| e.to_string())?;
+            summary.seen += s.seen;
+            summary.inserted += s.inserted;
+            summary.skipped += s.skipped;
+            summary.failed += s.failed;
+        }
+        return Ok(summary);
+    }
 
     let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
     let source: Box<dyn Source> = match detect_chat_format(&bytes) {
         Some(ChatFormat::Telegram) => Box::new(TelegramSource::new(&file)),
+        Some(ChatFormat::Signal) => Box::new(SignalSource::new(&file)),
         Some(ChatFormat::WhatsApp) => Box::new(WhatsappSource::new(&file)),
         None => {
             return Err(format!(
-                "unrecognized chat export format: {} (expected a WhatsApp .txt export or a Telegram result.json)",
+                "unrecognized chat export format: {} (expected a WhatsApp .txt export, a Telegram result.json, or a Signal conversation .json)",
                 file.display()
             ))
         }

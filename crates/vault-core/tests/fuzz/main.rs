@@ -23,6 +23,7 @@
 
 mod corpus;
 mod gen_mbox;
+mod gen_signal;
 mod gen_telegram;
 mod gen_whatsapp;
 mod harness;
@@ -108,6 +109,38 @@ fn telegram_fuzz_never_panics() {
 }
 
 // ---------------------------------------------------------------------------
+// Signal conversation JSON export
+// ---------------------------------------------------------------------------
+
+#[test]
+fn signal_fuzz_never_panics() {
+    for (idx, (desc, input)) in corpus::signal_cases().into_iter().enumerate() {
+        check_no_panic("signal", idx, &desc, &input, || {
+            let _ = vault_core::signal::parse_signal(&input, "fuzz");
+            let _ = vault_core::signal::is_signal_export(&input);
+        });
+    }
+    let mut rng = rng::Rng::new(0x7369_676e_616c_696d); // "signalim"
+    for i in 0..iterations() {
+        let seed = rng.next_u64();
+        let mut input = gen_signal::export(&mut rng::Rng::new(seed));
+        if rng.bool() {
+            mutate::apply(&mut input, &mut rng);
+        }
+        check_no_panic(
+            "signal",
+            i,
+            &format!("random seed={seed:#x}"),
+            &input,
+            || {
+                let _ = vault_core::signal::parse_signal(&input, "fuzz");
+                let _ = vault_core::signal::is_signal_export(&input);
+            },
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // .mbox files
 // ---------------------------------------------------------------------------
 
@@ -138,10 +171,11 @@ fn mbox_fuzz_never_panics() {
 #[test]
 fn detect_chat_format_fuzz_never_panics() {
     // Detection runs over every corpus input and fresh random exports of
-    // all three shapes (including cross-format mixups), and must always
+    // all four shapes (including cross-format mixups), and must always
     // answer instead of crashing.
     let mut cases = corpus::whatsapp_cases();
     cases.extend(corpus::telegram_cases());
+    cases.extend(corpus::signal_cases());
     cases.extend(corpus::mbox_cases());
     cases.extend(corpus::mixed_format_cases());
     for (idx, (desc, input)) in cases.into_iter().enumerate() {
@@ -152,9 +186,10 @@ fn detect_chat_format_fuzz_never_panics() {
     let mut rng = rng::Rng::new(0x0064_6574_6563_7421); // "detect!"
     for i in 0..iterations() {
         let seed = rng.next_u64();
-        let mut input = match rng.below(3) {
+        let mut input = match rng.below(4) {
             0 => gen_whatsapp::export(&mut rng::Rng::new(seed)),
             1 => gen_telegram::export(&mut rng::Rng::new(seed)),
+            2 => gen_signal::export(&mut rng::Rng::new(seed)),
             _ => gen_mbox::file(&mut rng::Rng::new(seed)),
         };
         mutate::apply(&mut input, &mut rng);
