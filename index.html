@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mailchat Vault</title>
+    <style>
+      :root { color-scheme: light dark; }
+      * { box-sizing: border-box; }
+      body {
+        font: 15px/1.45 system-ui, sans-serif;
+        margin: 0;
+        padding: 16px;
+        max-width: 860px;
+      }
+      header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
+      h1 { font-size: 20px; margin: 0; }
+      #stats { color: gray; font-size: 13px; }
+      section { margin-bottom: 16px; }
+      .row { display: flex; gap: 8px; }
+      input[type="text"] { flex: 1; padding: 6px 8px; font: inherit; }
+      button { padding: 6px 12px; font: inherit; cursor: pointer; }
+      #status { margin-top: 6px; font-size: 13px; color: gray; min-height: 1em; }
+      #status.error { color: crimson; }
+      #results { list-style: none; margin: 0; padding: 0; }
+      #results li { padding: 8px 0; border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
+      .meta { color: gray; font-size: 13px; }
+      .body { margin-top: 2px; white-space: pre-wrap; word-break: break-word; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Mailchat Vault</h1>
+      <span id="stats">…</span>
+    </header>
+
+    <section>
+      <div class="row">
+        <input id="search" type="text" placeholder="Search the archive (FTS5)…" autofocus />
+        <button id="search-btn" type="button">Search</button>
+      </div>
+      <div id="status"></div>
+      <ul id="results"></ul>
+    </section>
+
+    <section>
+      <div class="row">
+        <input id="mbox-path" type="text" placeholder="/path/to/archive.mbox" />
+        <button id="import-btn" type="button">Import .mbox</button>
+        <button id="seed-btn" type="button">Load demo</button>
+      </div>
+      <div id="import-status" class="meta" style="margin-top: 6px"></div>
+    </section>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
