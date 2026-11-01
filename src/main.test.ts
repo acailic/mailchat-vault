@@ -36,6 +36,10 @@ vi.mock("@tauri-apps/api/core", () => ({
   },
 }));
 
+// The chat-export import opens the OS file picker; stub it per test.
+const dialog = vi.hoisted(() => ({ open: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: dialog.open }));
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
@@ -607,6 +611,70 @@ describe("keyboard navigation", () => {
     await flush();
     expect($('[data-index="0"]').classList.contains("active")).toBe(true);
     expect(win.document.querySelectorAll(".hit-item.active").length).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Chat export import (media extraction wiring)
+// ---------------------------------------------------------------------------
+
+describe("chat export import", () => {
+  const OUTCOME = {
+    summary: { source: "telegram", seen: 4, inserted: 4, skipped: 0, failed: 0 },
+    media: { referenced: 3, stored: 3, deduped: 1, missing: 0, linked: 3 },
+  };
+
+  function importCalls(): Array<{ cmd: string; args: unknown }> {
+    return tauri.calls.filter((c) => c.cmd === "import_chat_export");
+  }
+
+  it("passes the picked path and the checked extract-media toggle, then reports media counts", async () => {
+    await boot();
+    dialog.open.mockResolvedValue("/tmp/tg-export/result.json");
+    tauri.handlers.set("import_chat_export", () => OUTCOME);
+    $("#chat-import-btn").click();
+    await vi.waitFor(() => expect(importCalls()).toHaveLength(1));
+    expect(importCalls()[0].args).toEqual({
+      path: "/tmp/tg-export/result.json",
+      extract_media: true,
+    });
+    await vi.waitFor(() =>
+      expect($("#import-status").textContent).toBe(
+        "Imported 4 new, 0 already present (of 4 in telegram). Media: 3 stored, 1 deduped, 3 linked.",
+      ),
+    );
+  });
+
+  it("unchecking the toggle disables extraction and omits the media part", async () => {
+    await boot();
+    dialog.open.mockResolvedValue("/tmp/chat.txt");
+    input("#chat-media").checked = false;
+    tauri.handlers.set("import_chat_export", () => ({
+      summary: { source: "whatsapp", seen: 2, inserted: 2, skipped: 0, failed: 0 },
+      media: null,
+    }));
+    $("#chat-import-btn").click();
+    await vi.waitFor(() => expect(importCalls()).toHaveLength(1));
+    expect(importCalls()[0].args).toEqual({ path: "/tmp/chat.txt", extract_media: false });
+    await vi.waitFor(() =>
+      expect($("#import-status").textContent).toBe(
+        "Imported 2 new, 0 already present (of 2 in whatsapp).",
+      ),
+    );
+  });
+
+  it("a cancelled picker imports nothing; a backend error is shown", async () => {
+    await boot();
+    dialog.open.mockResolvedValue(null);
+    $("#chat-import-btn").click();
+    await vi.waitFor(() => expect(dialog.open).toHaveBeenCalled());
+    await flush();
+    expect(importCalls()).toHaveLength(0);
+
+    dialog.open.mockResolvedValue("/tmp/chat.txt");
+    tauri.handlers.set("import_chat_export", () => Promise.reject("bad export"));
+    $("#chat-import-btn").click();
+    await vi.waitFor(() => expect($("#import-status").textContent).toBe("Import failed: bad export"));
   });
 });
 

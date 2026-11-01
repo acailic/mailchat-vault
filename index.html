@@ -119,6 +119,36 @@
       .thread-row.current { outline: 1px solid Highlight; }
       .thread-row.link { cursor: pointer; }
       .thread-row.link:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
+      .detail-media h3 {
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: gray;
+        margin: 0 0 4px;
+      }
+      .media-list { list-style: none; margin: 0 0 12px; padding: 0; }
+      .media-item {
+        display: flex;
+        gap: 8px;
+        align-items: baseline;
+        flex-wrap: wrap;
+        padding: 5px 8px;
+        margin-bottom: 4px;
+        border-radius: 6px;
+        background: color-mix(in srgb, currentColor 5%, transparent);
+      }
+      .media-kind {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        padding: 1px 6px;
+        border-radius: 999px;
+        border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+      }
+      .media-name { word-break: break-all; }
+      .media-item .meta { word-break: break-all; }
+      .media-item.unresolved .media-name { text-decoration: line-through; }
     </style>
   </head>
   <body>
@@ -171,6 +201,9 @@
         <input id="mbox-path" type="text" placeholder="/path/to/archive.mbox" />
         <button id="import-btn" type="button">Import .mbox</button>
         <button id="chat-import-btn" type="button">Import chat export…</button>
+        <label class="meta" title="Copy media files from the export into the vault's media store (hash-named, deduplicated)">
+          <input id="chat-media" type="checkbox" checked /> extract media
+        </label>
         <button id="seed-btn" type="button">Load demo</button>
       </div>
       <div id="import-status" class="meta" style="margin-top: 6px"></div>

@@ -13,7 +13,10 @@
 //! - [`whatsapp`]: the WhatsApp `.txt` chat export source.
 //! - [`telegram`]: the Telegram `result.json` chat export source.
 //! - [`signal`]: the Signal Desktop conversation JSON export source.
-//! - [`chat_export`]: format detection for picked chat export files.
+//! - [`chat_export`]: chat export format detection plus the import flow
+//!   (with media extraction) for picked files.
+//! - [`media`]: content-addressed media store and the extraction pass that
+//!   links export files to messages.
 //! - [`imap`]: the incremental IMAP/Gmail source.
 //! - [`search`]: free-text to FTS5 MATCH query building.
 //! - [`llm`]: LLM-assisted search — natural language to an FTS5 plan, then
@@ -30,6 +33,7 @@ pub mod ingest;
 pub mod llm;
 pub mod mail;
 pub mod mbox;
+pub mod media;
 pub mod message;
 pub mod query;
 pub mod search;
@@ -56,6 +60,8 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("llm error: {0}")]
     Llm(String),
+    #[error("chat import error: {0}")]
+    ChatImport(String),
     #[error("invalid date filter: {0}")]
     InvalidDate(String),
     #[error("imap error: {0}")]

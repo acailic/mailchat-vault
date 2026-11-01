@@ -13,7 +13,7 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice �
   - Versioned migrations applied automatically on open.
 - **Idempotent ingest**: a `Source` trait yields messages; writes dedup on `(source, external_id)`, so re-importing is always safe.
 - **Manual/demo source**: import an `.mbox` file (no IMAP needed) — subjects, authors, dates, and decoded text bodies are archived and searchable.
-- **Chat imports**: WhatsApp `.txt` exports, Telegram Desktop `result.json` exports, and Signal Desktop conversation `.json` exports (e.g. `sigtop export-messages -f json`) — texts, authors, and timestamps are archived and searchable; quoted replies are kept as metadata, attachments are not extracted but recorded in `raw_json`. The format is auto-detected from the file contents, so re-importing the same export never duplicates messages.
+- **Chat imports**: WhatsApp `.txt` exports, Telegram Desktop `result.json` exports, and Signal Desktop conversation `.json` exports (e.g. `sigtop export-messages -f json`) — texts, authors, and timestamps are archived and searchable; quoted replies are kept as metadata, and Signal attachments are recorded in `raw_json`. **Media extraction** for WhatsApp and Telegram: files referenced by the export (images, documents, voice notes) are copied into a content-addressed `media/` store in app data — hash-named (SHA-256), deduplicated by content — and linked from the message's `raw_json`, with a media section in the detail view. Extraction can be switched off with the **extract media** toggle; text-only exports import fine (missing files are just counted), and re-importing an export with its files backfills media links into already-stored messages. The format is auto-detected from the file contents, so re-importing the same export never duplicates messages.
 - **IMAP sync (Gmail & friends)**: incremental, UIDVALIDITY/UID-tracked sync from any IMAP server over host/port/user/password — Gmail via app password in this first round (XOAUTH2 later). Folders map to the message `channel` field; re-syncing never duplicates. Passwords are prompted for, kept in the OS keyring when available and in session memory otherwise — never in the database.
 - **Search tool UI** over the FTS5 index:
   - results with **match highlighting** (FTS5 snippets, rendered as `<mark>` runs), **grouped by chat/thread**;
@@ -27,9 +27,9 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice �
 ## Repository layout
 
 ```
-crates/vault-core/   # storage (SQLite/FTS5, migrations), filtered/paged search queries, ingest trait, mail parsing, mbox / WhatsApp / Telegram / Signal sources, IMAP sync, LLM search pipeline, local embeddings + hybrid ranking — no UI deps
-src-tauri/           # Tauri app shell: commands (search_messages, chat_context, llm_ask, llm_status, embed_messages, embed_status, import_mbox, import_chat_export, sync_imap, seed_demo, stats) + secret storage
-src/                 # frontend (vanilla TS): search + filters + pagination + detail view, ask UI + embedding controls, import & IMAP sync controls
+crates/vault-core/   # storage (SQLite/FTS5, migrations), filtered/paged search queries, ingest trait, mail parsing, mbox / WhatsApp / Telegram / Signal sources, media extraction into the content-addressed store, IMAP sync, LLM search pipeline, local embeddings + hybrid ranking — no UI deps
+src-tauri/           # Tauri app shell: commands (search_messages, chat_context, llm_ask, llm_status, embed_messages, embed_status, import_mbox, import_chat_export with optional media extraction, sync_imap, seed_demo, stats) + secret storage
+src/                 # frontend (vanilla TS): search + filters + pagination + detail view (with media links), ask UI + embedding controls, import & IMAP sync controls
 index.html           # single-page shell
 ```
 
@@ -52,9 +52,9 @@ npm install
 npm run tauri dev
 ```
 
-First run tip: click **Load demo** to seed the sample messages, then search for e.g. `vault`, click a hit to read it with its thread neighbors, or set the source/author/date filters to browse. Click **Update local embeddings** in the Ask section to build the local vector index (offline) — Ask then ranks results hybrid (FTS + local vectors). To import real data, point the import field at any `.mbox` file (e.g. exported from Thunderbird), use **Import chat export…** to pick a WhatsApp `Export chat` `.txt` file or a Telegram export's `result.json` (picking the export directory works too), or a Signal conversation `.json`, or fill in the **IMAP sync** section (see below).
+First run tip: click **Load demo** to seed the sample messages, then search for e.g. `vault`, click a hit to read it with its thread neighbors, or set the source/author/date filters to browse. Click **Update local embeddings** in the Ask section to build the local vector index (offline) — Ask then ranks results hybrid (FTS + local vectors). To import real data, point the import field at any `.mbox` file (e.g. exported from Thunderbird), use **Import chat export…** to pick a WhatsApp `Export chat` `.txt` file or a Telegram export's `result.json` (picking the export directory works too), or a Signal conversation `.json` — unzipped "Attach Media" WhatsApp exports also copy their files into the vault's media store unless **extract media** is unchecked — or fill in the **IMAP sync** section (see below).
 
-The database lives in your app data dir (e.g. `~/.local/share/com.acailic.mailchatvault/vault.db` on Linux).
+The database lives in your app data dir (e.g. `~/.local/share/com.acailic.mailchatvault/vault.db` on Linux); extracted chat media lives next to it under `media/`, each file named by the SHA-256 of its contents.
 
 ## LLM-assisted search (v1)
 
@@ -149,7 +149,7 @@ Any IMAP server with implicit TLS works the same way: host, port (993), username
 ## Tests
 
 ```sh
-cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram ingest, filtered/paged search, chat context, 100k FTS perf fixture, IMAP sync (mock server), LLM search pipeline (mock LLM, no network), local embeddings (deterministic embedder, incremental job, cosine scan, hybrid ranking, 100k vector perf budgets), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations)
+cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram ingest, media extraction (real small fixture files), filtered/paged search, chat context, 100k FTS perf fixture, IMAP sync (mock server), LLM search pipeline (mock LLM, no network), local embeddings (deterministic embedder, incremental job, cosine scan, hybrid ranking, 100k vector perf budgets), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations)
 npm test                 # frontend unit + UI-state snapshot tests (vitest)
 npm run check            # TypeScript type-check
 cargo test --workspace   # also compiles the Tauri app (needs the Linux libs above)
@@ -188,10 +188,10 @@ view, and keyboard navigation).
 
 ## Out of scope for now (separate tasks)
 
-XOAUTH2 (OAuth) login for Gmail, multi-account UI, more chat sources (Discord), automatic folder watching, chat media extraction, multi-provider menus, icons/bundling/installers, settings UI, result export, statistics dashboard, push notifications.
+XOAUTH2 (OAuth) login for Gmail, multi-account UI, more chat sources (Discord), automatic folder watching, multi-provider menus, icons/bundling/installers, settings UI, result export, statistics dashboard, push notifications. The media-extraction layer is source-generic: when further chat sources land, their exports plug into the same hash-named `media/` store and `raw_json` convention.
 
 ## Notes on chat import details
 
-- **WhatsApp**: export dates carry no UTC offset, so they are stored as-is in the archive's UTC-normalized form; day-first vs month-first ordering is inferred from the file's own dates (day-first when ambiguous). Media placeholders (`image omitted`, `(file attached)`, …) are kept as text and recorded in `raw_json`.
-- **Telegram**: `date_unixtime` is preferred for timestamps (timezone-correct); service entries (calls, joins) are skipped; the original message JSON (attachments, reply references included) is kept verbatim in `raw_json`.
-- **Signal**: conversation exports are top-level JSON arrays of Signal Desktop's raw message objects (as written by `sigtop export-messages -f json`, one file per conversation). Timestamps (`sent_at`/`timestamp`/`received_at`) are absolute epoch milliseconds, stored as exact UTC; outgoing messages are archived with author `You`; service entries (call history, key changes, profile changes, group changes) are skipped; message ids are namespaced by the conversation uuid, so a re-export under a renamed file dedups instead of duplicating; the whole original message object (attachments, quotes, reactions) is kept verbatim in `raw_json`.
+- **WhatsApp**: export dates carry no UTC offset, so they are stored as-is in the archive's UTC-normalized form; day-first vs month-first ordering is inferred from the file's own dates (day-first when ambiguous). Media placeholders (`image omitted`, `(file attached)`, …) are kept as text and recorded in `raw_json`; when the exported files sit next to the `.txt` ("Attach Media" export, unzipped), named attachments are matched by file name — exact, then by stem/case — and copied into the media store, linked from `raw_json` (`media` array). `<Media omitted>` placeholders carry no name and stay placeholders.
+- **Telegram**: `date_unixtime` is preferred for timestamps (timezone-correct); service entries (calls, joins) are skipped; the original message JSON (attachments, reply references included) is kept verbatim in `raw_json`, and `photo`/`file` paths are resolved inside the export directory (`..` and symlink escapes are rejected), stored hash-named, and linked via the added `media` array.
+- **Signal**: conversation exports are top-level JSON arrays of Signal Desktop's raw message objects (as written by `sigtop export-messages -f json`, one file per conversation). Timestamps (`sent_at`/`timestamp`/`received_at`) are absolute epoch milliseconds, stored as exact UTC; outgoing messages are archived with author `You`; service entries (call history, key changes, profile changes, group changes) are skipped; message ids are namespaced by the conversation uuid, so a re-export under a renamed file dedups instead of duplicating; the whole original message object (attachments, quotes, reactions) is kept verbatim in `raw_json` — media extraction is not implemented for Signal yet.

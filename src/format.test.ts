@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatSentAt, snippet } from "./format";
+import { formatSentAt, humanSize, snippet } from "./format";
 
 describe("formatSentAt", () => {
   it("renders a compact local timestamp", () => {
@@ -33,6 +33,26 @@ describe("formatSentAt", () => {
     const justAfterMidnightUtc = "2026-03-09T00:20:00Z";
     expect(formatSentAt(justBeforeMidnightUtc)).toBe(expectLocal(justBeforeMidnightUtc));
     expect(formatSentAt(justAfterMidnightUtc)).toBe(expectLocal(justAfterMidnightUtc));
+  });
+});
+
+describe("humanSize", () => {
+  it("renders bytes through terabytes", () => {
+    expect(humanSize(0)).toBe("0 B");
+    expect(humanSize(12)).toBe("12 B");
+    expect(humanSize(1024)).toBe("1 KB");
+    expect(humanSize(2048)).toBe("2 KB");
+    expect(humanSize(3.5 * 1024 * 1024)).toBe("3.5 MB");
+    expect(humanSize(5 * 1024 * 1024 * 1024)).toBe("5 GB");
+    expect(humanSize(2.5 * 1024 ** 4)).toBe("2.5 TB");
+  });
+
+  it("rounds large mantissas and rejects nonsense", () => {
+    expect(humanSize(102.4 * 1024)).toBe("102 KB");
+    expect(humanSize(999 * 1024 * 1024)).toBe("999 MB");
+    expect(humanSize(-5)).toBe("—");
+    expect(humanSize(Number.NaN)).toBe("—");
+    expect(humanSize(Number.POSITIVE_INFINITY)).toBe("—");
   });
 });
 

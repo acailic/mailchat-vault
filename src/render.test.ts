@@ -260,6 +260,70 @@ describe("detail panel", () => {
     expect(el.querySelectorAll(".thread-row.link").length).toBe(2);
   });
 
+  it("renders media links and unresolved attachment placeholders", () => {
+    const rawJson = JSON.stringify({
+      attachment: { kind: "file", name: "IMG-20261101-WA0001.jpg" },
+      media: [
+        {
+          sha256: "a".repeat(64),
+          path: `media/${"a".repeat(64)}.jpg`,
+          name: "IMG-20261101-WA0001.jpg",
+          kind: "image",
+          size: 2048,
+        },
+        {
+          sha256: "b".repeat(64),
+          path: `media/${"b".repeat(64)}.pdf`,
+          name: "plan.pdf",
+          kind: "document",
+          size: 5 * 1024 * 1024,
+        },
+      ],
+    });
+    const withMedia: ChatContext = {
+      before: [],
+      message: { ...message(4, "whatsapp", "family", "IMG-20261101-WA0001.jpg"), raw_json: rawJson },
+      after: [],
+    };
+    const el = document.createElement("aside");
+    renderDetail(el, {
+      ctx: withMedia,
+      queryText: "",
+      onOpenMessage: () => {},
+      onClose: () => {},
+    });
+    expect(el.innerHTML).toMatchSnapshot();
+    const items = [...el.querySelectorAll(".media-item")];
+    expect(items.length).toBe(2);
+    expect(items[0].querySelector(".media-kind")!.textContent).toBe("image");
+    expect(items[0].querySelector(".media-name")!.textContent).toBe("IMG-20261101-WA0001.jpg");
+    expect(items[0].textContent).toContain("2 KB");
+    expect(items[0].textContent).toContain(`media/${"a".repeat(64)}.jpg`);
+    expect(items[1].textContent).toContain("5 MB");
+
+    // An attachment with a name that was never extracted shows as
+    // unresolved; a matching media entry suppresses the placeholder.
+    const unresolved: ChatContext = {
+      before: [],
+      message: {
+        ...message(5, "whatsapp", "family", "video omitted"),
+        raw_json: JSON.stringify({ attachment: { kind: "video", name: "VID-1.mp4" } }),
+      },
+      after: [],
+    };
+    const el2 = document.createElement("aside");
+    renderDetail(el2, {
+      ctx: unresolved,
+      queryText: "",
+      onOpenMessage: () => {},
+      onClose: () => {},
+    });
+    const unresolvedItems = el2.querySelectorAll(".media-item.unresolved");
+    expect(unresolvedItems.length).toBe(1);
+    expect(unresolvedItems[0].textContent).toContain("VID-1.mp4");
+    expect(unresolvedItems[0].textContent).toContain("not in export");
+  });
+
   it("renders raw_json-free meta and never executes message content", () => {
     const evil: ChatContext = {
       before: [],
