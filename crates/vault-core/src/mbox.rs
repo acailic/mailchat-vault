@@ -8,13 +8,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use chrono::{TimeZone, Utc};
-use mailparse::{parse_mail, MailHeaderMap, ParsedMail};
-use serde_json::json;
-
 use crate::ingest::{Collected, Source};
-use crate::message::NewMessage;
-use crate::util::fnv1a;
+use crate::mail::parse_raw_mail;
 use crate::Result;
 
 /// Source name and dedup namespace for mbox imports.
@@ -50,13 +45,10 @@ impl Source for MboxSource {
 
 /// Parse raw `.mbox` file contents into messages.
 ///
-/// `chat_id` groups the messages (typically the file name stem). For each
-/// mail: `external_id` is the `Message-ID` (falling back to a content hash
-/// when absent), `body` is the decoded text body prefixed with the subject so
-/// both are full-text searchable, and `raw_json` keeps the key headers.
-///
-/// Mails that fail to parse are counted in `Collected::failed` rather than
-/// silently dropped.
+/// `chat_id` groups the messages (typically the file name stem). Message
+/// parsing itself lives in [`crate::mail`] and is shared with the IMAP
+/// source. Mails that fail to parse are counted in `Collected::failed`
+/// rather than silently dropped.
 pub fn parse_mbox(bytes: &[u8], chat_id: &str) -> Result<Collected> {
     let mut messages = Vec::new();
     let mut failed: u64 = 0;
@@ -69,7 +61,7 @@ pub fn parse_mbox(bytes: &[u8], chat_id: &str) -> Result<Collected> {
         if raw.is_empty() {
             continue;
         }
-        match parse_single(raw, chat_id) {
+        match parse_raw_mail(raw, MBOX_SOURCE, chat_id) {
             Some(msg) => messages.push(msg),
             None => failed += 1,
         }
@@ -103,101 +95,4 @@ fn split_mbox(bytes: &[u8]) -> Vec<&[u8]> {
 
 fn starts_with_from_line(line: &[u8]) -> bool {
     line.starts_with(b"From ")
-}
-
-fn parse_single(raw: &[u8], chat_id: &str) -> Option<NewMessage> {
-    let mail = parse_mail(raw).ok()?;
-
-    let message_id = mail
-        .headers
-        .get_first_value("Message-ID")
-        .map(|v| v.trim().trim_matches(['<', '>']).to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| format!("generated-{:016x}", fnv1a(raw)));
-
-    let author = mail
-        .headers
-        .get_first_value("From")
-        .map(|v| v.trim().to_string())
-        .unwrap_or_default();
-
-    let sent_at = mail
-        .headers
-        .get_first_value("Date")
-        .and_then(|v| mailparse::dateparse(&v).ok())
-        .and_then(|secs| Utc.timestamp_opt(secs, 0).single())
-        .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string())
-        .unwrap_or_default();
-
-    let subject = mail
-        .headers
-        .get_first_value("Subject")
-        .map(|v| v.trim().to_string())
-        .unwrap_or_default();
-
-    // Decoded text body: walk to the text/plain leaf parts, joined;
-    // html-only or otherwise text-less mails fall back to the top-level
-    // body, decode failures yield "".
-    let text = extract_text(&mail)
-        .or_else(|| decoded_body(&mail))
-        .unwrap_or_default();
-    let body = if subject.is_empty() {
-        text
-    } else if text.is_empty() {
-        subject.clone()
-    } else {
-        format!("{subject}\n\n{text}")
-    };
-
-    let raw_json = json!({
-        "message_id": message_id,
-        "subject": subject,
-        "from": author,
-        "to": mail.headers.get_first_value("To").unwrap_or_default(),
-        "date": mail.headers.get_first_value("Date").unwrap_or_default(),
-    })
-    .to_string();
-
-    let mut msg = NewMessage::new(MBOX_SOURCE, message_id, author, sent_at, body);
-    msg.chat_id = chat_id.to_string();
-    msg.raw_json = raw_json;
-    Some(msg)
-}
-
-/// Collect the decoded text of every text/plain leaf part, joined with a
-/// blank line; `None` when the mail has no text/plain leaf at all. Leaf
-/// bodies go through `get_body`, so base64/quoted-printable transfer
-/// encodings are decoded; a leaf whose decode fails contributes "".
-fn extract_text(mail: &ParsedMail<'_>) -> Option<String> {
-    if mail.subparts.is_empty() {
-        return if mail.ctype.mimetype == "text/plain" {
-            Some(decoded_body(mail).unwrap_or_default())
-        } else {
-            None
-        };
-    }
-    let leaves: Vec<String> = mail.subparts.iter().filter_map(extract_text).collect();
-    if leaves.is_empty() {
-        None
-    } else {
-        Some(leaves.join("\n\n"))
-    }
-}
-
-/// Decode a part's body to a String: `get_body_raw` handles the transfer
-/// encoding; for bodies with no declared charset (or us-ascii) the bytes are
-/// read as UTF-8 with a Latin-1 fallback for legacy 8-bit mail (mailparse's
-/// own decode always maps them as Latin-1, garbling UTF-8 bodies); other
-/// declared charsets go through mailparse's charset tables.
-fn decoded_body(mail: &ParsedMail<'_>) -> Option<String> {
-    let raw = mail.get_body_raw().ok()?;
-    let charset = mail.ctype.charset.to_ascii_lowercase();
-    if !charset.is_empty() && charset != "us-ascii" {
-        return mail.get_body().ok().map(|t| t.trim_end().to_string());
-    }
-    Some(match String::from_utf8(raw) {
-        Ok(s) => s.trim_end().to_string(),
-        // Not UTF-8: map each byte as a Latin-1 code point (lossless).
-        Err(e) => e.into_bytes().into_iter().map(|b| b as char).collect(),
-    })
 }

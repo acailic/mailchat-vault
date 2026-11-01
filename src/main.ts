@@ -33,6 +33,25 @@ interface IngestSummary {
   failed: number;
 }
 
+interface FolderSyncSummary {
+  folder: string;
+  uidvalidity: number;
+  reset: boolean;
+  seen: number;
+  inserted: number;
+  skipped: number;
+  failed: number;
+  /** Why the folder failed to sync; null on success. */
+  error: string | null;
+}
+
+interface ImapSyncOutcome {
+  folders: FolderSyncSummary[];
+  /** null when a stored password was reused; "os_keyring" | "memory" when
+   * the entered password was just saved there. */
+  saved_to: "os_keyring" | "memory" | null;
+}
+
 const searchInput = document.querySelector<HTMLInputElement>("#search")!;
 const searchButton = document.querySelector<HTMLButtonElement>("#search-btn")!;
 const searchStatus = document.querySelector<HTMLElement>("#status")!;
@@ -50,6 +69,13 @@ const llmNote = document.querySelector<HTMLElement>("#llm-note")!;
 const answerBox = document.querySelector<HTMLElement>("#answer")!;
 const askNotes = document.querySelector<HTMLElement>("#ask-notes")!;
 const askResults = document.querySelector<HTMLUListElement>("#ask-results")!;
+const imapHostInput = document.querySelector<HTMLInputElement>("#imap-host")!;
+const imapPortInput = document.querySelector<HTMLInputElement>("#imap-port")!;
+const imapUserInput = document.querySelector<HTMLInputElement>("#imap-user")!;
+const imapPassInput = document.querySelector<HTMLInputElement>("#imap-pass")!;
+const imapFoldersInput = document.querySelector<HTMLInputElement>("#imap-folders")!;
+const imapSyncButton = document.querySelector<HTMLButtonElement>("#imap-sync-btn")!;
+const imapStatus = document.querySelector<HTMLElement>("#imap-status")!;
 
 function setStatus(text: string, isError = false): void {
   searchStatus.textContent = text;
@@ -204,6 +230,52 @@ async function seedDemo(): Promise<void> {
   }
 }
 
+async function syncImap(): Promise<void> {
+  const host = imapHostInput.value.trim();
+  const username = imapUserInput.value.trim();
+  const port = Number.parseInt(imapPortInput.value, 10);
+  const password = imapPassInput.value;
+  const folders = imapFoldersInput.value
+    .split(",")
+    .map((f) => f.trim())
+    .filter((f) => f.length > 0);
+  if (!host || !username) {
+    imapStatus.textContent = "Enter the IMAP host and your username first.";
+    return;
+  }
+  imapSyncButton.disabled = true;
+  imapStatus.textContent = `Syncing ${username} over IMAP… (first sync of a large mailbox can take a while)`;
+  try {
+    const outcome = await invoke<ImapSyncOutcome>("sync_imap", {
+      host,
+      port: Number.isNaN(port) ? null : port,
+      username,
+      password,
+      folders: folders.length > 0 ? folders : null,
+    });
+    const lines = outcome.folders.map(
+      (f) =>
+        `${f.folder}: ${f.inserted} new, ${f.skipped} already present` +
+        (f.failed > 0 ? `, ${f.failed} failed to parse` : "") +
+        (f.reset ? " (full rescan)" : "") +
+        (f.error ? ` — failed: ${f.error}` : ""),
+    );
+    const note =
+      outcome.saved_to === "memory"
+        ? " Password kept in memory only for this session (no OS keyring available)."
+        : outcome.saved_to === "os_keyring"
+          ? " Password stored in the OS keyring."
+          : "";
+    imapStatus.textContent = lines.join(" · ") + note;
+    imapPassInput.value = "";
+    await refreshStats();
+  } catch (e) {
+    imapStatus.textContent = `Sync failed: ${e}`;
+  } finally {
+    imapSyncButton.disabled = false;
+  }
+}
+
 searchButton.addEventListener("click", () => void runSearch());
 searchInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") void runSearch();
@@ -215,6 +287,7 @@ askInput.addEventListener("keydown", (event) => {
 importButton.addEventListener("click", () => void importMbox());
 chatImportButton.addEventListener("click", () => void importChatExport());
 seedButton.addEventListener("click", () => void seedDemo());
+imapSyncButton.addEventListener("click", () => void syncImap());
 
 void refreshStats();
 void refreshLlmNote();
