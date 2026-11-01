@@ -31,10 +31,8 @@ pub struct SearchQuery {
     /// Case-insensitive substring filter on the author.
     pub author: String,
     /// Inclusive lower day bound (`YYYY-MM-DD`), empty when unbounded.
-    #[serde(alias = "fromDate")]
     pub from_date: String,
     /// Inclusive upper day bound (`YYYY-MM-DD`), empty when unbounded.
-    #[serde(alias = "toDate")]
     pub to_date: String,
     /// Page size, clamped to `1..=MAX_LIMIT`.
     pub limit: u32,
@@ -71,15 +69,6 @@ impl SearchQuery {
             }
         }
         Ok(())
-    }
-
-    /// Whether the query matches nothing on purpose (fresh, untouched UI).
-    pub fn is_blank(&self) -> bool {
-        self.text.trim().is_empty()
-            && self.sources.is_empty()
-            && self.author.trim().is_empty()
-            && self.from_date.is_empty()
-            && self.to_date.is_empty()
     }
 }
 
@@ -241,21 +230,5 @@ mod tests {
     fn escape_like_escapes_wildcards() {
         assert_eq!(escape_like("50%_of\\it"), "50\\%\\_of\\\\it");
         assert_eq!(escape_like("plain"), "plain");
-    }
-
-    #[test]
-    fn is_blank_detects_any_active_filter() {
-        assert!(SearchQuery::default().is_blank());
-        assert!(!SearchQuery {
-            text: "  ".into(),
-            sources: vec!["mbox".into()],
-            ..SearchQuery::default()
-        }
-        .is_blank());
-        assert!(!SearchQuery {
-            author: "ana".into(),
-            ..SearchQuery::default()
-        }
-        .is_blank());
     }
 }
