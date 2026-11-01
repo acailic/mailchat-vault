@@ -537,15 +537,26 @@ impl QueryFilters {
             )));
         }
         if !query.from_date.is_empty() {
-            sql.push_str(" AND m.sent_at >= ?");
-            values.push(SqlValue::from(query.from_date.clone()));
+            // Local-day semantics: include everything from local midnight of
+            // the from day on (the UI renders the same local day).
+            if let Some(day) = crate::query::parse_day(&query.from_date) {
+                let offset = chrono::Local::now().fixed_offset();
+                sql.push_str(" AND m.sent_at >= ?");
+                values.push(SqlValue::from(crate::query::local_day_instant_utc(
+                    day, offset,
+                )));
+            }
         }
         if !query.to_date.is_empty() {
-            // Inclusive day bound: sent_at < (to_date + 1 day) textually
-            // includes every timestamp later on to_date itself.
-            if let Some(bound) = crate::query::day_after_exclusive(&query.to_date) {
+            // Exclusive bound: strictly before local midnight of the day
+            // after, so everything later on to_date itself still matches.
+            if let Some(day) = crate::query::parse_day(&query.to_date) {
+                let offset = chrono::Local::now().fixed_offset();
                 sql.push_str(" AND m.sent_at < ?");
-                values.push(SqlValue::from(bound));
+                values.push(SqlValue::from(crate::query::local_day_instant_utc(
+                    day + chrono::Duration::days(1),
+                    offset,
+                )));
             }
         }
         if !query.from_date.is_empty() || !query.to_date.is_empty() {
