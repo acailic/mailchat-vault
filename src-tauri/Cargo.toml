@@ -1,0 +1,21 @@
+[package]
+name = "mailchat-vault"
+description = "Mailchat Vault — local email & chat archive desktop app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+default-run = "mailchat-vault"
+
+[lib]
+name = "mailchat_vault_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+vault-core = { path = "../crates/vault-core" }

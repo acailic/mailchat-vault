@@ -1,0 +1,18 @@
+[package]
+name = "vault-core"
+description = "Storage and ingest core for mailchat-vault: SQLite + FTS5 archive of email and chat messages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+mailparse = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
