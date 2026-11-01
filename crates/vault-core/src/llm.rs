@@ -57,28 +57,68 @@ impl LlmConfig {
     pub const DEFAULT_BASE_URL: &'static str = "https://api.z.ai/api/anthropic";
     pub const DEFAULT_MODEL: &'static str = "glm-5";
 
-    /// Read from the process environment; `None` (LLM disabled) when no API
-    /// key is set. Key lookup order: `ANTHROPIC_API_KEY`, `ZAI_API_KEY`,
-    /// `GLM_API_KEY` (first non-empty wins).
-    pub fn from_env() -> Option<Self> {
+    /// Read from the process environment; `Ok(None)` (LLM disabled) when no
+    /// API key is set, `Err` when a key is paired with an endpoint from a
+    /// different provider.
+    ///
+    /// Provider selection: `ZAI_API_KEY` / `GLM_API_KEY` select the default
+    /// z.ai endpoint ([`Self::DEFAULT_BASE_URL`]); `ANTHROPIC_API_KEY` is
+    /// honored only together with an explicit `ANTHROPIC_BASE_URL`, so a key
+    /// is never sent to a provider it does not belong to.
+    pub fn from_env() -> Result<Option<Self>> {
         Self::from_lookup(|name| std::env::var(name).ok())
     }
 
     /// Pure variant of [`Self::from_env`] for tests.
-    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<Self> {
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Option<Self>> {
         let value = |name: &str| {
             lookup(name)
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
         };
-        let api_key = ["ANTHROPIC_API_KEY", "ZAI_API_KEY", "GLM_API_KEY"]
-            .into_iter()
-            .find_map(value)?;
-        Some(Self {
-            base_url: value("ANTHROPIC_BASE_URL").unwrap_or_else(|| Self::DEFAULT_BASE_URL.into()),
+        let base_url = value("ANTHROPIC_BASE_URL");
+        let anthropic_key = value("ANTHROPIC_API_KEY");
+        let zai_key = value("ZAI_API_KEY").or_else(|| value("GLM_API_KEY"));
+        let (api_key, base_url) = match (anthropic_key, zai_key, base_url) {
+            // An Anthropic key is never sent to the z.ai endpoint, even when
+            // explicitly paired with it there; only its own endpoint honors it.
+            (Some(_), _, Some(url)) if url == Self::DEFAULT_BASE_URL => {
+                return Err(Error::Llm(
+                    "ANTHROPIC_API_KEY is paired with the default z.ai endpoint: refusing to \
+                     send an Anthropic key to z.ai. Point ANTHROPIC_BASE_URL at the endpoint \
+                     that accepts this key, or use ZAI_API_KEY / GLM_API_KEY instead."
+                        .into(),
+                ))
+            }
+            // An Anthropic key is honored only with its explicitly paired endpoint.
+            (Some(key), _, Some(url)) => (key, url),
+            (Some(_), _, None) => {
+                return Err(Error::Llm(
+                    "ANTHROPIC_API_KEY is set but ANTHROPIC_BASE_URL is not: refusing to send \
+                     an Anthropic key to the default z.ai endpoint. Set ANTHROPIC_BASE_URL to \
+                     the endpoint that accepts this key, or unset ANTHROPIC_API_KEY and use \
+                     ZAI_API_KEY / GLM_API_KEY instead."
+                        .into(),
+                ))
+            }
+            // z.ai keys pair with the z.ai endpoint only.
+            (None, Some(key), Some(url)) if url == Self::DEFAULT_BASE_URL => (key, url),
+            (None, Some(_), Some(url)) => {
+                return Err(Error::Llm(format!(
+                    "ANTHROPIC_BASE_URL={url} does not match the z.ai key (ZAI_API_KEY / \
+                     GLM_API_KEY); refusing to send it to a different provider. Unset \
+                     ANTHROPIC_BASE_URL to use the default z.ai endpoint."
+                )))
+            }
+            (None, Some(key), None) => (key, Self::DEFAULT_BASE_URL.into()),
+            // No API key: LLM stays off.
+            (None, None, _) => return Ok(None),
+        };
+        Ok(Some(Self {
+            base_url,
             model: value("MAILCHAT_LLM_MODEL").unwrap_or_else(|| Self::DEFAULT_MODEL.into()),
             api_key,
-        })
+        }))
     }
 
     /// Host part of the base URL, for display (e.g. `"api.z.ai"`).
@@ -569,39 +609,86 @@ mod tests {
 
     #[test]
     fn config_lookup_requires_a_key() {
-        assert!(LlmConfig::from_lookup(|_| None).is_none());
+        assert!(LlmConfig::from_lookup(|_| None).unwrap().is_none());
         assert!(
             LlmConfig::from_lookup(|name| (name == "ANTHROPIC_API_KEY").then(|| "  ".into()))
+                .unwrap()
                 .is_none()
         );
 
         let cfg = LlmConfig::from_lookup(|name| (name == "ZAI_API_KEY").then(|| "k".into()))
+            .unwrap()
             .expect("ZAI key enables the LLM");
         assert_eq!(cfg.api_key, "k");
         assert_eq!(cfg.base_url, LlmConfig::DEFAULT_BASE_URL);
         assert_eq!(cfg.model, LlmConfig::DEFAULT_MODEL);
+    }
 
+    #[test]
+    fn anthropic_key_needs_explicit_base_url() {
+        // ANTHROPIC_API_KEY alone is refused (would go to the z.ai endpoint).
+        let err = LlmConfig::from_lookup(|name| (name == "ANTHROPIC_API_KEY").then(|| "k".into()))
+            .unwrap_err();
+        assert!(err.to_string().contains("ANTHROPIC_BASE_URL"));
+
+        // Even an explicit z.ai URL never receives an Anthropic key.
+        let err = LlmConfig::from_lookup(|name| {
+            (name == "ANTHROPIC_API_KEY" || name == "ANTHROPIC_BASE_URL").then(|| {
+                if name == "ANTHROPIC_API_KEY" {
+                    "k".to_string()
+                } else {
+                    LlmConfig::DEFAULT_BASE_URL.to_string()
+                }
+            })
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("refusing to send an Anthropic key to z.ai"));
+
+        // With an explicit base URL it is honored, and that URL is used.
         let cfg = LlmConfig::from_lookup(|name| match name {
-            "GLM_API_KEY" => Some("k2".into()),
-            "ANTHROPIC_BASE_URL" => Some("https://example.invalid/api".into()),
+            "ANTHROPIC_API_KEY" => Some("k".into()),
+            "ANTHROPIC_BASE_URL" => Some("https://api.anthropic.com".into()),
             "MAILCHAT_LLM_MODEL" => Some("m1".into()),
             _ => None,
         })
-        .unwrap();
+        .unwrap()
+        .expect("explicit URL pairs the Anthropic key");
         assert_eq!(
             (
                 cfg.api_key.as_str(),
                 cfg.base_url.as_str(),
                 cfg.model.as_str()
             ),
-            ("k2", "https://example.invalid/api", "m1")
+            ("k", "https://api.anthropic.com", "m1")
         );
-        assert_eq!(cfg.host(), "example.invalid");
+        assert_eq!(cfg.host(), "api.anthropic.com");
+    }
+
+    #[test]
+    fn zai_key_is_refused_on_a_foreign_endpoint() {
+        let err = LlmConfig::from_lookup(|name| match name {
+            "GLM_API_KEY" => Some("k2".into()),
+            "ANTHROPIC_BASE_URL" => Some("https://example.invalid/api".into()),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("refusing to send"));
+
+        // The explicit z.ai URL itself is accepted (redundant but consistent).
+        let cfg = LlmConfig::from_lookup(|name| match name {
+            "ZAI_API_KEY" => Some("k".into()),
+            "ANTHROPIC_BASE_URL" => Some(LlmConfig::DEFAULT_BASE_URL.into()),
+            _ => None,
+        })
+        .unwrap()
+        .expect("explicit z.ai URL matches the z.ai key");
+        assert_eq!(cfg.base_url, LlmConfig::DEFAULT_BASE_URL);
     }
 
     #[test]
     fn default_config_host_is_z_ai() {
-        let cfg = LlmConfig::from_lookup(|name| (name == "ANTHROPIC_API_KEY").then(|| "k".into()))
+        let cfg = LlmConfig::from_lookup(|name| (name == "ZAI_API_KEY").then(|| "k".into()))
+            .unwrap()
             .unwrap();
         assert_eq!(cfg.host(), "api.z.ai");
     }

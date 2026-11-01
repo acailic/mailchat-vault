@@ -65,9 +65,12 @@ The UI always shows the plan actually used (`FTS: … · dates: … · planned b
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` / `ZAI_API_KEY` / `GLM_API_KEY` | API key, first non-empty wins | unset → LLM off |
-| `ANTHROPIC_BASE_URL` | Anthropic-compatible endpoint base URL | `https://api.z.ai/api/anthropic` |
+| `ZAI_API_KEY` / `GLM_API_KEY` | API key for the default z.ai endpoint (`https://api.z.ai/api/anthropic`) | unset → LLM off |
+| `ANTHROPIC_API_KEY` | Anthropic key, honored **only** together with an explicit `ANTHROPIC_BASE_URL` | unset → z.ai keys apply |
+| `ANTHROPIC_BASE_URL` | endpoint base URL; pairs with `ANTHROPIC_API_KEY`, or must equal the z.ai endpoint when a z.ai key is used | unset → `https://api.z.ai/api/anthropic` |
 | `MAILCHAT_LLM_MODEL` | model name | `glm-5` |
+
+A mismatched key/endpoint pairing (for example `ANTHROPIC_API_KEY` without `ANTHROPIC_BASE_URL`) is refused with a clear error instead of sending the key anywhere.
 
 ### Privacy
 

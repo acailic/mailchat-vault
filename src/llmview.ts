@@ -45,9 +45,9 @@ export function describePlan(outcome: Pick<AskOutcome, "plan" | "plan_source">):
 export function privacyNote(status: LlmStatus): string {
   if (!status.enabled) {
     return (
-      "LLM assist is off — no API key configured. Ask runs as a plain local " +
-      "full-text search; nothing leaves this machine. Set ANTHROPIC_API_KEY " +
-      "(or ZAI_API_KEY / GLM_API_KEY) in the environment to enable."
+      "LLM assist is off — no usable API key configured. Ask runs as a plain local " +
+      "full-text search; nothing leaves this machine. Set ZAI_API_KEY (or GLM_API_KEY) " +
+      "in the environment to enable, or ANTHROPIC_API_KEY together with ANTHROPIC_BASE_URL."
     );
   }
   return (

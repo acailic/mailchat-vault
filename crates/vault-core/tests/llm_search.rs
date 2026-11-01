@@ -301,7 +301,9 @@ fn llm_status_reflects_config_availability() {
     let disabled = LlmStatus::from_config(None);
     assert!(!disabled.enabled);
 
-    let cfg = LlmConfig::from_lookup(|name| (name == "ZAI_API_KEY").then(|| "k".into())).unwrap();
+    let cfg = LlmConfig::from_lookup(|name| (name == "ZAI_API_KEY").then(|| "k".into()))
+        .unwrap()
+        .expect("ZAI key enables the LLM");
     let enabled = LlmStatus::from_config(Some(&cfg));
     assert!(enabled.enabled);
     assert_eq!(enabled.model, "glm-5");

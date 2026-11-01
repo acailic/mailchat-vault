@@ -200,7 +200,13 @@ pub fn run() {
             let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
             std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
             let storage = Storage::open(data_dir.join("vault.db")).map_err(|e| e.to_string())?;
-            let llm = LlmConfig::from_env().map(AnthropicLlm::new);
+            let llm = match LlmConfig::from_env() {
+                Ok(config) => config.map(AnthropicLlm::new),
+                Err(e) => {
+                    eprintln!("LLM disabled: {e}");
+                    None
+                }
+            };
             app.manage(AppState {
                 storage: Mutex::new(storage),
                 llm,
