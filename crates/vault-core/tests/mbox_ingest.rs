@@ -1,7 +1,17 @@
 use vault_core::ingest::{ingest, IngestSummary, Source};
 use vault_core::mbox::MboxSource;
-use vault_core::search::build_match_query;
+use vault_core::query::SearchQuery;
 use vault_core::storage::Storage;
+
+fn search_hits(s: &Storage, term: &str) -> Vec<vault_core::query::SearchHit> {
+    s.search_page(&SearchQuery {
+        text: term.into(),
+        limit: 10,
+        ..SearchQuery::default()
+    })
+    .unwrap()
+    .hits
+}
 
 const SAMPLE_MBOX: &str = "\
 From alice@example.com Sat Nov  1 10:00:00 2026
@@ -114,7 +124,7 @@ fn ingested_mail_is_full_text_searchable() {
 
     // Search body content, subject content, and author.
     for term in ["kickoff", "archive schema", "carol"] {
-        let hits = storage.search(&build_match_query(term), 10).unwrap();
+        let hits = search_hits(&storage, term);
         assert!(!hits.is_empty(), "no hits for {term:?}");
     }
 }
@@ -167,9 +177,7 @@ Content-Transfer-Encoding: quoted-printable
     std::fs::write(&path, mbox).unwrap();
     let storage = Storage::open_in_memory().unwrap();
     ingest(&storage, &MboxSource::new(&path)).unwrap();
-    let hits = storage
-        .search(&build_match_query("multipart base64 world"), 10)
-        .unwrap();
+    let hits = search_hits(&storage, "multipart base64 world");
     assert!(!hits.is_empty(), "decoded base64 body must be searchable");
 }
 
@@ -223,7 +231,7 @@ Ključ na premijeri je spreman.
     let storage = Storage::open_in_memory().unwrap();
     ingest(&storage, &MboxSource::new(&path)).unwrap();
     for term in ["premijeri", "spreman", "Ključ"] {
-        let hits = storage.search(&build_match_query(term), 10).unwrap();
+        let hits = search_hits(&storage, term);
         assert!(!hits.is_empty(), "no hits for {term:?}");
     }
 }
@@ -299,7 +307,7 @@ Ključ na premijeri.
     let storage = Storage::open_in_memory().unwrap();
     ingest(&storage, &MboxSource::new(&path)).unwrap();
     for term in ["premijeri", "Šeta"] {
-        let hits = storage.search(&build_match_query(term), 10).unwrap();
+        let hits = search_hits(&storage, term);
         assert!(!hits.is_empty(), "no hits for {term:?}");
     }
 }

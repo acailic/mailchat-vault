@@ -136,7 +136,7 @@ fn summary_prompt_is_limited_to_top_n_results() {
         s.insert_message(&msg).unwrap();
     }
     let llm = MockLlm::with_replies(["summary"]);
-    let results = s.search(&build_match_query("vault"), 50).unwrap();
+    let results = s.search_filtered(&build_match_query("vault"), None, None, 50).unwrap();
     assert_eq!(results.len(), 10);
     let summarized = summarize_results(&llm, "vault?", &results, 3);
     assert_eq!(summarized.answer.as_deref(), Some("summary"));

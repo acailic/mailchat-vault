@@ -184,15 +184,6 @@ impl Storage {
         Ok(inserted)
     }
 
-    /// Full-text search over `body` and `author` using FTS5.
-    ///
-    /// `match_query` is a raw FTS5 MATCH expression (see
-    /// [`crate::search::build_match_query`] for building one safely from free
-    /// text). Results are ordered by FTS5 relevance (`rank`).
-    pub fn search(&self, match_query: &str, limit: u32) -> Result<Vec<Message>> {
-        self.search_filtered(match_query, None, None, limit)
-    }
-
     /// Full-text search with optional inclusive sent-date bounds.
     ///
     /// `date_from`/`date_to` are `YYYY-MM-DD` strings; anything else is an
