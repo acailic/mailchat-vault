@@ -66,9 +66,12 @@ struct TelegramExport {
 ///
 /// `chat_id_fallback` is used when the export carries neither a chat name
 /// nor a chat id. `external_id` is `<chat>/<message id>`: message ids
-/// repeat across chats, and the dedup key is namespaced by source only.
-/// Entries that are not objects or have no id count as failed; service
-/// entries are skipped silently.
+/// repeat across chats, and the dedup key is namespaced by source only,
+/// so the chat key comes from the stable export `id` when present — two
+/// chats sharing a display name stay distinct, and a re-export after a
+/// contact rename dedups instead of duplicating. Entries that are not
+/// objects or have no id count as failed; service entries are skipped
+/// silently.
 pub fn parse_telegram(bytes: &[u8], chat_id_fallback: &str) -> Result<Collected> {
     let export: TelegramExport = serde_json::from_slice(bytes)?;
     let chat_id = export
@@ -79,6 +82,12 @@ pub fn parse_telegram(bytes: &[u8], chat_id_fallback: &str) -> Result<Collected>
         .or_else(|| export.id.as_ref().map(id_to_string))
         .filter(|c| !c.is_empty())
         .unwrap_or_else(|| chat_id_fallback.to_string());
+    let dedup_chat = export
+        .id
+        .as_ref()
+        .map(id_to_string)
+        .filter(|c| !c.is_empty())
+        .unwrap_or_else(|| chat_id.clone());
 
     let mut messages = Vec::new();
     let mut failed: u64 = 0;
@@ -113,7 +122,7 @@ pub fn parse_telegram(bytes: &[u8], chat_id_fallback: &str) -> Result<Collected>
             .to_string();
         let sent_at = telegram_sent_at(obj);
         let body = message_text(obj.get("text"));
-        let external_id = format!("{}/{}", chat_id, id);
+        let external_id = format!("{}/{}", dedup_chat, id);
 
         let mut msg = NewMessage::new(TELEGRAM_SOURCE, external_id, author, sent_at, body);
         msg.channel = "chat".to_string();

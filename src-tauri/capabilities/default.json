@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Default capability for the main window: core IPC plus the chat-export file dialog.",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default"]
+  "permissions": ["core:default", "dialog:allow-open"]
 }

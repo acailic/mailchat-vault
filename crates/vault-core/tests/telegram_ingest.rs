@@ -81,7 +81,7 @@ fn parses_fields_from_result_json() {
     assert_eq!(first.source, TELEGRAM_SOURCE);
     assert_eq!(first.channel, "chat");
     assert_eq!(first.chat_id, "Arhiva ekipa");
-    assert_eq!(first.external_id, "Arhiva ekipa/100");
+    assert_eq!(first.external_id, "123456789/100");
     assert_eq!(first.author, "Marko Horvat");
     // date_unixtime is UTC and wins over the naive local date string
     // (exporter timezone here is UTC+1).
@@ -132,10 +132,12 @@ fn chat_id_falls_back_to_id_then_hint() {
 
 #[test]
 fn same_message_id_in_different_chats_is_not_a_duplicate() {
-    // Message ids repeat across chats; the chat id namespaces them.
-    let a = r#"{"name": "Chat A", "messages": [
+    // Message ids repeat across chats; the dedup namespace comes from the
+    // stable export id, so even two chats sharing a display name stay
+    // distinct.
+    let a = r#"{"name": "Isti naziv", "id": 111, "messages": [
         {"id": 1, "type": "message", "date": "2023-11-01T10:00:00", "from": "A", "text": "iz chata A"}]}"#;
-    let b = r#"{"name": "Chat B", "messages": [
+    let b = r#"{"name": "Isti naziv", "id": 222, "messages": [
         {"id": 1, "type": "message", "date": "2023-11-01T10:00:00", "from": "B", "text": "iz chata B"}]}"#;
     let storage = Storage::open_in_memory().unwrap();
     for export in [a, b] {
@@ -146,6 +148,26 @@ fn same_message_id_in_different_chats_is_not_a_duplicate() {
         assert_eq!(summary.inserted, 1);
     }
     assert_eq!(storage.stats().unwrap().total, 2);
+}
+
+#[test]
+fn reexport_after_contact_rename_dedups_instead_of_duplicating() {
+    // Same export id, different display name: the dedup key follows the
+    // id, not the name.
+    let before = r#"{"name": "Staro ime", "id": 333, "messages": [
+        {"id": 1, "type": "message", "date": "2023-11-01T10:00:00", "from": "A", "text": "poruka"}]}"#;
+    let after = r#"{"name": "Novo ime", "id": 333, "messages": [
+        {"id": 1, "type": "message", "date": "2023-11-01T10:00:00", "from": "A", "text": "poruka"}]}"#;
+    let storage = Storage::open_in_memory().unwrap();
+    for (export, expected) in [(before, (1, 0)), (after, (0, 1))] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result.json");
+        std::fs::write(&path, export).unwrap();
+        let summary = ingest(&storage, &TelegramSource::new(&path)).unwrap();
+        assert_eq!(summary.inserted, expected.0);
+        assert_eq!(summary.skipped, expected.1);
+    }
+    assert_eq!(storage.stats().unwrap().total, 1);
 }
 
 #[test]
