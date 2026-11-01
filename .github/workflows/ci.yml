@@ -56,3 +56,58 @@ jobs:
 
       - name: Rust tests (core + app)
         run: cargo test --workspace
+
+  # Full E2E: drives the real app binary through tauri-driver/WebDriver
+  # under Xvfb (see tests/e2e/README.md). Every path here runs headless.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Tauri Linux system dependencies + E2E drivers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            webkit2gtk-driver \
+            xvfb \
+            sqlite3
+
+      - name: Cache tauri-driver
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/tauri-driver
+          key: tauri-driver-${{ runner.os }}-v2.1.0
+
+      - name: Install tauri-driver
+        run: |
+          if [ ! -x "$HOME/.cache/tauri-driver/bin/tauri-driver" ]; then
+            cargo install tauri-driver --locked --root "$HOME/.cache/tauri-driver"
+          fi
+          echo "$HOME/.cache/tauri-driver/bin" >> "$GITHUB_PATH"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # Produces dist/, which the Tauri app build script embeds.
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build the app
+        run: cargo build -p mailchat-vault --features tauri/custom-protocol
+
+      - name: E2E tests (headless)
+        run: xvfb-run -a --server-args="-screen 0 1280x960x24" npm run test:e2e
