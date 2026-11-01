@@ -538,12 +538,13 @@ impl QueryFilters {
         }
         if !query.from_date.is_empty() {
             // Local-day semantics: include everything from local midnight of
-            // the from day on (the UI renders the same local day).
+            // the from day on (the UI renders the same local day). The
+            // midnight is resolved per date, so historical DST periods use
+            // their own offset.
             if let Some(day) = crate::query::parse_day(&query.from_date) {
-                let offset = chrono::Local::now().fixed_offset();
                 sql.push_str(" AND m.sent_at >= ?");
                 values.push(SqlValue::from(crate::query::local_day_instant_utc(
-                    day, offset,
+                    day,
                 )));
             }
         }
@@ -551,11 +552,9 @@ impl QueryFilters {
             // Exclusive bound: strictly before local midnight of the day
             // after, so everything later on to_date itself still matches.
             if let Some(day) = crate::query::parse_day(&query.to_date) {
-                let offset = chrono::Local::now().fixed_offset();
                 sql.push_str(" AND m.sent_at < ?");
                 values.push(SqlValue::from(crate::query::local_day_instant_utc(
                     day + chrono::Duration::days(1),
-                    offset,
                 )));
             }
         }

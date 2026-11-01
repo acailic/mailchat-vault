@@ -8,7 +8,7 @@
 //! any date bound is active: they have no defined position on the timeline,
 //! so both bounds omit them consistently.
 
-use chrono::{FixedOffset, NaiveDate};
+use chrono::{Local, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::message::Message;
@@ -136,14 +136,28 @@ pub(crate) fn parse_day(input: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(input, "%Y-%m-%d").ok()
 }
 
-/// The UTC instant (RFC 3339 `…Z`) of local midnight starting `day` at
-/// `offset` — the shared boundary the date filters compare against, so a
-/// day bound selects exactly what the UI renders as that local day.
-pub(crate) fn local_day_instant_utc(day: NaiveDate, offset: FixedOffset) -> String {
-    let local_midnight = day.and_hms_opt(0, 0, 0).expect("00:00:00 is a valid time");
-    (local_midnight - offset)
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string()
+/// The UTC instant (RFC 3339 `…Z`) at which local midnight starting `day`
+/// begins in `tz` — the shared boundary the date filters compare against,
+/// so a day bound selects exactly what the UI renders as that local day.
+/// The offset is resolved per date (`tz.from_local_datetime`), so historical
+/// DST periods map to their own offset; a local midnight made ambiguous or
+/// skipped by a DST transition resolves deterministically via `earliest()`.
+pub(crate) fn day_instant_utc<Tz: TimeZone>(tz: &Tz, day: NaiveDate) -> String {
+    let local_instant = |hour: u32| {
+        tz.from_local_datetime(&day.and_hms_opt(hour, 0, 0).expect("00:00 is a valid time"))
+            .earliest()
+            .map(|dt| dt.with_timezone(&Utc))
+    };
+    let instant = local_instant(0)
+        .or_else(|| local_instant(1).map(|dt| dt - chrono::Duration::hours(1)))
+        .expect("a local midnight is resolvable");
+    instant.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// Same as [`day_instant_utc`] against the machine's local timezone, which
+/// is what the UI renders times in.
+pub(crate) fn local_day_instant_utc(day: NaiveDate) -> String {
+    day_instant_utc(&Local, day)
 }
 
 /// Escape `%`, `_` and `\` for a LIKE pattern with `ESCAPE '\'`.
@@ -161,6 +175,7 @@ pub(crate) fn escape_like(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::FixedOffset;
 
     #[test]
     fn normalize_clamps_limit_and_offset() {
@@ -219,28 +234,30 @@ mod tests {
     }
 
     #[test]
-    fn local_midnight_rolls_over_month_and_year() {
-        let plus_one = FixedOffset::east_opt(3600).unwrap();
-        let utc = FixedOffset::east_opt(0).unwrap();
-        // 2026-01-06 local midnight at UTC+1 is 2026-01-05T23:00Z.
+    fn local_midnight_resolves_per_date_offset_and_rolls_over() {
+        // A fixed +02:00 zone stands in for the DST-active offset (e.g.
+        // Europe/Zagreb on 2026-07-15): local midnight Jul 15 = Jul 14 22:00Z.
+        let cest = FixedOffset::east_opt(2 * 3600).unwrap();
         assert_eq!(
-            local_day_instant_utc(parse_day("2026-01-06").unwrap(), plus_one),
-            "2026-01-05T23:00:00Z"
+            day_instant_utc(&cest, parse_day("2026-07-15").unwrap()),
+            "2026-07-14T22:00:00Z"
         );
-        // At UTC the local midnight is the plain day boundary.
+        // And a +01:00 zone for the winter side (Zagreb 2026-11-01):
+        // local midnight Nov 1 = Oct 31 23:00Z.
+        let cet = FixedOffset::east_opt(3600).unwrap();
         assert_eq!(
-            local_day_instant_utc(parse_day("2026-01-06").unwrap(), utc),
-            "2026-01-06T00:00:00Z"
+            day_instant_utc(&cet, parse_day("2026-11-01").unwrap()),
+            "2026-10-31T23:00:00Z"
         );
-        // Month rollover: Feb 1 local midnight at UTC+1 lands in January.
+        // Month rollover: Feb 1 local midnight at UTC+2 lands in January.
         assert_eq!(
-            local_day_instant_utc(parse_day("2026-02-01").unwrap(), plus_one),
-            "2026-01-31T23:00:00Z"
+            day_instant_utc(&cest, parse_day("2026-02-01").unwrap()),
+            "2026-01-31T22:00:00Z"
         );
-        // Year rollover: Jan 1 local midnight at UTC+1 lands in December.
+        // Year rollover: Jan 1 local midnight at UTC+2 lands in December.
         assert_eq!(
-            local_day_instant_utc(parse_day("2026-01-01").unwrap(), plus_one),
-            "2025-12-31T23:00:00Z"
+            day_instant_utc(&cest, parse_day("2026-01-01").unwrap()),
+            "2025-12-31T22:00:00Z"
         );
     }
 
