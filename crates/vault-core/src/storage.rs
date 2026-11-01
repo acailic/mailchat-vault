@@ -152,14 +152,11 @@ impl Storage {
         date_to: Option<&str>,
         limit: u32,
     ) -> Result<Vec<Message>> {
-        let from = parse_date_bound(date_from, "date_from")?;
+        let from = parse_date_bound(date_from, "date_from")?.map(|d| d.to_string());
         // Inclusive date_to becomes an exclusive upper bound at midnight of
         // the next day; RFC 3339 UTC strings compare correctly as text.
-        let to_exclusive = parse_date_bound(date_to, "date_to")?.map(|day| {
-            (NaiveDate::parse_from_str(&day, "%Y-%m-%d").expect("validated by parse_date_bound")
-                + Duration::days(1))
-            .to_string()
-        });
+        let to_exclusive =
+            parse_date_bound(date_to, "date_to")?.map(|day| (day + Duration::days(1)).to_string());
         let mut stmt = self.conn.prepare(
             r#"
             SELECT m.id, m.source, m.external_id, m.channel, m.chat_id,
@@ -282,12 +279,12 @@ fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
     })
 }
 
-/// Validate an optional `YYYY-MM-DD` bound, returning it normalized.
-fn parse_date_bound(value: Option<&str>, field: &str) -> Result<Option<String>> {
+/// Parse an optional `YYYY-MM-DD` bound into a `NaiveDate`.
+fn parse_date_bound(value: Option<&str>, field: &str) -> Result<Option<NaiveDate>> {
     match value.map(str::trim).filter(|v| !v.is_empty()) {
         None => Ok(None),
         Some(v) => NaiveDate::parse_from_str(v, "%Y-%m-%d")
-            .map(|_| Some(v.to_string()))
+            .map(Some)
             .map_err(|_| Error::InvalidDate(format!("{field}={v}"))),
     }
 }

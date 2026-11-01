@@ -53,19 +53,15 @@ pub struct LlmConfig {
     pub model: String,
 }
 
-/// Whether two endpoint URLs name the same provider endpoint: scheme and
-/// host compared case-insensitively, trailing slashes ignored.
-fn same_endpoint(a: &str, b: &str) -> bool {
-    fn normalize(url: &str) -> String {
-        let (scheme, rest) = url.rsplit_once("://").map_or(("", url), |(s, r)| (s, r));
-        let (host, path) = rest.split_once('/').map_or((rest, None), |(h, p)| (h, Some(p)));
-        let host = host.to_ascii_lowercase();
-        match path {
-            Some(p) => format!("{}://{}/{}", scheme.to_ascii_lowercase(), host, p),
-            None => format!("{}://{}", scheme.to_ascii_lowercase(), host),
-        }
+/// Host (without port) of an endpoint URL; the z.ai-pairing guard compares
+/// providers by this host identity.
+fn endpoint_host(url: &str) -> &str {
+    let rest = url.rsplit_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split('/').next().unwrap_or_default();
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => host,
+        _ => authority,
     }
-    normalize(a.trim_end_matches('/')) == normalize(b.trim_end_matches('/'))
 }
 
 impl LlmConfig {
@@ -94,10 +90,13 @@ impl LlmConfig {
         let base_url = value("ANTHROPIC_BASE_URL");
         let anthropic_key = value("ANTHROPIC_API_KEY");
         let zai_key = value("ZAI_API_KEY").or_else(|| value("GLM_API_KEY"));
+        let is_zai_provider = |url: &str| {
+            endpoint_host(url).eq_ignore_ascii_case(endpoint_host(Self::DEFAULT_BASE_URL))
+        };
         let (api_key, base_url) = match (anthropic_key, zai_key, base_url) {
-            // An Anthropic key is never sent to the z.ai endpoint, even when
-            // explicitly paired with it there; only its own endpoint honors it.
-            (Some(_), _, Some(url)) if same_endpoint(&url, Self::DEFAULT_BASE_URL) => {
+            // An Anthropic key is never sent to a z.ai-host endpoint, even
+            // when explicitly paired with it there; only its own host honors it.
+            (Some(_), _, Some(url)) if is_zai_provider(&url) => {
                 return Err(Error::Llm(
                     "ANTHROPIC_API_KEY is paired with the default z.ai endpoint: refusing to \
                      send an Anthropic key to z.ai. Point ANTHROPIC_BASE_URL at the endpoint \
@@ -116,10 +115,8 @@ impl LlmConfig {
                         .into(),
                 ))
             }
-            // z.ai keys pair with the z.ai endpoint only.
-            (None, Some(key), Some(url)) if same_endpoint(&url, Self::DEFAULT_BASE_URL) => {
-                (key, url)
-            }
+            // z.ai keys pair with z.ai-host endpoints only.
+            (None, Some(key), Some(url)) if is_zai_provider(&url) => (key, url),
             (None, Some(_), Some(url)) => {
                 return Err(Error::Llm(format!(
                     "ANTHROPIC_BASE_URL={url} does not match the z.ai key (ZAI_API_KEY / \
@@ -140,13 +137,7 @@ impl LlmConfig {
 
     /// Host part of the base URL, for display (e.g. `"api.z.ai"`).
     pub fn host(&self) -> &str {
-        self.base_url
-            .trim_end_matches('/')
-            .rsplit_once("://")
-            .map_or(self.base_url.trim_end_matches('/'), |(_, rest)| rest)
-            .split('/')
-            .next()
-            .unwrap_or_default()
+        endpoint_host(&self.base_url)
     }
 }
 
@@ -304,19 +295,25 @@ impl QueryPlan {
         if match_expr.len() > MAX_MATCH_LEN {
             return Err(Error::Llm("translation match too long".into()));
         }
-        for date in [&raw.date_from, &raw.date_to].into_iter().flatten() {
-            if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
-                return Err(Error::Llm(format!(
-                    "translation produced a bad date: {date}"
-                )));
-            }
-        }
         Ok(Self {
             match_expr,
-            date_from: raw.date_from,
-            date_to: raw.date_to,
+            date_from: canonical_date(&raw.date_from)?,
+            date_to: canonical_date(&raw.date_to)?,
         })
     }
+}
+
+/// Parse an optional model-supplied date and return it in canonical
+/// zero-padded `%Y-%m-%d` form, so it compares correctly as text.
+fn canonical_date(value: &Option<String>) -> Result<Option<String>> {
+    value
+        .as_deref()
+        .map(|s| {
+            NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .map(|d| d.to_string())
+                .map_err(|_| Error::Llm(format!("translation produced a bad date: {s}")))
+        })
+        .transpose()
 }
 
 /// Shape of the model's translation reply.
@@ -704,12 +701,19 @@ mod tests {
 
     #[test]
     fn url_variants_cannot_bypass_provider_pairing() {
-        // Trailing slash and host case are the same endpoint: an Anthropic
-        // key paired with either spelling is still refused.
+        // Any spelling of the z.ai host is the z.ai provider: an Anthropic
+        // key paired with any of these is refused.
         for variant in [
+            "https://api.z.ai",
+            "https://api.z.ai/",
+            "https://api.z.ai/api/anthropic",
             "https://api.z.ai/api/anthropic/",
-            "https://API.Z.AI/api/anthropic",
             "https://api.z.ai/api/anthropic///",
+            "https://API.Z.AI/api/anthropic",
+            "https://api.z.ai:443/api/anthropic",
+            "http://api.z.ai/api/anthropic",
+            "api.z.ai/api/anthropic",
+            "https://api.z.ai/api/Anthropic",
         ] {
             let err = LlmConfig::from_lookup(|name| match name {
                 "ANTHROPIC_API_KEY" => Some("k".into()),
@@ -724,10 +728,14 @@ mod tests {
             );
         }
 
-        // The same variants, paired with a z.ai key, are accepted.
+        // The same spellings, paired with a z.ai key, are accepted as the
+        // z.ai provider.
         for variant in [
+            "https://api.z.ai",
             "https://api.z.ai/api/anthropic/",
             "https://API.Z.AI/api/anthropic",
+            "https://api.z.ai:443/api/anthropic",
+            "http://api.z.ai/api/anthropic",
         ] {
             let cfg = LlmConfig::from_lookup(|name| match name {
                 "ZAI_API_KEY" => Some("k".into()),
@@ -735,9 +743,31 @@ mod tests {
                 _ => None,
             })
             .unwrap()
-            .expect("variant is the z.ai endpoint");
+            .expect("variant is the z.ai provider");
             assert_eq!(cfg.base_url, variant);
         }
+
+        // A different host fails closed in both directions.
+        for key in ["ZAI_API_KEY", "GLM_API_KEY"] {
+            let err = LlmConfig::from_lookup(|name| match name {
+                name if name == key => Some("k".into()),
+                "ANTHROPIC_BASE_URL" => Some("https://sub.api.z.ai.example.com/api".into()),
+                _ => None,
+            })
+            .unwrap_err();
+            assert!(err.to_string().contains("refusing to send"));
+        }
+    }
+
+    #[test]
+    fn translate_canonicalizes_non_padded_dates() {
+        let llm = MockLlm::with_replies([
+            "{\"match\": \"x\", \"date_from\": \"2026-10-1\", \
+              \"date_to\": \"2026-11-9\"}",
+        ]);
+        let plan = translate(&llm, "q", today()).unwrap();
+        assert_eq!(plan.date_from.as_deref(), Some("2026-10-01"));
+        assert_eq!(plan.date_to.as_deref(), Some("2026-11-09"));
     }
 
     #[test]

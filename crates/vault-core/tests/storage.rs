@@ -176,3 +176,35 @@ fn rebuild_fts_restores_index() {
     s.rebuild_fts().unwrap();
     assert_eq!(s.search("searchable", 10).unwrap().len(), 1);
 }
+
+#[test]
+fn date_bounds_are_canonicalized_before_text_comparison() {
+    let s = storage();
+    let days = [
+        ("1", "2026-09-30T12:00:00Z"),
+        ("2", "2026-10-01T12:00:00Z"),
+        ("3", "2026-10-05T12:00:00Z"),
+        ("4", "2026-10-09T12:00:00Z"),
+        ("5", "2026-10-10T12:00:00Z"),
+    ];
+    for (id, sent_at) in days {
+        s.insert_message(&NewMessage::new("test", id, "a", sent_at, "vault"))
+            .unwrap();
+    }
+
+    // Non-padded bounds must behave exactly like their padded spellings.
+    let found = s
+        .search_filtered("\"vault\"", Some("2026-10-1"), Some("2026-10-9"), 10)
+        .unwrap();
+    let ids: Vec<&str> = found.iter().map(|m| m.external_id.as_str()).collect();
+    assert_eq!(ids, ["2", "3", "4"]);
+
+    // Padded bounds keep working unchanged.
+    let found = s
+        .search_filtered("\"vault\"", Some("2026-10-01"), None, 10)
+        .unwrap();
+    assert_eq!(found.len(), 4);
+
+    // Non-padded spelling of an invalid date is still an error.
+    assert!(s.search_filtered("\"vault\"", Some("2026-13-1"), None, 10).is_err());
+}
