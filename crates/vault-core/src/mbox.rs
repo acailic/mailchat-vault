@@ -134,11 +134,11 @@ fn parse_single(raw: &[u8], chat_id: &str) -> Option<NewMessage> {
         .map(|v| v.trim().to_string())
         .unwrap_or_default();
 
-    // Decoded text body: walk to the text/plain leaf parts (get_body decodes
-    // their transfer encoding), joined; html-only or otherwise text-less
-    // mails fall back to the top-level body, decode failures yield "".
+    // Decoded text body: walk to the text/plain leaf parts, joined;
+    // html-only or otherwise text-less mails fall back to the top-level
+    // body, decode failures yield "".
     let text = extract_text(&mail)
-        .or_else(|| mail.get_body().ok().map(|t| t.trim_end().to_string()))
+        .or_else(|| decoded_body(&mail))
         .unwrap_or_default();
     let body = if subject.is_empty() {
         text
@@ -170,7 +170,7 @@ fn parse_single(raw: &[u8], chat_id: &str) -> Option<NewMessage> {
 fn extract_text(mail: &ParsedMail<'_>) -> Option<String> {
     if mail.subparts.is_empty() {
         return if mail.ctype.mimetype == "text/plain" {
-            Some(mail.get_body().unwrap_or_default().trim_end().to_string())
+            Some(decoded_body(mail).unwrap_or_default())
         } else {
             None
         };
@@ -181,6 +181,24 @@ fn extract_text(mail: &ParsedMail<'_>) -> Option<String> {
     } else {
         Some(leaves.join("\n\n"))
     }
+}
+
+/// Decode a part's body to a String: `get_body_raw` handles the transfer
+/// encoding; for bodies with no declared charset (or us-ascii) the bytes are
+/// read as UTF-8 with a Latin-1 fallback for legacy 8-bit mail (mailparse's
+/// own decode always maps them as Latin-1, garbling UTF-8 bodies); other
+/// declared charsets go through mailparse's charset tables.
+fn decoded_body(mail: &ParsedMail<'_>) -> Option<String> {
+    let raw = mail.get_body_raw().ok()?;
+    let charset = mail.ctype.charset.to_ascii_lowercase();
+    if !charset.is_empty() && charset != "us-ascii" {
+        return mail.get_body().ok().map(|t| t.trim_end().to_string());
+    }
+    Some(match String::from_utf8(raw) {
+        Ok(s) => s.trim_end().to_string(),
+        // Not UTF-8: map each byte as a Latin-1 code point (lossless).
+        Err(e) => e.into_bytes().into_iter().map(|b| b as char).collect(),
+    })
 }
 
 /// FNV-1a: a tiny, fully deterministic content hash for mails without a

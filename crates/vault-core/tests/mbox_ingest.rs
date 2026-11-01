@@ -171,6 +171,50 @@ Content-Transfer-Encoding: quoted-printable
 }
 
 #[test]
+fn nonmime_8bit_body_is_stored_readable_and_searchable() {
+    // No MIME-Version/Content-Type: mailparse would otherwise decode the
+    // raw 8-bit body bytes as Latin-1 ("Ključ" → "KljuÄč" mojibake).
+    let mbox_utf8 = "\
+From kruno@example.com Sat Nov  1 15:00:00 2026
+From: Kruno Test <kruno@example.com>
+To: Bob <bob@example.com>
+Subject: Test mail
+Date: Sat, 1 Nov 2026 15:00:00 +0100
+Message-ID: <nm8-utf8@example.com>
+
+Ključ na premijeri je spreman.
+";
+    let collected = vault_core::mbox::parse_mbox(mbox_utf8.as_bytes(), "inbox").unwrap();
+    assert_eq!(collected.failed, 0);
+    assert_eq!(collected.messages.len(), 1);
+    let msg = &collected.messages[0];
+    assert!(msg.body.contains("Ključ na premijeri je spreman."),
+        "UTF-8 body without declared charset must not become mojibake, got: {:?}", msg.body);
+
+    // Legacy true-Latin-1 bytes (0xE9 = 'é') keep decoding correctly via
+    // the fallback instead of turning into invalid UTF-8 replacement chars.
+    let mut mbox_latin1 = mbox_utf8.as_bytes().to_vec();
+    // Replace "č" (bytes c4 8d) with the single Latin-1 byte e9.
+    let kljuc_pos = mbox_latin1.windows(2).position(|w| w == [0xc4, 0x8d]).unwrap();
+    mbox_latin1.splice(kljuc_pos..kljuc_pos + 2, [0xe9]);
+    let collected = vault_core::mbox::parse_mbox(&mbox_latin1, "inbox").unwrap();
+    assert_eq!(collected.messages.len(), 1);
+    assert!(collected.messages[0].body.contains("Kljué na premijeri je spreman."),
+        "Latin-1 0xE9 must decode to 'é', got: {:?}", collected.messages[0].body);
+
+    // End-to-end: the diacritic token must be full-text searchable.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("nonmime.mbox");
+    std::fs::write(&path, mbox_utf8).unwrap();
+    let storage = Storage::open_in_memory().unwrap();
+    ingest(&storage, &MboxSource::new(&path)).unwrap();
+    for term in ["premijeri", "spreman", "Ključ"] {
+        let hits = storage.search(&build_match_query(term), 10).unwrap();
+        assert!(!hits.is_empty(), "no hits for {term:?}");
+    }
+}
+
+#[test]
 fn unparseable_message_is_counted_not_dropped() {
     // mailparse rejects a header block whose first line is a bare
     // continuation line ("Header cannot start with a space"), which is what
