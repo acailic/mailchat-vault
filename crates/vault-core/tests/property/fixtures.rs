@@ -172,7 +172,7 @@ pub fn phrase_matches(msg: &NewMessage, a: &str, b: &str) -> bool {
 }
 
 // --------------------------------------------------------------------------
-// MATCH query builders (mirror what the app feeds to Storage::search)
+// MATCH query builders (mirror what the app feeds to Storage::search_filtered)
 // --------------------------------------------------------------------------
 
 pub fn quoted_term(term: &str) -> String {
