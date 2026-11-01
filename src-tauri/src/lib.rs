@@ -196,8 +196,11 @@ async fn sync_imap(
     password: String,
     folders: Option<Vec<String>>,
 ) -> Result<ImapSyncOutcome, String> {
-    let host = host.trim().to_string();
-    let username = username.trim().to_string();
+    // Email addresses and hostnames are case-insensitive, so one account
+    // spelled with different casing must map to one dedup namespace
+    // (`imap:<username>`) and one keyring entry (`user@host`).
+    let host = host.trim().to_lowercase();
+    let username = username.trim().to_lowercase();
     if host.is_empty() {
         return Err("host is required (e.g. imap.gmail.com)".into());
     }

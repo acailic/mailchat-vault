@@ -43,7 +43,7 @@
 use std::collections::HashSet;
 use std::fmt;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -69,6 +69,9 @@ const FETCH_BATCH: usize = 50;
 
 /// Socket timeouts for the production connection.
 const IO_TIMEOUT: Duration = Duration::from_secs(60);
+/// Bound on the TCP connect phase, so a blackholed host fails fast instead
+/// of hanging on the OS default (which can take minutes).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// TLS stream type used by [`connect`].
 pub type TlsStream = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
@@ -159,6 +162,9 @@ pub struct FolderSyncSummary {
     pub skipped: u64,
     /// Messages that could not be parsed (not stored).
     pub failed: u64,
+    /// Why syncing this folder failed, when it did; the remaining folders
+    /// are still synced and reported.
+    pub error: Option<String>,
 }
 
 /// Connect to the configured server over implicit TLS and log in.
@@ -173,7 +179,25 @@ pub fn connect(config: &ImapConfig) -> Result<Session<TlsStream>> {
         .with_no_client_auth();
     let server_name = rustls::pki_types::ServerName::try_from(config.host.clone())?;
     let conn = rustls::ClientConnection::new(Arc::new(tls_config), server_name)?;
-    let tcp = TcpStream::connect((config.host.as_str(), config.port))?;
+    let mut tcp = None;
+    let mut last_err = None;
+    for addr in (config.host.as_str(), config.port).to_socket_addrs()? {
+        match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
+            Ok(stream) => {
+                tcp = Some(stream);
+                break;
+            }
+            Err(err) => last_err = Some(err),
+        }
+    }
+    let tcp = tcp.ok_or_else(|| {
+        last_err.unwrap_or_else(|| {
+            std::io::Error::other(format!(
+                "no address resolved for {}:{}",
+                config.host, config.port
+            ))
+        })
+    })?;
     tcp.set_read_timeout(Some(IO_TIMEOUT))?;
     tcp.set_write_timeout(Some(IO_TIMEOUT))?;
     let client = imap::Client::new(rustls::StreamOwned::new(conn, tcp));
@@ -187,15 +211,33 @@ pub fn connect(config: &ImapConfig) -> Result<Session<TlsStream>> {
 ///
 /// Generic over the stream so the production TLS path ([`sync`]) and the
 /// test path (plain TCP against a mock server) share one implementation.
+/// Sync every configured folder over an already-authenticated session.
+///
+/// Generic over the stream so the production TLS path ([`sync`]) and the
+/// test path (plain TCP against a mock server) share one implementation.
+/// A failing folder never aborts the others: each folder reports its own
+/// outcome, with [`FolderSyncSummary::error`] set on failure.
 pub fn sync_session<T: Read + Write>(
     session: &mut Session<T>,
     storage: &Storage,
     source: &str,
     folders: &[String],
-) -> Result<Vec<FolderSyncSummary>> {
+) -> Vec<FolderSyncSummary> {
     folders
         .iter()
-        .map(|folder| sync_folder(session, storage, source, folder))
+        .map(|folder| match sync_folder(session, storage, source, folder) {
+            Ok(summary) => summary,
+            Err(e) => FolderSyncSummary {
+                folder: folder.to_string(),
+                uidvalidity: 0,
+                reset: false,
+                seen: 0,
+                inserted: 0,
+                skipped: 0,
+                failed: 0,
+                error: Some(e.to_string()),
+            },
+        })
         .collect()
 }
 
@@ -204,10 +246,10 @@ pub fn sync(config: &ImapConfig, storage: &Storage) -> Result<Vec<FolderSyncSumm
     let source = source_name(&config.username);
     let mut session = connect(config)?;
     let folders = config.effective_folders();
-    let result = sync_session(&mut session, storage, &source, &folders);
+    let summaries = sync_session(&mut session, storage, &source, &folders);
     // Best-effort logout; a failed logout must not mask a sync error.
     let _ = session.logout();
-    result
+    Ok(summaries)
 }
 
 /// Incrementally sync one folder. See the [module documentation](self)
@@ -239,6 +281,7 @@ pub fn sync_folder<T: Read + Write>(
         inserted: 0,
         skipped: 0,
         failed: 0,
+        error: None,
     };
 
     // UIDNEXT bounds the interesting range: no UID >= start can exist when

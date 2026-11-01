@@ -144,7 +144,6 @@ fn mbox_fixture_and_imap_sync_produce_equivalent_archives() {
         &folders,
     );
     let _ = s.logout();
-    let summaries = summaries.unwrap();
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].inserted, 3);
     assert_eq!(summaries[0].failed, 0);

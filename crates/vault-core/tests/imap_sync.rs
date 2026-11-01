@@ -56,7 +56,7 @@ fn sync(server: &MockImap, storage: &Storage, folders: &[&str]) -> Vec<vimap::Fo
     let mut s = session(server);
     let summaries = vimap::sync_session(&mut s, storage, &source(), &folders);
     let _ = s.logout();
-    summaries.unwrap()
+    summaries
 }
 
 #[test]
@@ -371,21 +371,41 @@ fn missing_folder_reports_error_without_breaking_others() {
         "INBOX",
         MockMailbox::new(7, vec![mail(Some("m-1@x"), "One", "hi")]),
     );
+    server.set_mailbox(
+        "Archive",
+        MockMailbox::new(3, vec![mail(Some("ar-1@x"), "Ar", "archive body")]),
+    );
     let storage = Storage::open_in_memory().unwrap();
 
     let mut s = session(&server);
-    let result = vimap::sync_session(
+    let summaries = vimap::sync_session(
         &mut s,
         &storage,
         &source(),
-        &["INBOX".to_string(), "NoSuch".to_string()],
+        &[
+            "INBOX".to_string(),
+            "NoSuch".to_string(),
+            "Archive".to_string(),
+        ],
     );
     let _ = s.logout();
-    let err = result.expect_err("sync must fail on a missing folder");
+
+    // The failing folder reports its error in its own summary...
+    assert_eq!(summaries.len(), 3);
+    let err = summaries[1]
+        .error
+        .as_deref()
+        .expect("the missing folder must carry its error");
     assert!(
-        err.to_string().to_lowercase().contains("no such mailbox"),
+        err.to_lowercase().contains("no such mailbox"),
         "unexpected error: {err}"
     );
-    // The folder before the failure was still fully synced.
-    assert_eq!(storage.stats().unwrap().total, 1);
+    assert_eq!(summaries[1].seen, 0);
+
+    // ...while the folders before and after it still fully synced.
+    assert_eq!(summaries[0].error, None);
+    assert_eq!(summaries[0].inserted, 1);
+    assert_eq!(summaries[2].error, None);
+    assert_eq!(summaries[2].inserted, 1);
+    assert_eq!(storage.stats().unwrap().total, 2);
 }
