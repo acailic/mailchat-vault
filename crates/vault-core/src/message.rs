@@ -93,3 +93,13 @@ pub struct SourceCount {
     pub source: String,
     pub count: u64,
 }
+
+/// Incremental IMAP sync cursor for one `(source, folder)`.
+/// See [`crate::imap`] for the UIDVALIDITY/UID model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImapSyncState {
+    /// The folder's `UIDVALIDITY` when the cursor was written.
+    pub uidvalidity: u32,
+    /// The highest message UID already fetched in this folder.
+    pub last_uid: u32,
+}

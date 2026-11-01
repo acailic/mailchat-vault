@@ -1,0 +1,391 @@
+//! Incremental IMAP sync tests against the in-process mock server
+//! (`imap_mock`). These exercise the real protocol path — greeting, LOGIN,
+//! EXAMINE, UID SEARCH, UID FETCH with literals, LOGOUT — without any
+//! network access or real credentials.
+
+mod imap_mock;
+
+use imap_mock::{MockImap, MockMailbox};
+use vault_core::imap as vimap;
+use vault_core::search::build_match_query;
+use vault_core::storage::Storage;
+
+const USER: &str = "alice@example.com";
+const PASSWORD: &str = "hunter2-app-password";
+const FOLDERS: &[&str] = &["INBOX"];
+
+fn source() -> String {
+    vimap::source_name(USER)
+}
+
+/// One raw test mail.
+fn mail(message_id: Option<&str>, subject: &str, body: &str) -> Vec<u8> {
+    let id = message_id
+        .map(|m| format!("Message-ID: <{m}>\r\n"))
+        .unwrap_or_default();
+    format!(
+        "From: Alice Smith <alice@example.com>\r\n\
+         To: Bob <bob@example.com>\r\n\
+         Subject: {subject}\r\n\
+         {id}\
+         Date: Sat, 1 Nov 2026 10:00:00 +0100\r\n\
+         \r\n\
+         {body}"
+    )
+    .into_bytes()
+}
+
+/// A raw message that fails to parse (a torn header continuation line,
+/// like a truncated download).
+const BROKEN_MAIL: &[u8] = b"   torn header continuation\r\nSubject: never parses\r\n\r\nbody";
+
+/// Open a logged-in session against the mock server.
+fn session(server: &MockImap) -> imap::Session<std::net::TcpStream> {
+    let stream = std::net::TcpStream::connect(server.addr).unwrap();
+    let mut client = imap::Client::new(stream);
+    client.read_greeting().unwrap();
+    client
+        .login(USER, PASSWORD)
+        .map_err(|(e, _client)| e)
+        .unwrap()
+}
+
+/// Sync the given folders once against the mock server.
+fn sync(server: &MockImap, storage: &Storage, folders: &[&str]) -> Vec<vimap::FolderSyncSummary> {
+    let folders: Vec<String> = folders.iter().map(|f| f.to_string()).collect();
+    let mut s = session(server);
+    let summaries = vimap::sync_session(&mut s, storage, &source(), &folders);
+    let _ = s.logout();
+    summaries.unwrap()
+}
+
+#[test]
+fn login_uses_configured_credentials() {
+    let server = MockImap::start();
+    server.set_mailbox(
+        "INBOX",
+        MockMailbox::new(7, vec![mail(Some("m-1@x"), "One", "hi")]),
+    );
+    let storage = Storage::open_in_memory().unwrap();
+    sync(&server, &storage, FOLDERS);
+
+    let log = server.log();
+    let login = log.logins.first().expect("a LOGIN happened");
+    assert!(login.contains(USER), "login line {login:?} lacks user");
+    assert!(
+        login.contains(PASSWORD),
+        "login line {login:?} lacks password"
+    );
+}
+
+#[test]
+fn initial_sync_stores_messages_with_folder_as_channel() {
+    let server = MockImap::start();
+    server.set_mailbox(
+        "INBOX",
+        MockMailbox::new(
+            7,
+            vec![
+                mail(Some("m-1@example.com"), "First mail", "hello vault world"),
+                mail(Some("m-2@example.com"), "Second mail", "second body text"),
+            ],
+        ),
+    );
+    let storage = Storage::open_in_memory().unwrap();
+    let summaries = sync(&server, &storage, FOLDERS);
+
+    assert_eq!(summaries.len(), 1);
+    let s = &summaries[0];
+    assert_eq!(s.folder, "INBOX");
+    assert_eq!(s.uidvalidity, 7);
+    assert!(s.reset, "first sync is a full scan");
+    assert_eq!(s.seen, 2);
+    assert_eq!(s.inserted, 2);
+    assert_eq!(s.skipped, 0);
+    assert_eq!(s.failed, 0);
+
+    // Cursor saved at the highest fetched UID.
+    let state = storage.get_imap_state(&source(), "INBOX").unwrap().unwrap();
+    assert_eq!(state.uidvalidity, 7);
+    assert_eq!(state.last_uid, 2);
+
+    // Messages stored under the imap:<user> source, folder as channel,
+    // Message-ID as external id, and full-text searchable.
+    assert_eq!(storage.stats().unwrap().total, 2);
+    let hits = storage
+        .search(&build_match_query("hello vault world"), 10)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    let m = &hits[0];
+    assert_eq!(m.source, format!("imap:{USER}"));
+    assert_eq!(m.external_id, "m-1@example.com");
+    assert_eq!(m.channel, "INBOX");
+    assert_eq!(m.author, "Alice Smith <alice@example.com>");
+    assert_eq!(m.sent_at, "2026-11-01T09:00:00Z");
+    // Folder/UID provenance kept in raw_json.
+    let raw: serde_json::Value = serde_json::from_str(&m.raw_json).unwrap();
+    assert_eq!(raw["folder"], "INBOX");
+    assert_eq!(raw["uid"], 1);
+    assert_eq!(raw["uidvalidity"], 7);
+    assert_eq!(raw["subject"], "First mail");
+}
+
+#[test]
+fn resync_without_changes_fetches_nothing() {
+    let server = MockImap::start();
+    server.set_mailbox(
+        "INBOX",
+        MockMailbox::new(
+            7,
+            vec![
+                mail(Some("m-1@x"), "One", "hi"),
+                mail(Some("m-2@x"), "Two", "ho"),
+            ],
+        ),
+    );
+    let storage = Storage::open_in_memory().unwrap();
+    sync(&server, &storage, FOLDERS);
+    let fetches_after_first = server.log().fetch_sets.len();
+    let searches_after_first = server.log().searches.len();
+
+    let summaries = sync(&server, &storage, FOLDERS);
+    let s = &summaries[0];
+    assert!(!s.reset);
+    assert_eq!(s.seen, 0);
+    assert_eq!(s.inserted, 0);
+    assert_eq!(s.skipped, 0);
+    assert_eq!(storage.stats().unwrap().total, 2);
+
+    // No new SEARCH or FETCH reached the server (UIDNEXT short-circuit).
+    let log = server.log();
+    assert_eq!(log.fetch_sets.len(), fetches_after_first);
+    assert_eq!(log.searches.len(), searches_after_first);
+}
+
+#[test]
+fn incremental_sync_fetches_only_new_messages() {
+    let server = MockImap::start();
+    server.set_mailbox(
+        "INBOX",
+        MockMailbox::new(
+            7,
+            vec![
+                mail(Some("m-1@x"), "One", "first"),
+                mail(Some("m-2@x"), "Two", "second"),
+            ],
+        ),
+    );
+    let storage = Storage::open_in_memory().unwrap();
+    sync(&server, &storage, FOLDERS);
+
+    // A new mail arrives.
+    server.add_message("INBOX", mail(Some("m-3@x"), "Three", "third body"));
+
+    let summaries = sync(&server, &storage, FOLDERS);
+    let s = &summaries[0];
+    assert!(!s.reset);
+    assert_eq!(s.seen, 1);
+    assert_eq!(s.inserted, 1);
+    assert_eq!(storage.stats().unwrap().total, 3);
+
+    // Only the new UID was fetched, and the search ranged past the cursor.
+    let log = server.log();
+    assert_eq!(log.searches.last().unwrap(), "3:*");
+    assert_eq!(log.fetch_sets.last().unwrap(), "3");
+
+    let state = storage.get_imap_state(&source(), "INBOX").unwrap().unwrap();
+    assert_eq!((state.uidvalidity, state.last_uid), (7, 3));
+
+    // The new mail is searchable.
+    let hits = storage
+        .search(&build_match_query("third body"), 10)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].external_id, "m-3@x");
+}
+
+#[test]
+fn uidvalidity_change_rescans_without_duplicates() {
+    let server = MockImap::start();
+    let mails = vec![
+        mail(Some("m-1@x"), "One", "first"),
+        mail(Some("m-2@x"), "Two", "second"),
+    ];
+    server.set_mailbox("INBOX", MockMailbox::new(7, mails.clone()));
+    let storage = Storage::open_in_memory().unwrap();
+    sync(&server, &storage, FOLDERS);
+
+    // The folder is recreated: same messages, new UIDVALIDITY (UIDs
+    // reassigned from 1).
+    server.set_mailbox("INBOX", MockMailbox::new(99, mails));
+
+    let summaries = sync(&server, &storage, FOLDERS);
+    let s = &summaries[0];
+    assert_eq!(s.uidvalidity, 99);
+    assert!(s.reset, "UIDVALIDITY change must trigger a full rescan");
+    assert_eq!(s.seen, 2);
+    assert_eq!(
+        s.inserted, 0,
+        "rescanned mails must dedup by (source, external_id)"
+    );
+    assert_eq!(s.skipped, 2);
+    assert_eq!(storage.stats().unwrap().total, 2);
+
+    // Cursor now tracks the new validity.
+    let state = storage.get_imap_state(&source(), "INBOX").unwrap().unwrap();
+    assert_eq!((state.uidvalidity, state.last_uid), (99, 2));
+}
+
+#[test]
+fn messages_without_message_id_get_stable_generated_ids() {
+    let no_id = mail(None, "No id", "idless body");
+    let server = MockImap::start();
+    server.set_mailbox("INBOX", MockMailbox::new(7, vec![no_id.clone()]));
+    let storage = Storage::open_in_memory().unwrap();
+    sync(&server, &storage, FOLDERS);
+    assert_eq!(storage.stats().unwrap().total, 1);
+
+    // Force a refetch via UIDVALIDITY reset: the content-hash id must
+    // dedup the mail instead of storing it twice.
+    server.set_mailbox("INBOX", MockMailbox::new(8, vec![no_id]));
+    let summaries = sync(&server, &storage, FOLDERS);
+    assert_eq!(summaries[0].skipped, 1);
+    assert_eq!(summaries[0].inserted, 0);
+    assert_eq!(storage.stats().unwrap().total, 1);
+}
+
+#[test]
+fn unparseable_messages_are_counted_not_dropped() {
+    let server = MockImap::start();
+    server.set_mailbox(
+        "INBOX",
+        MockMailbox::new(
+            7,
+            vec![
+                mail(Some("m-1@x"), "Good", "good body"),
+                BROKEN_MAIL.to_vec(),
+            ],
+        ),
+    );
+    let storage = Storage::open_in_memory().unwrap();
+    let summaries = sync(&server, &storage, FOLDERS);
+
+    let s = &summaries[0];
+    assert_eq!(s.inserted, 1);
+    assert_eq!(s.failed, 1);
+    assert_eq!(s.seen, 2);
+    assert_eq!(storage.stats().unwrap().total, 1);
+}
+
+#[test]
+fn folders_map_to_separate_channels_and_cursors() {
+    let server = MockImap::start();
+    server.set_mailbox(
+        "INBOX",
+        MockMailbox::new(7, vec![mail(Some("in-1@x"), "In", "inbox body")]),
+    );
+    server.set_mailbox(
+        "Archive",
+        MockMailbox::new(3, vec![mail(Some("ar-1@x"), "Ar", "archive body")]),
+    );
+
+    let storage = Storage::open_in_memory().unwrap();
+    let summaries = sync(&server, &storage, &["INBOX", "Archive"]);
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries[0].folder, "INBOX");
+    assert_eq!(summaries[1].folder, "Archive");
+
+    // Each folder's messages carry their folder as channel; one cursor per
+    // folder.
+    let inbox_hits = storage
+        .search(&build_match_query("inbox body"), 10)
+        .unwrap();
+    let archive_hits = storage
+        .search(&build_match_query("archive body"), 10)
+        .unwrap();
+    assert_eq!((inbox_hits.len(), archive_hits.len()), (1, 1));
+    assert_eq!(inbox_hits[0].channel, "INBOX");
+    assert_eq!(archive_hits[0].channel, "Archive");
+
+    let inbox_state = storage.get_imap_state(&source(), "INBOX").unwrap().unwrap();
+    let archive_state = storage
+        .get_imap_state(&source(), "Archive")
+        .unwrap()
+        .unwrap();
+    assert_eq!((inbox_state.uidvalidity, inbox_state.last_uid), (7, 1));
+    assert_eq!((archive_state.uidvalidity, archive_state.last_uid), (3, 1));
+}
+
+#[test]
+fn same_mail_in_two_folders_dedups_within_one_account() {
+    // The same Message-ID in two folders (e.g. INBOX and All Mail) is one
+    // archived message: first folder wins, the second is skipped.
+    let shared = mail(Some("shared-1@x"), "Shared", "shared body");
+    let server = MockImap::start();
+    server.set_mailbox("INBOX", MockMailbox::new(7, vec![shared.clone()]));
+    server.set_mailbox("All Mail", MockMailbox::new(5, vec![shared]));
+
+    let storage = Storage::open_in_memory().unwrap();
+    let summaries = sync(&server, &storage, &["INBOX", "All Mail"]);
+    assert_eq!(summaries[0].inserted, 1);
+    assert_eq!(summaries[1].inserted, 0);
+    assert_eq!(summaries[1].skipped, 1);
+    assert_eq!(storage.stats().unwrap().total, 1);
+}
+
+#[test]
+fn password_is_never_written_to_the_database() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("vault.db");
+    let storage = Storage::open(&db_path).unwrap();
+
+    let server = MockImap::start();
+    server.set_mailbox(
+        "INBOX",
+        MockMailbox::new(7, vec![mail(Some("m-1@x"), "One", "hi")]),
+    );
+    sync(&server, &storage, FOLDERS);
+
+    // Scan every file SQLite may have written (db + WAL sidecar).
+    for path in [
+        db_path.clone(),
+        dir.path().join("vault.db-wal"),
+        dir.path().join("vault.db-shm"),
+    ] {
+        if let Ok(bytes) = std::fs::read(&path) {
+            assert!(
+                !bytes
+                    .windows(PASSWORD.len())
+                    .any(|w| w == PASSWORD.as_bytes()),
+                "password leaked into {}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn missing_folder_reports_error_without_breaking_others() {
+    let server = MockImap::start();
+    server.set_mailbox(
+        "INBOX",
+        MockMailbox::new(7, vec![mail(Some("m-1@x"), "One", "hi")]),
+    );
+    let storage = Storage::open_in_memory().unwrap();
+
+    let mut s = session(&server);
+    let result = vimap::sync_session(
+        &mut s,
+        &storage,
+        &source(),
+        &["INBOX".to_string(), "NoSuch".to_string()],
+    );
+    let _ = s.logout();
+    let err = result.expect_err("sync must fail on a missing folder");
+    assert!(
+        err.to_string().to_lowercase().contains("no such mailbox"),
+        "unexpected error: {err}"
+    );
+    // The folder before the failure was still fully synced.
+    assert_eq!(storage.stats().unwrap().total, 1);
+}
