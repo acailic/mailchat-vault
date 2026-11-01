@@ -20,7 +20,7 @@ struct AppState {
     storage: Mutex<Storage>,
 }
 
-fn lock(state: &State<AppState>) -> Result<MutexGuard<'_, Storage>, String> {
+fn lock<'a>(state: &'a State<'_, AppState>) -> Result<MutexGuard<'a, Storage>, String> {
     state.storage.lock().map_err(|e| e.to_string())
 }
 
