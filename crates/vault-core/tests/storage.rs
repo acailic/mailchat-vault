@@ -207,4 +207,25 @@ fn date_bounds_are_canonicalized_before_text_comparison() {
 
     // Non-padded spelling of an invalid date is still an error.
     assert!(s.search_filtered("\"vault\"", Some("2026-13-1"), None, 10).is_err());
+
+    // Wide signed years are refused instead of panicking or silently
+    // mis-ordering against 4-digit sent_at text.
+    assert!(
+        s.search_filtered("\"vault\"", Some("+262143-12-31"), None, 10)
+            .is_err()
+    );
+    assert!(
+        s.search_filtered("\"vault\"", None, Some("+262143-12-31"), 10)
+            .is_err()
+    );
+    assert!(
+        s.search_filtered("\"vault\"", None, Some("9999-12-31"), 10)
+            .is_err(),
+        "date_to whose successor leaves the 4-digit range is refused"
+    );
+    // The last upper bound with a representable successor still works.
+    assert!(
+        s.search_filtered("\"vault\"", None, Some("9999-12-30"), 10)
+            .is_ok()
+    );
 }

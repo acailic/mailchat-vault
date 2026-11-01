@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use chrono::{Duration, NaiveDate};
+use chrono::{Datelike, Days, NaiveDate};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::message::{InsertOutcome, Message, NewMessage, SourceCount, Stats};
@@ -155,8 +155,14 @@ impl Storage {
         let from = parse_date_bound(date_from, "date_from")?.map(|d| d.to_string());
         // Inclusive date_to becomes an exclusive upper bound at midnight of
         // the next day; RFC 3339 UTC strings compare correctly as text.
-        let to_exclusive =
-            parse_date_bound(date_to, "date_to")?.map(|day| (day + Duration::days(1)).to_string());
+        let to_exclusive = parse_date_bound(date_to, "date_to")?
+            .map(|day| {
+                day.checked_add_days(Days::new(1))
+                    .filter(|next| (0..=9999).contains(&next.year()))
+                    .map(|next| next.to_string())
+                    .ok_or_else(|| Error::InvalidDate(format!("date_to={day} out of range")))
+            })
+            .transpose()?;
         let mut stmt = self.conn.prepare(
             r#"
             SELECT m.id, m.source, m.external_id, m.channel, m.chat_id,
@@ -279,13 +285,18 @@ fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
     })
 }
 
-/// Parse an optional `YYYY-MM-DD` bound into a `NaiveDate`.
+/// Parse an optional `YYYY-MM-DD` bound into a `NaiveDate`. Years outside
+/// `0000..=9999` (chrono also accepts signed 5+ digit spellings) are
+/// rejected: they cannot be ordered as text against the stored RFC 3339
+/// `sent_at` strings.
 fn parse_date_bound(value: Option<&str>, field: &str) -> Result<Option<NaiveDate>> {
     match value.map(str::trim).filter(|v| !v.is_empty()) {
         None => Ok(None),
         Some(v) => NaiveDate::parse_from_str(v, "%Y-%m-%d")
+            .ok()
+            .filter(|d| (0..=9999).contains(&d.year()))
             .map(Some)
-            .map_err(|_| Error::InvalidDate(format!("{field}={v}"))),
+            .ok_or_else(|| Error::InvalidDate(format!("{field}={v}"))),
     }
 }
 

@@ -19,7 +19,7 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 
 use crate::message::Message;
@@ -304,14 +304,18 @@ impl QueryPlan {
 }
 
 /// Parse an optional model-supplied date and return it in canonical
-/// zero-padded `%Y-%m-%d` form, so it compares correctly as text.
+/// zero-padded `%Y-%m-%d` form, so it compares correctly as text. Years
+/// outside `0000..=9999` are rejected: they cannot be ordered as text
+/// against the stored RFC 3339 `sent_at` strings.
 fn canonical_date(value: &Option<String>) -> Result<Option<String>> {
     value
         .as_deref()
         .map(|s| {
             NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .ok()
+                .filter(|d| (0..=9999).contains(&d.year()))
                 .map(|d| d.to_string())
-                .map_err(|_| Error::Llm(format!("translation produced a bad date: {s}")))
+                .ok_or_else(|| Error::Llm(format!("translation produced a bad date: {s}")))
         })
         .transpose()
 }
@@ -806,7 +810,8 @@ mod tests {
             "no json here at all",
             "{\"date_from\": \"2026-01-01\"}", // match missing
             "{\"match\": \"   \"}",            // match blank
-            "{\"match\": \"ok\", \"date_from\": \"January\"}", // bad date
+            "{\"match\": \"ok\", \"date_from\": \"January\"}",          // bad date
+            "{\"match\": \"ok\", \"date_to\": \"+262143-12-31\"}", // unorderable wide year
         ] {
             let llm = MockLlm::with_replies([bad]);
             assert!(
