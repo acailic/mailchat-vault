@@ -92,7 +92,12 @@ fn message_by_id(
     external_id: &str,
 ) -> vault_core::message::Message {
     let all = storage
-        .search(&build_match_query(&unique_term(storage, external_id)), 50)
+        .search_filtered(
+            &build_match_query(&unique_term(storage, external_id)),
+            None,
+            None,
+            50,
+        )
         .unwrap();
     all.into_iter()
         .find(|m| m.source == source && m.external_id == external_id)
@@ -177,7 +182,7 @@ fn mbox_fixture_and_imap_sync_produce_equivalent_archives() {
     // ingest paths.
     let generated = |storage: &Storage| {
         storage
-            .search(&build_match_query("Sorry I missed"), 10)
+            .search_filtered(&build_match_query("Sorry I missed"), None, None, 10)
             .unwrap()
             .into_iter()
             .find(|m| m.external_id.starts_with("generated-"))
@@ -197,14 +202,14 @@ fn mbox_fixture_and_imap_sync_produce_equivalent_archives() {
     for term in ["kickoff", "FTS notes", "base64"] {
         assert!(
             !mbox_storage
-                .search(&build_match_query(term), 10)
+                .search_filtered(&build_match_query(term), None, None, 10)
                 .unwrap()
                 .is_empty(),
             "mbox: no hits for {term}"
         );
         assert!(
             !imap_storage
-                .search(&build_match_query(term), 10)
+                .search_filtered(&build_match_query(term), None, None, 10)
                 .unwrap()
                 .is_empty(),
             "imap: no hits for {term}"
