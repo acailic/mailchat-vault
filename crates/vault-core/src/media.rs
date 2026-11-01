@@ -66,9 +66,14 @@ pub struct MediaEntry {
 
 /// Copy `src` into the content-addressed store at `data_dir/media/`.
 ///
-/// The file is hashed streaming (never fully in memory), then copied only
-/// when no file with that hash exists yet. Returns the store entry with
-/// the original display name and kind plus whether this call wrote the
+/// The copy is made first (through a temp file inside the store
+/// directory) and then hashed streaming, so the recorded digest always
+/// describes the stored bytes. The hash is the content's identity: if
+/// any file named `<sha256>.*` is already in the store — under this
+/// extension or another — it is reused, so identical files (re-imports,
+/// the same photo in two chats, the same bytes under `photo.jpg` and
+/// `photo.jpeg`) are stored once. Returns the store entry with the
+/// original display name and kind plus whether this call wrote the
 /// file (`false` = identical content was already stored); `path` is
 /// relative to `data_dir` (`media/<sha256>.<ext>`), so it stays valid
 /// wherever app-data lives.
@@ -78,25 +83,39 @@ pub fn store(
     display_name: &str,
     kind: &str,
 ) -> Result<(MediaEntry, bool)> {
-    let (sha256, size) = hash_file(src)?;
     let store_dir = data_dir.join("media");
     fs::create_dir_all(&store_dir)?;
-    let file_name = format!("{}.{}", sha256, sanitize_extension(display_name));
+    // Same name means same content; writing through a temp file keeps a
+    // half-written copy out of the store, and hashing the copy (not the
+    // source) keeps the digest honest if the source changes mid-import.
+    let tmp = store_dir.join(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let (sha256, size) = match fs::copy(src, &tmp) {
+        Ok(_) => hash_file(&tmp).inspect_err(|_| {
+            fs::remove_file(&tmp).ok();
+        })?,
+        Err(e) => {
+            fs::remove_file(&tmp).ok();
+            return Err(e.into());
+        }
+    };
+    // The hash is the identity: reuse an existing entry for the same
+    // content even when it is stored under a different extension.
+    let ext = sanitize_extension(display_name);
+    let file_name =
+        existing_store_name(&store_dir, &sha256).unwrap_or_else(|| format!("{sha256}.{ext}"));
     let target = store_dir.join(&file_name);
     let mut written = false;
-    if !target.exists() {
+    if target.exists() {
+        fs::remove_file(&tmp).ok();
+    } else {
         written = true;
-        // Same name means same content; writing through a temp file keeps
-        // a half-written copy out of the store.
-        let tmp = store_dir.join(format!(
-            ".tmp-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
-        fs::copy(src, &tmp)?;
         // Another import may have written the same content meanwhile; an
         // atomic rename wins, and a collision that is not the same content
         // (cryptographically impossible in practice) fails loudly.
@@ -118,6 +137,20 @@ pub fn store(
         },
         written,
     ))
+}
+
+/// The name of an existing store file for this content, if any: the first
+/// file whose name starts with the hash (the extension varies, the hash
+/// does not).
+fn existing_store_name(store_dir: &Path, sha256: &str) -> Option<String> {
+    fs::read_dir(store_dir)
+        .ok()?
+        .flatten()
+        .find(|e| {
+            e.file_type().map(|t| t.is_file()).unwrap_or(false)
+                && e.file_name().to_string_lossy().starts_with(sha256)
+        })
+        .map(|e| e.file_name().to_string_lossy().into_owned())
 }
 
 /// Streaming SHA-256 + file size.
@@ -475,6 +508,33 @@ mod tests {
         let (third, written) = store(&data_root, &other, "renamed.jpg", "image").unwrap();
         assert!(written);
         assert_ne!(third.sha256, first.sha256);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_content_under_different_extension_is_deduped() {
+        let dir = tmpdir("dedup-ext");
+        let as_jpg = dir.join("photo.jpg");
+        let as_jpeg = dir.join("photo.jpeg");
+        fs::write(&as_jpg, b"same-jpeg-bytes").unwrap();
+        fs::write(&as_jpeg, b"same-jpeg-bytes").unwrap();
+        let data_root = dir.join("root");
+        let (first, written) = store(&data_root, &as_jpg, "photo.jpg", "image").unwrap();
+        assert!(written);
+        let (second, written) = store(&data_root, &as_jpeg, "photo.jpeg", "image").unwrap();
+        assert!(!written, "same content under another extension is deduped");
+        assert_eq!(second.sha256, first.sha256);
+        assert_eq!(second.path, first.path, "one store file serves both names");
+        assert_eq!(second.name, "photo.jpeg");
+        let store_files = fs::read_dir(data_root.join("media"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_type().unwrap().is_file()
+                    && !e.file_name().to_string_lossy().starts_with(".tmp-")
+            })
+            .count();
+        assert_eq!(store_files, 1, "exactly one physical file in the store");
         let _ = fs::remove_dir_all(&dir);
     }
 
