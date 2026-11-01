@@ -18,6 +18,9 @@
 //! - [`search`]: free-text to FTS5 MATCH query building.
 //! - [`llm`]: LLM-assisted search — natural language to an FTS5 plan, then
 //!   a summary over the top results (privacy-scoped RAG).
+//! - [`vector`]: local embeddings (offline embedder, SQLite blob index,
+//!   incremental embedding job) and the FTS+vector hybrid ranking used by
+//!   the Ask pipeline.
 //! - [`query`]: paged/filtered search requests and chat-thread context.
 
 pub mod chat_export;
@@ -34,6 +37,7 @@ pub mod signal;
 pub mod storage;
 pub mod telegram;
 pub mod util;
+pub mod vector;
 pub mod whatsapp;
 
 use thiserror::Error;
@@ -62,4 +66,6 @@ pub enum Error {
     InvalidServerName(#[from] rustls::pki_types::InvalidDnsNameError),
     #[error("invalid query: {0}")]
     InvalidQuery(String),
+    #[error("embedding error: {0}")]
+    Embedding(String),
 }

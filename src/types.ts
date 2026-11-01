@@ -61,3 +61,21 @@ export interface ChatContext {
   /** Oldest → newest. */
   after: Message[];
 }
+
+/** Local embedding coverage (mirrors `vault_core::vector::EmbeddingStatus`). */
+export interface EmbeddingStatus {
+  model: string;
+  dim: number;
+  embedded: number;
+  messages: number;
+  pending: number;
+}
+
+/** What one embedding-job run did (mirrors `vault_core::vector::EmbedJobSummary`). */
+export interface EmbedJobSummary {
+  model: string;
+  dim: number;
+  embedded: number;
+  remaining: number;
+  elapsed_ms: number;
+}

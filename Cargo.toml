@@ -32,6 +32,14 @@ webpki-roots = "0.26"
 # contract (search < 100 ms over 100k messages) is asserted in `cargo test`.
 opt-level = 3
 
+[profile.dev.package.vault-core]
+# Same rationale as libsqlite3-sys above, for our own CPU-bound code: the
+# vector scan is 512 integer multiply-adds per embedded message, and its
+# perf contract over 100k messages (tests/vector_perf.rs) is asserted in
+# `cargo test` (debug profile). Optimizing only this crate keeps the rest
+# of the dev/test build debuggable.
+opt-level = 3
+
 [profile.release]
 lto = true
 codegen-units = 1
