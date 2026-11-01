@@ -75,12 +75,6 @@ pub enum InsertOutcome {
     Duplicate(i64),
 }
 
-impl InsertOutcome {
-    pub fn was_inserted(self) -> bool {
-        matches!(self, InsertOutcome::Inserted(_))
-    }
-}
-
 /// Archive contents summary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stats {

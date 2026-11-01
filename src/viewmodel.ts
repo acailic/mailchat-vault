@@ -4,8 +4,8 @@
 import type { ChatContext, SearchHit } from "./types";
 
 /** Marker characters the backend wraps around FTS5-matched terms. */
-export const SNIPPET_OPEN = "\x01";
-export const SNIPPET_CLOSE = "\x02";
+const SNIPPET_OPEN = "\x01";
+const SNIPPET_CLOSE = "\x02";
 
 /** A run of text, optionally a search-term match to be highlighted. */
 export interface Segment {

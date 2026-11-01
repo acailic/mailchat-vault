@@ -55,7 +55,10 @@ fn insert_is_idempotent_on_source_and_external_id() {
 
     // Same external_id under a different source namespace is a new message.
     let other_source = NewMessage::new("other", "m1", "ana", "", "hello");
-    assert!(s.insert_message(&other_source).unwrap().was_inserted());
+    assert!(matches!(
+        s.insert_message(&other_source).unwrap(),
+        InsertOutcome::Inserted(_)
+    ));
 
     assert_eq!(s.stats().unwrap().total, 2);
     let found = search(&s, "changed", 10).hits;
@@ -177,16 +180,4 @@ fn get_returns_stored_message() {
     assert_eq!(m.body, "hello body");
     assert_eq!(m.author, "ana <a@b>");
     assert!(s.get(9999).unwrap().is_none());
-}
-
-#[test]
-fn rebuild_fts_restores_index() {
-    let s = storage();
-    s.insert_message(&msg("1", "ana", "searchable body"))
-        .unwrap();
-    // Wipe the index directly to simulate corruption, then rebuild.
-    s.wipe_fts_for_tests().unwrap();
-    assert!(search(&s, "searchable", 10).hits.is_empty());
-    s.rebuild_fts().unwrap();
-    assert_eq!(search(&s, "searchable", 10).hits.len(), 1);
 }

@@ -134,8 +134,9 @@ fn fixture() -> Storage {
         };
         msgs.push(m);
     }
-    let inserted = s.insert_messages(&msgs).expect("bulk insert");
-    assert_eq!(inserted as usize, TARGET_ROWS);
+    for m in &msgs {
+        s.insert_message(m).expect("seed insert");
+    }
     assert_eq!(s.stats().unwrap().total as usize, TARGET_ROWS);
     s
 }
