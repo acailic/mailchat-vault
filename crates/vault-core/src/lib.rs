@@ -10,11 +10,13 @@
 //! - [`ingest`]: the [`ingest::Source`] abstraction and idempotent ingest.
 //! - [`mbox`]: the manual/demo `.mbox` file source.
 //! - [`search`]: free-text to FTS5 MATCH query building.
+//! - [`query`]: paged/filtered search requests and chat-thread context.
 
 pub mod demo;
 pub mod ingest;
 pub mod mbox;
 pub mod message;
+pub mod query;
 pub mod search;
 pub mod storage;
 
@@ -30,4 +32,6 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("email parse error: {0}")]
     MailParse(#[from] mailparse::MailParseError),
+    #[error("invalid query: {0}")]
+    InvalidQuery(String),
 }

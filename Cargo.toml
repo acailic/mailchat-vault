@@ -21,6 +21,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 
+[profile.dev.package."libsqlite3-sys"]
+# Keep dev/test builds debuggable but let the bundled SQLite C code run at
+# release speed: FTS queries are CPU-bound inside sqlite3.c, and the perf
+# contract (search < 100 ms over 100k messages) is asserted in `cargo test`.
+opt-level = 3
+
 [profile.release]
 lto = true
 codegen-units = 1

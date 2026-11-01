@@ -11,21 +11,101 @@
         font: 15px/1.45 system-ui, sans-serif;
         margin: 0;
         padding: 16px;
-        max-width: 860px;
+        max-width: 920px;
       }
-      header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
+      header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
       h1 { font-size: 20px; margin: 0; }
       #stats { color: gray; font-size: 13px; }
+      kbd {
+        font: 11px/1 ui-monospace, monospace;
+        border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+        border-radius: 3px;
+        padding: 1px 4px;
+      }
       section { margin-bottom: 16px; }
-      .row { display: flex; gap: 8px; }
-      input[type="text"] { flex: 1; padding: 6px 8px; font: inherit; }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+      input[type="text"] { flex: 1; min-width: 12em; padding: 6px 8px; font: inherit; }
+      input[type="date"] { padding: 5px 6px; font: inherit; }
+      input[type="text"].short { flex: 0 1 14em; }
       button { padding: 6px 12px; font: inherit; cursor: pointer; }
+      #filters { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+      #filters .spacer { flex: 1; }
+      #source-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+      .chip {
+        padding: 3px 10px;
+        font-size: 13px;
+        border-radius: 999px;
+        border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+        background: transparent;
+        color: inherit;
+      }
+      .chip.on { background: color-mix(in srgb, Highlight 30%, transparent); border-color: Highlight; }
       #status { margin-top: 6px; font-size: 13px; color: gray; min-height: 1em; }
       #status.error { color: crimson; }
       #results { list-style: none; margin: 0; padding: 0; }
-      #results li { padding: 8px 0; border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
+      .group { margin-bottom: 10px; }
+      .group h3 {
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: gray;
+        margin: 10px 0 2px;
+      }
+      .hit-item {
+        padding: 7px 8px;
+        border-radius: 6px;
+        cursor: pointer;
+        border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+      }
+      .hit-item:hover { background: color-mix(in srgb, currentColor 6%, transparent); }
+      .hit-item.active {
+        background: color-mix(in srgb, Highlight 18%, transparent);
+        outline: 1px solid color-mix(in srgb, Highlight 60%, transparent);
+      }
       .meta { color: gray; font-size: 13px; }
       .body { margin-top: 2px; white-space: pre-wrap; word-break: break-word; }
+      mark.hit {
+        background: color-mix(in srgb, gold 55%, transparent);
+        color: inherit;
+        border-radius: 2px;
+        padding: 0 1px;
+      }
+      #pagination { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
+      .page-info { font-size: 13px; color: gray; }
+      #import { margin-top: 24px; border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent); padding-top: 12px; }
+      #keyboard-hint { margin-top: 8px; font-size: 12px; color: gray; }
+
+      /* Detail panel: fixed right column, overlay on narrow windows. */
+      #detail {
+        display: none;
+        position: fixed;
+        top: 0; right: 0; bottom: 0;
+        width: min(480px, 92vw);
+        padding: 16px;
+        overflow-y: auto;
+        background: Canvas;
+        border-left: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+        box-shadow: -8px 0 24px color-mix(in srgb, black 20%, transparent);
+      }
+      #detail.open { display: block; }
+      .detail-card header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+      .detail-card h2 { font-size: 16px; margin: 0 0 8px; }
+      .close-btn { font-size: 13px; }
+      .meta-table {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 2px 12px;
+        margin: 0 0 12px;
+        font-size: 13px;
+      }
+      .meta-table dt { color: gray; }
+      .meta-table dd { margin: 0; word-break: break-all; }
+      .thread { list-style: none; margin: 0; padding: 0; }
+      .thread-row { padding: 8px; border-radius: 6px; margin-bottom: 4px; background: color-mix(in srgb, currentColor 5%, transparent); }
+      .thread-row.current { outline: 1px solid Highlight; }
+      .thread-row.link { cursor: pointer; }
+      .thread-row.link:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
     </style>
   </head>
   <body>
@@ -39,11 +119,24 @@
         <input id="search" type="text" placeholder="Search the archive (FTS5)…" autofocus />
         <button id="search-btn" type="button">Search</button>
       </div>
+      <div id="filters">
+        <div id="source-chips" title="Filter by source (none selected = all sources)"></div>
+        <input id="author" class="short" type="text" placeholder="author contains… (Enter)" />
+        <label class="meta">from <input id="from-date" type="date" /></label>
+        <label class="meta">to <input id="to-date" type="date" /></label>
+        <div class="spacer"></div>
+        <button id="clear-filters" type="button" title="Reset all filters">Clear</button>
+      </div>
       <div id="status"></div>
-      <ul id="results"></ul>
+      <div id="results"></div>
+      <div id="pagination"></div>
+      <p id="keyboard-hint">
+        <kbd>/</kbd> search · <kbd>↑</kbd><kbd>↓</kbd> move · <kbd>Enter</kbd> open ·
+        <kbd>Esc</kbd> close
+      </p>
     </section>
 
-    <section>
+    <section id="import">
       <div class="row">
         <input id="mbox-path" type="text" placeholder="/path/to/archive.mbox" />
         <button id="import-btn" type="button">Import .mbox</button>
@@ -51,6 +144,8 @@
       </div>
       <div id="import-status" class="meta" style="margin-top: 6px"></div>
     </section>
+
+    <aside id="detail" aria-label="Message detail"></aside>
 
     <script type="module" src="/src/main.ts"></script>
   </body>
