@@ -65,7 +65,7 @@ fn fresh_database_applies_every_migration_exactly_once() {
         "no duplicate bookkeeping rows"
     );
     assert_eq!(s.stats().unwrap().total, 1);
-    assert_eq!(s.search("smoke", 10).unwrap().len(), 1);
+    assert_eq!(s.search_filtered("smoke", None, None, 10).unwrap().len(), 1);
 }
 
 #[test]
@@ -80,7 +80,10 @@ fn version0_database_upgrades_in_place() {
     // The upgraded database works end to end: write, index, read.
     s.insert_message(&msg("integrity", "up-1", "upgraded archive body"))
         .unwrap();
-    assert_eq!(s.search("upgraded", 10).unwrap().len(), 1);
+    assert_eq!(
+        s.search_filtered("upgraded", None, None, 10).unwrap().len(),
+        1
+    );
 }
 
 /// The frozen v1 schema, verbatim as migration 1 created it (see the v1
@@ -169,8 +172,16 @@ fn v1_database_with_data_upgrades_in_place_to_v2() {
     let stats = s.stats().unwrap();
     assert_eq!(stats.total, 7);
     assert_eq!(stats.by_source.len(), 1);
-    assert_eq!(s.search("vintage", 10).unwrap().len(), 7);
-    assert_eq!(s.search("\"v1 era\"", 10).unwrap().len(), 7);
+    assert_eq!(
+        s.search_filtered("vintage", None, None, 10).unwrap().len(),
+        7
+    );
+    assert_eq!(
+        s.search_filtered("\"v1 era\"", None, None, 10)
+            .unwrap()
+            .len(),
+        7
+    );
 
     // The schema v2 addition is live: the IMAP cursor round-trips.
     assert!(s.get_imap_state("imap/gmail", "INBOX").unwrap().is_none());
@@ -277,7 +288,10 @@ fn failed_migration_rolls_back_completely() {
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
     s.insert_message(&msg("integrity", "after-unblock", "post rollback body"))
         .unwrap();
-    assert_eq!(s.search("rollback", 10).unwrap().len(), 1);
+    assert_eq!(
+        s.search_filtered("rollback", None, None, 10).unwrap().len(),
+        1
+    );
 }
 
 #[test]

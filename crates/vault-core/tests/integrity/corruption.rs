@@ -177,17 +177,21 @@ fn fts_index_corruption_is_detected_and_rebuildable() {
     assert_eq!(s.stats().unwrap().total, n);
     for i in 0..n {
         assert!(
-            s.search(&format!("tok{i}"), 1).unwrap().is_empty(),
+            s.search_filtered(&format!("tok{i}"), None, None, 1)
+                .unwrap()
+                .is_empty(),
             "wiped index must not return hits"
         );
     }
 
     // Recovery path: rebuild restores the index exactly.
     s.rebuild_fts().unwrap();
-    assert_eq!(s.search("tok17", 10).unwrap().len(), 1);
+    assert_eq!(s.search_filtered("tok17", None, None, 10).unwrap().len(), 1);
     for i in 0..n {
         assert_eq!(
-            s.search(&format!("tok{i}"), 1).unwrap().len(),
+            s.search_filtered(&format!("tok{i}"), None, None, 1)
+                .unwrap()
+                .len(),
             1,
             "every row must be searchable after rebuild"
         );

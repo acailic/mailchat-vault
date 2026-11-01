@@ -170,7 +170,9 @@ pub(crate) fn cursor(storage: &Storage, user: &str, folder: &str) -> Option<(u32
 /// Search the archive for one phrase; the search-handle bodies from
 /// [`mails`] make each mail individually addressable.
 pub(crate) fn find(storage: &Storage, phrase: &str) -> Vec<Message> {
-    storage.search(&build_match_query(phrase), 100).unwrap()
+    storage
+        .search_filtered(&build_match_query(phrase), None, None, 100)
+        .unwrap()
 }
 
 /// The exact UID set string a `UID FETCH` batch carries, e.g. `"1,2,3"`.

@@ -28,7 +28,11 @@ async function setDate(browser, selector, value) {
 export async function run(ctx) {
   const { withSession, assert, ui } = ctx;
   const settle = (browser) => settleStatus(browser, ui);
-  await withSession({}, async (browser) => {
+  // The fixture mails straddle *UTC* midnight (23:59:30Z / 00:00:30Z); the
+  // date inputs filter by *local* day. Only under TZ=UTC do the two mails
+  // sit on different local dates, so pin the app's timezone the same way
+  // the llm_search fixtures do.
+  await withSession({ env: { TZ: "UTC" } }, async (browser) => {
     await ui.waitForApp(browser);
     if ((await ui.uiMode(browser)) !== "filtered") {
       ctx.skip("date-range UI pending (fm/mailchat-search-ui)");

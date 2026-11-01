@@ -17,6 +17,7 @@
 //! - [`search`]: free-text to FTS5 MATCH query building.
 //! - [`llm`]: LLM-assisted search — natural language to an FTS5 plan, then
 //!   a summary over the top results (privacy-scoped RAG).
+//! - [`query`]: paged/filtered search requests and chat-thread context.
 
 pub mod chat_export;
 pub mod demo;
@@ -26,6 +27,7 @@ pub mod llm;
 pub mod mail;
 pub mod mbox;
 pub mod message;
+pub mod query;
 pub mod search;
 pub mod storage;
 pub mod telegram;
@@ -56,4 +58,6 @@ pub enum Error {
     Tls(#[from] rustls::Error),
     #[error("invalid tls server name: {0}")]
     InvalidServerName(#[from] rustls::pki_types::InvalidDnsNameError),
+    #[error("invalid query: {0}")]
+    InvalidQuery(String),
 }

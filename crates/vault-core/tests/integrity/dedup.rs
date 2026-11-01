@@ -59,7 +59,7 @@ fn reimporting_the_same_mbox_file_never_duplicates() {
     assert_eq!(s.stats().unwrap().total, 2);
     // Stable external ids (Message-ID, or a deterministic content hash when
     // absent) are what make re-imports idempotent.
-    let hits = s.search("kickoff", 10).unwrap();
+    let hits = s.search_filtered("kickoff", None, None, 10).unwrap();
     assert_eq!(hits.len(), 2);
 }
 
@@ -109,7 +109,9 @@ fn same_message_from_mbox_and_whatsapp_lives_once_per_source() {
     assert!(by_source.contains(&("whatsapp", 3)));
 
     // The shared sentence is searchable in both archives' rows.
-    let hits = s.search("\"same words in both channels\"", 10).unwrap();
+    let hits = s
+        .search_filtered("\"same words in both channels\"", None, None, 10)
+        .unwrap();
     assert_eq!(hits.len(), 2, "one hit per source namespace");
     let mut sources: Vec<&str> = hits.iter().map(|m| m.source.as_str()).collect();
     sources.sort_unstable();
@@ -161,6 +163,9 @@ fn identical_external_ids_across_sources_do_not_collide() {
     ));
 
     assert_eq!(s.stats().unwrap().total, 2);
-    assert_eq!(s.search("mbox", 10).unwrap().len(), 1);
-    assert_eq!(s.search("whatsapp", 10).unwrap().len(), 1);
+    assert_eq!(s.search_filtered("mbox", None, None, 10).unwrap().len(), 1);
+    assert_eq!(
+        s.search_filtered("whatsapp", None, None, 10).unwrap().len(),
+        1
+    );
 }

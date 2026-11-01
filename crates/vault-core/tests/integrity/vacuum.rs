@@ -78,21 +78,28 @@ fn vacuum_compacts_keeps_data_and_keeps_fts_in_sync() {
     // (Rows are inserted as i = 0..ROWS with id = i+1, so `id % 2 = 1`
     // deletes the even-i tokens and keeps the odd-i ones.)
     assert!(
-        s.search("unique0", 10).unwrap().is_empty(),
+        s.search_filtered("unique0", None, None, 10)
+            .unwrap()
+            .is_empty(),
         "even-i rows deleted"
     );
     assert!(
-        s.search("unique998", 10).unwrap().is_empty(),
+        s.search_filtered("unique998", None, None, 10)
+            .unwrap()
+            .is_empty(),
         "even-i rows deleted"
     );
     for probe in ["unique1", "unique999", "unique2999"] {
         assert_eq!(
-            s.search(probe, 10).unwrap().len(),
+            s.search_filtered(probe, None, None, 10).unwrap().len(),
             1,
             "{probe} must survive"
         );
     }
-    let total_hits = s.search("padding", u32::MAX).unwrap().len();
+    let total_hits = s
+        .search_filtered("padding", None, None, u32::MAX)
+        .unwrap()
+        .len();
     assert_eq!(total_hits as u64, stats.total, "search must see every row");
 
     // Triggers survived VACUUM: a fresh insert lands in table and index.
@@ -104,7 +111,12 @@ fn vacuum_compacts_keeps_data_and_keeps_fts_in_sync() {
         ))
         .unwrap();
     assert!(matches!(out, InsertOutcome::Inserted(_)));
-    assert_eq!(s.search("unique3000", 10).unwrap().len(), 1);
+    assert_eq!(
+        s.search_filtered("unique3000", None, None, 10)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -128,7 +140,9 @@ fn vacuum_without_deletions_preserves_everything() {
     assert_eq!(integrity_check(&db).as_deref(), Some("ok"));
     assert!(fts_integrity_check(&db).is_ok());
     assert_eq!(
-        s.search("padding", u32::MAX).unwrap().len() as u64,
+        s.search_filtered("padding", None, None, u32::MAX)
+            .unwrap()
+            .len() as u64,
         ROWS as u64
     );
 }
