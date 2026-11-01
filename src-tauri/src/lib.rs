@@ -8,9 +8,9 @@
 //!   optional date range + RAG answer over the top results.
 //! - `llm_status` — LLM availability for the UI (never the key).
 //! - `import_mbox` — manual `.mbox` import (the demo ingest source).
-//! - `import_chat_export` — WhatsApp `.txt` / Telegram `result.json`
-//!   import with format auto-detection (the frontend picks the file via
-//!   the dialog plugin).
+//! - `import_chat_export` — WhatsApp `.txt` / Telegram `result.json` /
+//!   Signal `.json` import with format auto-detection (the frontend picks
+//!   the file via the dialog plugin).
 //! - `sync_imap` — incremental IMAP/Gmail sync (first live mail source).
 //! - `seed_demo` — insert the built-in sample messages (idempotent).
 //! - `stats` — archive counts per source (drives the source filter chips).
@@ -29,6 +29,7 @@ use vault_core::llm::{
 };
 use vault_core::mbox::MboxSource;
 use vault_core::query::{ChatContext, SearchPage, SearchQuery};
+use vault_core::signal::SignalSource;
 use vault_core::storage::Storage;
 use vault_core::telegram::TelegramSource;
 use vault_core::whatsapp::WhatsappSource;
@@ -156,8 +157,9 @@ fn import_mbox(state: State<AppState>, path: String) -> Result<IngestSummary, St
     ingest(&storage, &source).map_err(|e: Error| e.to_string())
 }
 
-/// Import a chat export: a WhatsApp `.txt` export or a Telegram
-/// `result.json` (a directory containing `result.json` works too). The
+/// Import a chat export: a WhatsApp `.txt` export, a Telegram
+/// `result.json`, or a Signal conversation `.json` (e.g. from
+/// `sigtop export-messages -f json`, one file per conversation). The
 /// format is detected from the file contents. Re-importing skips
 /// already-stored messages.
 #[tauri::command]
@@ -176,10 +178,11 @@ fn import_chat_export(state: State<AppState>, path: String) -> Result<IngestSumm
     let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
     let source: Box<dyn Source> = match detect_chat_format(&bytes) {
         Some(ChatFormat::Telegram) => Box::new(TelegramSource::new(&file)),
+        Some(ChatFormat::Signal) => Box::new(SignalSource::new(&file)),
         Some(ChatFormat::WhatsApp) => Box::new(WhatsappSource::new(&file)),
         None => {
             return Err(format!(
-                "unrecognized chat export format: {} (expected a WhatsApp .txt export or a Telegram result.json)",
+                "unrecognized chat export format: {} (expected a WhatsApp .txt export, a Telegram result.json, or a Signal conversation .json)",
                 file.display()
             ))
         }

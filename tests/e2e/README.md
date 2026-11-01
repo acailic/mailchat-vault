@@ -56,6 +56,7 @@ Useful knobs:
 | `06-source-filter` | filter results by source chips (mbox vs demo) | conditional — activates when the filtered-search UI lands |
 | `07-detail-view` | message detail panel + adjacent thread messages, click-through neighbours, Esc | conditional — same |
 | `08-date-range` | date-range filter UI around the near-midnight boundary; undated messages excluded while bounded | conditional — same |
+| `09-signal-import` | import a Signal conversation `.json` (invokes `import_chat_export` directly — the native file chooser cannot be automated) → stats label + signal chip, searchable hit with highlights, detail view with thread context, re-import dedup, renamed re-export dedups by conversation uuid, unrecognized file fails loudly and stores nothing | active (needs the filtered-search UI's source chips) |
 
 ### Conditional specs
 
@@ -83,6 +84,9 @@ tests/e2e/
   harness/assert.mjs tiny assertion helpers
   fixtures/archive.mbox  8-message fixture: near-midnight pair, base64 body,
                      undated mail, distinctive authors/keywords
+  fixtures/signal-conversation.json  Signal conversation export: 5 archiveable
+                     messages + 3 service entries (call history, key change,
+                     profile change)
   specs/*.e2e.mjs     one file per critical path (the `.e2e.mjs` suffix keeps
                      vitest from collecting them as unit tests)
 ```
@@ -94,8 +98,10 @@ inside the repo.
 
 - The suite has been validated against **both UI generations**: the current
   classic UI (5 active specs) and the filtered-search UI from
-  `fm/mailchat-search-ui` (7 active specs — the conditional paths and the
-  arrow-key/`/`/Esc keyboard extras all pass there too).
+  `fm/mailchat-search-ui` (8 active specs — the conditional paths and the
+  arrow-key/`/`/Esc keyboard extras all pass there too). `09-signal-import`
+  needs the filtered-search UI's source chips, so it does not run on the
+  classic UI.
 - WebKitWebDriver quirks the specs deliberately work around: clicking
   `body` targets the page centre (a result row — opens the detail view), so
   focus is parked on the `h1` instead; `findElement` with a volatile
