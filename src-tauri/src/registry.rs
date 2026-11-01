@@ -217,12 +217,17 @@ impl LlmRegistry {
     }
 
     /// Id of the default provider for the menu preselection: the settings
-    /// default, else `env` when the environment fallback is usable, else
-    /// `None` (nothing configured → the UI preselects local-only).
+    /// default (only while it references a configured profile — a dangling
+    /// id from an externally edited file falls through exactly like
+    /// [`Self::select_default`]), else `env` when the environment fallback
+    /// is usable, else `None` (nothing configured → the UI preselects
+    /// local-only).
     pub fn default_provider_id(&self) -> Option<String> {
         self.settings
             .default_provider
-            .clone()
+            .as_ref()
+            .filter(|default| self.settings.providers.iter().any(|p| &p.id == default))
+            .cloned()
             .or_else(|| self.env.as_ref().map(|_| ENV_ID.to_string()))
     }
 
@@ -459,6 +464,23 @@ mod tests {
                 .unwrap()
                 .available
         );
+    }
+
+    #[test]
+    fn dangling_default_falls_through_to_env_everywhere() {
+        let settings = settings_with(vec![], Some("gone"));
+        let r = registry(settings, &[], Some(env_config()));
+        match r.select(None) {
+            Selection::Provider { id, config, .. } => {
+                assert_eq!(id, ENV_ID);
+                assert_eq!(config.model, "env-model");
+            }
+            other => panic!("env should be selected: {other:?}"),
+        }
+        assert_eq!(r.default_provider_id(), Some(ENV_ID.into()));
+        let status = r.status();
+        assert!(status.enabled);
+        assert_eq!(status.default_provider, Some(ENV_ID.into()));
     }
 
     #[test]
