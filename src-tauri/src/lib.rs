@@ -9,15 +9,18 @@
 //! - `import_chat_export` — WhatsApp `.txt` / Telegram `result.json`
 //!   import with format auto-detection (the frontend picks the file via
 //!   the dialog plugin).
+//! - `sync_imap` — incremental IMAP/Gmail sync (first live mail source).
 //! - `seed_demo` — insert the built-in sample messages (idempotent).
 //! - `stats` — archive counts per source.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::Utc;
+use serde::Serialize;
 use tauri::{Manager, State};
 use vault_core::chat_export::{detect_chat_format, ChatFormat};
+use vault_core::imap::{self, FolderSyncSummary, ImapConfig};
 use vault_core::ingest::{ingest, Collected, IngestSummary, Source};
 use vault_core::llm::{
     self, AnthropicLlm, AskOutcome, LlmConfig, LlmStatus, PlanSource, PlannedQuery, QueryPlan,
@@ -29,11 +32,23 @@ use vault_core::telegram::TelegramSource;
 use vault_core::whatsapp::WhatsappSource;
 use vault_core::{demo, message, Error, Result as CoreResult};
 
+mod secrets;
+
 /// Shared app state: one open storage handle guarded by a mutex, plus the
 /// optional LLM backend (`None` when no API key is configured).
 struct AppState {
-    storage: Mutex<Storage>,
+    storage: Arc<Mutex<Storage>>,
     llm: Option<AnthropicLlm>,
+}
+
+/// Result of an IMAP sync: per-folder summaries plus where an entered
+/// password was kept (the OS keyring or session memory).
+#[derive(Debug, Serialize)]
+struct ImapSyncOutcome {
+    folders: Vec<FolderSyncSummary>,
+    /// `None` when a previously stored password was reused; `Some(store)`
+    /// when the user just entered one and it was saved to `store`.
+    saved_to: Option<secrets::SecretStore>,
 }
 
 fn lock<'a>(state: &'a State<'_, AppState>) -> Result<MutexGuard<'a, Storage>, String> {
@@ -164,6 +179,67 @@ fn import_chat_export(state: State<AppState>, path: String) -> Result<IngestSumm
     ingest(&storage, source.as_ref()).map_err(|e: Error| e.to_string())
 }
 
+/// Incrementally sync an IMAP account (Gmail via app password, or any
+/// host/port/user/password server). Only messages new since the last sync
+/// are fetched; re-syncing never duplicates.
+///
+/// Password handling: an entered password is used for this sync and kept in
+/// the OS keyring when available, otherwise in session memory only — never
+/// in the vault database. An empty password field reuses the stored one.
+#[tauri::command]
+async fn sync_imap(
+    state: State<'_, AppState>,
+    secrets: State<'_, secrets::Secrets>,
+    host: String,
+    port: Option<u16>,
+    username: String,
+    password: String,
+    folders: Option<Vec<String>>,
+) -> Result<ImapSyncOutcome, String> {
+    // Email addresses and hostnames are case-insensitive, so one account
+    // spelled with different casing must map to one dedup namespace
+    // (`imap:<username>`) and one keyring entry (`user@host`).
+    let host = host.trim().to_lowercase();
+    let username = username.trim().to_lowercase();
+    if host.is_empty() {
+        return Err("host is required (e.g. imap.gmail.com)".into());
+    }
+    if username.is_empty() {
+        return Err("username is required".into());
+    }
+
+    // Resolve the password: entered now (and remembered) or stored before.
+    let (password, saved_to) = if password.is_empty() {
+        let stored = secrets
+            .load(&host, &username)
+            .ok_or_else(|| "no password stored for this account — enter one".to_string())?;
+        (stored, None)
+    } else {
+        let store = secrets.save(&host, &username, &password);
+        (password, Some(store))
+    };
+
+    let config = ImapConfig {
+        host,
+        port: port.unwrap_or(imap::GMAIL_IMAP_PORT),
+        username,
+        password,
+        folders: folders.unwrap_or_default(),
+    };
+    let storage = Arc::clone(&state.storage);
+    // Network sync can take minutes; keep it off the UI thread.
+    let folders = tauri::async_runtime::spawn_blocking(move || {
+        let storage = storage
+            .lock()
+            .map_err(|e| format!("storage lock poisoned: {e}"))?;
+        imap::sync(&config, &storage).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("sync task failed: {e}"))??;
+
+    Ok(ImapSyncOutcome { folders, saved_to })
+}
+
 /// Insert the built-in demo messages so a fresh install has searchable data.
 #[tauri::command]
 fn seed_demo(state: State<AppState>) -> Result<IngestSummary, String> {
@@ -208,9 +284,10 @@ pub fn run() {
                 }
             };
             app.manage(AppState {
-                storage: Mutex::new(storage),
+                storage: Arc::new(Mutex::new(storage)),
                 llm,
             });
+            app.manage(secrets::Secrets::new());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -219,6 +296,7 @@ pub fn run() {
             llm_status,
             import_mbox,
             import_chat_export,
+            sync_imap,
             seed_demo,
             stats
         ])

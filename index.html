@@ -15,6 +15,7 @@
       }
       header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; }
       h1 { font-size: 20px; margin: 0; }
+      h2 { font-size: 15px; margin: 0 0 8px; color: gray; }
       #stats { color: gray; font-size: 13px; }
       section { margin-bottom: 16px; }
       .row { display: flex; gap: 8px; }
@@ -76,6 +77,23 @@
         <button id="seed-btn" type="button">Load demo</button>
       </div>
       <div id="import-status" class="meta" style="margin-top: 6px"></div>
+    </section>
+
+    <section>
+      <h2>IMAP sync</h2>
+      <div class="row">
+        <input id="imap-host" type="text" placeholder="imap.gmail.com" value="imap.gmail.com" />
+        <input id="imap-port" type="number" placeholder="993" value="993" style="max-width: 90px" />
+      </div>
+      <div class="row">
+        <input id="imap-user" type="text" placeholder="you@gmail.com" />
+        <input id="imap-pass" type="password" placeholder="App password" autocomplete="off" />
+      </div>
+      <div class="row">
+        <input id="imap-folders" type="text" placeholder="INBOX (comma-separated folders)" />
+        <button id="imap-sync-btn" type="button">Sync</button>
+      </div>
+      <div id="imap-status" class="meta" style="margin-top: 6px"></div>
     </section>
 
     <script type="module" src="/src/main.ts"></script>

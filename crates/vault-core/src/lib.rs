@@ -6,20 +6,24 @@
 //! Layout:
 //! - [`message`]: the message model (`NewMessage` in, `Message` out).
 //! - [`storage`]: SQLite database with FTS5 full-text index, migrations,
-//!   idempotent inserts, search.
+//!   idempotent inserts, search, IMAP sync cursors.
 //! - [`ingest`]: the [`ingest::Source`] abstraction and idempotent ingest.
+//! - [`mail`]: shared RFC 5322 raw-mail parsing (used by mbox and IMAP).
 //! - [`mbox`]: the manual/demo `.mbox` file source.
 //! - [`whatsapp`]: the WhatsApp `.txt` chat export source.
 //! - [`telegram`]: the Telegram `result.json` chat export source.
 //! - [`chat_export`]: format detection for picked chat export files.
+//! - [`imap`]: the incremental IMAP/Gmail source.
 //! - [`search`]: free-text to FTS5 MATCH query building.
 //! - [`llm`]: LLM-assisted search — natural language to an FTS5 plan, then
 //!   a summary over the top results (privacy-scoped RAG).
 
 pub mod chat_export;
 pub mod demo;
+pub mod imap;
 pub mod ingest;
 pub mod llm;
+pub mod mail;
 pub mod mbox;
 pub mod message;
 pub mod search;
@@ -46,4 +50,10 @@ pub enum Error {
     Llm(String),
     #[error("invalid date filter: {0}")]
     InvalidDate(String),
+    #[error("imap error: {0}")]
+    Imap(#[from] ::imap::Error),
+    #[error("tls error: {0}")]
+    Tls(#[from] rustls::Error),
+    #[error("invalid tls server name: {0}")]
+    InvalidServerName(#[from] rustls::pki_types::InvalidDnsNameError),
 }

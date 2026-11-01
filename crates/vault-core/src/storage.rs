@@ -12,9 +12,10 @@ use crate::message::{InsertOutcome, Message, NewMessage, SourceCount, Stats};
 use crate::{Error, Result};
 
 /// Ordered schema migrations; each entry runs once, inside a transaction.
-const MIGRATIONS: &[(i64, &str)] = &[(
-    1,
-    r#"
+const MIGRATIONS: &[(i64, &str)] = &[
+    (
+        1,
+        r#"
         CREATE TABLE messages (
             id           INTEGER PRIMARY KEY,
             source       TEXT    NOT NULL,
@@ -52,7 +53,21 @@ const MIGRATIONS: &[(i64, &str)] = &[(
             VALUES (new.id, new.body, new.author);
         END;
         "#,
-)];
+    ),
+    (
+        2,
+        r#"
+        CREATE TABLE imap_sync_state (
+            source      TEXT    NOT NULL,
+            folder      TEXT    NOT NULL,
+            uidvalidity INTEGER NOT NULL,
+            last_uid    INTEGER NOT NULL DEFAULT 0,
+            updated_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (source, folder)
+        );
+        "#,
+    ),
+];
 
 /// Handle to the vault database.
 ///
@@ -266,6 +281,51 @@ impl Storage {
         self.conn.execute(
             "INSERT INTO messages_fts (messages_fts) VALUES ('delete-all')",
             [],
+        )?;
+        Ok(())
+    }
+
+    /// Load the incremental-sync cursor (UIDVALIDITY + last fetched UID)
+    /// for one `(source, folder)`. See [`crate::imap`].
+    pub fn get_imap_state(
+        &self,
+        source: &str,
+        folder: &str,
+    ) -> Result<Option<crate::message::ImapSyncState>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT uidvalidity, last_uid FROM imap_sync_state
+                 WHERE source = ?1 AND folder = ?2",
+                params![source, folder],
+                |row| {
+                    Ok(crate::message::ImapSyncState {
+                        uidvalidity: row.get(0)?,
+                        last_uid: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Save (upsert) the incremental-sync cursor for one `(source, folder)`.
+    /// Stores only folder cursors — never credentials.
+    pub fn set_imap_state(
+        &self,
+        source: &str,
+        folder: &str,
+        uidvalidity: u32,
+        last_uid: u32,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO imap_sync_state (source, folder, uidvalidity, last_uid, updated_at)
+             VALUES (?1, ?2, ?3, ?4, datetime('now'))
+             ON CONFLICT (source, folder) DO UPDATE SET
+                uidvalidity = excluded.uidvalidity,
+                last_uid    = excluded.last_uid,
+                updated_at  = excluded.updated_at",
+            params![source, folder, uidvalidity, last_uid],
         )?;
         Ok(())
     }
