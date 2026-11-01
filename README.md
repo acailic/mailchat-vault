@@ -120,6 +120,14 @@ npm run check            # TypeScript type-check
 cargo test --workspace   # also compiles the Tauri app (needs the Linux libs above)
 ```
 
+The parser layer is also fuzzed (`crates/vault-core/tests/fuzz/`): a
+hand-crafted malformed-input corpus plus deterministic seeded structured
+generators assert that no input — truncated files, mixed formats, Unicode
+edge cases, duplicate JSON keys, bogus timezones, hostile MIME nesting —
+may ever panic a parser, only produce an `Err` or a counted parse
+failure. Raise the random rounds locally with
+`MC_FUZZ_ITERS=100000 cargo test -p vault-core --test fuzz --release`.
+
 CI (`.github/workflows/ci.yml`) runs all of the above plus `clippy` and `fmt --check` on every push and PR.
 
 IMAP sync is tested hermetically against an in-process mock IMAP4rev1 server (the greenmail equivalent), including an integration test that ingests the same `.mbox` fixture through both paths and compares the archives. A real-server test (`tests/imap_gmail_manual.rs`) is `#[ignore]`d: it needs live credentials and is **not** run in CI. To run it against your own account:
