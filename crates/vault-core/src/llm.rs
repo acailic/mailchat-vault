@@ -660,7 +660,9 @@ mod tests {
             })
         })
         .unwrap_err();
-        assert!(err.to_string().contains("refusing to send an Anthropic key to z.ai"));
+        assert!(err
+            .to_string()
+            .contains("refusing to send an Anthropic key to z.ai"));
 
         // With an explicit base URL it is honored, and that URL is used.
         let cfg = LlmConfig::from_lookup(|name| match name {
@@ -772,10 +774,8 @@ mod tests {
 
     #[test]
     fn translate_canonicalizes_non_padded_dates() {
-        let llm = MockLlm::with_replies([
-            "{\"match\": \"x\", \"date_from\": \"2026-10-1\", \
-              \"date_to\": \"2026-11-9\"}",
-        ]);
+        let llm = MockLlm::with_replies(["{\"match\": \"x\", \"date_from\": \"2026-10-1\", \
+              \"date_to\": \"2026-11-9\"}"]);
         let plan = translate(&llm, "q", today()).unwrap();
         assert_eq!(plan.date_from.as_deref(), Some("2026-10-01"));
         assert_eq!(plan.date_to.as_deref(), Some("2026-11-09"));
@@ -817,7 +817,7 @@ mod tests {
             "no json here at all",
             "{\"date_from\": \"2026-01-01\"}", // match missing
             "{\"match\": \"   \"}",            // match blank
-            "{\"match\": \"ok\", \"date_from\": \"January\"}",          // bad date
+            "{\"match\": \"ok\", \"date_from\": \"January\"}", // bad date
             "{\"match\": \"ok\", \"date_to\": \"+262143-12-31\"}", // unorderable wide year
         ] {
             let llm = MockLlm::with_replies([bad]);
