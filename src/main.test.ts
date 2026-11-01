@@ -1231,5 +1231,425 @@ describe("folder watching", () => {
     await vi.waitFor(() =>
       expect($("#watch-status").textContent).toContain("No folders watched yet"),
     );
+// Ask provider menu (multi-provider)
+// ---------------------------------------------------------------------------
+
+const LOCAL_ITEM = {
+  id: "local",
+  name: "Local full-text",
+  kind: "local",
+  model: "",
+  host: "",
+  available: true,
+};
+
+const ZAI_ITEM = {
+  id: "zai",
+  name: "z.ai GLM",
+  kind: "zai",
+  model: "glm-5",
+  host: "api.z.ai",
+  available: true,
+};
+
+const KEYLESS_ITEM = {
+  id: "mine",
+  name: "Custom",
+  kind: "custom",
+  model: "m",
+  host: "127.0.0.1",
+  available: false,
+};
+
+function menuOptions(): Array<{ value: string; text: string; disabled: boolean }> {
+  const select = $<HTMLSelectElement>("#ask-provider");
+  return [...select.options].map((o) => ({
+    value: o.value,
+    text: o.textContent ?? "",
+    disabled: o.disabled,
+  }));
+}
+
+function emptyOutcome() {
+  return {
+    plan: { match_expr: "x", date_from: null, date_to: null },
+    plan_source: "no_llm",
+    ranking: "fts_only",
+    results: [],
+    answer: null,
+    notes: [],
+  };
+}
+
+describe("ask provider menu", () => {
+  it("boots with the menu built from llm_status, default preselected", async () => {
+    tauri.handlers.set("llm_status", () => ({
+      enabled: true,
+      model: "glm-5",
+      host: "api.z.ai",
+      summarize_top: 8,
+      providers: [LOCAL_ITEM, ZAI_ITEM, KEYLESS_ITEM],
+      default_provider: "zai",
+    }));
+    await boot();
+    await vi.waitFor(() => expect(menuOptions().length).toBe(3));
+    expect(menuOptions()).toEqual([
+      { value: "local", text: "Local full-text (no LLM)", disabled: false },
+      { value: "zai", text: "z.ai GLM (glm-5 · api.z.ai)", disabled: false },
+      { value: "mine", text: "Custom (m · 127.0.0.1) — no API key", disabled: true },
+    ]);
+    expect(input("#ask-provider").value).toBe("zai");
+    expect($("#llm-note").textContent).toContain("LLM assist is on (glm-5 via api.z.ai)");
+    expect($("#llm-note").textContent).toContain("top 8 result messages");
+  });
+
+  it("preselects local-only when nothing is configured", async () => {
+    tauri.handlers.set("llm_status", () => ({
+      enabled: false,
+      model: "",
+      host: "",
+      summarize_top: 8,
+      providers: [LOCAL_ITEM],
+      default_provider: null,
+    }));
+    await boot();
+    await vi.waitFor(() => expect(input("#ask-provider").value).toBe("local"));
+    expect($("#llm-note").textContent).toContain("LLM assist is off");
+    expect($("#llm-note").textContent).toContain("nothing leaves this machine");
+  });
+
+  it("an ask sends the selected provider id and the note follows selection", async () => {
+    tauri.handlers.set("llm_status", () => ({
+      enabled: true,
+      model: "glm-5",
+      host: "api.z.ai",
+      summarize_top: 8,
+      providers: [LOCAL_ITEM, ZAI_ITEM],
+      default_provider: "zai",
+    }));
+    tauri.handlers.set("llm_ask", () => emptyOutcome());
+    await boot();
+    await vi.waitFor(() => expect(input("#ask-provider").value).toBe("zai"));
+
+    // Switch to local mode: the privacy note switches before asking.
+    input("#ask-provider").value = "local";
+    fireChange(input("#ask-provider"));
+    expect($("#llm-note").textContent).toContain("LLM assist is off");
+
+    input("#ask").value = "vault?";
+    pressKey(input("#ask"), "Enter");
+    await vi.waitFor(() =>
+      expect(tauri.calls.find((c) => c.cmd === "llm_ask")).toBeTruthy(),
+    );
+    expect(tauri.calls.find((c) => c.cmd === "llm_ask")!.args).toEqual({
+      question: "vault?",
+      limit: 50,
+      provider: "local",
+    });
+
+    // And back to the provider for the next ask.
+    input("#ask-provider").value = "zai";
+    fireChange(input("#ask-provider"));
+    expect($("#llm-note").textContent).toContain("LLM assist is on");
+    input("#ask").value = "again";
+    pressKey(input("#ask"), "Enter");
+    await vi.waitFor(() => expect(tauri.calls.filter((c) => c.cmd === "llm_ask").length).toBe(2));
+    expect(tauri.calls.filter((c) => c.cmd === "llm_ask")[1].args).toEqual({
+      question: "again",
+      limit: 50,
+      provider: "zai",
+    });
+  });
+
+  it("a menu rebuild keeps a still-valid selection, else falls back to the default", async () => {
+    let status = {
+      enabled: true,
+      model: "glm-5",
+      host: "api.z.ai",
+      summarize_top: 8,
+      providers: [LOCAL_ITEM, ZAI_ITEM, KEYLESS_ITEM],
+      default_provider: "zai",
+    };
+    tauri.handlers.set("llm_status", () => status);
+    tauri.handlers.set("settings_save", (args: unknown) => {
+      void (args as { payload: unknown }).payload;
+      // Simulate: the keyless provider got a key, zai was removed.
+      status = {
+        enabled: true,
+        model: "m",
+        host: "127.0.0.1",
+        summarize_top: 8,
+        providers: [LOCAL_ITEM, { ...KEYLESS_ITEM, available: true }],
+        default_provider: "mine",
+      };
+      return viewWith((v) => {
+        v.default_provider = "mine";
+        v.providers = [customProvider({ has_key: true })];
+      });
+    });
+    await boot();
+    await vi.waitFor(() => expect(input("#ask-provider").value).toBe("zai"));
+
+    // User picks mine; it is disabled but selectable state is only guarded
+    // on rebuild, so first make it available, then keep it across a save.
+    status = { ...status, providers: [LOCAL_ITEM, ZAI_ITEM, { ...KEYLESS_ITEM, available: true }] };
+    // Save triggers a menu rebuild: selection "zai" no longer exists → the
+    // new default "mine" is preselected.
+    $("#settings-save-btn").click();
+    await vi.waitFor(() => expect(input("#ask-provider").value).toBe("mine"));
+    expect(menuOptions().find((o) => o.value === "zai")).toBeUndefined();
+    expect($("#llm-note").textContent).toContain("LLM assist is on (m via 127.0.0.1)");
+  });
+
+  it("a save that does not change the default keeps the user's selection", async () => {
+    let status = {
+      enabled: true,
+      model: "glm-5",
+      host: "api.z.ai",
+      summarize_top: 8,
+      providers: [LOCAL_ITEM, ZAI_ITEM],
+      default_provider: "zai",
+    };
+    tauri.handlers.set("llm_status", () => status);
+    tauri.handlers.set("settings_save", () => viewWith()); // same default "zai"
+    await boot();
+    await vi.waitFor(() => expect(input("#ask-provider").value).toBe("zai"));
+
+    // The user deliberately switches to local, then saves an unrelated
+    // change (theme): their selection survives the rebuild.
+    input("#ask-provider").value = "local";
+    fireChange(input("#ask-provider"));
+    input("#theme").value = "dark";
+    fireChange(input("#theme"));
+    $("#settings-save-btn").click();
+    await vi.waitFor(() => expect($("#settings-note").textContent).toContain("Saved."));
+    await flush();
+    expect(input("#ask-provider").value).toBe("local");
+    expect($("#llm-note").textContent).toContain("LLM assist is off");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Settings screen
+// ---------------------------------------------------------------------------
+
+function zaiProvider(extra: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "zai",
+    name: "",
+    kind: "zai",
+    base_url: "",
+    model: "",
+    has_key: true,
+    ...extra,
+  };
+}
+
+function customProvider(extra: Partial<Record<string, unknown>> = {}) {
+  return {
+    id: "mine",
+    name: "Mine",
+    kind: "custom",
+    base_url: "http://127.0.0.1:9/api",
+    model: "m",
+    has_key: false,
+    ...extra,
+  };
+}
+
+function viewWith(mutate: (v: Record<string, unknown>) => void = () => {}): Record<string, unknown> {
+  const view = {
+    providers: [zaiProvider()],
+    default_provider: "zai",
+    theme: "system",
+    summarize_top: 8,
+    env: null,
+    env_error: null,
+    settings_error: null,
+    key_store: null,
+  } as Record<string, unknown>;
+  mutate(view);
+  return view;
+}
+
+function rowIds(): string[] {
+  return [...win.document.querySelectorAll(".provider-row")].map(
+    (r) => (r as unknown as HTMLElement).dataset.id!,
+  );
+}
+
+function rowEl(id: string): HTMLElement {
+  return $<HTMLElement>(`.provider-row[data-id="${id}"]`);
+}
+
+function rowInput(id: string, cls: string): HTMLInputElement {
+  return rowEl(id).querySelector(`.${cls}`) as unknown as HTMLInputElement;
+}
+
+describe("settings screen", () => {
+  it("renders providers, the default radio, options, and env diagnostics", async () => {
+    tauri.handlers.set("settings_get", () =>
+      viewWith((v) => {
+        v.providers = [zaiProvider(), customProvider()];
+        v.default_provider = "mine";
+        v.theme = "dark";
+        v.summarize_top = 12;
+        v.env = { model: "env-model", host: "127.0.0.1" };
+        v.env_error = null;
+        v.key_store = "os_keyring";
+      }),
+    );
+    await boot();
+    await vi.waitFor(() => expect(rowIds()).toEqual(["zai", "mine"]));
+    // Row contents: kind label, values, key placeholder for a stored key.
+    expect($<HTMLElement>('.provider-row[data-id="zai"] .kind-label').textContent)
+      .toBe("z.ai GLM");
+    expect(rowInput("zai", "prov-name").value).toBe("");
+    expect(rowInput("zai", "prov-url").value).toBe("");
+    expect(rowInput("zai", "prov-url").placeholder).toContain("api.z.ai");
+    expect(rowInput("zai", "prov-key").placeholder).toContain("stored");
+    expect(rowInput("mine", "prov-url").value).toBe("http://127.0.0.1:9/api");
+    // Default radio on the right row, theme and option applied.
+    const checked = $<HTMLInputElement>('input[name="default-provider"]:checked');
+    expect(checked?.value).toBe("mine");
+    expect(input("#theme").value).toBe("dark");
+    expect(input("#summarize-top").value).toBe("12");
+    expect(document.documentElement.style.colorScheme).toBe("dark");
+    // Key-store note and the environment fallback line.
+    expect($("#settings-note").textContent).toContain("OS keyring");
+    expect($("#env-info").textContent).toContain("Environment fallback: env-model via 127.0.0.1");
+  });
+
+  it("surfaces env pairing errors and settings-file problems", async () => {
+    tauri.handlers.set("settings_get", () =>
+      viewWith((v) => {
+        v.env_error = "ANTHROPIC_API_KEY is set but ANTHROPIC_BASE_URL is not";
+        v.settings_error = "settings error: invalid settings.json";
+      }),
+    );
+    await boot();
+    await vi.waitFor(() => expect($("#env-info").textContent).toContain("ANTHROPIC_BASE_URL"));
+    expect($("#env-info").textContent).toContain("Settings file problem");
+  });
+
+  it("adds provider rows with unique ids and per-kind prefills", async () => {
+    await boot();
+    input("#add-kind").value = "anthropic";
+    $("#add-provider-btn").click();
+    input("#add-kind").value = "custom";
+    $("#add-provider-btn").click();
+    $("#add-provider-btn").click();
+    await vi.waitFor(() => expect(rowIds()).toEqual(["anthropic", "custom", "custom-2"]));
+    expect(rowInput("anthropic", "prov-url").value).toBe("https://api.anthropic.com");
+    expect(rowInput("anthropic", "prov-model").value).not.toBe("");
+    expect(rowInput("custom", "prov-url").value).toBe("");
+  });
+
+  it("saving sends the collected form plus non-empty key updates, and re-renders", async () => {
+    let saved: { cmd: string; args: unknown } | undefined;
+    tauri.handlers.set("settings_get", () => viewWith());
+    tauri.handlers.set("settings_save", (args: unknown) => {
+      saved = { cmd: "settings_save", args: (args as { payload: unknown }).payload };
+      return viewWith((v) => {
+        v.theme = "light";
+        v.key_store = "memory";
+      });
+    });
+    tauri.handlers.set("llm_status", () => ({
+      enabled: true,
+      model: "glm-5",
+      host: "api.z.ai",
+      summarize_top: 8,
+      providers: [LOCAL_ITEM, ZAI_ITEM],
+      default_provider: "zai",
+    }));
+    await boot();
+
+    // Edit the zai row: name + a new key; add a custom provider with a key.
+    rowInput("zai", "prov-name").value = "Work GLM";
+    rowInput("zai", "prov-key").value = "  secret-1  ";
+    input("#add-kind").value = "custom";
+    $("#add-provider-btn").click();
+    await vi.waitFor(() => expect(rowIds()).toEqual(["zai", "custom"]));
+    rowInput("custom", "prov-url").value = "http://127.0.0.1:9/api";
+    rowInput("custom", "prov-model").value = "m";
+    rowInput("custom", "prov-key").value = "secret-2";
+    input("#summarize-top").value = "20";
+    input("#theme").value = "light";
+
+    $("#settings-save-btn").click();
+    await vi.waitFor(() => expect($("#settings-note").textContent).toContain("Saved."));
+    expect(saved!.args).toEqual({
+      providers: [
+        { id: "zai", name: "Work GLM", kind: "zai", base_url: "", model: "" },
+        { id: "custom", name: "", kind: "custom", base_url: "http://127.0.0.1:9/api", model: "m" },
+      ],
+      default_provider: "zai",
+      theme: "light",
+      summarize_top: 20,
+      api_keys: [
+        { id: "zai", key: "secret-1" }, // trimmed
+        { id: "custom", key: "secret-2" },
+      ],
+    });
+    // The response re-renders: key inputs reset, theme applied, note names
+    // the fallback store.
+    expect(rowInput("zai", "prov-key").value).toBe("");
+    expect(document.documentElement.style.colorScheme).toBe("light");
+    expect($("#settings-note").textContent).toContain("session memory");
+  });
+
+  it("a validation refusal shows the backend error and saves nothing", async () => {
+    tauri.handlers.set("settings_get", () => viewWith());
+    tauri.handlers.set(
+      "settings_save",
+      () => Promise.reject("settings error: provider “Mine”: a custom provider needs a base URL"),
+    );
+    await boot();
+    $("#settings-save-btn").click();
+    await vi.waitFor(() => expect($("#settings-note").textContent).toContain("Not saved"));
+    expect($("#settings-note").textContent).toContain("needs a base URL");
+    expect($("#settings-note").classList.contains("error")).toBe(true);
+    // The form keeps the user's edits (no re-render on failure).
+    expect(rowIds()).toEqual(["zai"]);
+  });
+
+  it("remove drops a row from the form; clear-key asks the backend and re-renders", async () => {
+    tauri.handlers.set("settings_get", () =>
+      viewWith((v) => {
+        v.providers = [zaiProvider(), customProvider({ has_key: true })];
+      }),
+    );
+    tauri.handlers.set("llm_key_clear", (args: unknown) => {
+      const { id } = args as { id: string };
+      expect(id).toBe("mine");
+      return viewWith((v) => {
+        v.providers = [zaiProvider(), customProvider({ has_key: false })];
+      });
+    });
+    await boot();
+    await vi.waitFor(() => expect(rowIds()).toEqual(["zai", "mine"]));
+
+    // Clear key: one command with the row id.
+    ($<HTMLElement>('.provider-row[data-id="mine"] .clear-key-btn')).click();
+    await vi.waitFor(() =>
+      expect(tauri.calls.find((c) => c.cmd === "llm_key_clear")).toBeTruthy(),
+    );
+    await vi.waitFor(() =>
+      expect($<HTMLElement>('.provider-row[data-id="mine"] .clear-key-btn').hidden).toBe(true),
+    );
+
+    // Remove: the row disappears client-side (picked up by the next save).
+    ($<HTMLElement>('.provider-row[data-id="mine"] .remove-prov-btn')).click();
+    await vi.waitFor(() => expect(rowIds()).toEqual(["zai"]));
+  });
+
+  it("theme changes apply immediately, not only after save", async () => {
+    tauri.handlers.set("settings_get", () => viewWith((v) => (v.theme = "system")));
+    await boot();
+    await vi.waitFor(() => expect(input("#theme").value).toBe("system"));
+    input("#theme").value = "dark";
+    fireChange(input("#theme"));
+    expect(document.documentElement.style.colorScheme).toBe("dark");
   });
 });

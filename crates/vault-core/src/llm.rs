@@ -63,7 +63,7 @@ pub struct LlmConfig {
 /// `Url` (lowercase host, userinfo and port excluded), with a single
 /// trailing root dot stripped; `None` when the URL does not parse, which
 /// every comparison treats as not the z.ai provider.
-fn endpoint_host(url: &str) -> Option<String> {
+pub(crate) fn endpoint_host(url: &str) -> Option<String> {
     let parsed = Url::parse(url).ok()?;
     let host = parsed.host_str()?;
     Some(host.strip_suffix('.').unwrap_or(host).to_string())
@@ -390,6 +390,9 @@ pub enum PlanSource {
     LlmFallback,
     /// No LLM configured; plain term search.
     NoLlm,
+    /// Local-only mode was chosen for this ask (provider menu); nothing
+    /// was sent anywhere.
+    Local,
 }
 
 /// A [`QueryPlan`] plus its provenance and any degradation notes.
@@ -680,6 +683,10 @@ pub fn ask(
 }
 
 /// What the UI needs to know about LLM availability. Never exposes the key.
+///
+/// The scalar fields describe the **default** selection (what an ask with
+/// no explicit provider uses); `providers` is the full provider menu for
+/// the Ask UI (local-only, configured profiles, environment fallback).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LlmStatus {
     pub enabled: bool,
@@ -689,23 +696,30 @@ pub struct LlmStatus {
     pub host: String,
     /// How many top results feed the summary.
     pub summarize_top: usize,
+    /// The provider menu (see [`crate::settings::build_menu`]).
+    pub providers: Vec<crate::settings::ProviderMenuItem>,
+    /// Id of the default provider (`None` = local-only when nothing is
+    /// configured; `Some("env")` when the environment fallback is used).
+    pub default_provider: Option<String>,
 }
 
 impl LlmStatus {
-    pub fn from_config(config: Option<&LlmConfig>) -> Self {
-        match config {
-            Some(c) => Self {
-                enabled: true,
-                model: c.model.clone(),
-                host: c.host(),
-                summarize_top: DEFAULT_SUMMARIZE_TOP,
-            },
-            None => Self {
-                enabled: false,
+    /// Status for a local-only setup with no provider menu extras (tests).
+    pub fn local_only() -> Self {
+        Self {
+            enabled: false,
+            model: String::new(),
+            host: String::new(),
+            summarize_top: DEFAULT_SUMMARIZE_TOP,
+            providers: vec![crate::settings::ProviderMenuItem {
+                id: crate::settings::LOCAL_ID.to_string(),
+                name: "Local full-text".to_string(),
+                kind: crate::settings::LOCAL_ID.to_string(),
                 model: String::new(),
                 host: String::new(),
-                summarize_top: DEFAULT_SUMMARIZE_TOP,
-            },
+                available: true,
+            }],
+            default_provider: None,
         }
     }
 }

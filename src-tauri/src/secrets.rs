@@ -1,17 +1,19 @@
-//! IMAP account password storage: OS keyring first, memory fallback.
+//! IMAP account passwords and LLM API keys: OS keyring first, memory
+//! fallback.
 //!
 //! Preferred store: the OS keyring — Secret Service (GNOME Keyring/KWallet)
 //! on Linux via a pure-Rust zbus client, Keychain Services on macOS,
 //! Credential Manager on Windows — under the service name `mailchat-vault`,
-//! one entry per account (`user@host`).
+//! one entry per secret: IMAP accounts as `user@host`, LLM provider API
+//! keys as `llm:<provider-id>`.
 //!
 //! When the OS keyring is unavailable at runtime (headless session, locked
-//! keyring, unsupported platform), the password is kept **only in process
+//! keyring, unsupported platform), the secret is kept **only in process
 //! memory for the current app session** and disappears when the app exits.
-//! Passwords are never written to the vault database (see
-//! `vault_core::imap` for the ingest-side guarantees) and never logged.
-//! [`Secrets::save`] reports which store is active so the UI can tell the
-//! user.
+//! Secrets are never written to the vault database (see
+//! `vault_core::imap` for the ingest-side guarantees), never written to the
+//! settings file, and never logged. [`Secrets::save`] reports which store
+//! is active so the UI can tell the user.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -47,6 +49,11 @@ impl Secrets {
     /// Keyring/memory key for one account.
     fn account_key(host: &str, username: &str) -> String {
         format!("{username}@{host}")
+    }
+
+    /// Keyring/memory key for one LLM provider profile's API key.
+    fn llm_key(provider_id: &str) -> String {
+        format!("llm:{provider_id}")
     }
 
     /// Remember a password for `user@host`: OS keyring when available,
@@ -99,6 +106,57 @@ impl Secrets {
             .expect("secrets memory lock")
             .get(key)
             .cloned()
+    }
+
+    /// Store the API key of LLM provider profile `provider_id`: OS keyring
+    /// when available, otherwise session memory (same policy as IMAP
+    /// passwords). Returns the store that was used.
+    pub fn save_llm_key(&self, provider_id: &str, key: &str) -> SecretStore {
+        let entry_key = Self::llm_key(provider_id);
+        let keyring =
+            keyring::Entry::new(SERVICE, &entry_key).and_then(|entry| entry.set_password(key));
+        match keyring {
+            Ok(()) => SecretStore::OsKeyring,
+            Err(_) => {
+                self.memory
+                    .lock()
+                    .expect("secrets memory lock")
+                    .insert(entry_key, key.to_string());
+                SecretStore::Memory
+            }
+        }
+    }
+
+    /// Load the stored API key for provider profile `provider_id` (OS
+    /// keyring first, then session memory). `None` when no key is set.
+    pub fn load_llm_key(&self, provider_id: &str) -> Option<String> {
+        let key = Self::llm_key(provider_id);
+        if let Ok(entry) = keyring::Entry::new(SERVICE, &key) {
+            if let Ok(stored) = entry.get_password() {
+                return Some(stored);
+            }
+        }
+        self.memory
+            .lock()
+            .expect("secrets memory lock")
+            .get(&key)
+            .cloned()
+    }
+
+    /// Forget the API key of provider profile `provider_id` in every
+    /// store. Returns whether a key was actually stored.
+    pub fn clear_llm_key(&self, provider_id: &str) -> bool {
+        let key = Self::llm_key(provider_id);
+        let in_memory = self
+            .memory
+            .lock()
+            .expect("secrets memory lock")
+            .remove(&key)
+            .is_some();
+        let in_keyring = keyring::Entry::new(SERVICE, &key)
+            .and_then(|entry| entry.delete_credential())
+            .is_ok();
+        in_memory || in_keyring
     }
 }
 

@@ -359,18 +359,33 @@ fn ask_outcome_is_serializable_for_the_frontend() {
 }
 
 #[test]
-fn llm_status_reflects_config_availability() {
+fn llm_status_serializes_the_provider_menu() {
     use vault_core::llm::LlmStatus;
+    use vault_core::settings::{build_menu, Settings};
 
-    let disabled = LlmStatus::from_config(None);
+    // Local-only status: disabled, menu lists exactly the local entry.
+    let disabled = LlmStatus::local_only();
     assert!(!disabled.enabled);
+    assert_eq!(disabled.providers.len(), 1);
+    assert_eq!(disabled.providers[0].id, "local");
+    assert_eq!(disabled.default_provider, None);
+    let json = serde_json::to_value(&disabled).unwrap();
+    // The exact serde field names the frontend mirrors.
+    assert_eq!(json["providers"][0]["id"], "local");
+    assert_eq!(json["providers"][0]["available"], true);
+    assert!(json.get("default_provider").is_some());
 
+    // A settings-backed menu: the status fields are filled by the shell's
+    // registry; here we assert the pure menu building the status is built
+    // from — including the env fallback entry.
     let cfg = LlmConfig::from_lookup(|name| (name == "ZAI_API_KEY").then(|| "k".into()))
         .unwrap()
         .expect("ZAI key enables the LLM");
-    let enabled = LlmStatus::from_config(Some(&cfg));
-    assert!(enabled.enabled);
-    assert_eq!(enabled.model, "glm-5");
-    assert_eq!(enabled.host, "api.z.ai");
-    assert_eq!(enabled.summarize_top, DEFAULT_SUMMARIZE_TOP);
+    let settings = Settings::default();
+    let menu = build_menu(&settings, |_| false, Some(&cfg));
+    let ids: Vec<&str> = menu.iter().map(|i| i.id.as_str()).collect();
+    assert_eq!(ids, ["local", "env"]);
+    assert_eq!(menu[1].model, "glm-5");
+    assert_eq!(menu[1].host, "api.z.ai");
+    assert!(menu[1].available);
 }

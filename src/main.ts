@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open, save } from "@tauri-apps/plugin-dialog";import { formatSentAt, snippet } from "./format";
-import { describePlan, privacyNote, type AskOutcome, type LlmStatus } from "./llmview";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { formatSentAt, snippet } from "./format";
+import { describePlan, type AskOutcome, type LlmStatus } from "./llmview";
 import {
   renderDashboard,
   renderDetail,
@@ -9,6 +10,20 @@ import {
   renderResults,
   renderSourceChips,
 } from "./render";
+import {
+  applyTheme,
+  keyStoreNote,
+  kindLabel,
+  menuItemLabel,
+  placeholderForKind,
+  prefillForKind,
+  uniqueProviderId,
+  LOCAL_ID,
+  type ProviderKind,
+  type ProviderMenuItem,
+  type SaveSettingsPayload,
+  type SettingsView,
+} from "./settings";
 import type {
   ArchiveStats,
   ChatContext,
@@ -97,6 +112,15 @@ const dashboardRefreshButton = document.querySelector<HTMLButtonElement>("#stats
 const exportFormatSelect = document.querySelector<HTMLSelectElement>("#export-format")!;
 const exportButton = document.querySelector<HTMLButtonElement>("#export-btn")!;
 const exportStatus = document.querySelector<HTMLElement>("#export-status")!;
+const askProvider = document.querySelector<HTMLSelectElement>("#ask-provider")!;
+const settingsNote = document.querySelector<HTMLElement>("#settings-note")!;
+const envInfo = document.querySelector<HTMLElement>("#env-info")!;
+const providerRows = document.querySelector<HTMLElement>("#provider-rows")!;
+const addKind = document.querySelector<HTMLSelectElement>("#add-kind")!;
+const addProviderButton = document.querySelector<HTMLButtonElement>("#add-provider-btn")!;
+const themeSelect = document.querySelector<HTMLSelectElement>("#theme")!;
+const summarizeTopInput = document.querySelector<HTMLInputElement>("#summarize-top")!;
+const settingsSaveButton = document.querySelector<HTMLButtonElement>("#settings-save-btn")!;
 
 // ---------------------------------------------------------------------------
 // State
@@ -114,6 +138,10 @@ interface UiState {
   activeIndex: number;
   detail: ChatContext | null;
 }
+
+// The last `llm_status` response: powers the Ask provider menu and the
+// privacy note for the current selection.
+let llmStatus: LlmStatus | null = null;
 
 const state: UiState = {
   text: "",
@@ -216,7 +244,8 @@ async function runAsk(): Promise<void> {
   askButton.disabled = true;
   askStatus.textContent = "Asking… (translate → search → summarize)";
   try {
-    const outcome = await invoke<AskOutcome>("llm_ask", { question, limit: 50 });
+    const provider = askProvider.value || null;
+    const outcome = await invoke<AskOutcome>("llm_ask", { question, limit: 50, provider });
     askStatus.textContent = describePlan(outcome);
     renderAsk(outcome);
   } catch (e) {
@@ -226,11 +255,54 @@ async function runAsk(): Promise<void> {
   }
 }
 
-async function refreshLlmNote(): Promise<void> {
+// ---------------------------------------------------------------------------
+// Provider menu (multi-provider Ask UI)
+// ---------------------------------------------------------------------------
+
+/** The menu entry currently selected in the Ask provider menu. */
+function selectedMenuItem(): ProviderMenuItem | null {
+  return llmStatus?.providers.find((p) => p.id === askProvider.value) ?? null;
+}
+
+/** Rebuild the Ask provider menu from a status. `keepPrevious` keeps the
+ * user's current selection when it is still available (a rebuild after a
+ * settings save); the first build always preselects the default. */
+function buildProviderMenu(status: LlmStatus, keepPrevious: boolean): void {
+  const previous = keepPrevious ? askProvider.value : "";
+  askProvider.replaceChildren(
+    ...status.providers.map((item) => {
+      const option = document.createElement("option");
+      option.value = item.id;
+      option.textContent = menuItemLabel(item);
+      option.disabled = !item.available;
+      return option;
+    }),
+  );
+  const stillThere =
+    previous && status.providers.some((p) => p.id === previous && p.available);
+  const wanted = stillThere
+    ? previous
+    : (status.providers.find((p) => p.id === status.default_provider && p.available)?.id ??
+      LOCAL_ID);
+  askProvider.value = wanted;
+  updateLlmNote();
+}
+
+/** Privacy note for the currently selected provider. */
+function updateLlmNote(): void {
+  const item = selectedMenuItem();
+  llmNote.textContent = item
+    ? privacyNoteFor(item, llmStatus?.summarize_top ?? 8)
+    : "";
+}
+
+async function refreshLlm(): Promise<void> {
   try {
-    const status = await invoke<LlmStatus>("llm_status");
-    llmNote.textContent = privacyNote(status);
+    const hadStatus = llmStatus !== null;
+    llmStatus = await invoke<LlmStatus>("llm_status");
+    buildProviderMenu(llmStatus, hadStatus);
   } catch {
+    llmStatus = null;
     llmNote.textContent = "";
   }
 }
@@ -277,6 +349,198 @@ async function runEmbedJob(): Promise<void> {
   } finally {
     embedButton.disabled = false;
   }
+/** Rebuild the menu, preselecting the default (used when a save changed
+ * the default provider, so a freshly configured default takes effect). */
+function preferDefaultInMenu(): void {
+  if (llmStatus) buildProviderMenu(llmStatus, false);
+}
+
+// ---------------------------------------------------------------------------
+// Settings (providers, default, options)
+// ---------------------------------------------------------------------------
+
+function rowInputs(row: HTMLElement): Record<string, HTMLInputElement> {
+  const pick = (cls: string) => row.querySelector<HTMLInputElement>(`.${cls}`)!;
+  return {
+    name: pick("prov-name"),
+    base_url: pick("prov-url"),
+    model: pick("prov-model"),
+    key: pick("prov-key"),
+  };
+}
+
+/** One provider row: default radio, name/url/model inputs, write-only key
+ * field, clear-key and remove buttons. `takenIds` feeds id generation for
+ * newly added rows. */
+function providerRow(
+  profile: { id: string; name: string; kind: ProviderKind; base_url: string; model: string },
+  hasKey: boolean,
+  isDefault: boolean,
+): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "provider-row";
+  row.dataset.id = profile.id;
+  row.dataset.kind = profile.kind;
+
+  const radio = document.createElement("input");
+  radio.type = "radio";
+  radio.name = "default-provider";
+  radio.value = profile.id;
+  radio.checked = isDefault;
+  radio.title = "Use as the default provider for Ask";
+
+  const kind = document.createElement("span");
+  kind.className = "kind-label";
+  kind.textContent = kindLabel(profile.kind);
+
+  const name = document.createElement("input");
+  name.className = "prov-name";
+  name.type = "text";
+  name.value = profile.name;
+  name.placeholder = `${kindLabel(profile.kind)} name`;
+
+  const url = document.createElement("input");
+  url.className = "prov-url";
+  url.type = "text";
+  url.value = profile.base_url;
+  url.placeholder = placeholderForKind(profile.kind, "base_url");
+
+  const model = document.createElement("input");
+  model.className = "prov-model";
+  model.type = "text";
+  model.value = profile.model;
+  model.placeholder = placeholderForKind(profile.kind, "model");
+
+  const key = document.createElement("input");
+  key.className = "prov-key";
+  key.type = "password";
+  key.autocomplete = "off";
+  key.placeholder = hasKey ? "stored — type to replace" : "API key";
+  row.dataset.hasKey = String(hasKey);
+
+  const clearKey = document.createElement("button");
+  clearKey.type = "button";
+  clearKey.className = "small-btn clear-key-btn";
+  clearKey.textContent = "Clear key";
+  clearKey.hidden = !hasKey;
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "small-btn remove-prov-btn";
+  remove.textContent = "Remove";
+
+  row.append(radio, kind, name, url, model, key, clearKey, remove);
+  return row;
+}
+
+/** Render the whole Settings form from a view (after boot and after every
+ * successful save or key clear). */
+function renderSettings(view: SettingsView): void {
+  providerRows.replaceChildren(
+    ...view.providers.map((p) =>
+      providerRow(p, p.has_key, view.default_provider === p.id),
+    ),
+  );
+  const autoRadio = document.querySelector<HTMLInputElement>(
+    'input[name="default-provider"][value=""]',
+  );
+  if (autoRadio) autoRadio.checked = view.default_provider === null;
+  themeSelect.value = view.theme;
+  summarizeTopInput.value = String(view.summarize_top);
+
+  const envLines: string[] = [];
+  if (view.env) {
+    envLines.push(
+      `Environment fallback: ${view.env.model} via ${view.env.host} (read-only — ZAI_API_KEY/GLM_API_KEY or ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL; used when no default provider is set).`,
+    );
+  }
+  if (view.env_error) envLines.push(`Environment config ignored: ${view.env_error}`);
+  if (view.settings_error) envLines.push(`Settings file problem: ${view.settings_error}`);
+  envInfo.textContent = envLines.join(" ");
+
+  settingsNote.classList.remove("error");
+  settingsNote.textContent = keyStoreNote(view.key_store);
+  applyTheme(view.theme);
+}
+
+/** Collect the form into a `settings_save` payload. */
+function collectSettings(): SaveSettingsPayload {
+  const rows = [...providerRows.querySelectorAll<HTMLElement>(".provider-row")];
+  const providers = rows.map((row) => ({
+    id: row.dataset.id!,
+    name: rowInputs(row).name.value.trim(),
+    kind: row.dataset.kind as ProviderKind,
+    base_url: rowInputs(row).base_url.value.trim(),
+    model: rowInputs(row).model.value.trim(),
+  }));
+  const checked = document.querySelector<HTMLInputElement>(
+    'input[name="default-provider"]:checked',
+  );
+  const api_keys = rows
+    .map((row) => ({ id: row.dataset.id!, key: rowInputs(row).key.value.trim() }))
+    .filter((update) => update.key !== "");
+  return {
+    providers,
+    default_provider: checked && checked.value ? checked.value : null,
+    theme: themeSelect.value as SettingsView["theme"],
+    summarize_top: Number.parseInt(summarizeTopInput.value, 10) || 8,
+    api_keys,
+  };
+}
+
+async function saveSettings(): Promise<void> {
+  const payload = collectSettings();
+  const previousDefault = llmStatus?.default_provider ?? null;
+  settingsSaveButton.disabled = true;
+  settingsNote.classList.remove("error");
+  settingsNote.textContent = "Saving…";
+  try {
+    const view = await invoke<SettingsView>("settings_save", { payload });
+    renderSettings(view);
+    settingsNote.textContent = `Saved. ${keyStoreNote(view.key_store)}`.trim();
+    await refreshLlm();
+    // A save that changed the default provider switches the menu to it;
+    // otherwise the user's current selection survives the rebuild.
+    if (llmStatus && llmStatus.default_provider !== previousDefault) {
+      preferDefaultInMenu();
+    }
+  } catch (e) {
+    settingsNote.classList.add("error");
+    settingsNote.textContent = `Not saved: ${e}`;
+  } finally {
+    settingsSaveButton.disabled = false;
+  }
+}
+
+async function loadSettings(): Promise<void> {
+  try {
+    const view = await invoke<SettingsView>("settings_get");
+    renderSettings(view);
+  } catch (e) {
+    settingsNote.classList.add("error");
+    settingsNote.textContent = `Settings unavailable: ${e}`;
+  }
+}
+
+async function clearProviderKey(id: string): Promise<void> {
+  try {
+    const view = await invoke<SettingsView>("llm_key_clear", { id });
+    renderSettings(view);
+    await refreshLlm();
+  } catch (e) {
+    settingsNote.classList.add("error");
+    settingsNote.textContent = `Could not clear key: ${e}`;
+  }
+}
+
+function addProviderRow(): void {
+  const kind = addKind.value as ProviderKind;
+  const taken = [...providerRows.querySelectorAll<HTMLElement>(".provider-row")].map(
+    (row) => row.dataset.id!,
+  );
+  const prefill = prefillForKind(kind);
+  const id = uniqueProviderId(kind === "zai" ? "zai" : kind, taken);
+  providerRows.append(providerRow({ ...prefill, id }, false, false));
 }
 
 // Sequential stats token: a late response from an earlier refresh (e.g. one
@@ -795,6 +1059,7 @@ askButton.addEventListener("click", () => void runAsk());
 askInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") void runAsk();
 });
+askProvider.addEventListener("change", updateLlmNote);
 authorInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") void runSearch(0);
 });
@@ -813,11 +1078,25 @@ watchPathInput.addEventListener("keydown", (event) => {
 watchAddButton.addEventListener("click", () => void pickWatchFolder());
 dashboardRefreshButton.addEventListener("click", () => void refreshDashboard());
 exportButton.addEventListener("click", () => void exportResults());
+addProviderButton.addEventListener("click", addProviderRow);
+settingsSaveButton.addEventListener("click", () => void saveSettings());
+themeSelect.addEventListener("change", () => applyTheme(themeSelect.value as SettingsView["theme"]));
+providerRows.addEventListener("click", (event) => {
+  const target = event.target as HTMLElement;
+  const row = target.closest<HTMLElement>(".provider-row");
+  if (!row || !row.dataset.id) return;
+  if (target.classList.contains("clear-key-btn")) {
+    void clearProviderKey(row.dataset.id);
+  } else if (target.classList.contains("remove-prov-btn")) {
+    row.remove();
+  }
+});
 
 setStatus("Type something to search, or set a filter to browse.");
 renderAll();
 void refreshStats();
 void refreshDashboard();
-void refreshLlmNote();
+void refreshLlm();
 void refreshEmbedStatus();
 void refreshWatchStatus();
+void loadSettings();
