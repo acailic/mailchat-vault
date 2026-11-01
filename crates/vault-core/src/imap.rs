@@ -1,10 +1,11 @@
 //! IMAP ingest: incremental, UID-based sync of mail folders into the vault.
 //!
-//! This is the first "live" mail source: it connects to an IMAP server —
-//! Gmail via app password in this first round (TODO: XOAUTH2/OAuth2 login
-//! later), or any other server over host/port/user/password — and pulls new
-//! messages into the archive through the same idempotent storage path as
-//! every other source (`(source, external_id)` dedup).
+//! This is the first "live" mail source: it connects to an IMAP server
+//! — Gmail via app password *or* via Google sign-in (OAuth2 → SASL
+//! XOAUTH2, see [`crate::oauth`]), or any other server over
+//! host/port/user/password — and pulls new messages into the archive
+//! through the same idempotent storage path as every other source
+//! (`(source, external_id)` dedup).
 //!
 //! # Incremental sync model
 //!
@@ -25,11 +26,13 @@
 //!
 //! # Credentials
 //!
-//! [`ImapConfig`] holds the password only in memory for the duration of a
-//! sync. It is never written to the vault database (the sync-state table
-//! stores only folder cursors) and `Debug` output is redacted. The Tauri
-//! shell keeps entered passwords in the OS keyring when available and
-//! otherwise in process memory only — see `src-tauri/src/secrets.rs`.
+//! [`ImapConfig`] carries the auth mode ([`ImapAuth`]): an app/account
+//! password, or an OAuth2 access token for Gmail's `AUTHENTICATE XOAUTH2`.
+//! Secrets live only in memory for the duration of a sync. They are never
+//! written to the vault database (the sync-state table stores only folder
+//! cursors) and `Debug` output is redacted. The Tauri shell keeps entered
+//! passwords and the OAuth refresh token in the OS keyring when available
+//! and otherwise in process memory only — see `src-tauri/src/secrets.rs`.
 //!
 //! # Testing
 //!
@@ -88,8 +91,8 @@ pub fn source_name(username: &str) -> String {
 
 /// Connection settings for one IMAP account.
 ///
-/// The password lives only in memory for the duration of a sync; it is
-/// never persisted and never printed (manual `Debug` redacts it).
+/// The credentials live only in memory for the duration of a sync; they
+/// are never persisted and never printed (manual `Debug` redacts them).
 #[derive(Clone)]
 pub struct ImapConfig {
     /// IMAP host, e.g. `imap.gmail.com`.
@@ -98,20 +101,60 @@ pub struct ImapConfig {
     pub port: u16,
     /// Account username (full address for Gmail).
     pub username: String,
-    /// App password (Gmail) or account password. Never persisted.
-    pub password: String,
+    /// How to authenticate: app/account password, or Gmail OAuth2
+    /// (`AUTHENTICATE XOAUTH2`).
+    pub auth: ImapAuth,
     /// Folders to sync; defaults to `["INBOX"]` when empty.
     pub folders: Vec<String>,
 }
 
+/// How a sync authenticates with the IMAP server.
+#[derive(Clone)]
+pub enum ImapAuth {
+    /// App password (Gmail) or account password via `LOGIN`.
+    Password(String),
+    /// OAuth2 access token via SASL `XOAUTH2` (Gmail "Google sign-in";
+    /// the token is minted by [`crate::oauth::refresh_access_token`]).
+    Xoauth2 {
+        /// Bearer token from the OAuth2 flow (≈1 h lifetime).
+        access_token: String,
+    },
+}
+
+impl fmt::Debug for ImapAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The secret payload must never reach log output; the variant
+        // name stays readable for diagnostics.
+        match self {
+            ImapAuth::Password(_) => write!(f, "password(<redacted>)"),
+            ImapAuth::Xoauth2 { .. } => write!(f, "xoauth2(<redacted>)"),
+        }
+    }
+}
+
 impl ImapConfig {
-    /// Gmail preset: host/port fixed, folders default to `INBOX`.
+    /// Gmail preset: host/port fixed, folders default to `INBOX`,
+    /// app-password login.
     pub fn gmail(username: impl Into<String>, password: impl Into<String>) -> Self {
         Self {
             host: GMAIL_IMAP_HOST.to_string(),
             port: GMAIL_IMAP_PORT,
             username: username.into(),
-            password: password.into(),
+            auth: ImapAuth::Password(password.into()),
+            folders: Vec::new(),
+        }
+    }
+
+    /// Gmail preset with OAuth2: authenticates via `AUTHENTICATE XOAUTH2`
+    /// with the given access token (see [`crate::oauth`]).
+    pub fn gmail_oauth(username: impl Into<String>, access_token: impl Into<String>) -> Self {
+        Self {
+            host: GMAIL_IMAP_HOST.to_string(),
+            port: GMAIL_IMAP_PORT,
+            username: username.into(),
+            auth: ImapAuth::Xoauth2 {
+                access_token: access_token.into(),
+            },
             folders: Vec::new(),
         }
     }
@@ -138,8 +181,8 @@ impl fmt::Debug for ImapConfig {
             .field("host", &self.host)
             .field("port", &self.port)
             .field("username", &self.username)
+            .field("auth", &self.auth)
             .field("folders", &self.effective_folders())
-            .field("password", &"<redacted>")
             .finish()
     }
 }
@@ -167,7 +210,52 @@ pub struct FolderSyncSummary {
     pub error: Option<String>,
 }
 
-/// Connect to the configured server over implicit TLS and log in.
+/// The SASL XOAUTH2 mechanism for [`imap::Client::authenticate`]: the
+/// client base64-encodes [`oauth::xoauth2_sasl`]'s string and sends it as
+/// the `AUTHENTICATE XOAUTH2` response.
+struct Xoauth2Authenticator<'a> {
+    user: &'a str,
+    token: &'a str,
+}
+
+impl imap::Authenticator for Xoauth2Authenticator<'_> {
+    type Response = String;
+
+    fn process(&self, _challenge: &[u8]) -> Self::Response {
+        crate::oauth::xoauth2_sasl(self.user, self.token)
+    }
+}
+
+/// Authenticate an IMAP client per [`ImapAuth`]: `LOGIN` for passwords,
+/// `AUTHENTICATE XOAUTH2` for OAuth tokens. Generic over the stream so the
+/// production TLS path ([`connect`]) and the test path (plain TCP against
+/// the mock server) share one implementation.
+pub fn authenticate<T: Read + Write>(
+    client: imap::Client<T>,
+    username: &str,
+    auth: &ImapAuth,
+) -> Result<Session<T>> {
+    match auth {
+        ImapAuth::Password(password) => client
+            .login(username, password)
+            .map_err(|(e, _client)| e)
+            .map_err(crate::Error::from),
+        ImapAuth::Xoauth2 { access_token } => {
+            let mechanism = Xoauth2Authenticator {
+                user: username,
+                token: access_token,
+            };
+            client
+                .authenticate("XOAUTH2", &mechanism)
+                .map_err(|(e, _client)| e)
+                .map_err(crate::Error::from)
+        }
+    }
+}
+
+/// Connect to the configured server over implicit TLS and authenticate
+/// ([`authenticate`]): `LOGIN` with the configured password, or SASL
+/// `XOAUTH2` with the configured OAuth2 access token.
 ///
 /// Uses rustls with the webpki root store, so no system TLS libraries are
 /// needed.
@@ -201,10 +289,7 @@ pub fn connect(config: &ImapConfig) -> Result<Session<TlsStream>> {
     tcp.set_read_timeout(Some(IO_TIMEOUT))?;
     tcp.set_write_timeout(Some(IO_TIMEOUT))?;
     let client = imap::Client::new(rustls::StreamOwned::new(conn, tcp));
-    client
-        .login(&config.username, &config.password)
-        .map_err(|(e, _client)| e)
-        .map_err(crate::Error::from)
+    authenticate(client, &config.username, &config.auth)
 }
 
 /// Sync every configured folder over an already-authenticated session.

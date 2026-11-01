@@ -31,6 +31,7 @@ mod credentials_no_persist;
 mod error_collection;
 mod folder_channel;
 mod incremental;
+mod oauth_sync;
 mod partial_resume;
 mod uidvalidity_reset;
 

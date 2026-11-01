@@ -1231,5 +1231,142 @@ describe("folder watching", () => {
     await vi.waitFor(() =>
       expect($("#watch-status").textContent).toContain("No folders watched yet"),
     );
+// IMAP sync auth mode (app password vs Google sign-in)
+// ---------------------------------------------------------------------------
+
+const SYNC_OUTCOME = {
+  folders: [
+    {
+      folder: "INBOX",
+      uidvalidity: 7,
+      reset: true,
+      seen: 2,
+      inserted: 2,
+      skipped: 0,
+      failed: 0,
+      error: null,
+    },
+  ],
+  saved_to: null,
+};
+
+function imapCalls(): Array<{ cmd: string; args: unknown }> {
+  return tauri.calls.filter((c) => c.cmd === "sync_imap");
+}
+
+function select(sel: string, value: string): void {
+  const el = $<HTMLSelectElement>(sel);
+  el.value = value;
+  fireChange(el);
+}
+
+async function clickSync(): Promise<void> {
+  ($<HTMLButtonElement>("#imap-sync-btn") as HTMLButtonElement).click();
+  await vi.waitFor(() => expect(imapCalls().length).toBeGreaterThan(0));
+}
+
+describe("IMAP sync auth mode", () => {
+  it("defaults to password mode: password field visible, sign-in hidden, auth sent as password", async () => {
+    await boot();
+    expect(input("#imap-pass").hidden).toBe(false);
+    expect($<HTMLButtonElement>("#imap-oauth-btn").hidden).toBe(true);
+
+    tauri.handlers.set("sync_imap", () => SYNC_OUTCOME);
+    input("#imap-host").value = "imap.gmail.com";
+    input("#imap-user").value = "you@gmail.com";
+    input("#imap-pass").value = "abcd-efgh-ijkl-mnop";
+    await clickSync();
+
+    const args = imapCalls()[0].args as Record<string, unknown>;
+    expect(args.auth).toBe("password");
+    expect(args.password).toBe("abcd-efgh-ijkl-mnop");
+    await vi.waitFor(() =>
+      expect($("#imap-status").textContent).toContain("INBOX: 2 new"),
+    );
+  });
+
+  it("switching to Google sign-in hides the password field, shows the sign-in button and a hint", async () => {
+    await boot();
+    tauri.handlers.set("oauth_status", () => ({ configured: true, signed_in: false }));
+    input("#imap-host").value = "imap.gmail.com";
+    input("#imap-user").value = "you@gmail.com";
+    select("#imap-auth", "oauth");
+    await flush();
+
+    expect(input("#imap-pass").hidden).toBe(true);
+    expect($<HTMLButtonElement>("#imap-oauth-btn").hidden).toBe(false);
+    const calls = tauri.calls.filter((c) => c.cmd === "oauth_status");
+    expect(calls.length).toBe(1);
+    expect(calls[0].args).toEqual({ host: "imap.gmail.com", username: "you@gmail.com" });
+    await vi.waitFor(() =>
+      expect($("#imap-oauth-hint").textContent).toContain("Not signed in yet"),
+    );
+  });
+
+  it("the sign-in button runs the browser flow and reports where the token was kept", async () => {
+    await boot();
+    tauri.handlers.set("oauth_status", () => ({ configured: true, signed_in: false }));
+    input("#imap-user").value = "you@gmail.com";
+    select("#imap-auth", "oauth");
+    await flush();
+
+    tauri.handlers.set("oauth_gmail_login", () => ({
+      username: "you@gmail.com",
+      saved_to: "os_keyring",
+    }));
+    ($<HTMLButtonElement>("#imap-oauth-btn") as HTMLButtonElement).click();
+    await vi.waitFor(() =>
+      expect($("#imap-status").textContent).toContain("Signed in as you@gmail.com"),
+    );
+    expect($("#imap-status").textContent).toContain("OS keyring");
+    // The status hint refreshes to the signed-in wording.
+    tauri.handlers.set("oauth_status", () => ({ configured: true, signed_in: true }));
+    ($<HTMLButtonElement>("#imap-oauth-btn") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect($("#imap-oauth-hint").textContent).toContain("Signed in as"));
+  });
+
+  it("a failed sign-in surfaces the error and re-enables the button", async () => {
+    await boot();
+    tauri.handlers.set("oauth_status", () => ({ configured: true, signed_in: false }));
+    input("#imap-user").value = "you@gmail.com";
+    select("#imap-auth", "oauth");
+    await flush();
+
+    tauri.handlers.set("oauth_gmail_login", () => {
+      throw new Error("sign-in timed out waiting for the browser redirect");
+    });
+    ($<HTMLButtonElement>("#imap-oauth-btn") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect($("#imap-status").textContent).toContain("Sign-in failed"));
+    expect($<HTMLButtonElement>("#imap-oauth-btn").disabled).toBe(false);
+  });
+
+  it("an OAuth sync sends auth oauth and never the (hidden) password field value", async () => {
+    await boot();
+    tauri.handlers.set("oauth_status", () => ({ configured: true, signed_in: true }));
+    input("#imap-host").value = "imap.gmail.com";
+    input("#imap-user").value = "you@gmail.com";
+    // A stale password left in the (now hidden) field must not be sent.
+    input("#imap-pass").value = "stale-app-password";
+    select("#imap-auth", "oauth");
+    await flush();
+
+    tauri.handlers.set("sync_imap", () => SYNC_OUTCOME);
+    await clickSync();
+
+    const args = imapCalls()[0].args as Record<string, unknown>;
+    expect(args.auth).toBe("oauth");
+    expect(args.password).toBe("");
+  });
+
+  it("switching back to password mode restores the password field and hides the button", async () => {
+    await boot();
+    tauri.handlers.set("oauth_status", () => ({ configured: true, signed_in: false }));
+    select("#imap-auth", "oauth");
+    await flush();
+    select("#imap-auth", "password");
+    await flush();
+
+    expect(input("#imap-pass").hidden).toBe(false);
+    expect($<HTMLButtonElement>("#imap-oauth-btn").hidden).toBe(true);
   });
 });

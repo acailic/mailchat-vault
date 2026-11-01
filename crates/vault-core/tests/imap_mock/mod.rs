@@ -3,9 +3,10 @@
 //! A minimal scripted server over plain TCP. The production client path
 //! wraps the stream in TLS; tests instead use `imap::Client::new` over a
 //! raw `TcpStream`, which speaks the same protocol. Only the commands the
-//! vault-core sync issues are implemented (LOGIN, EXAMINE/SELECT, UID
-//! SEARCH, UID FETCH, LOGOUT); the shared mailbox state can be mutated
-//! between connections to simulate new mail and UIDVALIDITY resets.
+//! vault-core sync issues are implemented (LOGIN, AUTHENTICATE XOAUTH2,
+//! EXAMINE/SELECT, UID SEARCH, UID FETCH, LOGOUT); the shared mailbox
+//! state can be mutated between connections to simulate new mail and
+//! UIDVALIDITY resets.
 
 // Shared between test binaries that use different subsets of the helpers.
 #![allow(dead_code)]
@@ -14,6 +15,8 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
+
+use base64::Engine;
 
 /// One mock mailbox: UIDVALIDITY, UIDNEXT, and messages by UID.
 #[derive(Debug, Clone)]
@@ -43,6 +46,8 @@ impl MockMailbox {
 #[derive(Debug, Default, Clone)]
 pub struct ServerLog {
     pub logins: Vec<String>,
+    /// Decoded SASL strings of `AUTHENTICATE XOAUTH2` attempts.
+    pub authentications: Vec<String>,
     pub searches: Vec<String>,
     pub fetch_sets: Vec<String>,
 }
@@ -64,6 +69,10 @@ pub struct MockImap {
     drop_after_fetch_once: Arc<Mutex<Option<usize>>>,
     /// 1-based ordinal of each UID FETCH command seen.
     fetch_ordinal: Arc<Mutex<usize>>,
+    /// When `Some((user, token))`, the server only accepts
+    /// `AUTHENTICATE XOAUTH2` with exactly that user/token pair and
+    /// refuses `LOGIN` — the XOAUTH2-only mode the OAuth sync tests use.
+    xoauth2: Arc<Mutex<Option<(String, String)>>>,
 }
 
 impl MockImap {
@@ -76,12 +85,14 @@ impl MockImap {
         let fail_fetch_once = Arc::new(Mutex::new(None));
         let drop_after_fetch_once = Arc::new(Mutex::new(None));
         let fetch_ordinal = Arc::new(Mutex::new(0));
+        let xoauth2 = Arc::new(Mutex::new(None));
         {
             let mailboxes = Arc::clone(&mailboxes);
             let log = Arc::clone(&log);
             let fail_fetch_once = Arc::clone(&fail_fetch_once);
             let drop_after_fetch_once = Arc::clone(&drop_after_fetch_once);
             let fetch_ordinal = Arc::clone(&fetch_ordinal);
+            let xoauth2 = Arc::clone(&xoauth2);
             std::thread::spawn(move || {
                 for stream in listener.incoming() {
                     let Ok(stream) = stream else { break };
@@ -90,6 +101,7 @@ impl MockImap {
                     let fail_fetch_once = Arc::clone(&fail_fetch_once);
                     let drop_after_fetch_once = Arc::clone(&drop_after_fetch_once);
                     let fetch_ordinal = Arc::clone(&fetch_ordinal);
+                    let xoauth2 = Arc::clone(&xoauth2);
                     std::thread::spawn(move || {
                         if let Err(e) = serve(
                             stream,
@@ -98,6 +110,7 @@ impl MockImap {
                             &fail_fetch_once,
                             &drop_after_fetch_once,
                             &fetch_ordinal,
+                            &xoauth2,
                         ) {
                             // A dropped client mid-command is normal in
                             // tests; anything else is a protocol bug.
@@ -114,7 +127,16 @@ impl MockImap {
             fail_fetch_once,
             drop_after_fetch_once,
             fetch_ordinal,
+            xoauth2,
         }
+    }
+
+    /// Switch the server into XOAUTH2-only mode: `LOGIN` is refused and
+    /// `AUTHENTICATE XOAUTH2` succeeds only for exactly this user/token
+    /// pair (the SASL string must be `user={user}\x01auth=Bearer
+    /// {token}\x01\x01`).
+    pub fn set_xoauth2(&self, user: &str, access_token: &str) {
+        *self.xoauth2.lock().unwrap() = Some((user.to_string(), access_token.to_string()));
     }
 
     /// Answer exactly the nth UID FETCH command seen on this server (across
@@ -167,6 +189,7 @@ fn serve(
     fail_fetch_once: &Arc<Mutex<Option<usize>>>,
     drop_after_fetch_once: &Arc<Mutex<Option<usize>>>,
     fetch_ordinal: &Arc<Mutex<usize>>,
+    xoauth2: &Arc<Mutex<Option<(String, String)>>>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
@@ -191,7 +214,58 @@ fn serve(
         match command.to_ascii_uppercase().as_str() {
             "LOGIN" => {
                 log.lock().unwrap().logins.push(line.to_string());
-                write_line(&mut writer, format!("{tag} OK LOGIN completed").as_bytes())?;
+                if xoauth2.lock().unwrap().is_some() {
+                    write_line(
+                        &mut writer,
+                        format!("{tag} NO LOGIN disabled on this server; use AUTHENTICATE XOAUTH2")
+                            .as_bytes(),
+                    )?;
+                } else {
+                    write_line(&mut writer, format!("{tag} OK LOGIN completed").as_bytes())?;
+                }
+            }
+            "AUTHENTICATE" => {
+                let mechanism = rest.split(' ').next().unwrap_or_default();
+                if mechanism.eq_ignore_ascii_case("XOAUTH2") {
+                    // Server-first empty challenge, then the base64 SASL
+                    // initial response on the next line (the exchange the
+                    // imap crate performs).
+                    write_line(&mut writer, b"+ ")?;
+                    let mut response = String::new();
+                    reader.read_line(&mut response)?;
+                    let decoded = base64::engine::general_purpose::STANDARD
+                        .decode(response.trim())
+                        .ok()
+                        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                        .unwrap_or_else(|| format!("<undecodable: {}>", response.trim()));
+                    log.lock().unwrap().authentications.push(decoded.clone());
+                    let expected = xoauth2
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .map(|(user, token)| vault_core::oauth::xoauth2_sasl(&user, &token));
+                    match expected {
+                        Some(expected) if decoded == expected => write_line(
+                            &mut writer,
+                            format!("{tag} OK AUTHENTICATE completed").as_bytes(),
+                        )?,
+                        Some(_) => write_line(
+                            &mut writer,
+                            format!("{tag} NO [AUTHENTICATIONFAILED] invalid credentials")
+                                .as_bytes(),
+                        )?,
+                        None => write_line(
+                            &mut writer,
+                            format!("{tag} BAD AUTHENTICATE not enabled on this server").as_bytes(),
+                        )?,
+                    }
+                } else {
+                    write_line(
+                        &mut writer,
+                        format!("{tag} NO unsupported authentication mechanism: {mechanism}")
+                            .as_bytes(),
+                    )?;
+                }
             }
             "CAPABILITY" => {
                 write_line(&mut writer, b"* CAPABILITY IMAP4rev1")?;
