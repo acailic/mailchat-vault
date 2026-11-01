@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 use crate::message::Message;
 use crate::search::build_match_query;
@@ -53,15 +54,14 @@ pub struct LlmConfig {
     pub model: String,
 }
 
-/// Host (without port) of an endpoint URL; the z.ai-pairing guard compares
-/// providers by this host identity.
-fn endpoint_host(url: &str) -> &str {
-    let rest = url.rsplit_once("://").map_or(url, |(_, rest)| rest);
-    let authority = rest.split('/').next().unwrap_or_default();
-    match authority.rsplit_once(':') {
-        Some((host, port)) if port.bytes().all(|b| b.is_ascii_digit()) => host,
-        _ => authority,
-    }
+/// Host of an endpoint URL for provider comparison: semantic parsing via
+/// `Url` (lowercase host, userinfo and port excluded), with a single
+/// trailing root dot stripped; `None` when the URL does not parse, which
+/// every comparison treats as not the z.ai provider.
+fn endpoint_host(url: &str) -> Option<String> {
+    let parsed = Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    Some(host.strip_suffix('.').unwrap_or(host).to_string())
 }
 
 impl LlmConfig {
@@ -90,9 +90,8 @@ impl LlmConfig {
         let base_url = value("ANTHROPIC_BASE_URL");
         let anthropic_key = value("ANTHROPIC_API_KEY");
         let zai_key = value("ZAI_API_KEY").or_else(|| value("GLM_API_KEY"));
-        let is_zai_provider = |url: &str| {
-            endpoint_host(url).eq_ignore_ascii_case(endpoint_host(Self::DEFAULT_BASE_URL))
-        };
+        let is_zai_provider =
+            |url: &str| endpoint_host(url) == endpoint_host(Self::DEFAULT_BASE_URL);
         let (api_key, base_url) = match (anthropic_key, zai_key, base_url) {
             // An Anthropic key is never sent to a z.ai-host endpoint, even
             // when explicitly paired with it there; only its own host honors it.
@@ -135,9 +134,10 @@ impl LlmConfig {
         }))
     }
 
-    /// Host part of the base URL, for display (e.g. `"api.z.ai"`).
-    pub fn host(&self) -> &str {
-        endpoint_host(&self.base_url)
+    /// Host part of the base URL, for display (e.g. `"api.z.ai"`); the raw
+    /// base URL itself when it does not parse as an absolute URL.
+    pub fn host(&self) -> String {
+        endpoint_host(&self.base_url).unwrap_or_else(|| self.base_url.clone())
     }
 }
 
@@ -604,7 +604,7 @@ impl LlmStatus {
             Some(c) => Self {
                 enabled: true,
                 model: c.model.clone(),
-                host: c.host().to_string(),
+                host: c.host(),
                 summarize_top: DEFAULT_SUMMARIZE_TOP,
             },
             None => Self {
@@ -716,9 +716,12 @@ mod tests {
             "https://API.Z.AI/api/anthropic",
             "https://api.z.ai:443/api/anthropic",
             "https://api.z.ai:/api/anthropic",
+            "https://api.z.ai./api/anthropic",
+            "https://user@api.z.ai/api/anthropic",
+            "https://proxy:pw@api.z.ai/api/anthropic",
             "http://api.z.ai/api/anthropic",
-            "api.z.ai/api/anthropic",
             "https://api.z.ai/api/Anthropic",
+            "https://api.z.ai/some/other/path",
         ] {
             let err = LlmConfig::from_lookup(|name| match name {
                 "ANTHROPIC_API_KEY" => Some("k".into()),
@@ -741,6 +744,8 @@ mod tests {
             "https://API.Z.AI/api/anthropic",
             "https://api.z.ai:443/api/anthropic",
             "https://api.z.ai:/api/anthropic",
+            "https://api.z.ai./api/anthropic",
+            "https://user@api.z.ai/api/anthropic",
             "http://api.z.ai/api/anthropic",
         ] {
             let cfg = LlmConfig::from_lookup(|name| match name {
