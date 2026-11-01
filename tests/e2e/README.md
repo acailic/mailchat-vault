@@ -42,7 +42,7 @@ Useful knobs:
 | `MAILCHAT_TAURI_DRIVER=<path>` | tauri-driver binary |
 | `MAILCHAT_WEBKIT_DRIVER=<path>` | WebKitWebDriver binary |
 | `MAILCHAT_E2E_KEEP_DATA=1` | keep the per-spec data dirs (path is printed on failure) |
-| `MAILCHAT_E2E_TIMEOUT_MS` | per-spec watchdog (default 300000) |
+| `MAILCHAT_E2E_TIMEOUT_MS` | per-spec watchdog (default 600000; cold CI starts are slow) |
 
 ## What is covered
 

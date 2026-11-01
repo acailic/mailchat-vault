@@ -102,10 +102,30 @@ function killTree(child) {
   if (child.exitCode !== null) {
     return;
   }
-  child.kill("SIGTERM");
-  const forced = setTimeout(() => child.kill("SIGKILL"), 3000);
+  // The driver was spawned detached (own process group), so a negative pid
+  // signal takes down tauri-driver, WebKitWebDriver and the app together —
+  // otherwise the native driver and webkit processes orphan and slow down
+  // every later spec.
+  try {
+    process.kill(-child.pid, "SIGTERM");
+  } catch {
+    child.kill("SIGTERM");
+  }
+  const forced = setTimeout(() => {
+    try {
+      process.kill(-child.pid, "SIGKILL");
+    } catch {
+      child.kill("SIGKILL");
+    }
+  }, 3000);
   child.once("exit", () => clearTimeout(forced));
 }
+
+/** Errors worth a fresh driver + session attempt (slow cold app starts can
+ * make the first newSession still be mid-flight when a client retry lands,
+ * which WebKitWebDriver answers with "max active sessions"). */
+const RETRYABLE_SESSION_ERROR =
+  /session not created|maximum number of active sessions|UND_ERR_HEADERS_TIMEOUT|ECONNRESET|ECONNREFUSED/i;
 
 /**
  * Run `fn(browser, ctx)` against a fresh app instance.
@@ -117,6 +137,26 @@ function killTree(child) {
  *   post-mortems when `keepData` is set.
  */
 export async function withSession(options, fn, { keepData = false } = {}) {
+  const attempts = options.attempts ?? 2;
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const fresh = attempt === attempts; // no retry after the last attempt
+    try {
+      return await withSessionAttempt(options, fn, { keepData, fresh });
+    } catch (error) {
+      lastError = error;
+      const retryable =
+        !fresh && RETRYABLE_SESSION_ERROR.test(String(error?.message ?? error));
+      if (!retryable) {
+        throw error;
+      }
+      // Slow cold start: rebuild driver + session from scratch.
+    }
+  }
+  throw lastError;
+}
+
+async function withSessionAttempt(options, fn, { keepData }) {
   const extraEnv = options.env ?? {};
   const dataDir = await mkdtemp(path.join(tmpdir(), "mailchat-e2e-"));
   const port = await freePort();
@@ -140,7 +180,12 @@ export async function withSession(options, fn, { keepData = false } = {}) {
         // Without a compositor (Xvfb / CI) WebKit must not use accelerated
         // compositing, or the webview renders nothing.
         WEBKIT_DISABLE_COMPOSITING_MODE: "1",
+        // Skip the GTK accessibility bridge: on CI there is no a11y dbus
+        // service, and waiting for it stalls webview startup.
+        NO_AT_BRIDGE: "1",
       },
+      // Own process group so teardown can signal the whole tree.
+      detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -165,8 +210,11 @@ export async function withSession(options, fn, { keepData = false } = {}) {
       logLevel: "error",
       waitforInterval: 200,
       waitforTimeout: 10_000,
-      connectionRetryTimeout: 30_000,
-      connectionRetryCount: 2,
+      // Cold app starts on CI runners can take well over the 30s default;
+      // a premature client retry then collides with the still-creating
+      // session ("max active sessions"), so be patient instead.
+      connectionRetryTimeout: 240_000,
+      connectionRetryCount: 1,
     });
     await fn(browser, { dataDir });
   } catch (error) {

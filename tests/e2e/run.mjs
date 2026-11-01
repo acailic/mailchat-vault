@@ -81,7 +81,7 @@ async function loadSpecs() {
 
 async function main() {
   const filter = process.env.MAILCHAT_E2E_ONLY;
-  const perSpecTimeoutMs = Number(process.env.MAILCHAT_E2E_TIMEOUT_MS ?? 300_000);
+  const perSpecTimeoutMs = Number(process.env.MAILCHAT_E2E_TIMEOUT_MS ?? 600_000);
   const binary = await ensureAppBuilt();
   const sqlite = (await sqliteAvailable()) ? { query: sqliteQuery } : null;
   if (!sqlite) {
