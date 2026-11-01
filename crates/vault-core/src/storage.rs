@@ -5,10 +5,11 @@
 
 use std::path::Path;
 
+use chrono::{Datelike, Days, NaiveDate};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::message::{InsertOutcome, Message, NewMessage, SourceCount, Stats};
-use crate::Result;
+use crate::{Error, Result};
 
 /// Ordered schema migrations; each entry runs once, inside a transaction.
 const MIGRATIONS: &[(i64, &str)] = &[(
@@ -134,6 +135,34 @@ impl Storage {
     /// [`crate::search::build_match_query`] for building one safely from free
     /// text). Results are ordered by FTS5 relevance (`rank`).
     pub fn search(&self, match_query: &str, limit: u32) -> Result<Vec<Message>> {
+        self.search_filtered(match_query, None, None, limit)
+    }
+
+    /// Full-text search with optional inclusive sent-date bounds.
+    ///
+    /// `date_from`/`date_to` are `YYYY-MM-DD` strings; anything else is an
+    /// error. `date_to` is inclusive (messages sent any time that day count).
+    /// Messages with an unknown (`empty`) `sent_at` are excluded while a
+    /// bound is active — they cannot be placed in time. The MATCH expression
+    /// is a bound parameter throughout, so it can never spill into SQL text.
+    pub fn search_filtered(
+        &self,
+        match_query: &str,
+        date_from: Option<&str>,
+        date_to: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<Message>> {
+        let from = parse_date_bound(date_from, "date_from")?.map(|d| d.to_string());
+        // Inclusive date_to becomes an exclusive upper bound at midnight of
+        // the next day; RFC 3339 UTC strings compare correctly as text.
+        let to_exclusive = parse_date_bound(date_to, "date_to")?
+            .map(|day| {
+                day.checked_add_days(Days::new(1))
+                    .filter(|next| (0..=9999).contains(&next.year()))
+                    .map(|next| next.to_string())
+                    .ok_or_else(|| Error::InvalidDate(format!("date_to={day} out of range")))
+            })
+            .transpose()?;
         let mut stmt = self.conn.prepare(
             r#"
             SELECT m.id, m.source, m.external_id, m.channel, m.chat_id,
@@ -141,14 +170,39 @@ impl Storage {
             FROM messages_fts
             JOIN messages AS m ON m.id = messages_fts.rowid
             WHERE messages_fts MATCH ?1
+              AND (?2 IS NULL OR m.sent_at >= ?2)
+              AND (?3 IS NULL OR m.sent_at < ?3)
             ORDER BY rank
-            LIMIT ?2
+            LIMIT ?4
             "#,
         )?;
         let rows = stmt
-            .query_map(params![match_query, limit], message_from_row)?
+            .query_map(
+                params![match_query, from, to_exclusive, limit],
+                message_from_row,
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Whether `expr` compiles as an FTS5 MATCH expression against the index.
+    ///
+    /// Used to vet LLM-generated expressions before running them: a cheap
+    /// `LIMIT 1` probe whose only interesting outcome is error vs. no error
+    /// (row presence is irrelevant).
+    pub fn is_valid_match(&self, expr: &str) -> bool {
+        let Ok(mut stmt) = self
+            .conn
+            .prepare("SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?1 LIMIT 1")
+        else {
+            return false;
+        };
+        let Ok(mut rows) = stmt.query(params![expr]) else {
+            return false;
+        };
+        // Stepping once forces FTS5 to compile the expression; whether a
+        // row matches is irrelevant to validity.
+        rows.next().is_ok()
     }
 
     /// Fetch one message by row id (used to inspect a search hit).
@@ -229,6 +283,21 @@ fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
         body: row.get(7)?,
         raw_json: row.get(8)?,
     })
+}
+
+/// Parse an optional `YYYY-MM-DD` bound into a `NaiveDate`. Years outside
+/// `0000..=9999` (chrono also accepts signed 5+ digit spellings) are
+/// rejected: they cannot be ordered as text against the stored RFC 3339
+/// `sent_at` strings.
+fn parse_date_bound(value: Option<&str>, field: &str) -> Result<Option<NaiveDate>> {
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(None),
+        Some(v) => NaiveDate::parse_from_str(v, "%Y-%m-%d")
+            .ok()
+            .filter(|d| (0..=9999).contains(&d.year()))
+            .map(Some)
+            .ok_or_else(|| Error::InvalidDate(format!("{field}={v}"))),
+    }
 }
 
 /// Apply pending migrations, each in its own transaction, exactly once.
