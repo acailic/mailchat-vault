@@ -193,7 +193,7 @@ impl Storage {
               AND (?2 IS NULL OR m.sent_at >= ?2)
               AND (?3 IS NULL OR m.sent_at < ?3)
               AND ((?2 IS NULL AND ?3 IS NULL) OR m.sent_at != '')
-            ORDER BY rank
+            ORDER BY rank, m.id
             LIMIT ?4
             "#,
         )?;
