@@ -19,6 +19,7 @@ import {
   prefillForKind,
   uniqueProviderId,
   LOCAL_ID,
+  ENV_ID,
   type ProviderKind,
   type ProviderMenuItem,
   type SaveSettingsPayload,
@@ -444,7 +445,9 @@ function renderSettings(view: SettingsView): void {
   const autoRadio = document.querySelector<HTMLInputElement>(
     'input[name="default-provider"][value=""]',
   );
-  if (autoRadio) autoRadio.checked = view.default_provider === null;
+  if (autoRadio)
+    autoRadio.checked =
+      view.default_provider === null || view.default_provider === ENV_ID;
   themeSelect.value = view.theme;
   summarizeTopInput.value = String(view.summarize_top);
 
@@ -461,6 +464,14 @@ function renderSettings(view: SettingsView): void {
   settingsNote.classList.remove("error");
   settingsNote.textContent = keyStoreNote(view.key_store);
   applyTheme(view.theme);
+}
+
+/** The parsed summarize_top for the backend validator: an unparseable
+ * entry passes through as 0, which the backend refuses with its clear
+ * bounds error — never silently coerced to a valid value. */
+function parsedSummarizeTop(value: string): number {
+  const n = Number.parseInt(value, 10);
+  return Number.isNaN(n) ? 0 : n;
 }
 
 /** Collect the form into a `settings_save` payload. */
@@ -483,7 +494,7 @@ function collectSettings(): SaveSettingsPayload {
     providers,
     default_provider: checked && checked.value ? checked.value : null,
     theme: themeSelect.value as SettingsView["theme"],
-    summarize_top: Number.parseInt(summarizeTopInput.value, 10) || 8,
+    summarize_top: parsedSummarizeTop(summarizeTopInput.value),
     api_keys,
   };
 }

@@ -177,30 +177,34 @@ impl LlmRegistry {
         }
     }
 
-    /// The implicit selection: settings default → env fallback → local.
+    /// The implicit selection: settings default → env fallback → local. A
+    /// default that references no configured profile (a settings file
+    /// edited outside the app) falls through to the env fallback, exactly
+    /// like `None`.
     fn select_default(&self) -> Selection {
         if let Some(default) = &self.settings.default_provider {
-            let profile = self
+            if let Some(profile) = self
                 .settings
                 .providers
                 .iter()
                 .find(|p| &p.id == default)
-                .expect("validated: default references a configured provider");
-            return match self.keys.get(default) {
-                Some(key) => {
-                    let mut config = Self::config_for(profile);
-                    config.api_key = key.clone();
-                    Selection::Provider {
-                        id: default.clone(),
-                        name: profile.display_name().to_string(),
-                        config,
+            {
+                return match self.keys.get(default) {
+                    Some(key) => {
+                        let mut config = Self::config_for(profile);
+                        config.api_key = key.clone();
+                        Selection::Provider {
+                            id: default.clone(),
+                            name: profile.display_name().to_string(),
+                            config,
+                        }
                     }
-                }
-                None => Selection::local(format!(
-                    "default provider “{}” has no API key stored — set one in Settings",
-                    profile.display_name()
-                )),
-            };
+                    None => Selection::local(format!(
+                        "default provider “{}” has no API key stored — set one in Settings",
+                        profile.display_name()
+                    )),
+                };
+            }
         }
         match &self.env {
             Some(env) => Selection::Provider {

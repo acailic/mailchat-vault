@@ -204,6 +204,34 @@ fn is_http_url(url: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether `url` parses and points at a loopback host (`localhost`,
+/// `127.0.0.0/8`, `::1`) — the one place plaintext http stays allowed.
+fn is_loopback_url(url: &str) -> bool {
+    Url::parse(url)
+        .map(|u| match u.host() {
+            Some(url::Host::Domain(d)) => d == "localhost" || d.ends_with(".localhost"),
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            None => false,
+        })
+        .unwrap_or(false)
+}
+
+/// Refuse a base URL whose scheme is plaintext `http` on a non-loopback
+/// host: a stored API key must never travel unencrypted.
+fn check_no_plaintext_http(name: &str, base_url: &str) -> crate::Result<()> {
+    let plaintext = Url::parse(base_url)
+        .map(|u| u.scheme() == "http")
+        .unwrap_or(false);
+    if plaintext && !is_loopback_url(base_url) {
+        return Err(settings_error(format!(
+            "provider “{name}”: the API key must not travel over plaintext http — use https \
+             for {base_url} (or a localhost/127.0.0.1 endpoint for testing)"
+        )));
+    }
+    Ok(())
+}
+
 /// The z.ai host, for pairing checks (mirrors the env policy).
 fn zai_host() -> String {
     endpoint_host(LlmConfig::DEFAULT_BASE_URL).expect("default base URL parses")
@@ -307,6 +335,7 @@ impl Settings {
                                 LlmConfig::DEFAULT_BASE_URL
                             )));
                         }
+                        check_no_plaintext_http(name, &p.base_url)?;
                     }
                 }
                 ProviderKind::Anthropic => {
@@ -321,12 +350,13 @@ impl Settings {
                             "provider “{name}”: base URL must be an absolute http(s) URL"
                         )));
                     }
-                    if endpoint_host(&p.base_url).as_deref() == Some(zai_host().as_str()) {
+                    if endpoint_host(&p.base_url) == Some(zai_host()) {
                         return Err(settings_error(format!(
                             "provider “{name}”: refusing to send an Anthropic key to the z.ai \
                              endpoint — point the base URL at the endpoint that accepts this key"
                         )));
                     }
+                    check_no_plaintext_http(name, &p.base_url)?;
                     if p.model.is_empty() {
                         return Err(settings_error(format!(
                             "provider “{name}”: a model name is required for Anthropic providers"
@@ -588,6 +618,17 @@ mod tests {
         // Nor to an unparseable URL.
         let s = settings_with(vec![profile("glm", ProviderKind::Zai, "not a url", "")]);
         assert!(s.validate().is_err());
+
+        // Plaintext http: refused off loopback, so the z.ai key never
+        // travels unencrypted.
+        let s = settings_with(vec![profile(
+            "glm",
+            ProviderKind::Zai,
+            "http://api.z.ai/api/anthropic",
+            "",
+        )]);
+        let err = s.validate().unwrap_err().to_string();
+        assert!(err.contains("plaintext http"), "got: {err}");
     }
 
     #[test]
@@ -640,6 +681,24 @@ mod tests {
         )]);
         let err = s.validate().unwrap_err().to_string();
         assert!(err.contains("model name is required"), "got: {err}");
+
+        // Plaintext http off loopback: refused (key must stay encrypted);
+        // localhost endpoints stay allowed for local mocks.
+        let s = settings_with(vec![profile(
+            "claude",
+            ProviderKind::Anthropic,
+            "http://api.anthropic.com",
+            "claude-x",
+        )]);
+        let err = s.validate().unwrap_err().to_string();
+        assert!(err.contains("plaintext http"), "got: {err}");
+        let s = settings_with(vec![profile(
+            "claude",
+            ProviderKind::Anthropic,
+            "http://127.0.0.1:8080",
+            "claude-x",
+        )]);
+        s.validate().unwrap();
     }
 
     #[test]
