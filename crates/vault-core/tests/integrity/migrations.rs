@@ -13,7 +13,7 @@ use crate::util::{msg, raw};
 
 /// The schema version this build knows; bump expectation when a migration
 /// is added (the assertions below are version-agnostic where possible).
-const KNOWN_VERSION: i64 = 4;
+const KNOWN_VERSION: i64 = 5;
 
 fn migrations_rows(db: &std::path::Path) -> Vec<i64> {
     let conn = raw(db);
@@ -47,7 +47,10 @@ fn fresh_database_applies_every_migration_exactly_once() {
 
     let s = Storage::open(&db).unwrap();
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
-    assert_eq!(migrations_rows(&db), vec![1, 2, 3, 4]);
+    assert_eq!(
+        migrations_rows(&db),
+        (1..=KNOWN_VERSION).collect::<Vec<_>>()
+    );
 
     // The migrated schema is immediately functional.
     let out = s
@@ -61,7 +64,7 @@ fn fresh_database_applies_every_migration_exactly_once() {
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
     assert_eq!(
         migrations_rows(&db),
-        vec![1, 2, 3, 4],
+        (1..=KNOWN_VERSION).collect::<Vec<_>>(),
         "no duplicate bookkeeping rows"
     );
     assert_eq!(s.stats().unwrap().total, 1);
@@ -76,7 +79,10 @@ fn version0_database_upgrades_in_place() {
 
     let s = Storage::open(&db).unwrap();
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
-    assert_eq!(migrations_rows(&db), vec![1, 2, 3, 4]);
+    assert_eq!(
+        migrations_rows(&db),
+        (1..=KNOWN_VERSION).collect::<Vec<_>>()
+    );
     // The upgraded database works end to end: write, index, read.
     s.insert_message(&msg("integrity", "up-1", "upgraded archive body"))
         .unwrap();
@@ -162,12 +168,16 @@ fn v1_database_with_data_upgrades_in_place_to_current() {
     let db = dir.path().join("v1.db");
     version1_db_with_data(&db, 7);
 
-    // Opening with the current build applies every newer migration on top
-    // of the untouched v1 schema - in place, keeping every row (ids
+    // Opening with the current build applies every newer migration (2–5:
+    // IMAP sync state, embeddings, the canonical store, watched folders)
+    // on top of the untouched v1 schema - in place, keeping every row (ids
     // included) in the canonical store.
     let s = Storage::open(&db).unwrap();
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
-    assert_eq!(migrations_rows(&db), vec![1, 2, 3, 4]);
+    assert_eq!(
+        migrations_rows(&db),
+        (1..=KNOWN_VERSION).collect::<Vec<_>>()
+    );
 
     // The v1 archive is fully intact and searchable (through the canonical
     // tables the migration copied it into).
@@ -225,17 +235,32 @@ fn v1_database_with_data_upgrades_in_place_to_current() {
         assert!(!hits.is_empty(), "the scan reads migrated rows");
     }
 
+    // The schema v5 addition is live: watched folders round-trip.
+    assert!(s.watched_folders().unwrap().is_empty());
+    s.add_watched_folder("/tmp/exports").unwrap();
+    assert_eq!(
+        s.watched_folders().unwrap(),
+        vec!["/tmp/exports".to_string()]
+    );
+
     // Idempotence: reopening applies nothing new and everything is still there.
     drop(s);
     let s = Storage::open(&db).unwrap();
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
-    assert_eq!(migrations_rows(&db), vec![1, 2, 3, 4]);
+    assert_eq!(
+        migrations_rows(&db),
+        (1..=KNOWN_VERSION).collect::<Vec<_>>()
+    );
     assert_eq!(s.stats().unwrap().total, 7);
     let state = s
         .get_imap_state("imap/gmail", "INBOX")
         .unwrap()
         .expect("cursor survives reopen");
     assert_eq!(state.last_uid, 1234);
+    assert_eq!(
+        s.watched_folders().unwrap(),
+        vec!["/tmp/exports".to_string()]
+    );
 }
 
 #[test]

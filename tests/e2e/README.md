@@ -57,6 +57,7 @@ Useful knobs:
 | `07-detail-view` | message detail panel + adjacent thread messages, click-through neighbours, Esc | conditional — same |
 | `08-date-range` | date-range filter UI around the near-midnight boundary; undated messages excluded while bounded | conditional — same |
 | `09-signal-import` | import a Signal conversation `.json` (invokes `import_chat_export` directly — the native file chooser cannot be automated) → stats label + signal chip, searchable hit with highlights, detail view with thread context, re-import dedup, renamed re-export dedups by conversation uuid, unrecognized file fails loudly and stores nothing | active (needs the filtered-search UI's source chips) |
+| `10-folder-watch` | folder watching: arm a folder (initial scan + skip of unrecognized files), background import of new/modified files, dedup on rewrite, direct DB confirmation, removal stops imports | active |
 
 ### Conditional specs
 
