@@ -375,7 +375,10 @@ fn read_failed(path: &Path, e: io::Error) -> io::Error {
 }
 
 fn channel_file_failed(path: &Path, e: crate::Error) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, format!("{}: {e}", path.display()))
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{}: {e}", path.display()),
+    )
 }
 
 /// Import-hint chat key when the file carries no channel id: its stem.
