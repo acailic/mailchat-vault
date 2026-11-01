@@ -13,10 +13,11 @@ Prerequisites (Linux):
 
 - the usual Tauri build deps (`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`,
   `libayatana-appindicator3-dev`, `librsvg2-dev`)
-- the WebDriver binary: `webkit2gtk-driver` (Debian/Ubuntu package;
+- the WebDriver binary: Debian/Ubuntu package `webkit2gtk-driver`
+  (renamed `webkitgtk-webdriver` on Ubuntu 26.04+);
   `WebKitWebDriver` must be findable — the harness checks
   `/usr/libexec/webkit2gtk-4.1/WebKitWebDriver`, `/usr/bin/WebKitWebDriver`,
-  and `$PATH`)
+  and `$PATH`
 - `tauri-driver` (`cargo install tauri-driver --locked`), `sqlite3` (only for
   the direct-database assertions; specs degrade gracefully without it)
 - an X display; on a headless machine wrap the run in `xvfb-run -a`

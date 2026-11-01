@@ -59,8 +59,11 @@ jobs:
 
   # Full E2E: drives the real app binary through tauri-driver/WebDriver
   # under Xvfb (see tests/e2e/README.md). Every path here runs headless.
+  # Pinned to 24.04: it is the image the suite was validated on, and it
+  # ships the `webkit2gtk-driver` package (on 26.04+ the package is renamed
+  # `webkitgtk-webdriver`).
   e2e:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
