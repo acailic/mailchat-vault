@@ -99,14 +99,20 @@ proptest! {
 
         for (i, source) in distinct.iter().enumerate() {
             let msg = NewMessage::new(*source, external_id.clone(), "ana", "", format!("{body} v{i}"));
-            prop_assert!(storage.insert_message(&msg).unwrap().was_inserted());
+            prop_assert!(matches!(
+                storage.insert_message(&msg).unwrap(),
+                InsertOutcome::Inserted(_)
+            ));
         }
         prop_assert_eq!(storage.stats().unwrap().total, distinct.len() as u64);
 
         // Re-insert each with different content: all duplicates, no change.
         for source in &distinct {
             let msg = NewMessage::new(*source, external_id.clone(), "marko", "", "different body");
-            prop_assert!(!storage.insert_message(&msg).unwrap().was_inserted());
+            prop_assert!(matches!(
+                storage.insert_message(&msg).unwrap(),
+                InsertOutcome::Duplicate(_)
+            ));
         }
         prop_assert_eq!(storage.stats().unwrap().total, distinct.len() as u64);
     }
@@ -135,7 +141,7 @@ fn golden_seed_first_write_wins() {
     assert_eq!(storage.stats().unwrap().total, model.len() as u64);
     assert!(
         storage
-            .search(&fixtures::quoted_term("mutated-variant"), 1000)
+            .search_filtered(&fixtures::quoted_term("mutated-variant"), None, None, 1000)
             .unwrap()
             .is_empty(),
         "mutated content must never be searchable"

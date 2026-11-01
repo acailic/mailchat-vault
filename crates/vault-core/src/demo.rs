@@ -58,5 +58,29 @@ pub fn messages() -> Vec<NewMessage> {
                 .into(),
             raw_json: "{}".into(),
         },
+        NewMessage {
+            source: DEMO_SOURCE.into(),
+            external_id: "demo-5".into(),
+            channel: "chat".into(),
+            chat_id: "project-chat".into(),
+            author: "marko".into(),
+            sent_at: "2026-11-01T11:47:00Z".into(),
+            body: "next up: filters by source, author and date range over the \
+                   whole archive."
+                .into(),
+            raw_json: "{}".into(),
+        },
+        NewMessage {
+            source: DEMO_SOURCE.into(),
+            external_id: "demo-6".into(),
+            channel: "chat".into(),
+            chat_id: "project-chat".into(),
+            author: "jelena".into(),
+            sent_at: "2026-11-01T11:49:00Z".into(),
+            body: "open any hit to read the full message with its thread \
+                   neighbors. keyboard: arrows to move, enter to open, esc to close."
+                .into(),
+            raw_json: "{}".into(),
+        },
     ]
 }

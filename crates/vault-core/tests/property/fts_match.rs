@@ -1,4 +1,4 @@
-//! FTS MATCH semantics: `Storage::search` results must equal an independent
+//! FTS MATCH semantics: `Storage::search_filtered` results must equal an independent
 //! oracle of FTS5 `unicode61` semantics over the generated corpus —
 //! unicode folding (Latin diacritics, Cyrillic case, CJK runs), prefixes,
 //! phrases (never spanning body→author), and implicit AND for sanitized
@@ -45,7 +45,7 @@ fn spelling() -> impl Strategy<Value = Spelling> {
 
 fn hit_ids(storage: &Storage, query: &str, limit: u32) -> BTreeSet<(String, String)> {
     storage
-        .search(query, limit)
+        .search_filtered(query, None, None, limit)
         .unwrap()
         .into_iter()
         .map(|m: Message| (m.source, m.external_id))
@@ -240,7 +240,7 @@ proptest! {
             .unwrap();
         let query = build_match_query(&input);
         prop_assume!(!query.is_empty()); // whitespace-only: caller skips
-        let result = storage.search(&query, 10);
+        let result = storage.search_filtered(&query, None, None, 10);
         prop_assert!(
             result.is_ok(),
             "sanitized query must not error; input={:?} query={:?}",

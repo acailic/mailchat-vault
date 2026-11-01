@@ -1,4 +1,5 @@
 use vault_core::message::{InsertOutcome, NewMessage};
+use vault_core::query::SearchQuery;
 use vault_core::search::build_match_query;
 use vault_core::storage::Storage;
 
@@ -8,6 +9,15 @@ fn msg(external_id: &str, author: &str, body: &str) -> NewMessage {
 
 fn storage() -> Storage {
     Storage::open_in_memory().expect("open in-memory storage")
+}
+
+fn search(s: &Storage, text: &str, limit: u32) -> vault_core::query::SearchPage {
+    s.search_page(&SearchQuery {
+        text: text.into(),
+        limit,
+        ..SearchQuery::default()
+    })
+    .unwrap()
 }
 
 #[test]
@@ -45,10 +55,13 @@ fn insert_is_idempotent_on_source_and_external_id() {
 
     // Same external_id under a different source namespace is a new message.
     let other_source = NewMessage::new("other", "m1", "ana", "", "hello");
-    assert!(s.insert_message(&other_source).unwrap().was_inserted());
+    assert!(matches!(
+        s.insert_message(&other_source).unwrap(),
+        InsertOutcome::Inserted(_)
+    ));
 
     assert_eq!(s.stats().unwrap().total, 2);
-    let found = s.search("changed", 10).unwrap();
+    let found = search(&s, "changed", 10).hits;
     assert!(found.is_empty(), "changed body must not be searchable");
 }
 
@@ -64,13 +77,13 @@ fn fts_search_matches_body_and_author() {
     s.insert_message(&msg("2", "marko", "nothing relevant here"))
         .unwrap();
 
-    let body_hits = s.search("quarterly", 10).unwrap();
+    let body_hits = search(&s, "quarterly", 10).hits;
     assert_eq!(body_hits.len(), 1);
-    assert_eq!(body_hits[0].external_id, "1");
+    assert_eq!(body_hits[0].message.external_id, "1");
 
-    let author_hits = s.search("marko", 10).unwrap();
+    let author_hits = search(&s, "marko", 10).hits;
     assert_eq!(author_hits.len(), 1);
-    assert_eq!(author_hits[0].external_id, "2");
+    assert_eq!(author_hits[0].message.external_id, "2");
 }
 
 #[test]
@@ -80,7 +93,7 @@ fn fts_search_respects_limit() {
         s.insert_message(&msg(&format!("m{i}"), "a", "vault vault vault"))
             .unwrap();
     }
-    assert_eq!(s.search("vault", 3).unwrap().len(), 3);
+    assert_eq!(search(&s, "vault", 3).hits.len(), 3);
 }
 
 #[test]
@@ -94,10 +107,10 @@ fn fts_search_orders_by_relevance() {
         &format!("{} vault {}", "filler ".repeat(40), "tail".repeat(40)),
     ))
     .unwrap();
-    let hits = s.search("vault", 10).unwrap();
+    let hits = search(&s, "vault", 10).hits;
     assert_eq!(hits.len(), 2);
     assert_eq!(
-        hits[0].external_id, "dense",
+        hits[0].message.external_id, "dense",
         "denser document should rank first"
     );
 }
@@ -119,8 +132,12 @@ fn sanitized_user_queries_never_error() {
         if q.is_empty() {
             continue;
         }
-        s.search(&q, 10)
-            .unwrap_or_else(|e| panic!("query {input:?} failed: {e}"));
+        s.search_page(&SearchQuery {
+            text: input.into(),
+            limit: 10,
+            ..SearchQuery::default()
+        })
+        .unwrap_or_else(|e| panic!("query {input:?} failed: {e}"));
     }
 }
 
@@ -172,9 +189,9 @@ fn rebuild_fts_restores_index() {
         .unwrap();
     // Wipe the index directly to simulate corruption, then rebuild.
     s.wipe_fts_for_tests().unwrap();
-    assert!(s.search("searchable", 10).unwrap().is_empty());
+    assert!(search(&s, "searchable", 10).hits.is_empty());
     s.rebuild_fts().unwrap();
-    assert_eq!(s.search("searchable", 10).unwrap().len(), 1);
+    assert_eq!(search(&s, "searchable", 10).hits.len(), 1);
 }
 
 #[test]

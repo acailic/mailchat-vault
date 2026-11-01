@@ -1,7 +1,9 @@
 //! Mailchat Vault desktop app: a thin Tauri shell over `vault-core`.
 //!
 //! Commands exposed to the frontend:
-//! - `search_messages` — full-text search hitting SQLite FTS5.
+//! - `search_messages` — paged, filtered full-text search hitting SQLite FTS5
+//!   (relevance-ranked with match snippets, or newest-first browse).
+//! - `chat_context` — a message plus its adjacent messages in the same chat.
 //! - `llm_ask` — natural-language search: LLM-translated FTS5 plan +
 //!   optional date range + RAG answer over the top results.
 //! - `llm_status` — LLM availability for the UI (never the key).
@@ -11,7 +13,7 @@
 //!   the dialog plugin).
 //! - `sync_imap` — incremental IMAP/Gmail sync (first live mail source).
 //! - `seed_demo` — insert the built-in sample messages (idempotent).
-//! - `stats` — archive counts per source.
+//! - `stats` — archive counts per source (drives the source filter chips).
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -26,7 +28,7 @@ use vault_core::llm::{
     self, AnthropicLlm, AskOutcome, LlmConfig, LlmStatus, PlanSource, PlannedQuery, QueryPlan,
 };
 use vault_core::mbox::MboxSource;
-use vault_core::search::build_match_query;
+use vault_core::query::{ChatContext, SearchPage, SearchQuery};
 use vault_core::storage::Storage;
 use vault_core::telegram::TelegramSource;
 use vault_core::whatsapp::WhatsappSource;
@@ -55,20 +57,27 @@ fn lock<'a>(state: &'a State<'_, AppState>) -> Result<MutexGuard<'a, Storage>, S
     state.storage.lock().map_err(|e| e.to_string())
 }
 
-/// Full-text search over the archive. Free text is sanitized into an FTS5
-/// MATCH expression, so arbitrary input can never be a query syntax error.
+/// Paged, filtered full-text search over the archive.
+///
+/// `query.text` is sanitized into an FTS5 MATCH expression, so arbitrary
+/// input can never be a query syntax error; an empty text browses newest
+/// first under the same filters. Every response is bounded by
+/// `limit`/`offset`; `total` carries the match count for pagination.
 #[tauri::command]
-fn search_messages(
+fn search_messages(state: State<AppState>, query: SearchQuery) -> Result<SearchPage, String> {
+    lock(&state)?.search_page(&query).map_err(|e| e.to_string())
+}
+
+/// One message plus up to `radius` adjacent messages of the same chat
+/// thread (used by the detail view to link to neighbors).
+#[tauri::command]
+fn chat_context(
     state: State<AppState>,
-    query: String,
-    limit: Option<u32>,
-) -> Result<Vec<message::Message>, String> {
-    if query.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    let limit = limit.unwrap_or(50).clamp(1, 200);
+    id: i64,
+    radius: Option<u32>,
+) -> Result<Option<ChatContext>, String> {
     lock(&state)?
-        .search(&build_match_query(&query), limit)
+        .chat_context(id, radius.unwrap_or(8))
         .map_err(|e| e.to_string())
 }
 
@@ -244,7 +253,7 @@ async fn sync_imap(
 #[tauri::command]
 fn seed_demo(state: State<AppState>) -> Result<IngestSummary, String> {
     let storage = lock(&state)?;
-    ingest(&storage, &DemoSource).map_err(|e| e.to_string())
+    ingest(&storage, &DemoSource).map_err(|e: Error| e.to_string())
 }
 
 /// Archive counts: total and per source.
@@ -292,6 +301,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             search_messages,
+            chat_context,
             llm_ask,
             llm_status,
             import_mbox,

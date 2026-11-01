@@ -6,9 +6,13 @@
 use std::path::Path;
 
 use chrono::{Datelike, Days, NaiveDate};
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::types::Value as SqlValue;
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 
 use crate::message::{InsertOutcome, Message, NewMessage, SourceCount, Stats};
+use crate::query::{
+    ChatContext, SearchHit, SearchPage, SearchQuery, SNIPPET_CLOSE_MARK, SNIPPET_OPEN_MARK,
+};
 use crate::{Error, Result};
 
 /// Ordered schema migrations; each entry runs once, inside a transaction.
@@ -98,6 +102,7 @@ impl Storage {
         conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        register_fold_function(&conn)?;
         migrate(&conn)?;
         Ok(Self { conn })
     }
@@ -144,22 +149,17 @@ impl Storage {
         }
     }
 
-    /// Full-text search over `body` and `author` using FTS5.
-    ///
-    /// `match_query` is a raw FTS5 MATCH expression (see
-    /// [`crate::search::build_match_query`] for building one safely from free
-    /// text). Results are ordered by FTS5 relevance (`rank`).
-    pub fn search(&self, match_query: &str, limit: u32) -> Result<Vec<Message>> {
-        self.search_filtered(match_query, None, None, limit)
-    }
-
-    /// Full-text search with optional inclusive sent-date bounds.
+    /// Full-text search with optional inclusive LOCAL-day sent-date bounds —
+    /// the same date semantics as [`Storage::search_page`].
     ///
     /// `date_from`/`date_to` are `YYYY-MM-DD` strings; anything else is an
     /// error. `date_to` is inclusive (messages sent any time that day count).
-    /// Messages with an unknown (`empty`) `sent_at` are excluded while a
-    /// bound is active — they cannot be placed in time. The MATCH expression
-    /// is a bound parameter throughout, so it can never spill into SQL text.
+    /// Each bound is translated to the UTC instant of local midnight before
+    /// being compared with the stored UTC `sent_at`, so a day bound selects
+    /// exactly what the UI renders as that local day. Messages with an
+    /// unknown (`empty`) `sent_at` are excluded while a bound is active —
+    /// they cannot be placed in time. The MATCH expression is a bound
+    /// parameter throughout, so it can never spill into SQL text.
     pub fn search_filtered(
         &self,
         match_query: &str,
@@ -167,17 +167,23 @@ impl Storage {
         date_to: Option<&str>,
         limit: u32,
     ) -> Result<Vec<Message>> {
-        let from = parse_date_bound(date_from, "date_from")?.map(|d| d.to_string());
-        // Inclusive date_to becomes an exclusive upper bound at midnight of
-        // the next day; RFC 3339 UTC strings compare correctly as text.
-        let to_exclusive = parse_date_bound(date_to, "date_to")?
-            .map(|day| {
-                day.checked_add_days(Days::new(1))
+        let from = match parse_date_bound(date_from, "date_from")? {
+            Some(day) => Some(crate::query::local_day_instant_utc(day)?),
+            None => None,
+        };
+        // Inclusive date_to becomes an exclusive upper bound at local
+        // midnight of the next day; RFC 3339 UTC instants compare correctly
+        // as text.
+        let to_exclusive = match parse_date_bound(date_to, "date_to")? {
+            Some(day) => {
+                let next = day
+                    .checked_add_days(Days::new(1))
                     .filter(|next| (0..=9999).contains(&next.year()))
-                    .map(|next| next.to_string())
-                    .ok_or_else(|| Error::InvalidDate(format!("date_to={day} out of range")))
-            })
-            .transpose()?;
+                    .ok_or_else(|| Error::InvalidDate(format!("date_to={day} out of range")))?;
+                Some(crate::query::local_day_instant_utc(next)?)
+            }
+            None => None,
+        };
         let mut stmt = self.conn.prepare(
             r#"
             SELECT m.id, m.source, m.external_id, m.channel, m.chat_id,
@@ -187,7 +193,8 @@ impl Storage {
             WHERE messages_fts MATCH ?1
               AND (?2 IS NULL OR m.sent_at >= ?2)
               AND (?3 IS NULL OR m.sent_at < ?3)
-            ORDER BY rank
+              AND ((?2 IS NULL AND ?3 IS NULL) OR m.sent_at != '')
+            ORDER BY rank, m.id
             LIMIT ?4
             "#,
         )?;
@@ -218,6 +225,165 @@ impl Storage {
         // Stepping once forces FTS5 to compile the expression; whether a
         // row matches is irrelevant to validity.
         rows.next().is_ok()
+    }
+
+    /// Paged, filtered search: FTS5 relevance when `query.text` is non-empty,
+    /// newest-first browse otherwise, under the same facet filters.
+    ///
+    /// Returns one page plus the total match count (for pagination UI). All
+    /// row access stays index-backed: the FTS5 index drives text queries, the
+    /// `idx_messages_sent_at` / `idx_messages_source_chat` indexes back the
+    /// browse ordering and the source/date filters, and `LIMIT`/`OFFSET` bound
+    /// every response.
+    pub fn search_page(&self, query: &SearchQuery) -> Result<SearchPage> {
+        let mut query = query.clone();
+        query.normalize()?;
+        let filters = QueryFilters::build(&query)?;
+
+        let total: u64 = {
+            let (sql, bind) = if query.text.trim().is_empty() {
+                (
+                    format!(
+                        "SELECT COUNT(*) FROM messages AS m WHERE 1=1 {}",
+                        filters.sql
+                    ),
+                    filters.bind(),
+                )
+            } else {
+                let mut bind = vec![SqlValue::from(crate::search::build_match_query(
+                    &query.text,
+                ))];
+                bind.extend(filters.bind());
+                (
+                    format!(
+                        "SELECT COUNT(*) FROM messages_fts \
+                         JOIN messages AS m ON m.id = messages_fts.rowid \
+                         WHERE messages_fts MATCH ?1 {}",
+                        filters.sql
+                    ),
+                    bind,
+                )
+            };
+            let mut stmt = self.conn.prepare(&sql)?;
+            stmt.query_row(params_from_iter(bind), |row| row.get(0))?
+        };
+
+        let hits: Vec<SearchHit> = if query.text.trim().is_empty() {
+            let mut bind = filters.bind();
+            bind.push(SqlValue::Integer(query.limit as i64));
+            bind.push(SqlValue::Integer(query.offset as i64));
+            let sql = format!(
+                "SELECT m.id, m.source, m.external_id, m.channel, m.chat_id, \
+                 m.author, m.sent_at, m.body, m.raw_json, NULL \
+                 FROM messages AS m WHERE 1=1 {} \
+                 ORDER BY m.sent_at DESC, m.id DESC LIMIT ? OFFSET ?",
+                filters.sql
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows: Vec<SearchHit> = stmt
+                .query_map(params_from_iter(bind), hit_from_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        } else {
+            // Order follows the ? placeholders in the SQL text: the two
+            // snippet() markers in the SELECT, then the MATCH expression,
+            // then the filter bindings, then LIMIT/OFFSET.
+            let mut bind = vec![
+                SqlValue::from(SNIPPET_OPEN_MARK.to_string()),
+                SqlValue::from(SNIPPET_CLOSE_MARK.to_string()),
+                SqlValue::from(crate::search::build_match_query(&query.text)),
+            ];
+            bind.extend(filters.bind());
+            bind.push(SqlValue::Integer(query.limit as i64));
+            bind.push(SqlValue::Integer(query.offset as i64));
+            let sql = format!(
+                "SELECT m.id, m.source, m.external_id, m.channel, m.chat_id, \
+                 m.author, m.sent_at, m.body, m.raw_json, \
+                 snippet(messages_fts, 0, ?1, ?2, '…', 16) \
+                 FROM messages_fts \
+                 JOIN messages AS m ON m.id = messages_fts.rowid \
+                 WHERE messages_fts MATCH ?3 {} \
+                 ORDER BY rank, m.id LIMIT ? OFFSET ?",
+                filters.sql
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows: Vec<SearchHit> = stmt
+                .query_map(params_from_iter(bind), hit_from_row)?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+
+        Ok(SearchPage {
+            hits,
+            total,
+            limit: query.limit,
+            offset: query.offset,
+        })
+    }
+
+    /// A message plus its adjacent messages in the same chat thread.
+    ///
+    /// `before`/`after` each hold up to `radius` messages, oldest → newest.
+    /// Messages without a `chat_id` have no thread peers.
+    pub fn chat_context(&self, id: i64, radius: u32) -> Result<Option<ChatContext>> {
+        let radius = radius.clamp(1, crate::query::MAX_LIMIT) as i64;
+        let Some(message) = self.get(id)? else {
+            return Ok(None);
+        };
+        if message.chat_id.is_empty() {
+            return Ok(Some(ChatContext {
+                before: Vec::new(),
+                message,
+                after: Vec::new(),
+            }));
+        }
+
+        let mut before_stmt = self.conn.prepare(
+            "SELECT id, source, external_id, channel, chat_id, author, sent_at, body, raw_json \
+             FROM messages \
+             WHERE source = ?1 AND chat_id = ?2 \
+               AND (sent_at < ?3 OR (sent_at = ?3 AND id < ?4)) \
+             ORDER BY sent_at DESC, id DESC LIMIT ?5",
+        )?;
+        let mut before: Vec<Message> = before_stmt
+            .query_map(
+                params![
+                    message.source,
+                    message.chat_id,
+                    message.sent_at,
+                    message.id,
+                    radius
+                ],
+                message_from_row,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        before.reverse(); // newest → oldest from the query; thread reads oldest → newest
+
+        let mut after_stmt = self.conn.prepare(
+            "SELECT id, source, external_id, channel, chat_id, author, sent_at, body, raw_json \
+             FROM messages \
+             WHERE source = ?1 AND chat_id = ?2 \
+               AND (sent_at > ?3 OR (sent_at = ?3 AND id > ?4)) \
+             ORDER BY sent_at ASC, id ASC LIMIT ?5",
+        )?;
+        let after = after_stmt
+            .query_map(
+                params![
+                    message.source,
+                    message.chat_id,
+                    message.sent_at,
+                    message.id,
+                    radius
+                ],
+                message_from_row,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(Some(ChatContext {
+            before,
+            message,
+            after,
+        }))
     }
 
     /// Fetch one message by row id (used to inspect a search hit).
@@ -253,6 +419,15 @@ impl Storage {
         Ok(Stats { total, by_source })
     }
 
+    /// Currently applied schema version.
+    pub fn schema_version(&self) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Rebuild the FTS index from scratch from the `messages` table.
     ///
     /// Only needed if the index is ever corrupted; triggers keep it in sync
@@ -263,15 +438,6 @@ impl Storage {
             [],
         )?;
         Ok(())
-    }
-
-    /// Currently applied schema version.
-    pub fn schema_version(&self) -> Result<i64> {
-        Ok(self.conn.query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
-            [],
-            |row| row.get(0),
-        )?)
     }
 
     /// Test support: drop every FTS row (leaving `messages` intact) so index
@@ -358,6 +524,115 @@ fn parse_date_bound(value: Option<&str>, field: &str) -> Result<Option<NaiveDate
             .map(Some)
             .ok_or_else(|| Error::InvalidDate(format!("{field}={v}"))),
     }
+}
+
+fn hit_from_row(row: &Row<'_>) -> rusqlite::Result<SearchHit> {
+    Ok(SearchHit {
+        message: message_from_row(row)?,
+        snippet: row.get(9)?,
+    })
+}
+
+/// Filter SQL fragments (`AND ...` clauses referencing table alias `m`) plus
+/// the bound values for them, shared by the page and count statements of
+/// [`Storage::search_page`].
+struct QueryFilters {
+    sql: String,
+    values: Vec<SqlValue>,
+}
+
+impl QueryFilters {
+    fn build(query: &SearchQuery) -> Result<Self> {
+        let mut sql = String::new();
+        let mut values: Vec<SqlValue> = Vec::new();
+
+        if !query.sources.is_empty() {
+            let placeholders = vec!["?"; query.sources.len()].join(", ");
+            sql.push_str(&format!(" AND m.source IN ({placeholders})"));
+            values.extend(query.sources.iter().cloned().map(SqlValue::from));
+        }
+        let author = query.author.trim();
+        if !author.is_empty() {
+            sql.push_str(" AND fold(m.author) LIKE fold(?) ESCAPE '\\'");
+            values.push(SqlValue::from(format!(
+                "%{}%",
+                crate::query::escape_like(author)
+            )));
+        }
+        if !query.from_date.is_empty() {
+            // Local-day semantics: include everything from local midnight of
+            // the from day on (the UI renders the same local day). The
+            // midnight is resolved per date, so historical DST periods use
+            // their own offset.
+            if let Some(day) = crate::query::parse_day(&query.from_date) {
+                sql.push_str(" AND m.sent_at >= ?");
+                values.push(SqlValue::from(crate::query::local_day_instant_utc(day)?));
+            }
+        }
+        if !query.to_date.is_empty() {
+            // Exclusive bound: strictly before local midnight of the day
+            // after, so everything later on to_date itself still matches.
+            if let Some(day) = crate::query::parse_day(&query.to_date) {
+                let next = day
+                    .checked_add_days(Days::new(1))
+                    .filter(|next| (0..=9999).contains(&next.year()))
+                    .ok_or_else(|| {
+                        Error::InvalidDate(format!("date_to={} out of range", query.to_date))
+                    })?;
+                sql.push_str(" AND m.sent_at < ?");
+                values.push(SqlValue::from(crate::query::local_day_instant_utc(next)?));
+            }
+        }
+        if !query.from_date.is_empty() || !query.to_date.is_empty() {
+            // An unparseable date stored as empty sent_at has no defined
+            // position on the timeline; exclude it whenever a date filter is
+            // active so both bounds agree on the same set.
+            sql.push_str(" AND m.sent_at != ''");
+        }
+        Ok(Self { sql, values })
+    }
+
+    fn bind(&self) -> Vec<SqlValue> {
+        self.values.clone()
+    }
+}
+
+/// Fold a string for the author filter's case-insensitive comparison:
+/// Unicode-lowercased, with whitespace runs collapsed to single spaces.
+fn fold_for_search(s: &str) -> String {
+    s.split_whitespace()
+        .map(|w| w.chars().flat_map(char::to_lowercase).collect::<String>())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Register `fold` as a deterministic scalar SQL function on `conn`, so the
+/// author filter can compare Unicode-cased substrings (SQLite's built-in
+/// `lower()` and its LIKE case-folding are ASCII-only).
+fn register_fold_function(conn: &Connection) -> Result<()> {
+    conn.create_scalar_function(
+        "fold",
+        1,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let value = ctx.get_raw(0);
+            match value {
+                rusqlite::types::ValueRef::Text(bytes) => {
+                    let s = std::str::from_utf8(bytes).map_err(|_| {
+                        rusqlite::Error::InvalidColumnType(
+                            0,
+                            "author".into(),
+                            rusqlite::types::Type::Text,
+                        )
+                    })?;
+                    Ok(Some(fold_for_search(s)))
+                }
+                _ => Ok(None),
+            }
+        },
+    )?;
+    Ok(())
 }
 
 /// Apply pending migrations, each in its own transaction, exactly once.

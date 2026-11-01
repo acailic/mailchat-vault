@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use proptest::prelude::*;
 
-use vault_core::message::NewMessage;
+use vault_core::message::{InsertOutcome, NewMessage};
 use vault_core::storage::Storage;
 
 use crate::fixtures;
@@ -46,7 +46,7 @@ proptest! {
                 let again = fixtures::mutate(msg);
                 let outcome = reopened.insert_message(&again).unwrap();
                 prop_assert!(
-                    !outcome.was_inserted(),
+                    matches!(outcome, InsertOutcome::Duplicate(_)),
                     "dedup key lost across reopen: {}/{}",
                     again.source, again.external_id
                 );
@@ -79,7 +79,10 @@ proptest! {
 
         // Same keys through the second handle: all duplicates.
         for msg in &batch {
-            prop_assert!(!b.insert_message(msg).unwrap().was_inserted());
+            prop_assert!(matches!(
+                b.insert_message(msg).unwrap(),
+                InsertOutcome::Duplicate(_)
+            ));
         }
         prop_assert_eq!(a.stats().unwrap().total, model.len() as u64);
         assert_model_visible(&b, &model);
@@ -97,7 +100,7 @@ fn assert_model_visible(storage: &Storage, model: &HashMap<(String, String), &Ne
             .or_else(|| fixtures::tokenize(&msg.author).into_iter().next());
         let Some(token) = token else { continue };
         let hits = storage
-            .search(&fixtures::quoted_term(&token), 10_000)
+            .search_filtered(&fixtures::quoted_term(&token), None, None, 10_000)
             .unwrap();
         let hit = hits
             .iter()

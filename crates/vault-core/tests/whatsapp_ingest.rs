@@ -186,7 +186,9 @@ fn chat_id_comes_from_file_stem() {
 
     let storage = Storage::open_in_memory().unwrap();
     ingest(&storage, &WhatsappSource::new(&path)).unwrap();
-    let hits = storage.search(&build_match_query("pozdrav"), 10).unwrap();
+    let hits = storage
+        .search_filtered(&build_match_query("pozdrav"), None, None, 10)
+        .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].chat_id, "WhatsApp Chat with Ana");
     assert_eq!(hits[0].source, WHATSAPP_SOURCE);
@@ -203,12 +205,14 @@ fn imported_chat_is_full_text_searchable() {
 
     // Body content, unicode terms, and authors all hit FTS5.
     for term in ["pretragu", "šifrirani", "jelena", "arhiva"] {
-        let hits = storage.search(&build_match_query(term), 10).unwrap();
+        let hits = storage
+            .search_filtered(&build_match_query(term), None, None, 10)
+            .unwrap();
         assert!(!hits.is_empty(), "no hits for {term:?}");
     }
     // The quoted reference lives in raw_json, not the body.
     assert!(storage
-        .search(&build_match_query("super, hvala"), 10)
+        .search_filtered(&build_match_query("super, hvala"), None, None, 10)
         .unwrap()
         .iter()
         .all(|m| m.body == "super, hvala!"));

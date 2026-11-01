@@ -113,7 +113,7 @@ fn initial_sync_stores_messages_with_folder_as_channel() {
     // Message-ID as external id, and full-text searchable.
     assert_eq!(storage.stats().unwrap().total, 2);
     let hits = storage
-        .search(&build_match_query("hello vault world"), 10)
+        .search_filtered(&build_match_query("hello vault world"), None, None, 10)
         .unwrap();
     assert_eq!(hits.len(), 1);
     let m = &hits[0];
@@ -198,7 +198,7 @@ fn incremental_sync_fetches_only_new_messages() {
 
     // The new mail is searchable.
     let hits = storage
-        .search(&build_match_query("third body"), 10)
+        .search_filtered(&build_match_query("third body"), None, None, 10)
         .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].external_id, "m-3@x");
@@ -298,10 +298,10 @@ fn folders_map_to_separate_channels_and_cursors() {
     // Each folder's messages carry their folder as channel; one cursor per
     // folder.
     let inbox_hits = storage
-        .search(&build_match_query("inbox body"), 10)
+        .search_filtered(&build_match_query("inbox body"), None, None, 10)
         .unwrap();
     let archive_hits = storage
-        .search(&build_match_query("archive body"), 10)
+        .search_filtered(&build_match_query("archive body"), None, None, 10)
         .unwrap();
     assert_eq!((inbox_hits.len(), archive_hits.len()), (1, 1));
     assert_eq!(inbox_hits[0].channel, "INBOX");
