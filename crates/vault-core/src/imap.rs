@@ -211,10 +211,6 @@ pub fn connect(config: &ImapConfig) -> Result<Session<TlsStream>> {
 ///
 /// Generic over the stream so the production TLS path ([`sync`]) and the
 /// test path (plain TCP against a mock server) share one implementation.
-/// Sync every configured folder over an already-authenticated session.
-///
-/// Generic over the stream so the production TLS path ([`sync`]) and the
-/// test path (plain TCP against a mock server) share one implementation.
 /// A failing folder never aborts the others: each folder reports its own
 /// outcome, with [`FolderSyncSummary::error`] set on failure.
 pub fn sync_session<T: Read + Write>(
@@ -225,19 +221,7 @@ pub fn sync_session<T: Read + Write>(
 ) -> Vec<FolderSyncSummary> {
     folders
         .iter()
-        .map(|folder| match sync_folder(session, storage, source, folder) {
-            Ok(summary) => summary,
-            Err(e) => FolderSyncSummary {
-                folder: folder.to_string(),
-                uidvalidity: 0,
-                reset: false,
-                seen: 0,
-                inserted: 0,
-                skipped: 0,
-                failed: 0,
-                error: Some(e.to_string()),
-            },
-        })
+        .map(|folder| sync_folder(session, storage, source, folder))
         .collect()
 }
 
@@ -254,98 +238,115 @@ pub fn sync(config: &ImapConfig, storage: &Storage) -> Result<Vec<FolderSyncSumm
 
 /// Incrementally sync one folder. See the [module documentation](self)
 /// for the UIDVALIDITY/UID cursor model.
+///
+/// The outcome is always a summary: when syncing fails partway, the counts
+/// already accumulated stay in it, alongside [`FolderSyncSummary::error`].
 pub fn sync_folder<T: Read + Write>(
     session: &mut Session<T>,
     storage: &Storage,
     source: &str,
     folder: &str,
-) -> Result<FolderSyncSummary> {
-    // EXAMINE (read-only SELECT): fetching must never set \Seen or other
-    // flags on the user's mailbox.
-    let mailbox = session.examine(folder)?;
-    let uidvalidity = mailbox.uid_validity.unwrap_or(0);
+) -> FolderSyncSummary {
+    fn run<T: Read + Write>(
+        session: &mut Session<T>,
+        storage: &Storage,
+        source: &str,
+        folder: &str,
+        summary: &mut FolderSyncSummary,
+    ) -> Result<()> {
+        // EXAMINE (read-only SELECT): fetching must never set \Seen or other
+        // flags on the user's mailbox.
+        let mailbox = session.examine(folder)?;
+        let uidvalidity = mailbox.uid_validity.unwrap_or(0);
+        summary.uidvalidity = uidvalidity;
 
-    let saved = storage.get_imap_state(source, folder)?;
-    let (start_uid, reset) = match &saved {
-        Some(state) if state.uidvalidity == uidvalidity => {
-            (state.last_uid.saturating_add(1), false)
+        let saved = storage.get_imap_state(source, folder)?;
+        let (start_uid, reset) = match &saved {
+            Some(state) if state.uidvalidity == uidvalidity => {
+                (state.last_uid.saturating_add(1), false)
+            }
+            _ => (1, true),
+        };
+        summary.reset = reset;
+
+        // UIDNEXT bounds the interesting range: no UID >= start can exist when
+        // the server has not handed it out yet (this also skips the UID SEARCH
+        // entirely on an unchanged mailbox).
+        let nothing_new = mailbox
+            .uid_next
+            .is_some_and(|uid_next| start_uid >= uid_next);
+
+        let mut uids = Vec::new();
+        if mailbox.exists > 0 && !nothing_new {
+            let found = session.uid_search(format!("{start_uid}:*"))?;
+            // "x:*" always includes the mailbox's highest existing UID even
+            // when it is below x (RFC 3501 §6.4.8) — keep only new UIDs.
+            uids = found.into_iter().filter(|uid| *uid >= start_uid).collect();
+            uids.sort_unstable();
         }
-        _ => (1, true),
-    };
+
+        let mut last_uid = if reset {
+            0
+        } else {
+            saved.map_or(0, |s| s.last_uid)
+        };
+        for batch in uids.chunks(FETCH_BATCH) {
+            let set = batch
+                .iter()
+                .map(|uid| uid.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let fetches = session.uid_fetch(set, "RFC822")?;
+            let mut batch_max_uid = 0;
+            for fetch in fetches.iter() {
+                let (uid, raw) = match (fetch.uid, fetch.body()) {
+                    (Some(uid), Some(raw)) => (uid, raw),
+                    _ => {
+                        summary.failed += 1;
+                        continue;
+                    }
+                };
+                summary.seen += 1;
+                match parse_raw_mail(raw, source, "") {
+                    Some(mut msg) => {
+                        apply_folder_fields(&mut msg, folder, uid, uidvalidity);
+                        match storage.insert_message(&msg)? {
+                            InsertOutcome::Inserted(_) => summary.inserted += 1,
+                            InsertOutcome::Duplicate(_) => summary.skipped += 1,
+                        }
+                    }
+                    None => summary.failed += 1,
+                }
+                batch_max_uid = batch_max_uid.max(uid);
+            }
+            // Persist the cursor after every batch so an interrupted sync
+            // resumes where it stopped instead of refetching the folder.
+            if batch_max_uid > last_uid {
+                last_uid = batch_max_uid;
+                storage.set_imap_state(source, folder, uidvalidity, last_uid)?;
+            }
+        }
+
+        // Record the cursor even for empty/unchanged folders (the UIDVALIDITY
+        // may have appeared or reset).
+        storage.set_imap_state(source, folder, uidvalidity, last_uid)?;
+        Ok(())
+    }
 
     let mut summary = FolderSyncSummary {
         folder: folder.to_string(),
-        uidvalidity,
-        reset,
+        uidvalidity: 0,
+        reset: false,
         seen: 0,
         inserted: 0,
         skipped: 0,
         failed: 0,
         error: None,
     };
-
-    // UIDNEXT bounds the interesting range: no UID >= start can exist when
-    // the server has not handed it out yet (this also skips the UID SEARCH
-    // entirely on an unchanged mailbox).
-    let nothing_new = mailbox
-        .uid_next
-        .is_some_and(|uid_next| start_uid >= uid_next);
-
-    let mut uids = Vec::new();
-    if mailbox.exists > 0 && !nothing_new {
-        let found = session.uid_search(format!("{start_uid}:*"))?;
-        // "x:*" always includes the mailbox's highest existing UID even
-        // when it is below x (RFC 3501 §6.4.8) — keep only new UIDs.
-        uids = found.into_iter().filter(|uid| *uid >= start_uid).collect();
-        uids.sort_unstable();
+    if let Err(e) = run(session, storage, source, folder, &mut summary) {
+        summary.error = Some(e.to_string());
     }
-
-    let mut last_uid = if reset {
-        0
-    } else {
-        saved.map_or(0, |s| s.last_uid)
-    };
-    for batch in uids.chunks(FETCH_BATCH) {
-        let set = batch
-            .iter()
-            .map(|uid| uid.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        let fetches = session.uid_fetch(set, "RFC822")?;
-        let mut batch_max_uid = 0;
-        for fetch in fetches.iter() {
-            let (uid, raw) = match (fetch.uid, fetch.body()) {
-                (Some(uid), Some(raw)) => (uid, raw),
-                _ => {
-                    summary.failed += 1;
-                    continue;
-                }
-            };
-            summary.seen += 1;
-            match parse_raw_mail(raw, source, "") {
-                Some(mut msg) => {
-                    apply_folder_fields(&mut msg, folder, uid, uidvalidity);
-                    match storage.insert_message(&msg)? {
-                        InsertOutcome::Inserted(_) => summary.inserted += 1,
-                        InsertOutcome::Duplicate(_) => summary.skipped += 1,
-                    }
-                }
-                None => summary.failed += 1,
-            }
-            batch_max_uid = batch_max_uid.max(uid);
-        }
-        // Persist the cursor after every batch so an interrupted sync
-        // resumes where it stopped instead of refetching the folder.
-        if batch_max_uid > last_uid {
-            last_uid = batch_max_uid;
-            storage.set_imap_state(source, folder, uidvalidity, last_uid)?;
-        }
-    }
-
-    // Record the cursor even for empty/unchanged folders (the UIDVALIDITY
-    // may have appeared or reset).
-    storage.set_imap_state(source, folder, uidvalidity, last_uid)?;
-    Ok(summary)
+    summary
 }
 
 /// Set the folder-specific fields on an IMAP message: the folder becomes the

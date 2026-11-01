@@ -253,12 +253,12 @@ async function syncImap(): Promise<void> {
       password,
       folders: folders.length > 0 ? folders : null,
     });
-    const lines = outcome.folders.map((f) =>
-      f.error
-        ? `${f.folder}: failed (${f.error})`
-        : `${f.folder}: ${f.inserted} new, ${f.skipped} already present` +
-          (f.failed > 0 ? `, ${f.failed} failed to parse` : "") +
-          (f.reset ? " (full rescan)" : ""),
+    const lines = outcome.folders.map(
+      (f) =>
+        `${f.folder}: ${f.inserted} new, ${f.skipped} already present` +
+        (f.failed > 0 ? `, ${f.failed} failed to parse` : "") +
+        (f.reset ? " (full rescan)" : "") +
+        (f.error ? ` — failed: ${f.error}` : ""),
     );
     const note =
       outcome.saved_to === "memory"
