@@ -52,7 +52,7 @@ npm install
 npm run tauri dev
 ```
 
-First run tip: click **Load demo** to seed the sample messages, then search for e.g. `vault`, click a hit to read it with its thread neighbors, or set the source/author/date filters to browse. To import real data, point the import field at any `.mbox` file (e.g. exported from Thunderbird), use **Import chat export…** to pick a WhatsApp `Export chat` `.txt` file, a Telegram export's `result.json` (picking the export directory works too), or a Signal conversation `.json` (a directory of them works too), or fill in the **IMAP sync** section (see below).
+First run tip: click **Load demo** to seed the sample messages, then search for e.g. `vault`, click a hit to read it with its thread neighbors, or set the source/author/date filters to browse. To import real data, point the import field at any `.mbox` file (e.g. exported from Thunderbird), use **Import chat export…** to pick a WhatsApp `Export chat` `.txt` file, a Telegram export's `result.json` (picking the export directory works too), or a Signal conversation `.json`, or fill in the **IMAP sync** section (see below).
 
 The database lives in your app data dir (e.g. `~/.local/share/com.acailic.mailchatvault/vault.db` on Linux).
 
