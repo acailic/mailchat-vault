@@ -106,10 +106,16 @@ pub fn store(
         }
     };
     // The hash is the identity: reuse an existing entry for the same
-    // content even when it is stored under a different extension.
+    // content even when it is stored under a different extension. The
+    // exact `<sha256>.<ext>` name covers the common hits (re-imports,
+    // same bytes under a stable name) without enumerating the store.
     let ext = sanitize_extension(display_name);
-    let file_name =
-        existing_store_name(&store_dir, &sha256).unwrap_or_else(|| format!("{sha256}.{ext}"));
+    let exact_name = format!("{sha256}.{ext}");
+    let file_name = if store_dir.join(&exact_name).exists() {
+        exact_name
+    } else {
+        existing_store_name(&store_dir, &sha256).unwrap_or(exact_name)
+    };
     let target = store_dir.join(&file_name);
     let mut written = false;
     if target.exists() {
