@@ -225,6 +225,7 @@ async function openDetail(id: number): Promise<void> {
 }
 
 function closeDetail(): void {
+  detailSeq++; // supersede any in-flight load so it cannot re-open the panel
   state.detail = null;
   renderAll();
 }

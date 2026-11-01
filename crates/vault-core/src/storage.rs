@@ -168,29 +168,6 @@ impl Storage {
         Ok(inserted)
     }
 
-    /// Full-text search over `body` and `author` using FTS5.
-    ///
-    /// `match_query` is a raw FTS5 MATCH expression (see
-    /// [`crate::search::build_match_query`] for building one safely from free
-    /// text). Results are ordered by FTS5 relevance (`rank`).
-    pub fn search(&self, match_query: &str, limit: u32) -> Result<Vec<Message>> {
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT m.id, m.source, m.external_id, m.channel, m.chat_id,
-                   m.author, m.sent_at, m.body, m.raw_json
-            FROM messages_fts
-            JOIN messages AS m ON m.id = messages_fts.rowid
-            WHERE messages_fts MATCH ?1
-            ORDER BY rank
-            LIMIT ?2
-            "#,
-        )?;
-        let rows = stmt
-            .query_map(params![match_query, limit], message_from_row)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-
     /// Paged, filtered search: FTS5 relevance when `query.text` is non-empty,
     /// newest-first browse otherwise, under the same facet filters.
     ///
