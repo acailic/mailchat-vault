@@ -14,7 +14,8 @@
 //! - [`migrations`]: reopening an existing database applies migrations as a
 //!   no-op and preserves every stored row.
 //! - [`integrity`]: the FTS index stays consistent with the `messages`
-//!   table under arbitrary operation sequences.
+//!   table under arbitrary operation sequences, and recovers via
+//!   `rebuild_fts`.
 //!
 //! Determinism and reproduction
 //! ----------------------------

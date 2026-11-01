@@ -183,6 +183,18 @@ fn get_returns_stored_message() {
 }
 
 #[test]
+fn rebuild_fts_restores_index() {
+    let s = storage();
+    s.insert_message(&msg("1", "ana", "searchable body"))
+        .unwrap();
+    // Wipe the index directly to simulate corruption, then rebuild.
+    s.wipe_fts_for_tests().unwrap();
+    assert!(search(&s, "searchable", 10).hits.is_empty());
+    s.rebuild_fts().unwrap();
+    assert_eq!(search(&s, "searchable", 10).hits.len(), 1);
+}
+
+#[test]
 fn date_bounds_are_canonicalized_before_text_comparison() {
     let s = storage();
     let days = [
