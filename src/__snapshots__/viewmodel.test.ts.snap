@@ -1,0 +1,50 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`UI state snapshots > grouped results page 1`] = `
+{
+  "groups": [
+    {
+      "count": 2,
+      "label": "mbox · thread-a",
+    },
+    {
+      "count": 1,
+      "label": "whatsapp · family",
+    },
+  ],
+  "page": {
+    "from": 1,
+    "hasNext": true,
+    "hasPrev": false,
+    "page": 1,
+    "pageCount": 25,
+    "to": 50,
+    "total": 1234,
+  },
+}
+`;
+
+exports[`UI state snapshots > highlighted detail body segments 1`] = `
+[
+  {
+    "hit": false,
+    "text": "The quarterly ",
+  },
+  {
+    "hit": true,
+    "text": "vault",
+  },
+  {
+    "hit": false,
+    "text": " report mentions the ",
+  },
+  {
+    "hit": true,
+    "text": "vault",
+  },
+  {
+    "hit": false,
+    "text": " budget.",
+  },
+]
+`;

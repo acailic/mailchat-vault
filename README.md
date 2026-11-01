@@ -2,7 +2,7 @@
 
 Local email & chat archive — Tauri desktop app with SQLite FTS5 full-text search over your own messages. Private tool; nothing leaves the machine, except what you explicitly send for optional [LLM-assisted search](#llm-assisted-search-v1) (your question + the matching result rows only, and only when an API key is configured).
 
-This is the **v0 foundation**: a complete vertical slice — import, store, dedup, search, display. **v1** adds LLM-assisted natural-language search on top (see below), and the first live mail source: **incremental IMAP/Gmail sync** (see below). The rest of the roadmap (chat platform formats, XOAUTH2) will land as separate tasks.
+This is the **v0 foundation + usable search tool**: a complete vertical slice — import, store, dedup, search, filter, browse, read in thread context. **v1** adds LLM-assisted natural-language search on top (see below), and the first live mail source: **incremental IMAP/Gmail sync** (see below). The rest of the roadmap (chat platform formats, XOAUTH2) will land as separate tasks.
 
 ## What v0 does
 
@@ -15,15 +15,21 @@ This is the **v0 foundation**: a complete vertical slice — import, store, dedu
 - **Manual/demo source**: import an `.mbox` file (no IMAP needed) — subjects, authors, dates, and decoded text bodies are archived and searchable.
 - **Chat imports**: WhatsApp `.txt` exports and Telegram Desktop `result.json` exports — texts, authors, and timestamps are archived and searchable; quoted replies are kept as metadata, attachments are not extracted but recorded in `raw_json`. The format is auto-detected from the file contents, so re-importing the same export never duplicates messages.
 - **IMAP sync (Gmail & friends)**: incremental, UIDVALIDITY/UID-tracked sync from any IMAP server over host/port/user/password — Gmail via app password in this first round (XOAUTH2 later). Folders map to the message `channel` field; re-syncing never duplicates. Passwords are prompted for, kept in the OS keyring when available and in session memory otherwise — never in the database.
-- **Search UI**: a window with a search box that hits FTS5 (body + author) and shows relevance-ranked results; free-text input is sanitized so it can never be an FTS query syntax error.
+- **Search tool UI** over the FTS5 index:
+  - results with **match highlighting** (FTS5 snippets, rendered as `<mark>` runs), **grouped by chat/thread**;
+  - **filters**: source chips (email/whatsapp/telegram/… — whatever the archive holds), author substring, and a from–to date range; an empty query with filters set browses newest-first;
+  - **result count + pagination** (`1–50 of 1,234 · page 1/25`);
+  - **message detail**: full body with highlighted query terms, full metadata, and clickable **thread neighbors** of the same chat;
+  - **keyboard navigation**: `/` focus search, `↑`/`↓` move through results, `Enter` open detail, `↑`/`↓` walk the thread, `Esc` close.
+- **Performance contract**: queries answer in < 100 ms over 100k messages (asserted by a generated-fixture test; all queries are `LIMIT`-bounded and ride the FTS5 index plus the `sent_at`/`(source, chat_id)` indexes).
 - **Ask UI (v1)**: natural-language questions translated to FTS5 + date filters via an LLM, with a short summary over the top results — strictly privacy-scoped and fully optional (see below).
 
 ## Repository layout
 
 ```
-crates/vault-core/   # storage (SQLite/FTS5, migrations), ingest trait, mail parsing, mbox / WhatsApp / Telegram sources, IMAP sync, LLM search pipeline — no UI deps
-src-tauri/           # Tauri app shell: commands (search, llm_ask, llm_status, import_mbox, import_chat_export, sync_imap, seed_demo, stats) + secret storage
-src/                 # frontend (vanilla TS): search + ask UI, import & IMAP sync controls
+crates/vault-core/   # storage (SQLite/FTS5, migrations), filtered/paged search queries, ingest trait, mail parsing, mbox / WhatsApp / Telegram sources, IMAP sync, LLM search pipeline — no UI deps
+src-tauri/           # Tauri app shell: commands (search_messages, chat_context, llm_ask, llm_status, import_mbox, import_chat_export, sync_imap, seed_demo, stats) + secret storage
+src/                 # frontend (vanilla TS): search + filters + pagination + detail view, ask UI, import & IMAP sync controls
 index.html           # single-page shell
 ```
 
@@ -46,7 +52,7 @@ npm install
 npm run tauri dev
 ```
 
-First run tip: click **Load demo** to seed a few sample messages, then search for e.g. `vault`. To import real data, point the import field at any `.mbox` file (e.g. exported from Thunderbird), use **Import chat export…** to pick a WhatsApp `Export chat` `.txt` file or a Telegram export's `result.json` (picking the export directory works too), or fill in the **IMAP sync** section (see below).
+First run tip: click **Load demo** to seed the sample messages, then search for e.g. `vault`, click a hit to read it with its thread neighbors, or set the source/author/date filters to browse. To import real data, point the import field at any `.mbox` file (e.g. exported from Thunderbird), use **Import chat export…** to pick a WhatsApp `Export chat` `.txt` file or a Telegram export's `result.json` (picking the export directory works too), or fill in the **IMAP sync** section (see below).
 
 The database lives in your app data dir (e.g. `~/.local/share/com.acailic.mailchatvault/vault.db` on Linux).
 
@@ -114,9 +120,8 @@ Any IMAP server with implicit TLS works the same way: host, port (993), username
 ## Tests
 
 ```sh
-cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram ingest, IMAP sync (mock server), LLM search pipeline (mock LLM, no network), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations)
-npm test                 # frontend unit tests (vitest)
-npm run check            # TypeScript type-check
+cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram ingest, filtered/paged search, chat context, 100k perf fixture, IMAP sync (mock server), LLM search pipeline (mock LLM, no network), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations)
+npm test                 # frontend unit + UI-state snapshot tests (vitest)npm run check            # TypeScript type-check
 cargo test --workspace   # also compiles the Tauri app (needs the Linux libs above)
 ```
 
@@ -139,9 +144,15 @@ MAILCHAT_IMAP_USER=you@gmail.com MAILCHAT_IMAP_PASS=abcd-efgh-ijkl-mnop \
 
 It writes to a throwaway temp directory, never your real vault.
 
+Testing strategy for the UI: driving the Tauri webview headlessly in CI is
+not practical (webkit2gtk driver + display), so the UI is covered by tests
+over the query layer (`crates/vault-core`) and snapshot tests of the rendered
+UI state (`src/render.test.ts` via happy-dom: results list, pagination,
+source chips, detail panel).
+
 ## Out of scope for now (separate tasks)
 
-XOAUTH2 (OAuth) login for Gmail, multi-account UI, more chat sources (Signal, Discord), automatic folder watching, chat media extraction, local embedding models / vector search, multi-provider menus, icons/bundling/installers, settings UI, push notifications.
+XOAUTH2 (OAuth) login for Gmail, multi-account UI, more chat sources (Signal, Discord), automatic folder watching, chat media extraction, local embedding models / vector search, multi-provider menus, icons/bundling/installers, settings UI, result export, statistics dashboard, push notifications.
 
 ## Notes on chat import details
 
