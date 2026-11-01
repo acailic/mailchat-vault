@@ -327,10 +327,8 @@ pub fn extract_whatsapp(
         let mut lower_wanted: Vec<String> = wanted.iter().map(|w| w.to_lowercase()).collect();
         lower_wanted.sort();
         lower_wanted.dedup();
-        let mut lower_wanted_stems: Vec<String> = wanted
-            .iter()
-            .map(|w| stem_of(w).to_lowercase())
-            .collect();
+        let mut lower_wanted_stems: Vec<String> =
+            wanted.iter().map(|w| stem_of(w).to_lowercase()).collect();
         lower_wanted_stems.sort();
         lower_wanted_stems.dedup();
         collect_names(

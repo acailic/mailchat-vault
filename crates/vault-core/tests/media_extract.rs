@@ -192,8 +192,16 @@ fn video_thumbnail_keeps_image_kind_and_file_takes_the_hint() {
     let sb = Sandbox::new("tg-thumb");
     fs::create_dir_all(sb.export_dir().join("photos")).unwrap();
     fs::create_dir_all(sb.export_dir().join("video_files")).unwrap();
-    fs::copy(fixture("photo.jpg"), sb.export_dir().join("photos/thumb.jpg")).unwrap();
-    fs::write(sb.export_dir().join("video_files/clip.mp4"), b"fake-video-bytes").unwrap();
+    fs::copy(
+        fixture("photo.jpg"),
+        sb.export_dir().join("photos/thumb.jpg"),
+    )
+    .unwrap();
+    fs::write(
+        sb.export_dir().join("video_files/clip.mp4"),
+        b"fake-video-bytes",
+    )
+    .unwrap();
     fs::write(
         sb.export_dir().join("result.json"),
         r#"{"name": "d", "id": 9, "messages": [
@@ -209,13 +217,18 @@ fn video_thumbnail_keeps_image_kind_and_file_takes_the_hint() {
     assert_eq!(media.stored, 2);
     assert_eq!(media.deduped, 0);
 
-    let raw: serde_json::Value =
-        serde_json::from_str(&raw_json_of(&storage, "9/1")).unwrap();
+    let raw: serde_json::Value = serde_json::from_str(&raw_json_of(&storage, "9/1")).unwrap();
     let thumb = &raw["media"][0];
     let clip = &raw["media"][1];
-    assert_eq!(thumb["kind"], "image", "thumbnail kind from its own .jpg extension");
+    assert_eq!(
+        thumb["kind"], "image",
+        "thumbnail kind from its own .jpg extension"
+    );
     assert_eq!(thumb["name"], "thumb.jpg");
-    assert_eq!(clip["kind"], "video", "the file ref takes the media_type hint");
+    assert_eq!(
+        clip["kind"], "video",
+        "the file ref takes the media_type hint"
+    );
     assert_eq!(clip["name"], "clip.mp4");
 }
 
@@ -279,6 +292,57 @@ fn identical_content_in_two_messages_is_deduped_by_hash() {
     assert_eq!(first["media"][0]["sha256"], second["media"][0]["sha256"]);
     assert_eq!(first["media"][0]["name"], "a.jpg");
     assert_eq!(second["media"][0]["name"], "b.jpg");
+}
+
+#[test]
+fn identical_content_referenced_as_jpg_then_jpeg_is_stored_once() {
+    // The store is keyed by content, not (content, extension): the same
+    // bytes arriving as `a.jpg` in one export and `c.jpeg` in another are
+    // stored once, and the second reference reuses the first entry's name.
+    let sb = Sandbox::new("tg-cross-ext");
+    let photo = fs::read(fixture("photo.jpg")).unwrap();
+    fs::create_dir_all(sb.export_dir().join("photos")).unwrap();
+    fs::write(sb.export_dir().join("photos/a.jpg"), &photo).unwrap();
+    fs::write(
+        sb.export_dir().join("result.json"),
+        r#"{"name": "d", "id": 11, "messages": [
+  { "id": 1, "type": "message", "date_unixtime": "1698832800", "from": "A", "photo": "photos/a.jpg", "text": "" }
+]}"#,
+    )
+    .unwrap();
+    let storage = Storage::open_in_memory().unwrap();
+    let first = sb.import_with_media(&storage);
+    assert_eq!(first.media.unwrap().stored, 1);
+
+    // A later export re-encodes the same photo as `c.jpeg`, imported into
+    // the same app-data dir (same media store).
+    let later = sb.root.join("export-later");
+    fs::create_dir_all(later.join("photos")).unwrap();
+    fs::write(later.join("photos/c.jpeg"), &photo).unwrap();
+    fs::write(
+        later.join("result.json"),
+        r#"{"name": "d", "id": 12, "messages": [
+  { "id": 1, "type": "message", "date_unixtime": "1698832900", "from": "A", "photo": "photos/c.jpeg", "text": "" }
+]}"#,
+    )
+    .unwrap();
+    let second = import(&storage, &later, true, Some(&sb.data_dir())).unwrap();
+    let media = second.media.unwrap();
+    assert_eq!(media.stored, 0, "no second copy is written");
+    assert_eq!(
+        media.deduped, 1,
+        "recognized by content despite the extension"
+    );
+    assert_eq!(fs::read_dir(sb.store_dir()).unwrap().count(), 1);
+    let raw: serde_json::Value = serde_json::from_str(&raw_json_of(&storage, "12/1")).unwrap();
+    assert_eq!(raw["media"][0]["path"], first_stored_path(&storage, "11/1"));
+}
+
+/// Store path recorded for the first import, so the test can prove the
+/// later reference reuses that exact entry rather than writing a twin.
+fn first_stored_path(storage: &Storage, wanted_id: &str) -> String {
+    let raw: serde_json::Value = serde_json::from_str(&raw_json_of(storage, wanted_id)).unwrap();
+    raw["media"][0]["path"].as_str().unwrap().to_string()
 }
 
 #[test]
@@ -452,7 +516,10 @@ fn whatsapp_stem_match_never_shadowed_by_foreign_extension() {
     let outcome = sb.import_picked(&storage, &chat, true);
     let media = outcome.media.unwrap();
     assert_eq!(media.referenced, 2);
-    assert_eq!(media.missing, 1, "plan.pdf.bak must not answer for plan.pdf");
+    assert_eq!(
+        media.missing, 1,
+        "plan.pdf.bak must not answer for plan.pdf"
+    );
     assert_eq!(media.stored, 1, "IMG-1.jpg matches IMG-1.jpeg by stem");
     assert_eq!(fs::read_dir(sb.store_dir()).unwrap().count(), 1);
     let hits = storage

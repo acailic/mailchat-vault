@@ -399,9 +399,11 @@ fn split_quoted(body: &str) -> Option<(Option<String>, String, String)> {
     Some((quoted_author, quoted_text, reply))
 }
 
-/// Recognize WhatsApp's attachment placeholders. Media is not extracted in
-/// v0: the placeholder text stays searchable and the kind (and name, when
-/// present) is recorded for `raw_json`.
+/// Recognize WhatsApp's attachment placeholders. The placeholder text
+/// stays searchable and the kind (and name, when present) is recorded
+/// for `raw_json`; when the export ships with its files, the media pass
+/// (see [`crate::media`]) matches named attachments and links the stored
+/// copies via a `media` array in `raw_json`.
 fn detect_attachment(body: &str) -> Option<Value> {
     let stripped = strip_bidi(body);
     let text = stripped.trim();
