@@ -509,7 +509,11 @@ pub fn rank_hybrid(
 
     let (ids, ranking) = match (fts_ids.is_empty(), vector_ids.is_empty()) {
         (_, true) => (fts_ids, RankingMode::FtsOnly),
-        (true, false) => (vector_ids, RankingMode::VectorOnly),
+        (true, false) => {
+            let mut only = vector_ids;
+            only.truncate(limit as usize);
+            (only, RankingMode::VectorOnly)
+        }
         (false, false) => (
             rrf_fuse(&fts_ids, &vector_ids, limit as usize),
             RankingMode::HybridFtsVector,

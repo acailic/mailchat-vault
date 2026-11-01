@@ -154,6 +154,37 @@ fn ask_is_vector_only_when_fts_misses() {
 }
 
 #[test]
+fn vector_only_ranking_respects_the_caller_limit() {
+    let s = Storage::open_in_memory().unwrap();
+    let e = HashEmbedder::new();
+    // 80 subword-only relatives of the query ("deploying" appears as no
+    // stored token, so FTS matches nothing) — enough to overflow any
+    // reasonable limit above the similarity floor.
+    for n in 0..80 {
+        s.insert_message(&msg(
+            &format!("dep-{n}"),
+            "2026-10-01T00:00:00Z",
+            &format!("redeployment redeploying redeployed redeploy {n}"),
+        ))
+        .unwrap();
+    }
+    run_embedding_job(&s, &e, None).unwrap();
+
+    let outcome = ask(&s, None, &e, "deploying", 50, 8, today()).unwrap();
+    assert_eq!(outcome.ranking, RankingMode::VectorOnly);
+    assert!(
+        outcome.results.len() <= 50,
+        "VectorOnly must honor the caller's limit, got {}",
+        outcome.results.len()
+    );
+    assert_eq!(
+        outcome.results.len(),
+        50,
+        "80 candidates above the similarity floor, so the limit binds"
+    );
+}
+
+#[test]
 fn plan_date_bounds_apply_to_the_vector_leg() {
     let s = seeded();
     let e = HashEmbedder::new();
