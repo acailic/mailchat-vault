@@ -26,6 +26,18 @@
       #results li { padding: 8px 0; border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
       .meta { color: gray; font-size: 13px; }
       .body { margin-top: 2px; white-space: pre-wrap; word-break: break-word; }
+      h2 { font-size: 15px; margin: 0 0 8px; }
+      #llm-note {
+        margin-top: 6px; padding: 8px 10px; font-size: 13px;
+        border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+        border-radius: 8px;
+      }
+      #answer {
+        margin-top: 8px; padding: 10px 12px; white-space: pre-wrap;
+        border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+        border-radius: 8px;
+      }
+      #ask-notes { margin-top: 6px; font-size: 13px; color: darkorange; }
     </style>
   </head>
   <body>
@@ -41,6 +53,19 @@
       </div>
       <div id="status"></div>
       <ul id="results"></ul>
+    </section>
+
+    <section>
+      <h2>Ask the archive (natural language)</h2>
+      <div class="row">
+        <input id="ask" type="text" placeholder="e.g. “what did Ana say about the vault in October?”" />
+        <button id="ask-btn" type="button">Ask</button>
+      </div>
+      <div id="llm-note" class="meta"></div>
+      <div id="ask-status" class="meta" style="margin-top: 6px; min-height: 1em"></div>
+      <div id="answer" hidden></div>
+      <div id="ask-notes" hidden></div>
+      <ul id="ask-results"></ul>
     </section>
 
     <section>

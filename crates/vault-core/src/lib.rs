@@ -13,10 +13,13 @@
 //! - [`telegram`]: the Telegram `result.json` chat export source.
 //! - [`chat_export`]: format detection for picked chat export files.
 //! - [`search`]: free-text to FTS5 MATCH query building.
+//! - [`llm`]: LLM-assisted search — natural language to an FTS5 plan, then
+//!   a summary over the top results (privacy-scoped RAG).
 
 pub mod chat_export;
 pub mod demo;
 pub mod ingest;
+pub mod llm;
 pub mod mbox;
 pub mod message;
 pub mod search;
@@ -39,4 +42,8 @@ pub enum Error {
     MailParse(#[from] mailparse::MailParseError),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("llm error: {0}")]
+    Llm(String),
+    #[error("invalid date filter: {0}")]
+    InvalidDate(String),
 }

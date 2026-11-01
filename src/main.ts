@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { formatSentAt, snippet } from "./format";
+import { describePlan, privacyNote, type AskOutcome, type LlmStatus } from "./llmview";
 
 interface Message {
   id: number;
@@ -42,14 +43,21 @@ const importButton = document.querySelector<HTMLButtonElement>("#import-btn")!;
 const chatImportButton = document.querySelector<HTMLButtonElement>("#chat-import-btn")!;
 const seedButton = document.querySelector<HTMLButtonElement>("#seed-btn")!;
 const importStatus = document.querySelector<HTMLElement>("#import-status")!;
+const askInput = document.querySelector<HTMLInputElement>("#ask")!;
+const askButton = document.querySelector<HTMLButtonElement>("#ask-btn")!;
+const askStatus = document.querySelector<HTMLElement>("#ask-status")!;
+const llmNote = document.querySelector<HTMLElement>("#llm-note")!;
+const answerBox = document.querySelector<HTMLElement>("#answer")!;
+const askNotes = document.querySelector<HTMLElement>("#ask-notes")!;
+const askResults = document.querySelector<HTMLUListElement>("#ask-results")!;
 
 function setStatus(text: string, isError = false): void {
   searchStatus.textContent = text;
   searchStatus.classList.toggle("error", isError);
 }
 
-function renderResults(messages: Message[]): void {
-  resultsList.replaceChildren(
+function renderResults(list: HTMLUListElement, messages: Message[]): void {
+  list.replaceChildren(
     ...messages.map((m) => {
       const li = document.createElement("li");
       const meta = document.createElement("div");
@@ -74,9 +82,50 @@ async function runSearch(): Promise<void> {
   try {
     const messages = await invoke<Message[]>("search_messages", { query, limit: 50 });
     setStatus(`${messages.length} result${messages.length === 1 ? "" : "s"} for “${query}”`);
-    renderResults(messages);
+    renderResults(resultsList, messages);
   } catch (e) {
     setStatus(String(e), true);
+  }
+}
+
+function renderAsk(outcome: AskOutcome): void {
+  if (outcome.answer) {
+    answerBox.textContent = outcome.answer;
+    answerBox.hidden = false;
+  } else {
+    answerBox.hidden = true;
+  }
+  askNotes.textContent = outcome.notes.join(" · ");
+  askNotes.hidden = outcome.notes.length === 0;
+  const shown = outcome.results as Message[];
+  renderResults(askResults, shown);
+}
+
+async function runAsk(): Promise<void> {
+  const question = askInput.value.trim();
+  if (!question) {
+    askStatus.textContent = "Ask a question first.";
+    return;
+  }
+  askButton.disabled = true;
+  askStatus.textContent = "Asking… (translate → search → summarize)";
+  try {
+    const outcome = await invoke<AskOutcome>("llm_ask", { question, limit: 50 });
+    askStatus.textContent = describePlan(outcome);
+    renderAsk(outcome);
+  } catch (e) {
+    askStatus.textContent = String(e);
+  } finally {
+    askButton.disabled = false;
+  }
+}
+
+async function refreshLlmNote(): Promise<void> {
+  try {
+    const status = await invoke<LlmStatus>("llm_status");
+    llmNote.textContent = privacyNote(status);
+  } catch {
+    llmNote.textContent = "";
   }
 }
 
@@ -159,8 +208,13 @@ searchButton.addEventListener("click", () => void runSearch());
 searchInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") void runSearch();
 });
+askButton.addEventListener("click", () => void runAsk());
+askInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") void runAsk();
+});
 importButton.addEventListener("click", () => void importMbox());
 chatImportButton.addEventListener("click", () => void importChatExport());
 seedButton.addEventListener("click", () => void seedDemo());
 
 void refreshStats();
+void refreshLlmNote();

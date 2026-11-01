@@ -5,10 +5,11 @@
 
 use std::path::Path;
 
+use chrono::{Duration, NaiveDate};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::message::{InsertOutcome, Message, NewMessage, SourceCount, Stats};
-use crate::Result;
+use crate::{Error, Result};
 
 /// Ordered schema migrations; each entry runs once, inside a transaction.
 const MIGRATIONS: &[(i64, &str)] = &[(
@@ -134,6 +135,31 @@ impl Storage {
     /// [`crate::search::build_match_query`] for building one safely from free
     /// text). Results are ordered by FTS5 relevance (`rank`).
     pub fn search(&self, match_query: &str, limit: u32) -> Result<Vec<Message>> {
+        self.search_filtered(match_query, None, None, limit)
+    }
+
+    /// Full-text search with optional inclusive sent-date bounds.
+    ///
+    /// `date_from`/`date_to` are `YYYY-MM-DD` strings; anything else is an
+    /// error. `date_to` is inclusive (messages sent any time that day count).
+    /// Messages with an unknown (`empty`) `sent_at` are excluded while a
+    /// bound is active — they cannot be placed in time. The MATCH expression
+    /// is a bound parameter throughout, so it can never spill into SQL text.
+    pub fn search_filtered(
+        &self,
+        match_query: &str,
+        date_from: Option<&str>,
+        date_to: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<Message>> {
+        let from = parse_date_bound(date_from, "date_from")?;
+        // Inclusive date_to becomes an exclusive upper bound at midnight of
+        // the next day; RFC 3339 UTC strings compare correctly as text.
+        let to_exclusive = parse_date_bound(date_to, "date_to")?.map(|day| {
+            (NaiveDate::parse_from_str(&day, "%Y-%m-%d").expect("validated by parse_date_bound")
+                + Duration::days(1))
+            .to_string()
+        });
         let mut stmt = self.conn.prepare(
             r#"
             SELECT m.id, m.source, m.external_id, m.channel, m.chat_id,
@@ -141,14 +167,39 @@ impl Storage {
             FROM messages_fts
             JOIN messages AS m ON m.id = messages_fts.rowid
             WHERE messages_fts MATCH ?1
+              AND (?2 IS NULL OR m.sent_at >= ?2)
+              AND (?3 IS NULL OR m.sent_at < ?3)
             ORDER BY rank
-            LIMIT ?2
+            LIMIT ?4
             "#,
         )?;
         let rows = stmt
-            .query_map(params![match_query, limit], message_from_row)?
+            .query_map(
+                params![match_query, from, to_exclusive, limit],
+                message_from_row,
+            )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    /// Whether `expr` compiles as an FTS5 MATCH expression against the index.
+    ///
+    /// Used to vet LLM-generated expressions before running them: a cheap
+    /// `LIMIT 1` probe whose only interesting outcome is error vs. no error
+    /// (row presence is irrelevant).
+    pub fn is_valid_match(&self, expr: &str) -> bool {
+        let Ok(mut stmt) = self
+            .conn
+            .prepare("SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?1 LIMIT 1")
+        else {
+            return false;
+        };
+        let Ok(mut rows) = stmt.query(params![expr]) else {
+            return false;
+        };
+        // Stepping once forces FTS5 to compile the expression; whether a
+        // row matches is irrelevant to validity.
+        rows.next().is_ok()
     }
 
     /// Fetch one message by row id (used to inspect a search hit).
@@ -229,6 +280,16 @@ fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
         body: row.get(7)?,
         raw_json: row.get(8)?,
     })
+}
+
+/// Validate an optional `YYYY-MM-DD` bound, returning it normalized.
+fn parse_date_bound(value: Option<&str>, field: &str) -> Result<Option<String>> {
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(None),
+        Some(v) => NaiveDate::parse_from_str(v, "%Y-%m-%d")
+            .map(|_| Some(v.to_string()))
+            .map_err(|_| Error::InvalidDate(format!("{field}={v}"))),
+    }
 }
 
 /// Apply pending migrations, each in its own transaction, exactly once.
