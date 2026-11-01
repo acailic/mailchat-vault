@@ -102,6 +102,7 @@ impl Storage {
         conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        register_fold_function(&conn)?;
         migrate(&conn)?;
         Ok(Self { conn })
     }
@@ -552,7 +553,7 @@ impl QueryFilters {
         }
         let author = query.author.trim();
         if !author.is_empty() {
-            sql.push_str(" AND m.author LIKE ? ESCAPE '\\'");
+            sql.push_str(" AND fold(m.author) LIKE fold(?) ESCAPE '\\'");
             values.push(SqlValue::from(format!(
                 "%{}%",
                 crate::query::escape_like(author)
@@ -594,6 +595,44 @@ impl QueryFilters {
     fn bind(&self) -> Vec<SqlValue> {
         self.values.clone()
     }
+}
+
+/// Fold a string for the author filter's case-insensitive comparison:
+/// Unicode-lowercased, with whitespace runs collapsed to single spaces.
+fn fold_for_search(s: &str) -> String {
+    s.split_whitespace()
+        .map(|w| w.chars().flat_map(char::to_lowercase).collect::<String>())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Register `fold` as a deterministic scalar SQL function on `conn`, so the
+/// author filter can compare Unicode-cased substrings (SQLite's built-in
+/// `lower()` and its LIKE case-folding are ASCII-only).
+fn register_fold_function(conn: &Connection) -> Result<()> {
+    conn.create_scalar_function(
+        "fold",
+        1,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let value = ctx.get_raw(0);
+            match value {
+                rusqlite::types::ValueRef::Text(bytes) => {
+                    let s = std::str::from_utf8(bytes).map_err(|_| {
+                        rusqlite::Error::InvalidColumnType(
+                            0,
+                            "author".into(),
+                            rusqlite::types::Type::Text,
+                        )
+                    })?;
+                    Ok(Some(fold_for_search(s)))
+                }
+                _ => Ok(None),
+            }
+        },
+    )?;
+    Ok(())
 }
 
 /// Apply pending migrations, each in its own transaction, exactly once.

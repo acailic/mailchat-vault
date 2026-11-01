@@ -160,6 +160,44 @@ fn author_filter_escapes_like_wildcards() {
 }
 
 #[test]
+fn author_filter_folds_unicode_case() {
+    let s = seeded();
+    let mut m = NewMessage::new(
+        "mbox",
+        "e4",
+        "Ivan Ivić <ivan@corp>",
+        "2026-02-11T09:00:00Z",
+        "ivić's quarterly report",
+    );
+    m.chat_id = "thread-b".into();
+    s.insert_message(&m).unwrap();
+
+    let hits = |author: &str| -> u64 {
+        s.search_page(&SearchQuery {
+            text: "report".into(),
+            author: author.into(),
+            limit: 10,
+            ..SearchQuery::default()
+        })
+        .unwrap()
+        .total
+    };
+
+    assert_eq!(
+        hits("ivić"),
+        1,
+        "lowercase diacritic pattern finds its author"
+    );
+    assert_eq!(hits("IVIĆ"), 1, "uppercase pattern folds the same");
+    assert_eq!(
+        hits("Ivan Ivić"),
+        1,
+        "pattern differing in case and spacing still folds to a match"
+    );
+    assert_eq!(hits("ivic"), 0, "pattern differing beyond case must miss");
+}
+
+#[test]
 fn date_range_filters_inclusively() {
     let s = seeded();
     let page = s

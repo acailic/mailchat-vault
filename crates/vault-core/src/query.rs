@@ -37,7 +37,7 @@ pub struct SearchQuery {
     /// Restrict to these ingest sources (e.g. `"mbox"`, `"whatsapp"`);
     /// empty means all sources.
     pub sources: Vec<String>,
-    /// Case-insensitive substring filter on the author.
+    /// Case-insensitive (Unicode-folded) substring filter on the author.
     pub author: String,
     /// Inclusive lower day bound (`YYYY-MM-DD`), empty when unbounded.
     pub from_date: String,
