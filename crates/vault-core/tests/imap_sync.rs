@@ -409,3 +409,97 @@ fn missing_folder_reports_error_without_breaking_others() {
     assert_eq!(summaries[2].inserted, 1);
     assert_eq!(storage.stats().unwrap().total, 2);
 }
+
+/// The server breaks mid-folder (one batch stored, the next FETCH fails):
+/// the folder summary keeps the counts already accumulated, the batch
+/// cursor already persisted is kept so a retry resumes instead of
+/// refetching, and the folders after the failure still sync.
+#[test]
+fn partial_folder_failure_keeps_counts_and_resume_cursor() {
+    let server = MockImap::start();
+    let sixty_mails: Vec<Vec<u8>> = (1..=60)
+        .map(|i| {
+            mail(
+                Some(&format!("p-{i}@x")),
+                &format!("Mail {i}"),
+                &format!("body {i}"),
+            )
+        })
+        .collect();
+    server.set_mailbox("INBOX", MockMailbox::new(7, sixty_mails));
+    server.set_mailbox(
+        "Archive",
+        MockMailbox::new(3, vec![mail(Some("ar-1@x"), "Ar", "archive body")]),
+    );
+    // Fail exactly the 2nd UID FETCH: the first 50-message batch stores,
+    // the second batch (UIDs 51..=60) fails.
+    server.fail_uid_fetch_once(Some(2));
+
+    let storage = Storage::open_in_memory().unwrap();
+    let summaries = sync(&server, &storage, &["INBOX", "Archive"]);
+
+    // The failing folder keeps its partial counts alongside the error.
+    assert_eq!(summaries.len(), 2);
+    let inbox = &summaries[0];
+    let err = inbox
+        .error
+        .as_deref()
+        .expect("the broken folder must carry its error");
+    assert_eq!(inbox.folder, "INBOX");
+    assert_eq!(
+        inbox.seen, 50,
+        "counts stored before the failure stay in the summary"
+    );
+    assert_eq!(inbox.inserted, 50);
+    assert_eq!(inbox.skipped, 0);
+    assert_eq!(inbox.failed, 0);
+    assert_eq!(inbox.uidvalidity, 7);
+    let _ = err;
+
+    // The folder after the broken one still fully synced.
+    assert_eq!(summaries[1].folder, "Archive");
+    assert_eq!(summaries[1].error, None);
+    assert_eq!(summaries[1].inserted, 1);
+    assert_eq!(storage.stats().unwrap().total, 51);
+
+    // The cursor persisted at the batch boundary survives the failure.
+    let state = storage.get_imap_state(&source(), "INBOX").unwrap().unwrap();
+    assert_eq!(state.last_uid, 50);
+
+    // With the server failure gone, a retry resumes from the persisted
+    // cursor: only UIDs 51..=60 are fetched — no refetch of the first
+    // batch, no duplicates.
+    let summaries = sync(&server, &storage, &["INBOX"]);
+    let inbox = &summaries[0];
+    assert_eq!(inbox.error, None);
+    assert_eq!(inbox.seen, 10);
+    assert_eq!(inbox.inserted, 10);
+    assert_eq!(storage.stats().unwrap().total, 61);
+    // The retry fetched exactly the ten remaining UIDs — the first batch
+    // was not refetched.
+    assert_eq!(
+        server.log().fetch_sets.last().unwrap(),
+        "51,52,53,54,55,56,57,58,59,60"
+    );
+}
+
+/// A blackholed host (SYN silently dropped) must fail within the bounded
+/// connect phase instead of hanging on the OS default, which can take
+/// minutes.
+#[test]
+fn connect_to_blackholed_host_fails_within_the_connect_timeout() {
+    let mut config = vimap::ImapConfig::gmail("user@example.com", "not-the-real-password");
+    config.host = "10.255.255.1".to_string();
+    let start = std::time::Instant::now();
+    let result = vimap::connect(&config);
+    let elapsed = start.elapsed();
+    assert!(result.is_err(), "a blackholed host must fail, not hang");
+    // The 30 s CONNECT_TIMEOUT engages (this host's SYN to 10.255.255.1 is
+    // silently dropped, so the OS default would hang well past this);
+    // allow scheduling slack on both sides.
+    assert!(
+        elapsed >= std::time::Duration::from_secs(25)
+            && elapsed < std::time::Duration::from_secs(90),
+        "connect must be bounded by CONNECT_TIMEOUT, took {elapsed:?}"
+    );
+}

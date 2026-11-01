@@ -52,6 +52,13 @@ pub struct MockImap {
     pub addr: SocketAddr,
     mailboxes: Arc<Mutex<BTreeMap<String, MockMailbox>>>,
     log: Arc<Mutex<ServerLog>>,
+    /// When `Some(n)`, exactly the nth UID FETCH command seen on this
+    /// server is answered with a tagged `BAD` instead of message data —
+    /// simulates a server that breaks mid-folder. Every other FETCH is
+    /// served normally.
+    fail_fetch_once: Arc<Mutex<Option<usize>>>,
+    /// 1-based ordinal of each UID FETCH command seen.
+    fetch_ordinal: Arc<Mutex<usize>>,
 }
 
 impl MockImap {
@@ -61,16 +68,24 @@ impl MockImap {
         let addr = listener.local_addr().expect("mock addr");
         let mailboxes = Arc::new(Mutex::new(BTreeMap::new()));
         let log = Arc::new(Mutex::new(ServerLog::default()));
+        let fail_fetch_once = Arc::new(Mutex::new(None));
+        let fetch_ordinal = Arc::new(Mutex::new(0));
         {
             let mailboxes = Arc::clone(&mailboxes);
             let log = Arc::clone(&log);
+            let fail_fetch_once = Arc::clone(&fail_fetch_once);
+            let fetch_ordinal = Arc::clone(&fetch_ordinal);
             std::thread::spawn(move || {
                 for stream in listener.incoming() {
                     let Ok(stream) = stream else { break };
                     let mailboxes = Arc::clone(&mailboxes);
                     let log = Arc::clone(&log);
+                    let fail_fetch_once = Arc::clone(&fail_fetch_once);
+                    let fetch_ordinal = Arc::clone(&fetch_ordinal);
                     std::thread::spawn(move || {
-                        if let Err(e) = serve(stream, &mailboxes, &log) {
+                        if let Err(e) =
+                            serve(stream, &mailboxes, &log, &fail_fetch_once, &fetch_ordinal)
+                        {
                             // A dropped client mid-command is normal in
                             // tests; anything else is a protocol bug.
                             eprintln!("mock imap connection error: {e}");
@@ -83,7 +98,16 @@ impl MockImap {
             addr,
             mailboxes,
             log,
+            fail_fetch_once,
+            fetch_ordinal,
         }
+    }
+
+    /// Answer exactly the nth UID FETCH command seen on this server (across
+    /// all connections, 1-based) with a tagged `BAD`, simulating a server
+    /// that breaks mid-folder. `None` (the default) serves normally.
+    pub fn fail_uid_fetch_once(&self, ordinal: Option<usize>) {
+        *self.fail_fetch_once.lock().unwrap() = ordinal;
     }
 
     /// Replace a mailbox wholesale (also how UIDVALIDITY resets are
@@ -117,6 +141,8 @@ fn serve(
     stream: TcpStream,
     mailboxes: &Arc<Mutex<BTreeMap<String, MockMailbox>>>,
     log: &Arc<Mutex<ServerLog>>,
+    fail_fetch_once: &Arc<Mutex<Option<usize>>>,
+    fetch_ordinal: &Arc<Mutex<usize>>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
@@ -228,6 +254,22 @@ fn serve(
                             .split_once(' ')
                             .map(|(s, q)| (s.to_string(), q.to_string()))
                             .unwrap_or((args.clone(), String::new()));
+                        let ordinal = {
+                            let mut n = fetch_ordinal.lock().unwrap();
+                            *n += 1;
+                            *n
+                        };
+                        let should_fail = {
+                            let threshold = fail_fetch_once.lock().unwrap();
+                            threshold.is_some_and(|n| ordinal == n)
+                        };
+                        if should_fail {
+                            write_line(
+                                &mut writer,
+                                format!("{tag} BAD simulated mid-folder fetch failure").as_bytes(),
+                            )?;
+                            continue;
+                        }
                         log.lock().unwrap().fetch_sets.push(set.clone());
                         let snapshot = {
                             let boxes = mailboxes.lock().unwrap();
