@@ -12,7 +12,7 @@ use chrono::{Local, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::message::Message;
-use crate::Error;
+use crate::{Error, Result};
 
 /// Marker characters wrapped around FTS5-matched terms inside snippets.
 ///
@@ -65,7 +65,7 @@ impl Default for SearchQuery {
 
 impl SearchQuery {
     /// Clamp `limit`/`offset` into range and validate the day bounds.
-    pub fn normalize(&mut self) -> Result<(), Error> {
+    pub fn normalize(&mut self) -> Result<()> {
         self.limit = self.limit.clamp(1, MAX_LIMIT);
         self.offset = self.offset.min(MAX_OFFSET);
         self.sources.retain(|s| !s.trim().is_empty());
@@ -140,23 +140,28 @@ pub(crate) fn parse_day(input: &str) -> Option<NaiveDate> {
 /// begins in `tz` — the shared boundary the date filters compare against,
 /// so a day bound selects exactly what the UI renders as that local day.
 /// The offset is resolved per date (`tz.from_local_datetime`), so historical
-/// DST periods map to their own offset; a local midnight made ambiguous or
-/// skipped by a DST transition resolves deterministically via `earliest()`.
-pub(crate) fn day_instant_utc<Tz: TimeZone>(tz: &Tz, day: NaiveDate) -> String {
+/// DST periods map to their own offset; a local midnight made ambiguous by
+/// a DST transition resolves deterministically via `earliest()`. A local
+/// day that does not exist at all (full-day DST skip) is an error.
+pub(crate) fn day_instant_utc<Tz: TimeZone>(tz: &Tz, day: NaiveDate) -> Result<String> {
     let local_instant = |hour: u32| {
         tz.from_local_datetime(&day.and_hms_opt(hour, 0, 0).expect("00:00 is a valid time"))
             .earliest()
             .map(|dt| dt.with_timezone(&Utc))
     };
-    let instant = local_instant(0)
-        .or_else(|| local_instant(1).map(|dt| dt - chrono::Duration::hours(1)))
-        .expect("a local midnight is resolvable");
-    instant.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    let instant =
+        local_instant(0).or_else(|| local_instant(1).map(|dt| dt - chrono::Duration::hours(1)));
+    let Some(instant) = instant else {
+        return Err(Error::InvalidDate(format!(
+            "{day} does not exist in the local calendar"
+        )));
+    };
+    Ok(instant.format("%Y-%m-%dT%H:%M:%SZ").to_string())
 }
 
 /// Same as [`day_instant_utc`] against the machine's local timezone, which
 /// is what the UI renders times in.
-pub(crate) fn local_day_instant_utc(day: NaiveDate) -> String {
+pub(crate) fn local_day_instant_utc(day: NaiveDate) -> Result<String> {
     day_instant_utc(&Local, day)
 }
 
@@ -175,7 +180,7 @@ pub(crate) fn escape_like(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::FixedOffset;
+    use chrono::{FixedOffset, LocalResult, NaiveDateTime};
 
     #[test]
     fn normalize_clamps_limit_and_offset() {
@@ -239,24 +244,24 @@ mod tests {
         // Europe/Zagreb on 2026-07-15): local midnight Jul 15 = Jul 14 22:00Z.
         let cest = FixedOffset::east_opt(2 * 3600).unwrap();
         assert_eq!(
-            day_instant_utc(&cest, parse_day("2026-07-15").unwrap()),
+            day_instant_utc(&cest, parse_day("2026-07-15").unwrap()).unwrap(),
             "2026-07-14T22:00:00Z"
         );
         // And a +01:00 zone for the winter side (Zagreb 2026-11-01):
         // local midnight Nov 1 = Oct 31 23:00Z.
         let cet = FixedOffset::east_opt(3600).unwrap();
         assert_eq!(
-            day_instant_utc(&cet, parse_day("2026-11-01").unwrap()),
+            day_instant_utc(&cet, parse_day("2026-11-01").unwrap()).unwrap(),
             "2026-10-31T23:00:00Z"
         );
         // Month rollover: Feb 1 local midnight at UTC+2 lands in January.
         assert_eq!(
-            day_instant_utc(&cest, parse_day("2026-02-01").unwrap()),
+            day_instant_utc(&cest, parse_day("2026-02-01").unwrap()).unwrap(),
             "2026-01-31T22:00:00Z"
         );
         // Year rollover: Jan 1 local midnight at UTC+2 lands in December.
         assert_eq!(
-            day_instant_utc(&cest, parse_day("2026-01-01").unwrap()),
+            day_instant_utc(&cest, parse_day("2026-01-01").unwrap()).unwrap(),
             "2025-12-31T22:00:00Z"
         );
     }
@@ -265,5 +270,52 @@ mod tests {
     fn escape_like_escapes_wildcards() {
         assert_eq!(escape_like("50%_of\\it"), "50\\%\\_of\\\\it");
         assert_eq!(escape_like("plain"), "plain");
+    }
+
+    /// A timezone with a full-day gap: every local time on 2011-12-30 is
+    /// unresolvable (models Pacific/Apia's date-line jump, which real TZ
+    /// data normalizes away under `Local`).
+    #[derive(Clone)]
+    struct SkipDayZone;
+
+    impl TimeZone for SkipDayZone {
+        type Offset = FixedOffset;
+
+        fn from_offset(_offset: &FixedOffset) -> SkipDayZone {
+            SkipDayZone
+        }
+
+        fn offset_from_utc_date(&self, _utc: &NaiveDate) -> FixedOffset {
+            FixedOffset::east_opt(13 * 3600).unwrap()
+        }
+
+        fn offset_from_local_date(&self, local: &NaiveDate) -> LocalResult<FixedOffset> {
+            if *local == NaiveDate::from_ymd_opt(2011, 12, 30).unwrap() {
+                LocalResult::None
+            } else {
+                LocalResult::Single(FixedOffset::east_opt(13 * 3600).unwrap())
+            }
+        }
+
+        fn offset_from_utc_datetime(&self, _utc: &NaiveDateTime) -> FixedOffset {
+            FixedOffset::east_opt(13 * 3600).unwrap()
+        }
+
+        fn offset_from_local_datetime(&self, local: &NaiveDateTime) -> LocalResult<FixedOffset> {
+            if local.date() == NaiveDate::from_ymd_opt(2011, 12, 30).unwrap() {
+                LocalResult::None
+            } else {
+                LocalResult::Single(FixedOffset::east_opt(13 * 3600).unwrap())
+            }
+        }
+    }
+
+    #[test]
+    fn nonexistent_local_day_is_an_error_not_a_panic() {
+        let zone = SkipDayZone;
+        assert!(day_instant_utc(&zone, parse_day("2011-12-30").unwrap()).is_err());
+        // Adjacent real days still resolve.
+        assert!(day_instant_utc(&zone, parse_day("2011-12-29").unwrap()).is_ok());
+        assert!(day_instant_utc(&zone, parse_day("2011-12-31").unwrap()).is_ok());
     }
 }

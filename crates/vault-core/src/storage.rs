@@ -148,13 +148,17 @@ impl Storage {
         }
     }
 
-    /// Full-text search with optional inclusive sent-date bounds.
+    /// Full-text search with optional inclusive LOCAL-day sent-date bounds —
+    /// the same date semantics as [`Storage::search_page`].
     ///
     /// `date_from`/`date_to` are `YYYY-MM-DD` strings; anything else is an
     /// error. `date_to` is inclusive (messages sent any time that day count).
-    /// Messages with an unknown (`empty`) `sent_at` are excluded while a
-    /// bound is active — they cannot be placed in time. The MATCH expression
-    /// is a bound parameter throughout, so it can never spill into SQL text.
+    /// Each bound is translated to the UTC instant of local midnight before
+    /// being compared with the stored UTC `sent_at`, so a day bound selects
+    /// exactly what the UI renders as that local day. Messages with an
+    /// unknown (`empty`) `sent_at` are excluded while a bound is active —
+    /// they cannot be placed in time. The MATCH expression is a bound
+    /// parameter throughout, so it can never spill into SQL text.
     pub fn search_filtered(
         &self,
         match_query: &str,
@@ -162,17 +166,23 @@ impl Storage {
         date_to: Option<&str>,
         limit: u32,
     ) -> Result<Vec<Message>> {
-        let from = parse_date_bound(date_from, "date_from")?.map(|d| d.to_string());
-        // Inclusive date_to becomes an exclusive upper bound at midnight of
-        // the next day; RFC 3339 UTC strings compare correctly as text.
-        let to_exclusive = parse_date_bound(date_to, "date_to")?
-            .map(|day| {
-                day.checked_add_days(Days::new(1))
+        let from = match parse_date_bound(date_from, "date_from")? {
+            Some(day) => Some(crate::query::local_day_instant_utc(day)?),
+            None => None,
+        };
+        // Inclusive date_to becomes an exclusive upper bound at local
+        // midnight of the next day; RFC 3339 UTC instants compare correctly
+        // as text.
+        let to_exclusive = match parse_date_bound(date_to, "date_to")? {
+            Some(day) => {
+                let next = day
+                    .checked_add_days(Days::new(1))
                     .filter(|next| (0..=9999).contains(&next.year()))
-                    .map(|next| next.to_string())
-                    .ok_or_else(|| Error::InvalidDate(format!("date_to={day} out of range")))
-            })
-            .transpose()?;
+                    .ok_or_else(|| Error::InvalidDate(format!("date_to={day} out of range")))?;
+                Some(crate::query::local_day_instant_utc(next)?)
+            }
+            None => None,
+        };
         let mut stmt = self.conn.prepare(
             r#"
             SELECT m.id, m.source, m.external_id, m.channel, m.chat_id,
@@ -182,6 +192,7 @@ impl Storage {
             WHERE messages_fts MATCH ?1
               AND (?2 IS NULL OR m.sent_at >= ?2)
               AND (?3 IS NULL OR m.sent_at < ?3)
+              AND ((?2 IS NULL AND ?3 IS NULL) OR m.sent_at != '')
             ORDER BY rank
             LIMIT ?4
             "#,
@@ -226,7 +237,7 @@ impl Storage {
     pub fn search_page(&self, query: &SearchQuery) -> Result<SearchPage> {
         let mut query = query.clone();
         query.normalize()?;
-        let filters = QueryFilters::build(&query);
+        let filters = QueryFilters::build(&query)?;
 
         let total: u64 = {
             let (sql, bind) = if query.text.trim().is_empty() {
@@ -507,7 +518,7 @@ struct QueryFilters {
 }
 
 impl QueryFilters {
-    fn build(query: &SearchQuery) -> Self {
+    fn build(query: &SearchQuery) -> Result<Self> {
         let mut sql = String::new();
         let mut values: Vec<SqlValue> = Vec::new();
 
@@ -531,17 +542,21 @@ impl QueryFilters {
             // their own offset.
             if let Some(day) = crate::query::parse_day(&query.from_date) {
                 sql.push_str(" AND m.sent_at >= ?");
-                values.push(SqlValue::from(crate::query::local_day_instant_utc(day)));
+                values.push(SqlValue::from(crate::query::local_day_instant_utc(day)?));
             }
         }
         if !query.to_date.is_empty() {
             // Exclusive bound: strictly before local midnight of the day
             // after, so everything later on to_date itself still matches.
             if let Some(day) = crate::query::parse_day(&query.to_date) {
+                let next = day
+                    .checked_add_days(Days::new(1))
+                    .filter(|next| (0..=9999).contains(&next.year()))
+                    .ok_or_else(|| {
+                        Error::InvalidDate(format!("date_to={} out of range", query.to_date))
+                    })?;
                 sql.push_str(" AND m.sent_at < ?");
-                values.push(SqlValue::from(crate::query::local_day_instant_utc(
-                    day + chrono::Duration::days(1),
-                )));
+                values.push(SqlValue::from(crate::query::local_day_instant_utc(next)?));
             }
         }
         if !query.from_date.is_empty() || !query.to_date.is_empty() {
@@ -550,7 +565,7 @@ impl QueryFilters {
             // active so both bounds agree on the same set.
             sql.push_str(" AND m.sent_at != ''");
         }
-        Self { sql, values }
+        Ok(Self { sql, values })
     }
 
     fn bind(&self) -> Vec<SqlValue> {

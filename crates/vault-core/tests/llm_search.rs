@@ -18,7 +18,13 @@ fn today() -> NaiveDate {
 }
 
 /// Distinctive per-message bodies so prompt-containment assertions are exact.
+///
+/// The date-boundary expectations (m4 on 2026-10-31 23:59:59Z counting as
+/// October) are written against UTC; pin the process TZ so the local-day
+/// bound translation cannot shift them on a non-UTC machine.
 fn seeded() -> Storage {
+    std::env::set_var("TZ", "UTC");
+    let _ = chrono::Local::now(); // resolve with the pinned TZ
     let s = Storage::open_in_memory().unwrap();
     let rows = [
         (
