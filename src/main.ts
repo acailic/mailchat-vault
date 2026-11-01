@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { formatSentAt, snippet } from "./format";
 
 interface Message {
@@ -38,6 +39,7 @@ const resultsList = document.querySelector<HTMLUListElement>("#results")!;
 const statsLabel = document.querySelector<HTMLElement>("#stats")!;
 const mboxPathInput = document.querySelector<HTMLInputElement>("#mbox-path")!;
 const importButton = document.querySelector<HTMLButtonElement>("#import-btn")!;
+const chatImportButton = document.querySelector<HTMLButtonElement>("#chat-import-btn")!;
 const seedButton = document.querySelector<HTMLButtonElement>("#seed-btn")!;
 const importStatus = document.querySelector<HTMLElement>("#import-status")!;
 
@@ -110,6 +112,36 @@ async function importMbox(): Promise<void> {
   }
 }
 
+async function importChatExport(): Promise<void> {
+  chatImportButton.disabled = true;
+  try {
+    const picked = await open({
+      multiple: false,
+      title: "Import chat export",
+      filters: [
+        {
+          name: "Chat export (WhatsApp .txt, Telegram result.json)",
+          extensions: ["txt", "json"],
+        },
+      ],
+    });
+    if (typeof picked !== "string") {
+      return; // cancelled
+    }
+    importStatus.textContent = `Importing ${picked}…`;
+    const summary = await invoke<IngestSummary>("import_chat_export", { path: picked });
+    const failedPart = summary.failed > 0 ? `, ${summary.failed} failed to parse` : "";
+    importStatus.textContent =
+      `Imported ${summary.inserted} new, ${summary.skipped} already present` +
+      `${failedPart} (of ${summary.seen} in ${summary.source}).`;
+    await refreshStats();
+  } catch (e) {
+    importStatus.textContent = `Import failed: ${e}`;
+  } finally {
+    chatImportButton.disabled = false;
+  }
+}
+
 async function seedDemo(): Promise<void> {
   seedButton.disabled = true;
   try {
@@ -128,6 +160,7 @@ searchInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") void runSearch();
 });
 importButton.addEventListener("click", () => void importMbox());
+chatImportButton.addEventListener("click", () => void importChatExport());
 seedButton.addEventListener("click", () => void seedDemo());
 
 void refreshStats();

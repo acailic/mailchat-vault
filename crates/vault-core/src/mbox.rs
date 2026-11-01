@@ -14,6 +14,7 @@ use serde_json::json;
 
 use crate::ingest::{Collected, Source};
 use crate::message::NewMessage;
+use crate::util::fnv1a;
 use crate::Result;
 
 /// Source name and dedup namespace for mbox imports.
@@ -199,15 +200,4 @@ fn decoded_body(mail: &ParsedMail<'_>) -> Option<String> {
         // Not UTF-8: map each byte as a Latin-1 code point (lossless).
         Err(e) => e.into_bytes().into_iter().map(|b| b as char).collect(),
     })
-}
-
-/// FNV-1a: a tiny, fully deterministic content hash for mails without a
-/// `Message-ID` (so re-importing the same file never duplicates them).
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        acc ^= u64::from(b);
-        acc = acc.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    acc
 }
