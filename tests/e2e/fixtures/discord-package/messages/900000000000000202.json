@@ -1,0 +1,8 @@
+{
+  "channel": { "id": "900000000000000202", "name": "random" },
+  "guild": { "id": "800000000000000001", "name": "Ekipa HQ" },
+  "messages": [
+    { "id": "1700000000000010001", "type": "Default", "timestamp": "2026-11-01 09:00:00.000+00:00", "content": "jutarnja kava ☕", "author": { "id": "111000000000000002", "name": "jelena", "nickname": "Jelena Babić" } },
+    { "id": "1700000000000010002", "type": "Default", "timestamp": "2026-11-01 09:05:12.345+00:00", "content": "mačku sam prestavio na novi policu, sad burek", "author": { "id": "111000000000000003", "name": "ana" } }
+  ]
+}
