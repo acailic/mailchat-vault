@@ -34,16 +34,23 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use notify::event::{DataChange, ModifyKind};
+use std::io::{Read, Seek};
+
+use notify::event::{DataChange, ModifyKind, RenameMode};
 use notify::{recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
 use serde::Serialize;
 
-use crate::chat_export::{detect_chat_format, ChatFormat};
 use crate::ingest::{ingest, IngestSummary, Source};
 use crate::mbox::MboxSource;
 use crate::storage::Storage;
-use crate::telegram::TelegramSource;
-use crate::whatsapp::WhatsappSource;
+use crate::telegram::{is_telegram_export_reader, TelegramSource};
+use crate::whatsapp::{is_whatsapp_export, WhatsappSource};
+
+/// Largest prefix read for format sniffing: WhatsApp detection decides
+/// from the first lines, and Telegram detection streams the rest without
+/// buffering it, so an unrelated multi-gigabyte file never enters memory
+/// whole.
+const DETECT_SNIFF_BYTES: u64 = 64 * 1024;
 
 /// File extensions that are import candidates when they appear or change.
 const WATCHED_EXTENSIONS: [&str; 3] = ["mbox", "txt", "json"];
@@ -277,7 +284,8 @@ fn push_event(snap: &mut WatchSnapshot, event: WatchEvent, max_events: usize) {
 }
 
 /// Whether a filesystem event kind should (re)arm the settle timer for its
-/// paths (file creation/writes/metadata/rename-into; not reads/removals).
+/// paths (file creation/writes/metadata/rename-into; not reads/removals/
+/// rename-aways, which disarm instead).
 fn is_activity(kind: &EventKind) -> bool {
     matches!(
         kind,
@@ -285,7 +293,6 @@ fn is_activity(kind: &EventKind) -> bool {
             | EventKind::Modify(
                 ModifyKind::Any
                     | ModifyKind::Data(DataChange::Any)
-                    | ModifyKind::Name(_)
                     | ModifyKind::Other
                     | ModifyKind::Metadata(_)
             )
@@ -300,23 +307,53 @@ fn is_import_candidate(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Arm the settle timer for one path that just changed.
+fn arm(pending: &mut HashMap<PathBuf, Instant>, path: &Path, settle: Duration) {
+    if path.is_dir() {
+        return; // only files are import candidates
+    }
+    if is_import_candidate(path) {
+        pending.insert(path.to_path_buf(), Instant::now() + settle);
+    }
+}
+
+/// Disarm a path and everything pending beneath it (a removed or renamed-
+/// away file, or a folder whose whole subtree is gone).
+fn disarm_subtree(pending: &mut HashMap<PathBuf, Instant>, path: &Path) {
+    pending.retain(|p, _| !p.starts_with(path));
+}
+
 /// Record one filesystem event: activity (re)arms the settle timer for its
-/// file paths; removals disarm theirs.
+/// file paths; removals and rename-aways disarm theirs (including any
+/// pending subtree).
 fn handle_fs_event(event: &Event, pending: &mut HashMap<PathBuf, Instant>, settle: Duration) {
     match &event.kind {
-        EventKind::Remove(_) => {
+        EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
             for path in &event.paths {
-                pending.remove(path);
+                disarm_subtree(pending, path);
+            }
+        }
+        // Both carries [from, to]: the old path is gone, the new one is
+        // ordinary activity.
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
+            let mut paths = event.paths.iter();
+            if let Some(from) = paths.next() {
+                disarm_subtree(pending, from);
+            }
+            for path in paths {
+                arm(pending, path, settle);
+            }
+        }
+        // Any other rename mode (To, or a from/to-agnostic Any/Other from
+        // backends like FSEvents) is activity at its path.
+        EventKind::Modify(ModifyKind::Name(_)) => {
+            for path in &event.paths {
+                arm(pending, path, settle);
             }
         }
         kind if is_activity(kind) => {
             for path in &event.paths {
-                if path.is_dir() {
-                    continue; // only files are import candidates
-                }
-                if is_import_candidate(path) {
-                    pending.insert(path.clone(), Instant::now() + settle);
-                }
+                arm(pending, path, settle);
             }
         }
         _ => {}
@@ -633,6 +670,11 @@ fn import_file(
 /// Pick the ingest source for an import candidate by extension + contents.
 /// `Ok(None)` = watched extension but unknown contents (a skip, not an
 /// error — folders legitimately hold unrelated .txt/.json files).
+///
+/// Detection is bounded: only a [`DETECT_SNIFF_BYTES`] prefix is read for
+/// the WhatsApp line check, and Telegram detection streams the file
+/// without buffering it, so an unrelated huge file costs neither a full
+/// read nor a parse tree.
 fn import_source_for(path: &Path) -> Result<Option<Box<dyn Source>>, String> {
     let ext = path
         .extension()
@@ -642,18 +684,27 @@ fn import_source_for(path: &Path) -> Result<Option<Box<dyn Source>>, String> {
     if ext == "mbox" {
         return Ok(Some(Box::new(MboxSource::new(path))));
     }
-    let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    match detect_chat_format(&bytes) {
-        Some(ChatFormat::Telegram) => Ok(Some(Box::new(TelegramSource::new(path)))),
-        Some(ChatFormat::WhatsApp) => Ok(Some(Box::new(WhatsappSource::new(path)))),
-        None => Ok(None),
+    let mut file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut prefix = Vec::new();
+    (&mut file)
+        .take(DETECT_SNIFF_BYTES)
+        .read_to_end(&mut prefix)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    file.rewind()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if is_whatsapp_export(&prefix) {
+        return Ok(Some(Box::new(WhatsappSource::new(path))));
     }
+    if is_telegram_export_reader(file) {
+        return Ok(Some(Box::new(TelegramSource::new(path))));
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify::event::{CreateKind, RemoveKind};
+    use notify::event::{CreateKind, RenameMode, RemoveKind};
 
     #[test]
     fn extensions_filter_is_case_insensitive() {
@@ -696,6 +747,112 @@ mod tests {
             settle,
         );
         assert!(!pending.contains_key(&file));
+    }
+
+    #[test]
+    fn rename_away_disarms_and_rename_both_arms_only_the_new_path() {
+        let settle = Duration::from_millis(10);
+        let mut pending = HashMap::new();
+        let old = PathBuf::from("/definitely-not-here-watch-test/a.mbox");
+        let new = PathBuf::from("/definitely-not-here-watch-test/b.mbox");
+
+        handle_fs_event(
+            &Event::new(EventKind::Create(CreateKind::File)).add_path(old.clone()),
+            &mut pending,
+            settle,
+        );
+        assert!(pending.contains_key(&old));
+
+        // A rename-away is a disarm, not an import of a vanished file.
+        handle_fs_event(
+            &Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
+                .add_path(old.clone()),
+            &mut pending,
+            settle,
+        );
+        assert!(!pending.contains_key(&old));
+
+        // [from, to]: the old path is disarmed, the new one armed.
+        handle_fs_event(
+            &Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+                .add_path(old.clone())
+                .add_path(new.clone()),
+            &mut pending,
+            settle,
+        );
+        assert!(!pending.contains_key(&old));
+        assert!(pending.contains_key(&new));
+
+        // Rename-into (To) is activity at the new path.
+        handle_fs_event(
+            &Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To)))
+                .add_path(new.clone()),
+            &mut pending,
+            settle,
+        );
+        assert!(pending.contains_key(&new));
+    }
+
+    #[test]
+    fn folder_removal_disarms_pending_subtree() {
+        let settle = Duration::from_millis(10);
+        let mut pending = HashMap::new();
+        let dir = PathBuf::from("/definitely-not-here-watch-test/sub");
+        let child = dir.join("c.mbox");
+        let nested = dir.join("nested/d.txt");
+        let elsewhere = PathBuf::from("/definitely-not-here-watch-test/keep.mbox");
+        for p in [&child, &nested, &elsewhere] {
+            handle_fs_event(
+                &Event::new(EventKind::Create(CreateKind::File)).add_path(p.to_path_buf()),
+                &mut pending,
+                settle,
+            );
+        }
+        handle_fs_event(
+            &Event::new(EventKind::Remove(RemoveKind::Folder)).add_path(dir.clone()),
+            &mut pending,
+            settle,
+        );
+        assert!(!pending.contains_key(&child));
+        assert!(!pending.contains_key(&nested));
+        assert!(pending.contains_key(&elsewhere));
+    }
+
+    #[test]
+    fn detection_bounded_for_unrelated_and_large_exports() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // A large unrelated .json: skipped regardless of size.
+        let big = dir.path().join("dump.json");
+        std::fs::write(&big, format!("{{\"pad\": \"{}\"}}", "x".repeat(200_000))).unwrap();
+        assert!(import_source_for(&big).unwrap().is_none());
+
+        // A WhatsApp export larger than the sniff cap: the header is in
+        // line 1, so the prefix alone decides.
+        let wa = dir.path().join("chat.txt");
+        std::fs::write(
+            &wa,
+            format!("[1.11.2026., 09:00:05] Marko: hi\n{}\n", "x".repeat(200_000)),
+        )
+        .unwrap();
+        let source = import_source_for(&wa).unwrap().unwrap();
+        assert_eq!(source.name(), "whatsapp");
+
+        // A Telegram export larger than the sniff cap: the prefix is a
+        // truncated document, so only streaming detection finds it.
+        let messages: String = (0..100)
+            .map(|i| {
+                format!(
+                    "{{\"id\": {i}, \"type\": \"message\", \"text\": \"{}\"}}",
+                    "y".repeat(1024)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let tg = dir.path().join("result.json");
+        std::fs::write(&tg, format!("{{\"name\": \"x\", \"messages\": [{messages}]}}")).unwrap();
+        let source = import_source_for(&tg).unwrap().unwrap();
+        assert_eq!(source.name(), "telegram");
     }
 
     #[test]
