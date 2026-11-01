@@ -17,7 +17,7 @@ import {
 } from "./viewmodel";
 
 /** Append segments as text nodes plus `<mark class="hit">` runs. */
-export function appendSegments(el: HTMLElement, segments: Segment[]): void {
+function appendSegments(el: HTMLElement, segments: Segment[]): void {
   for (const seg of segments) {
     if (seg.hit) {
       const mark = document.createElement("mark");

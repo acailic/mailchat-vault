@@ -148,42 +148,6 @@ impl Storage {
         }
     }
 
-    /// Insert many messages in one transaction, preparing the statement once.
-    ///
-    /// Same idempotency semantics as [`Storage::insert_message`], row by
-    /// row; returns how many rows were newly inserted (duplicates skipped).
-    pub fn insert_messages(&self, msgs: &[NewMessage]) -> Result<u64> {
-        let tx = self.conn.unchecked_transaction()?;
-        let inserted = {
-            let mut stmt = tx.prepare(
-                r#"
-                INSERT INTO messages
-                    (source, external_id, channel, chat_id, author, sent_at, body, raw_json)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                ON CONFLICT (source, external_id) DO NOTHING
-                "#,
-            )?;
-            let mut inserted = 0u64;
-            for msg in msgs {
-                // 1 when inserted, 0 when the dedup key conflict skipped it.
-                inserted += stmt.execute(params![
-                    msg.source,
-                    msg.external_id,
-                    msg.channel,
-                    msg.chat_id,
-                    msg.author,
-                    msg.sent_at,
-                    msg.body,
-                    msg.raw_json,
-                ])? as u64;
-            }
-            drop(stmt);
-            inserted
-        };
-        tx.commit()?;
-        Ok(inserted)
-    }
-
     /// Full-text search with optional inclusive sent-date bounds.
     ///
     /// `date_from`/`date_to` are `YYYY-MM-DD` strings; anything else is an
@@ -443,18 +407,6 @@ impl Storage {
         Ok(Stats { total, by_source })
     }
 
-    /// Rebuild the FTS index from scratch from the `messages` table.
-    ///
-    /// Only needed if the index is ever corrupted; triggers keep it in sync
-    /// during normal operation.
-    pub fn rebuild_fts(&self) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO messages_fts (messages_fts) VALUES ('rebuild')",
-            [],
-        )?;
-        Ok(())
-    }
-
     /// Currently applied schema version.
     pub fn schema_version(&self) -> Result<i64> {
         Ok(self.conn.query_row(
@@ -519,6 +471,7 @@ impl Storage {
         )?;
         Ok(())
     }
+(no-mistakes(review): Exclude empty sent_at from date filters, sweep dead code)
 }
 
 fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
@@ -594,6 +547,12 @@ impl QueryFilters {
                 sql.push_str(" AND m.sent_at < ?");
                 values.push(SqlValue::from(bound));
             }
+        }
+        if !query.from_date.is_empty() || !query.to_date.is_empty() {
+            // An unparseable date stored as empty sent_at has no defined
+            // position on the timeline; exclude it whenever a date filter is
+            // active so both bounds agree on the same set.
+            sql.push_str(" AND m.sent_at != ''");
         }
         Self { sql, values }
     }

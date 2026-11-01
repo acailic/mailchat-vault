@@ -224,6 +224,59 @@ fn invalid_date_fails_the_query() {
 }
 
 #[test]
+fn date_filters_consistently_exclude_empty_sent_at() {
+    let s = Storage::open_in_memory().unwrap();
+    s.insert_message(&chat_msg(
+        "mbox",
+        "dated",
+        "c",
+        "a",
+        "2026-01-05T09:00:00Z",
+        "vault dated body",
+    ))
+    .unwrap();
+    s.insert_message(&chat_msg(
+        "mbox",
+        "undated",
+        "c",
+        "a",
+        "",
+        "vault undated body",
+    ))
+    .unwrap();
+
+    // Both single-bound filters exclude the undated message.
+    for q in [
+        SearchQuery {
+            text: "vault".into(),
+            from_date: "2026-01-01".into(),
+            limit: 10,
+            ..SearchQuery::default()
+        },
+        SearchQuery {
+            text: "vault".into(),
+            to_date: "2026-01-31".into(),
+            limit: 10,
+            ..SearchQuery::default()
+        },
+    ] {
+        let page = s.search_page(&q).unwrap();
+        assert_eq!(page.total, 1, "undated message must be excluded: {q:?}");
+        assert_eq!(page.hits[0].message.external_id, "dated");
+    }
+
+    // With no date bound both messages stay searchable.
+    let all = s
+        .search_page(&SearchQuery {
+            text: "vault".into(),
+            limit: 10,
+            ..SearchQuery::default()
+        })
+        .unwrap();
+    assert_eq!(all.total, 2);
+}
+
+#[test]
 fn pagination_limits_offsets_and_counts() {
     let s = seeded();
     let q = |limit: u32, offset: u32| SearchQuery {

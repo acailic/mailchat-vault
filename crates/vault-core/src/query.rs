@@ -1,4 +1,8 @@
 //! Paged, filtered search queries and chat-thread context over the archive.
+//!
+//! Date filters exclude messages whose `sent_at` is empty (an unparseable or
+//! missing date): such messages have no defined position on the timeline, so
+//! both date bounds omit them consistently.
 
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
