@@ -521,9 +521,6 @@ mod tests {
 
     #[test]
     fn explicit_selection_and_local_mode() {
-
-    #[test]
-    fn explicit_selection_and_local_mode() {
         let settings = settings_with(
             vec![
                 profile("glm", ProviderKind::Zai),
