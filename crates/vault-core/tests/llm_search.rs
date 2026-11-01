@@ -3,6 +3,8 @@
 //! the privacy guarantee (only top result rows enter a prompt), and the
 //! no-key fallback path.
 
+use std::sync::{Mutex, Once};
+
 use chrono::NaiveDate;
 use vault_core::llm::{
     ask, run_plan, summarize_results, translate, validate, LlmConfig, MockLlm, PlanSource,
@@ -21,10 +23,23 @@ fn today() -> NaiveDate {
 ///
 /// The date-boundary expectations (m4 on 2026-10-31 23:59:59Z counting as
 /// October) are written against UTC; pin the process TZ so the local-day
-/// bound translation cannot shift them on a non-UTC machine.
+/// bound translation cannot shift them on a non-UTC machine. The pin must
+/// happen exactly once under exclusive access: tests run on parallel
+/// threads, and a concurrent first resolution of `Local` (inside the date
+/// bounds) could cache the host TZ before or while `TZ` is mutated.
+static TZ_LOCK: Mutex<()> = Mutex::new(());
+static TZ_PIN: Once = Once::new();
+
+fn pin_utc_tz() {
+    let _guard = TZ_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    TZ_PIN.call_once(|| {
+        std::env::set_var("TZ", "UTC");
+        let _ = chrono::Local::now(); // resolve with the pinned TZ
+    });
+}
+
 fn seeded() -> Storage {
-    std::env::set_var("TZ", "UTC");
-    let _ = chrono::Local::now(); // resolve with the pinned TZ
+    pin_utc_tz();
     let s = Storage::open_in_memory().unwrap();
     let rows = [
         (
