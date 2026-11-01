@@ -25,9 +25,12 @@
 //!   (with media extraction) for picked files.
 //! - [`media`]: content-addressed media store and the extraction pass that
 //!   links export files to messages.
-//! - [`imap`]: the incremental IMAP/Gmail source.
 //! - [`watch`]: automatic folder watching (background import of new or
 //!   modified export files from user-chosen folders).
+//! - [`imap`]: the incremental IMAP/Gmail source (app password or OAuth2
+//!   XOAUTH2 login).
+//! - [`oauth`]: the Google OAuth2 login flow behind IMAP XOAUTH2 — PKCE
+//!   loopback-redirect authorization, token exchange/refresh, SASL string.
 //! - [`search`]: free-text to FTS5 MATCH query building.
 //! - [`llm`]: LLM-assisted search — natural language to an FTS5 plan, then
 //!   a summary over the top results (privacy-scoped RAG).
@@ -53,6 +56,7 @@ pub mod mail;
 pub mod mbox;
 pub mod media;
 pub mod message;
+pub mod oauth;
 pub mod query;
 pub mod safe_migration;
 pub mod search;
@@ -90,6 +94,8 @@ pub enum Error {
     InvalidDate(String),
     #[error("imap error: {0}")]
     Imap(#[from] ::imap::Error),
+    #[error("oauth error: {0}")]
+    OAuth(String),
     #[error("tls error: {0}")]
     Tls(#[from] rustls::Error),
     #[error("invalid tls server name: {0}")]

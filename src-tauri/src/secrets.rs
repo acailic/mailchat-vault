@@ -1,11 +1,13 @@
-//! IMAP account passwords and LLM API keys: OS keyring first, memory
-//! fallback.
+//! IMAP account passwords, OAuth2 refresh tokens, and LLM API keys: OS
+//! keyring first, memory fallback.
 //!
 //! Preferred store: the OS keyring — Secret Service (GNOME Keyring/KWallet)
 //! on Linux via a pure-Rust zbus client, Keychain Services on macOS,
 //! Credential Manager on Windows — under the service name `mailchat-vault`,
-//! one entry per secret: IMAP accounts as `user@host`, LLM provider API
-//! keys as `llm:<provider-id>`.
+//! one entry per secret: IMAP accounts as `user@host`, the OAuth2 refresh
+//! token from a Gmail sign-in as `oauth:user@host` (see
+//! [`Secrets::save_refresh`]; short-lived access tokens are never stored),
+//! LLM provider API keys as `llm:<provider-id>`.
 //!
 //! When the OS keyring is unavailable at runtime (headless session, locked
 //! keyring, unsupported platform), the secret is kept **only in process

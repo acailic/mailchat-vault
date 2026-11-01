@@ -93,6 +93,36 @@ fn login_uses_configured_credentials() {
     );
 }
 
+/// The production `connect` funnels both auth modes through the shared
+/// [`vimap::authenticate`]; pin that the password variant issues a
+/// regular LOGIN against a fresh stream (regression guard for the
+/// XOAUTH2 refactor).
+#[test]
+fn password_auth_via_the_shared_authenticate_helper_logs_in() {
+    let server = MockImap::start();
+    server.set_mailbox(
+        "INBOX",
+        MockMailbox::new(7, vec![mail(Some("m-1@x"), "One", "hi")]),
+    );
+    let storage = Storage::open_in_memory().unwrap();
+
+    let stream = std::net::TcpStream::connect(server.addr).unwrap();
+    let mut client = imap::Client::new(stream);
+    client.read_greeting().unwrap();
+    let mut session = vimap::authenticate(
+        client,
+        USER,
+        &vimap::ImapAuth::Password(PASSWORD.to_string()),
+    )
+    .expect("password authenticate opens a session");
+
+    let folders: Vec<String> = FOLDERS.iter().map(|f| f.to_string()).collect();
+    let summaries = vimap::sync_session(&mut session, &storage, &source(), &folders);
+    let _ = session.logout();
+    assert_eq!(summaries[0].inserted, 1);
+    assert!(server.log().logins.iter().any(|l| l.contains(USER)));
+}
+
 #[test]
 fn initial_sync_stores_messages_with_folder_as_channel() {
     let server = MockImap::start();

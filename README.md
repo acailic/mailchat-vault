@@ -2,7 +2,7 @@
 
 Local email & chat archive — Tauri desktop app with SQLite FTS5 full-text search over your own messages. Private tool; nothing leaves the machine, except what you explicitly send for optional [LLM-assisted search](#llm-assisted-search-v1) (your question + the matching result rows only, and only when an API key is configured).
 
-This is the **v0 foundation + usable search tool**: a complete vertical slice — import, store, dedup, search, filter, browse, read in thread context. **v1** adds LLM-assisted natural-language search with local-embedding **hybrid ranking** on top (see below), with **multiple configurable providers and a Settings screen**, the first live mail source: **incremental IMAP/Gmail sync** (see below), and **automatic folder watching** (see below). The rest of the roadmap (chat platform formats, XOAUTH2) will land as separate tasks.
+This is the **v0 foundation + usable search tool**: a complete vertical slice — import, store, dedup, search, filter, browse, read in thread context. **v1** adds LLM-assisted natural-language search with local-embedding **hybrid ranking** on top (see below), with **multiple configurable providers and a Settings screen**, the first live mail source: **incremental IMAP/Gmail sync** (see below) — Gmail via **Google sign-in (OAuth2/XOAUTH2)** or app password — and **automatic folder watching** (see below). The rest of the roadmap (chat platform formats) will land as separate tasks.
 
 ## What v0 does
 
@@ -17,7 +17,7 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice �
 - **Idempotent ingest**: a `Source` trait yields messages; writes dedup on the canonical identity — legacy `(source, external_id)` keys map to one `message_identities` row each, and the IMAP connector scopes identities to their durable source instance with a semantic revision hash (the same mail in several folders is one row with one occurrence per folder; two conflicting payloads behind one `Message-ID` are preserved as two revisions) — so re-importing and re-syncing are always safe.
 - **Manual/demo source**: import an `.mbox` file (no IMAP needed) — subjects, authors, dates, and decoded text bodies are archived and searchable.
 - **Chat imports**: WhatsApp `.txt` exports, Telegram Desktop `result.json` exports, Signal Desktop conversation `.json` exports (e.g. `sigtop export-messages -f json`), and Discord Data Package `messages.json` files — texts, authors, and timestamps are archived and searchable; quoted replies are kept as metadata, and Signal/Discord attachments are recorded in `raw_json` (Discord reactions too). **Media extraction** for WhatsApp and Telegram: files referenced by the export (images, documents, voice notes) are copied into a content-addressed `media/` store in app data — hash-named (SHA-256), deduplicated by content — and linked from the message's `raw_json`, with a media section in the detail view. Extraction can be switched off with the **extract media** toggle; text-only exports import fine (missing files are just counted), and re-importing an export with its files backfills media links into already-stored messages. The format is auto-detected from the file contents, so re-importing the same export never duplicates messages.
-- **IMAP sync (Gmail & friends)**: incremental, UIDVALIDITY/UID-tracked sync from any IMAP server over host/port/user/password — Gmail via app password in this first round (XOAUTH2 later). Folders map to the message `channel` field; re-syncing never duplicates. Passwords are prompted for, kept in the OS keyring when available and in session memory otherwise — never in the database.
+- **IMAP sync (Gmail & friends)**: incremental, UIDVALIDITY/UID-tracked sync from any IMAP server over host/port/user — Gmail via **Google sign-in (OAuth2 → SASL XOAUTH2)** or **app password**; any other IMAP server via user/password. Folders map to the message `channel` field; re-syncing never duplicates. Secrets are prompted for or obtained via OAuth, kept in the OS keyring when available and in session memory otherwise — never in the database.
 - **Folder watching**: pick folders (typed path or the native picker) and every new or modified `.mbox` / WhatsApp `.txt` / Telegram `result.json` / Signal conversation `.json` export file under them is imported automatically in the background — watched folders persist across restarts, write bursts are debounced until a file settles, re-imports never duplicate (the same dedup contract as manual import), and skips/errors are shown in the UI without ever stopping the watcher (see below).
 - **Statistics dashboard**: archive aggregates in one view — total messages and date range, a per-day histogram (auto-downsampled to months/years when the archive spans too many days), and tables with inline bars for messages per source, top chats, and top authors. Served from trigger-maintained counter tables (schema migration 6), so the whole dashboard answers in **< 100 ms even on 1M messages** (asserted by a generated 1M-fixture test).
 - **Search tool UI** over the FTS5 index:
@@ -34,9 +34,9 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice �
 ## Repository layout
 
 ```
-crates/vault-core/   # storage (SQLite/FTS5, migrations + safe-migration path: snapshot/preflight/validation/rollback), filtered/paged search queries, archive statistics (dashboard aggregates), ingest trait, mail parsing, mbox / WhatsApp / Telegram / Signal / Discord sources, media extraction into the content-addressed store, IMAP sync, LLM search pipeline, local embeddings + hybrid ranking, folder watching, CSV/JSON/MBOX export, settings model (providers, pairing rules) — no UI deps
-src-tauri/           # Tauri app shell: commands (search_messages, chat_context, llm_ask, llm_status, embed_messages, embed_status, import_mbox, import_chat_export with optional media extraction, sync_imap, watch_add_folder, watch_remove_folder, watch_status, seed_demo, stats, archive_stats, export_search, export_chat, settings_get, settings_save, llm_key_clear) + LLM provider registry + secret storage (keyring) + watch-status events
-src/                 # frontend (vanilla TS): search + filters + pagination + detail view (with media links), ask UI with provider menu + embedding controls, settings screen, statistics dashboard (CSS bar charts, no chart library), import & IMAP sync controls, folder watching panel, export controls
+crates/vault-core/   # storage (SQLite/FTS5, migrations + safe-migration path: snapshot/preflight/validation/rollback), filtered/paged search queries, archive statistics (dashboard aggregates), ingest trait, mail parsing, mbox / WhatsApp / Telegram / Signal / Discord sources, media extraction into the content-addressed store, IMAP sync (password + OAuth2/XOAUTH2), OAuth2 login flow, LLM search pipeline, local embeddings + hybrid ranking, folder watching, CSV/JSON/MBOX export, settings model (providers, pairing rules) — no UI deps
+src-tauri/           # Tauri app shell: commands (search_messages, chat_context, llm_ask, llm_status, embed_messages, embed_status, import_mbox, import_chat_export with optional media extraction, sync_imap, oauth_gmail_login, oauth_status, watch_add_folder, watch_remove_folder, watch_status, seed_demo, stats, archive_stats, export_search, export_chat, settings_get, settings_save, llm_key_clear) + LLM provider registry + secret storage (passwords & OAuth refresh tokens, keyring) + watch-status events
+src/                 # frontend (vanilla TS): search + filters + pagination + detail view (with media links), ask UI with provider menu + embedding controls, settings screen, statistics dashboard (CSS bar charts, no chart library), import & IMAP sync controls (app password or Google sign-in), folder watching panel, export controls
 index.html           # single-page shell
 ```
 
@@ -187,6 +187,26 @@ The **IMAP sync** section pulls mail straight from a server into the archive —
 
 Each synced account is a **durable source instance**: its identity is the canonical connector configuration — case-folded host, port, TLS mode, and the exact username — while the password stays only in the OS keyring (or process memory). Reconfiguring credentials preserves the instance; two accounts on different hosts stay distinct even with the same username; and the same mail seen in several folders is one archived message with one folder occurrence per sighting.
 
+Two ways to authenticate, picked in the UI:
+
+### Gmail (Google sign-in / OAuth)
+
+The browser-based desktop OAuth2 flow: click **Sign in with Google…**, consent once in the browser window that opens, done — the app receives an access token plus a refresh token and authenticates IMAP via SASL `XOAUTH2`. No app password needed, and every sync refreshes a fresh short-lived access token from the stored refresh token.
+
+**You register the OAuth client yourself** (one-time, free):
+
+1. In [Google Cloud Console](https://console.cloud.google.com/apis/credentials) create an **OAuth client ID** of type **Desktop app** (any project works; no publishing needed for personal use).
+2. Add `http://localhost` as an **Authorized redirect URI** (the app redirects the browser to a loopback address with a random port — the port is ignored for loopback URIs).
+3. Copy the **client ID** and **client secret** into the environment before starting the app:
+
+   | Variable | Meaning |
+   | --- | --- |
+   | `MAILCHAT_GMAIL_CLIENT_ID` | your OAuth client ID (`…apps.googleusercontent.com`) |
+   | `MAILCHAT_GMAIL_CLIENT_SECRET` | your client secret (`GOCSPX-…`) |
+
+   Both must be set (or both unset — then the Google sign-in UI says it is not configured). The scope requested is `https://mail.google.com/` (the scope Gmail's IMAP endpoint requires); the app itself only ever issues read-only IMAP commands (`EXAMINE`, `UID SEARCH`, `UID FETCH`).
+4. In the app: choose **Google sign-in (OAuth)**, enter your address, sign in once, then **Sync** like with any other account.
+
 ### Gmail (app password)
 
 1. Enable 2-step verification on the Google account, then create an **App password** (Google Account → Security → 2-Step Verification → App passwords).
@@ -195,14 +215,15 @@ Each synced account is a **durable source instance**: its identity is the canoni
 
 ### Other servers
 
-Any IMAP server with implicit TLS works the same way: host, port (993), username, password, folders.
+Any IMAP server with implicit TLS works the same way via the app-password path: host, port (993), username, password, folders.
 
-### Where the password lives
+### Where credentials live
 
-- Typed passwords are used for the sync and then stored in the **OS keyring** when one is available (Secret Service/GNOME Keyring or KWallet on Linux, Keychain on macOS, Credential Manager on Windows) — service `mailchat-vault`, entry `user@host`.
-- With no OS keyring reachable, the password is kept **only in process memory for the current app session** (gone on exit) — the UI says so.
-- Passwords are never written to the vault database (a test scans the DB bytes to enforce this) and never logged.
-- Leaving the password field empty reuses the stored password; to remove it entirely, delete the entry in your OS keyring manager.
+- **Typed passwords** are used for the sync and then stored in the **OS keyring** when one is available (Secret Service/GNOME Keyring or KWallet on Linux, Keychain on macOS, Credential Manager on Windows) — service `mailchat-vault`, entry `user@host`.
+- **The OAuth refresh token** from a Google sign-in lives in the same OS keyring under the entry `oauth:user@host`. Short-lived access tokens exist only in process memory for the duration of a sync.
+- With no OS keyring reachable, the password or refresh token is kept **only in process memory for the current app session** (gone on exit) — the UI says so.
+- Secrets are never written to the vault database (tests byte-scan the DB files for the password *and* the refresh token to enforce this) and never logged. `ImapConfig`'s `Debug` output is redacted too.
+- Leaving the password field empty reuses the stored password; to remove it entirely, delete the entry in your OS keyring manager. To redo a Google sign-in, sign in again (it replaces the stored refresh token).
 
 ## Export
 
@@ -217,7 +238,7 @@ Rows stream straight to the file, so exports of very large result sets don't hol
 ## Tests
 
 ```sh
-cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram / Discord ingest, media extraction (real small fixture files), filtered/paged search, chat context, archive statistics (incl. the 1M-message dashboard perf contract), 100k FTS perf fixture, IMAP sync (mock server; durable source instances, multi-folder occurrences, conflicting revisions), LLM search pipeline (mock LLM, no network), settings model (file round-trip, provider pairing rules, menu building), local embeddings (deterministic embedder, incremental job, cosine scan, hybrid ranking, 100k vector perf budgets), folder watching (real temp folders), export (CSV/JSON/MBOX round-trips incl. unicode + large sets), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations, safe migration with injected before/within/after-conversion failures: snapshot kept readable, original restored byte-for-byte, durable failure-marker refusal on later opens, capacity preflight, newer-schema refusal)
+cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram / Discord ingest, media extraction (real small fixture files), filtered/paged search, chat context, archive statistics (incl. the 1M-message dashboard perf contract), 100k FTS perf fixture, IMAP sync (mock server; durable source instances, OAuth2 login flow (mock OAuth server + mock IMAP, XOAUTH2 end-to-end), multi-folder occurrences, conflicting revisions), LLM search pipeline (mock LLM, no network), settings model (file round-trip, provider pairing rules, menu building), local embeddings (deterministic embedder, incremental job, cosine scan, hybrid ranking, 100k vector perf budgets), folder watching (real temp folders), export (CSV/JSON/MBOX round-trips incl. unicode + large sets), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations, safe migration with injected before/within/after-conversion failures: snapshot kept readable, original restored byte-for-byte, durable failure-marker refusal on later opens, capacity preflight, newer-schema refusal)
 npm test                 # frontend unit + UI-state snapshot tests (vitest), incl. settings helpers and the provider-menu / settings wiring
 npm run check            # TypeScript type-check
 cargo test --workspace   # also compiles the Tauri app + its LLM provider registry tests (needs the Linux libs above)
@@ -235,7 +256,7 @@ failure. Raise the random rounds locally with
 
 CI (`.github/workflows/ci.yml`) runs all of the above plus `clippy` and `fmt --check` on every push and PR.
 
-IMAP sync is tested hermetically against an in-process mock IMAP4rev1 server (the greenmail equivalent), including an integration test that ingests the same `.mbox` fixture through both paths and compares the archives. A real-server test (`tests/imap_gmail_manual.rs`) is `#[ignore]`d: it needs live credentials and is **not** run in CI. To run it against your own account:
+IMAP sync is tested hermetically against an in-process mock IMAP4rev1 server (the greenmail equivalent), including an integration test that ingests the same `.mbox` fixture through both paths and compares the archives. The OAuth2 login (Google sign-in → XOAUTH2) is tested the same way: an in-process mock OAuth server (`tests/oauth_mock`) plays the authorization + token endpoints (PKCE, single-use codes, refresh grants, consent denial), an HTTP client stands in for the browser following the real loopback redirect, and the mock IMAP server verifies the SASL `XOAUTH2` string — the whole token flow end-to-end, plus the no-persist scan for the refresh token. A real-server test (`tests/imap_gmail_manual.rs`) is `#[ignore]`d: it needs live credentials and is **not** run in CI. To run it against your own account:
 
 ```sh
 MAILCHAT_IMAP_USER=you@gmail.com MAILCHAT_IMAP_PASS=abcd-efgh-ijkl-mnop \
@@ -259,8 +280,7 @@ same webview reason; the formats themselves are round-trip tested in
 
 ## Out of scope for now (separate tasks)
 
-XOAUTH2 (OAuth) login for Gmail, multi-account UI, push notifications. The media-extraction layer is source-generic: when further chat sources land, their exports plug into the same hash-named `media/` store and `raw_json` convention.
-
+multi-account UI, push notifications. The media-extraction layer is source-generic: when further chat sources land, their exports plug into the same hash-named `media/` store and `raw_json` convention.
 ## Installers & releases
 
 Pushing a version tag (`v*`) builds distributable installers — Linux AppImage + `.deb` (defaults of the enabled Tauri bundling), plus macOS `.dmg` and Windows `.msi`/NSIS `.exe` from the release workflow — as a **draft GitHub Release**. Artifacts are **unsigned** in this round (no code signing; Gatekeeper/SmartScreen caveats apply on macOS/Windows). The app ships with a full icon set (Linux/mac/win) generated from `src-tauri/icons/source.png`. See [docs/release.md](docs/release.md) for the install smoke-test checklist, local build commands, and how to regenerate the icons.
