@@ -388,9 +388,7 @@ impl QueryFilters {
             // their own offset.
             if let Some(day) = crate::query::parse_day(&query.from_date) {
                 sql.push_str(" AND m.sent_at >= ?");
-                values.push(SqlValue::from(crate::query::local_day_instant_utc(
-                    day,
-                )));
+                values.push(SqlValue::from(crate::query::local_day_instant_utc(day)));
             }
         }
         if !query.to_date.is_empty() {

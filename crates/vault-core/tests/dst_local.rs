@@ -49,15 +49,47 @@ fn historical_dst_day_filters_by_its_own_offset() {
     };
 
     // Summer: midnight of 2026-07-15 is 2026-07-14T22:00:00Z (DST +02:00).
-    assert_eq!(total("summer", "2026-07-15", ""), 1, "from = display day includes");
-    assert_eq!(total("summer", "", "2026-07-15"), 1, "to = display day includes");
-    assert_eq!(total("summer", "", "2026-07-14"), 0, "to before display day excludes");
-    assert_eq!(total("summer", "2026-07-16", ""), 0, "from after display day excludes");
+    assert_eq!(
+        total("summer", "2026-07-15", ""),
+        1,
+        "from = display day includes"
+    );
+    assert_eq!(
+        total("summer", "", "2026-07-15"),
+        1,
+        "to = display day includes"
+    );
+    assert_eq!(
+        total("summer", "", "2026-07-14"),
+        0,
+        "to before display day excludes"
+    );
+    assert_eq!(
+        total("summer", "2026-07-16", ""),
+        0,
+        "from after display day excludes"
+    );
 
     // Winter: midnight of 2026-01-15 is 2026-01-14T23:00:00Z (+01:00), so the
     // same wall-clock message lands inside Jan 14 and must not match Jan 15.
-    assert_eq!(total("winter", "2026-01-15", ""), 0, "wrong-season from must exclude");
-    assert_eq!(total("winter", "", "2026-01-14"), 1, "to = display day includes");
-    assert_eq!(total("winter", "", "2026-01-13"), 0, "to before display day excludes");
-    assert_eq!(total("winter", "2026-01-16", ""), 0, "from after display day excludes");
+    assert_eq!(
+        total("winter", "2026-01-15", ""),
+        0,
+        "wrong-season from must exclude"
+    );
+    assert_eq!(
+        total("winter", "", "2026-01-14"),
+        1,
+        "to = display day includes"
+    );
+    assert_eq!(
+        total("winter", "", "2026-01-13"),
+        0,
+        "to before display day excludes"
+    );
+    assert_eq!(
+        total("winter", "2026-01-16", ""),
+        0,
+        "from after display day excludes"
+    );
 }

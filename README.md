@@ -24,8 +24,8 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice �
 ## Repository layout
 
 ```
-crates/vault-core/   # storage (SQLite/FTS5, migrations), ingest trait, mbox source — no UI deps
-src-tauri/           # Tauri app shell: commands (search, import_mbox, seed_demo, stats)
+crates/vault-core/   # storage (SQLite/FTS5, migrations), filtered/paged search queries, ingest trait, mbox source — no UI deps
+src-tauri/           # Tauri app shell: commands (search, chat_context, import_mbox, seed_demo, stats)
 src/                 # frontend (vanilla TS): search box, results, import controls
 index.html           # single-page shell
 ```
