@@ -105,6 +105,58 @@ describe("results list", () => {
     (list.querySelector(".hit-item") as HTMLElement).click();
     expect(opened).toBe(7);
   });
+
+  it("renders an empty state with no groups or rows", () => {
+    const list = document.createElement("ul");
+    renderResults(list, {
+      groups: [],
+      activeIndex: -1,
+      terms: [],
+      onOpen: () => {},
+    });
+    expect(list.innerHTML).toBe("");
+    expect(list.querySelectorAll(".group,.hit-item").length).toBe(0);
+  });
+
+  it("replaces previously rendered rows on re-render (no stale rows)", () => {
+    const list = document.createElement("ul");
+    const first = [hit(message(1, "mbox", "t", "one"), null)];
+    renderResults(list, {
+      groups: groupHits(first),
+      activeIndex: -1,
+      terms: [],
+      onOpen: () => {},
+    });
+    const second = [hit(message(2, "mbox", "t", "two"), null)];
+    renderResults(list, {
+      groups: groupHits(second),
+      activeIndex: -1,
+      terms: [],
+      onOpen: () => {},
+    });
+    expect(list.querySelectorAll(".hit-item").length).toBe(1);
+    expect(list.querySelector<HTMLElement>(".hit-item")?.dataset.id).toBe("2");
+  });
+
+  it("marks every hit with a stable flat index across groups", () => {
+    const hits = [
+      hit(message(1, "mbox", "a", "x"), null),
+      hit(message(2, "mbox", "a", "y"), null),
+      hit(message(3, "demo", "", "z"), null),
+    ];
+    const list = document.createElement("ul");
+    renderResults(list, {
+      groups: groupHits(hits),
+      activeIndex: -1,
+      terms: [],
+      onOpen: () => {},
+    });
+    expect([...list.querySelectorAll<HTMLElement>(".hit-item")].map((li) => li.dataset.index)).toEqual([
+      "0",
+      "1",
+      "2",
+    ]);
+  });
 });
 
 describe("pagination", () => {
@@ -121,6 +173,27 @@ describe("pagination", () => {
     renderPagination(el, pageModel(0, 0, 50), { onPrev: () => {}, onNext: () => {} });
     expect(el.textContent).toContain("0 results");
     expect(el.querySelectorAll(".page-btn:disabled").length).toBe(2);
+  });
+
+  it("last page keeps prev enabled and disables next (snapshot)", () => {
+    const el = document.createElement("div");
+    renderPagination(el, pageModel(120, 100, 50), { onPrev: () => {}, onNext: () => {} });
+    expect(el.innerHTML).toMatchSnapshot();
+    const [prev, next] = [...el.querySelectorAll(".page-btn")] as HTMLButtonElement[];
+    expect(prev.disabled).toBe(false);
+    expect(next.disabled).toBe(true);
+  });
+
+  it("fires prev/next handlers", () => {
+    const fired: string[] = [];
+    const el = document.createElement("div");
+    renderPagination(el, pageModel(200, 50, 50), {
+      onPrev: () => fired.push("prev"),
+      onNext: () => fired.push("next"),
+    });
+    (el.querySelectorAll(".page-btn")[0] as HTMLButtonElement).click();
+    (el.querySelectorAll(".page-btn")[1] as HTMLButtonElement).click();
+    expect(fired).toEqual(["prev", "next"]);
   });
 });
 
@@ -146,6 +219,20 @@ describe("source chips", () => {
     });
     (el.querySelector(".chip") as HTMLElement).click();
     expect(toggled).toBe("mbox");
+  });
+
+  it("renders all chips unselected by default (snapshot)", () => {
+    const el = document.createElement("div");
+    renderSourceChips(el, {
+      available: [
+        { source: "mbox", count: 900 },
+        { source: "telegram", count: 80 },
+      ],
+      selected: [],
+      onToggle: () => {},
+    });
+    expect(el.innerHTML).toMatchSnapshot();
+    expect(el.querySelectorAll(".chip.on").length).toBe(0);
   });
 });
 
@@ -203,5 +290,24 @@ describe("detail panel", () => {
     expect(closed).toBe(true);
     (el.querySelector('.thread-row[data-id="3"]') as HTMLElement).click();
     expect(opened).toBe(3);
+  });
+
+  it("renders a solo message with no neighbors (snapshot)", () => {
+    const solo: ChatContext = {
+      before: [],
+      message: message(9, "telegram", "devs", "only message in thread"),
+      after: [],
+    };
+    const el = document.createElement("aside");
+    renderDetail(el, {
+      ctx: solo,
+      queryText: "message",
+      onOpenMessage: () => {},
+      onClose: () => {},
+    });
+    expect(el.innerHTML).toMatchSnapshot();
+    expect(el.querySelectorAll(".thread-row").length).toBe(1);
+    expect(el.querySelector(".thread-row.current")).not.toBeNull();
+    expect(el.querySelectorAll(".thread-row.link").length).toBe(0);
   });
 });

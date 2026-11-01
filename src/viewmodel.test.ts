@@ -4,6 +4,7 @@ import {
   groupHits,
   highlightSegments,
   moveIndex,
+  neighborId,
   pageModel,
   parseSnippet,
   splitTerms,
@@ -126,6 +127,20 @@ describe("groupHits", () => {
     expect(groups[0].label).toBe("demo · no thread");
     expect(groupHits([hit(1, "mbox", "t")])[0].label).toBe("mbox · t");
   });
+
+  it("keeps first-seen group order when chats interleave", () => {
+    const groups = groupHits([
+      hit(1, "telegram", "devs"),
+      hit(2, "mbox", "a"),
+      hit(3, "telegram", "devs"),
+      hit(4, "whatsapp", ""),
+      hit(5, "mbox", "a"),
+      hit(6, "telegram", "devs"),
+    ]);
+    expect(groups.map((g) => g.key)).toEqual(["telegram/devs", "mbox/a", "whatsapp/"]);
+    expect(groups.map((g) => g.hits.length)).toEqual([3, 2, 1]);
+    expect(groups[0].hits.map((h) => h.message.id)).toEqual([1, 3, 6]);
+  });
 });
 
 describe("pageModel", () => {
@@ -159,6 +174,10 @@ describe("moveIndex", () => {
   it("empty list stays -1", () => {
     expect(moveIndex(3, 0, 1)).toBe(-1);
   });
+
+  it("stepping backwards from no selection lands on the first row", () => {
+    expect(moveIndex(-1, 3, -1)).toBe(0);
+  });
 });
 
 describe("threadEntries / detail model", () => {
@@ -176,6 +195,46 @@ describe("threadEntries / detail model", () => {
       [3, true],
       [4, false],
     ]);
+  });
+
+  it("handles a solo message with no neighbors", () => {
+    const solo: ChatContext = {
+      before: [],
+      message: hit(9, "m", "c").message,
+      after: [],
+    };
+    expect(threadEntries(solo)).toEqual([{ message: solo.message, current: true }]);
+  });
+});
+
+describe("neighborId", () => {
+  const ctx: ChatContext = {
+    before: [hit(1, "m", "c").message, hit(2, "m", "c").message],
+    message: hit(3, "m", "c").message,
+    after: [hit(4, "m", "c").message, hit(5, "m", "c").message],
+  };
+
+  it("steps to the previous and next thread neighbor", () => {
+    expect(neighborId(ctx, -1)).toBe(2);
+    expect(neighborId(ctx, 1)).toBe(4);
+  });
+
+  it("returns null at the thread edges", () => {
+    const topEdge: ChatContext = {
+      before: [],
+      message: hit(9, "m", "c").message,
+      after: [hit(10, "m", "c").message],
+    };
+    const bottomEdge: ChatContext = {
+      before: [hit(8, "m", "c").message],
+      message: hit(9, "m", "c").message,
+      after: [],
+    };
+    expect(neighborId(topEdge, -1)).toBeNull();
+    expect(neighborId(bottomEdge, 1)).toBeNull();
+    // Edges still allow stepping back inward.
+    expect(neighborId(topEdge, 1)).toBe(10);
+    expect(neighborId(bottomEdge, -1)).toBe(8);
   });
 });
 
