@@ -1,0 +1,178 @@
+use vault_core::message::{InsertOutcome, NewMessage};
+use vault_core::search::build_match_query;
+use vault_core::storage::Storage;
+
+fn msg(external_id: &str, author: &str, body: &str) -> NewMessage {
+    NewMessage::new("test", external_id, author, "2026-01-01T00:00:00Z", body)
+}
+
+fn storage() -> Storage {
+    Storage::open_in_memory().expect("open in-memory storage")
+}
+
+#[test]
+fn migrations_apply_and_are_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("vault.db");
+
+    let s = Storage::open(&db).unwrap();
+    assert_eq!(s.schema_version().unwrap(), 1);
+
+    // Reopening the same file applies nothing new and keeps the data.
+    let s2 = Storage::open(&db).unwrap();
+    assert_eq!(s2.schema_version().unwrap(), 1);
+    s.insert_message(&msg("a", "x", "hello vault")).unwrap();
+    assert_eq!(s2.stats().unwrap().total, 1);
+}
+
+#[test]
+fn insert_is_idempotent_on_source_and_external_id() {
+    let s = storage();
+    let first = s.insert_message(&msg("m1", "ana", "first body")).unwrap();
+    assert!(matches!(first, InsertOutcome::Inserted(_)));
+
+    // Same dedup key, different content: no error, no second row, original
+    // body untouched.
+    let second = s
+        .insert_message(&msg("m1", "ana", "changed body that must not be stored"))
+        .unwrap();
+    assert!(
+        matches!(second, InsertOutcome::Duplicate(id) if id == match first {
+            InsertOutcome::Inserted(id) => id,
+            _ => unreachable!(),
+        })
+    );
+
+    // Same external_id under a different source namespace is a new message.
+    let other_source = NewMessage::new("other", "m1", "ana", "", "hello");
+    assert!(s.insert_message(&other_source).unwrap().was_inserted());
+
+    assert_eq!(s.stats().unwrap().total, 2);
+    let found = s.search("changed", 10).unwrap();
+    assert!(found.is_empty(), "changed body must not be searchable");
+}
+
+#[test]
+fn fts_search_matches_body_and_author() {
+    let s = storage();
+    s.insert_message(&msg(
+        "1",
+        "ana <ana@example.com>",
+        "quarterly report attached",
+    ))
+    .unwrap();
+    s.insert_message(&msg("2", "marko", "nothing relevant here"))
+        .unwrap();
+
+    let body_hits = s.search("quarterly", 10).unwrap();
+    assert_eq!(body_hits.len(), 1);
+    assert_eq!(body_hits[0].external_id, "1");
+
+    let author_hits = s.search("marko", 10).unwrap();
+    assert_eq!(author_hits.len(), 1);
+    assert_eq!(author_hits[0].external_id, "2");
+}
+
+#[test]
+fn fts_search_respects_limit() {
+    let s = storage();
+    for i in 0..5 {
+        s.insert_message(&msg(&format!("m{i}"), "a", "vault vault vault"))
+            .unwrap();
+    }
+    assert_eq!(s.search("vault", 3).unwrap().len(), 3);
+}
+
+#[test]
+fn fts_search_orders_by_relevance() {
+    let s = storage();
+    s.insert_message(&msg("dense", "a", "vault vault vault"))
+        .unwrap();
+    s.insert_message(&msg(
+        "sparse",
+        "b",
+        &format!("{} vault {}", "filler ".repeat(40), "tail".repeat(40)),
+    ))
+    .unwrap();
+    let hits = s.search("vault", 10).unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(
+        hits[0].external_id, "dense",
+        "denser document should rank first"
+    );
+}
+
+#[test]
+fn sanitized_user_queries_never_error() {
+    let s = storage();
+    s.insert_message(&msg("1", "ana", "vault notes")).unwrap();
+    for input in [
+        "",
+        "   ",
+        "vault",
+        "user's *weird* (input)",
+        "\"unbalanced",
+        "-not NEAR *",
+        "двонационални тест",
+    ] {
+        let q = build_match_query(input);
+        if q.is_empty() {
+            continue;
+        }
+        s.search(&q, 10)
+            .unwrap_or_else(|e| panic!("query {input:?} failed: {e}"));
+    }
+}
+
+#[test]
+fn stats_group_by_source() {
+    let s = storage();
+    s.insert_message(&msg("1", "a", "one")).unwrap();
+    s.insert_message(&msg("2", "a", "two")).unwrap();
+    let other = NewMessage::new("mbox", "x", "a", "", "three");
+    s.insert_message(&other).unwrap();
+
+    let stats = s.stats().unwrap();
+    assert_eq!(stats.total, 3);
+    assert_eq!(
+        stats.by_source,
+        vec![
+            vault_core::message::SourceCount {
+                source: "test".into(),
+                count: 2
+            },
+            vault_core::message::SourceCount {
+                source: "mbox".into(),
+                count: 1
+            },
+        ]
+    );
+}
+
+#[test]
+fn get_returns_stored_message() {
+    let s = storage();
+    let outcome = s
+        .insert_message(&msg("1", "ana <a@b>", "hello body"))
+        .unwrap();
+    let id = match outcome {
+        InsertOutcome::Inserted(id) => id,
+        _ => unreachable!(),
+    };
+    let m = s.get(id).unwrap().expect("message exists");
+    assert_eq!(m.body, "hello body");
+    assert_eq!(m.author, "ana <a@b>");
+    assert!(s.get(9999).unwrap().is_none());
+}
+
+#[test]
+fn rebuild_fts_restores_index() {
+    let s = storage();
+    s.insert_message(&msg("1", "ana", "searchable body"))
+        .unwrap();
+    // Wipe the index directly to simulate corruption, then rebuild.
+    s.wipe_fts_for_tests().unwrap();
+    assert!(s.search("searchable", 10).unwrap().is_empty());
+    s.rebuild_fts().unwrap();
+    assert_eq!(s.search("searchable", 10).unwrap().len(), 1);
+}
