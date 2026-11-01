@@ -494,12 +494,12 @@ fn connect_to_blackholed_host_fails_within_the_connect_timeout() {
     let result = vimap::connect(&config);
     let elapsed = start.elapsed();
     assert!(result.is_err(), "a blackholed host must fail, not hang");
-    // The 30 s CONNECT_TIMEOUT engages (this host's SYN to 10.255.255.1 is
-    // silently dropped, so the OS default would hang well past this);
-    // allow scheduling slack on both sides.
+    // On a host that blackholes SYNs to this address, the 30 s
+    // CONNECT_TIMEOUT engages instead of the OS default (which would hang
+    // well past this); on a host with no route, the connect fails fast with
+    // ENETUNREACH — both are passes. Only an unbounded hang must fail.
     assert!(
-        elapsed >= std::time::Duration::from_secs(25)
-            && elapsed < std::time::Duration::from_secs(90),
-        "connect must be bounded by CONNECT_TIMEOUT, took {elapsed:?}"
+        elapsed < std::time::Duration::from_secs(90),
+        "connect must be bounded (well under the OS default), took {elapsed:?}"
     );
 }
