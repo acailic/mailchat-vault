@@ -12,6 +12,7 @@
 //! - [`mbox`]: the manual/demo `.mbox` file source.
 //! - [`whatsapp`]: the WhatsApp `.txt` chat export source.
 //! - [`telegram`]: the Telegram `result.json` chat export source.
+//! - [`signal`]: the Signal Desktop conversation JSON export source.
 //! - [`chat_export`]: format detection for picked chat export files.
 //! - [`imap`]: the incremental IMAP/Gmail source.
 //! - [`search`]: free-text to FTS5 MATCH query building.
@@ -29,6 +30,7 @@ pub mod mbox;
 pub mod message;
 pub mod query;
 pub mod search;
+pub mod signal;
 pub mod storage;
 pub mod telegram;
 pub mod util;

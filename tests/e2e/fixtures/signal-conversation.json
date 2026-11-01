@@ -1,0 +1,104 @@
+[
+  {
+    "id": "0ea0b5fd-9f2a-4c73-8f8e-2f8ce6f22a11",
+    "type": "incoming",
+    "conversationId": "e7e0e0e3-1111-4a2b-9d3c-2a9d4b1e5c01",
+    "source": "+385912345678.2",
+    "sourceServiceId": "0ea0b5fd-9f2a-4c73-8f8e-2f8ce6f22a99",
+    "sent_at": 1698832800000,
+    "timestamp": 1698832800000,
+    "received_at_ms": 1698832801400,
+    "serverTimestamp": 1698832800123,
+    "body": "Zdravo ekipa! 👋 Čujem da je arhiva gotova 🎉",
+    "schemaVersion": 35,
+    "readStatus": 1,
+    "seenStatus": 1
+  },
+  {
+    "id": "3c7b5d3a-2f1e-4a6b-8c9d-0e1f2a3b4c5d",
+    "type": "outgoing",
+    "conversationId": "e7e0e0e3-1111-4a2b-9d3c-2a9d4b1e5c01",
+    "sent_at": 1698832890000,
+    "timestamp": 1698832890000,
+    "body": "Jeste! Traži u arhivi 🗄️",
+    "expireTimer": 0,
+    "sendStateByConversationId": {}
+  },
+  {
+    "id": "5d9c1e4f-6a7b-4c8d-9e0f-1a2b3c4d5e6f",
+    "type": "incoming",
+    "conversationId": "e7e0e0e3-1111-4a2b-9d3c-2a9d4b1e5c01",
+    "source": "+385912345678.1",
+    "sent_at": 1698832950000,
+    "timestamp": 1698832950000,
+    "body": "",
+    "hasAttachments": 1,
+    "attachments": [
+      {
+        "fileName": "signal-2023-11-01-110050.jpg",
+        "contentType": "image/jpeg",
+        "size": 284119
+      }
+    ]
+  },
+  {
+    "id": "7f1a2b3c-4d5e-4f6a-8b0c-9d1e2f3a4b5c",
+    "type": "incoming",
+    "conversationId": "e7e0e0e3-1111-4a2b-9d3c-2a9d4b1e5c01",
+    "source": "+385987654321",
+    "sent_at": 1698833010000,
+    "timestamp": 1698833010000,
+    "body": "odgovaram na poruku o arhivi",
+    "quote": {
+      "id": 1698832800000,
+      "author": "+385912345678",
+      "text": "Zdravo ekipa! 👋 Čujem da je arhiva gotova 🎉",
+      "attachments": [],
+      "isViewOnce": false,
+      "referencedMessageNotFound": false
+    }
+  },
+  {
+    "id": "9a8b7c6d-5e4f-4a3b-2c1d-0e9f8a7b6c5d",
+    "type": "incoming",
+    "conversationId": "e7e0e0e3-1111-4a2b-9d3c-2a9d4b1e5c01",
+    "source": "+385912345678.3",
+    "sent_at": 1698833070000,
+    "timestamp": 1698833070000,
+    "body": "reagiram",
+    "reactions": [
+      {
+        "emoji": "❤️",
+        "fromId": "3c7b5d3a-2f1e-4a6b-8c9d-0e1f2a3b4c5d",
+        "targetTimestamp": 1698832890000,
+        "timestamp": 1698833071000
+      }
+    ]
+  },
+  {
+    "type": "call-history",
+    "conversationId": "e7e0e0e3-1111-4a2b-9d3c-2a9d4b1e5c01",
+    "callId": "4f6e8a2b-1111-4c8d-8e0f-9a1b2c3d4e5f",
+    "sent_at": 1698833100000,
+    "acceptedAt": 1698833106000
+  },
+  {
+    "type": "keychange",
+    "conversationId": "e7e0e0e3-1111-4a2b-9d3c-2a9d4b1e5c01",
+    "key_changed": "+385912345678",
+    "sent_at": 1698833110000
+  },
+  {
+    "type": "profile-change",
+    "conversationId": "e7e0e0e3-1111-4a2b-9d3c-2a9d4b1e5c01",
+    "profileChange": {
+      "from": "Marko",
+      "to": "Marko H."
+    },
+    "sent_at": 1698833120000
+  },
+  {
+    "sent_at": 1
+  },
+  "not an object"
+]

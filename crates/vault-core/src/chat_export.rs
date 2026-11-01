@@ -1,6 +1,7 @@
 //! Chat export format detection for the generic "import chat export"
 //! path: the picked file's contents decide which source parses it.
 
+use crate::signal::is_signal_export;
 use crate::telegram::is_telegram_export;
 use crate::whatsapp::is_whatsapp_export;
 
@@ -9,16 +10,21 @@ use crate::whatsapp::is_whatsapp_export;
 pub enum ChatFormat {
     WhatsApp,
     Telegram,
+    Signal,
 }
 
 /// Detect which chat export format `bytes` hold, if any.
 ///
 /// Telegram wins when the JSON parses into an export with a `messages`
-/// array; otherwise a WhatsApp header within the first lines decides.
-/// Anything else returns `None`.
+/// array; a top-level JSON array of Signal Desktop message objects is a
+/// Signal conversation export; otherwise a WhatsApp header within the
+/// first lines decides. Anything else returns `None`.
 pub fn detect_chat_format(bytes: &[u8]) -> Option<ChatFormat> {
     if is_telegram_export(bytes) {
         return Some(ChatFormat::Telegram);
+    }
+    if is_signal_export(bytes) {
+        return Some(ChatFormat::Signal);
     }
     if is_whatsapp_export(bytes) {
         return Some(ChatFormat::WhatsApp);
@@ -51,6 +57,22 @@ mod tests {
             detect_chat_format(&telegram_bytes()),
             Some(ChatFormat::Telegram)
         );
+    }
+
+    #[test]
+    fn detects_signal_json_array() {
+        let signal = br#"[
+            {
+                "id": "b1f2e3d4",
+                "type": "incoming",
+                "conversationId": "conv-1",
+                "source": "+385912345678.2",
+                "sent_at": 1698832800000,
+                "timestamp": 1698832800000,
+                "body": "Zdravo ekipa!"
+            }
+        ]"#;
+        assert_eq!(detect_chat_format(signal), Some(ChatFormat::Signal));
     }
 
     #[test]
