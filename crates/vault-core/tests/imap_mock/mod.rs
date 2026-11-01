@@ -57,6 +57,11 @@ pub struct MockImap {
     /// simulates a server that breaks mid-folder. Every other FETCH is
     /// served normally.
     fail_fetch_once: Arc<Mutex<Option<usize>>>,
+    /// When `Some(n)`, the connection is closed right after the nth UID
+    /// FETCH completes successfully (one-shot: the setting clears itself
+    /// when it fires). Simulates the network — or the whole client
+    /// process — dying between two fetch batches.
+    drop_after_fetch_once: Arc<Mutex<Option<usize>>>,
     /// 1-based ordinal of each UID FETCH command seen.
     fetch_ordinal: Arc<Mutex<usize>>,
 }
@@ -69,11 +74,13 @@ impl MockImap {
         let mailboxes = Arc::new(Mutex::new(BTreeMap::new()));
         let log = Arc::new(Mutex::new(ServerLog::default()));
         let fail_fetch_once = Arc::new(Mutex::new(None));
+        let drop_after_fetch_once = Arc::new(Mutex::new(None));
         let fetch_ordinal = Arc::new(Mutex::new(0));
         {
             let mailboxes = Arc::clone(&mailboxes);
             let log = Arc::clone(&log);
             let fail_fetch_once = Arc::clone(&fail_fetch_once);
+            let drop_after_fetch_once = Arc::clone(&drop_after_fetch_once);
             let fetch_ordinal = Arc::clone(&fetch_ordinal);
             std::thread::spawn(move || {
                 for stream in listener.incoming() {
@@ -81,11 +88,17 @@ impl MockImap {
                     let mailboxes = Arc::clone(&mailboxes);
                     let log = Arc::clone(&log);
                     let fail_fetch_once = Arc::clone(&fail_fetch_once);
+                    let drop_after_fetch_once = Arc::clone(&drop_after_fetch_once);
                     let fetch_ordinal = Arc::clone(&fetch_ordinal);
                     std::thread::spawn(move || {
-                        if let Err(e) =
-                            serve(stream, &mailboxes, &log, &fail_fetch_once, &fetch_ordinal)
-                        {
+                        if let Err(e) = serve(
+                            stream,
+                            &mailboxes,
+                            &log,
+                            &fail_fetch_once,
+                            &drop_after_fetch_once,
+                            &fetch_ordinal,
+                        ) {
                             // A dropped client mid-command is normal in
                             // tests; anything else is a protocol bug.
                             eprintln!("mock imap connection error: {e}");
@@ -99,6 +112,7 @@ impl MockImap {
             mailboxes,
             log,
             fail_fetch_once,
+            drop_after_fetch_once,
             fetch_ordinal,
         }
     }
@@ -108,6 +122,15 @@ impl MockImap {
     /// that breaks mid-folder. `None` (the default) serves normally.
     pub fn fail_uid_fetch_once(&self, ordinal: Option<usize>) {
         *self.fail_fetch_once.lock().unwrap() = ordinal;
+    }
+
+    /// Close the connection immediately after the nth UID FETCH (across
+    /// all connections, 1-based) completes successfully — the fetch
+    /// response itself is fully delivered first. One-shot: the setting
+    /// clears itself once it fires, so retried connections serve
+    /// normally. `None` (the default) never drops.
+    pub fn drop_after_uid_fetch_once(&self, ordinal: Option<usize>) {
+        *self.drop_after_fetch_once.lock().unwrap() = ordinal;
     }
 
     /// Replace a mailbox wholesale (also how UIDVALIDITY resets are
@@ -142,6 +165,7 @@ fn serve(
     mailboxes: &Arc<Mutex<BTreeMap<String, MockMailbox>>>,
     log: &Arc<Mutex<ServerLog>>,
     fail_fetch_once: &Arc<Mutex<Option<usize>>>,
+    drop_after_fetch_once: &Arc<Mutex<Option<usize>>>,
     fetch_ordinal: &Arc<Mutex<usize>>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -295,6 +319,22 @@ fn serve(
                             }
                         }
                         write_line(&mut writer, format!("{tag} OK FETCH completed").as_bytes())?;
+                        // One-shot connection drop after a fully delivered
+                        // fetch: the next client command finds a closed
+                        // socket, exactly like a dead network link.
+                        let should_drop = {
+                            let mut knob = drop_after_fetch_once.lock().unwrap();
+                            match *knob {
+                                Some(n) if n == ordinal => {
+                                    *knob = None;
+                                    true
+                                }
+                                _ => false,
+                            }
+                        };
+                        if should_drop {
+                            return Ok(());
+                        }
                     }
                     _ => {
                         write_line(
