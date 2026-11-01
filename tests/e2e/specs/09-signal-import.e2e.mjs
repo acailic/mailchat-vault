@@ -40,7 +40,6 @@ async function invoke(browser, command, args = {}) {
 
 export async function run(ctx) {
   const { withSession, assert, ui } = ctx;
-  const evidenceDir = process.env.MAILCHAT_E2E_EVIDENCE_DIR;
 
   await withSession({}, async (browser, { dataDir }) => {
     await ui.waitForApp(browser);
@@ -80,8 +79,6 @@ export async function run(ctx) {
     const marks = await browser.$$("#results li.hit-item mark");
     assert.ok((await marks.length) > 0, "query terms highlighted with <mark>");
 
-    await browser.saveScreenshot(path.join(evidenceDir, "signal-search-hit.png"));
-
     // --- detail view: archived metadata + thread context ------------------
     await hits[0].click();
     await browser.waitUntil(
@@ -98,8 +95,6 @@ export async function run(ctx) {
     assert.includes(table, "+385912345678", "detail shows the author");
     const threadRows = await browser.$$("#detail ol.thread li.thread-row");
     assert.equal(threadRows.length, 5, "all 5 conversation messages as thread neighbours");
-    await browser.saveScreenshot(path.join(evidenceDir, "signal-detail.png"));
-
     // --- re-import dedups --------------------------------------------------
     const reimport = await invoke(browser, "import_chat_export", { path: signalFixture });
     assert.ok(reimport.ok, `re-import command succeeded: ${reimport.error ?? ""}`);
@@ -141,6 +136,5 @@ export async function run(ctx) {
       document.querySelector("#search").value = "";
       document.querySelector("#results").replaceChildren();
     });
-    await browser.saveScreenshot(path.join(evidenceDir, "signal-import-error.png"));
   });
 }
