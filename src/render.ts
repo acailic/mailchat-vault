@@ -31,8 +31,6 @@ export function appendSegments(el: HTMLElement, segments: Segment[]): void {
 }
 
 export interface ResultsOptions {
-  /** Flat hit list; activeIndex indexes into this. */
-  hits: SearchHit[];
   groups: HitGroup[];
   activeIndex: number;
   /** Query terms for client-side highlighting when a hit has no snippet. */

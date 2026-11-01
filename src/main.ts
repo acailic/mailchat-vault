@@ -52,7 +52,6 @@ interface UiState {
   hits: SearchHit[];
   activeIndex: number;
   detail: ChatContext | null;
-  ran: boolean;
 }
 
 const state: UiState = {
@@ -66,7 +65,6 @@ const state: UiState = {
   hits: [],
   activeIndex: -1,
   detail: null,
-  ran: false,
 };
 
 // ---------------------------------------------------------------------------
@@ -81,7 +79,6 @@ function setStatus(text: string, isError = false): void {
 function renderAll(): void {
   const terms = splitTerms(state.text);
   renderResults(resultsList, {
-    hits: state.hits,
     groups: groupHits(state.hits),
     activeIndex: state.activeIndex,
     terms,
@@ -143,7 +140,6 @@ async function runSearch(offset = 0): Promise<void> {
   const seq = ++searchSeq;
   const text = searchInput.value.trim();
   if (!text && !state.sources.length && !authorInput.value.trim() && !fromDateInput.value && !toDateInput.value) {
-    state.ran = false;
     state.hits = [];
     state.total = 0;
     state.offset = 0;
@@ -175,7 +171,6 @@ async function runSearch(offset = 0): Promise<void> {
     state.total = page.total;
     state.offset = page.offset;
     state.activeIndex = -1;
-    state.ran = true;
     const groups = groupHits(page.hits).length;
     const range =
       page.total === 0
@@ -204,16 +199,22 @@ function clearFilters(): void {
 // Detail view
 // ---------------------------------------------------------------------------
 
+// Sequential detail-load token: walking the thread fires concurrent
+// chat_context invocations; only the newest one may render.
+let detailSeq = 0;
+
 async function openDetail(id: number): Promise<void> {
+  const seq = ++detailSeq;
   try {
     const ctx = await invoke<ChatContext | null>("chat_context", { id, radius: 8 });
+    if (seq !== detailSeq) return; // a newer load superseded this response
     if (ctx) {
       state.detail = ctx;
       renderAll();
       detailPanel.querySelector<HTMLElement>(".detail-card")?.scrollIntoView({ block: "nearest" });
     }
   } catch (e) {
-    setStatus(String(e), true);
+    if (seq === detailSeq) setStatus(String(e), true);
   }
 }
 
