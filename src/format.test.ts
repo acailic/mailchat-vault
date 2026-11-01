@@ -13,6 +13,27 @@ describe("formatSentAt", () => {
     expect(formatSentAt("")).toBe("unknown time");
     expect(formatSentAt("not-a-date")).toBe("not-a-date");
   });
+
+  it("renders the local calendar day, including near-midnight instants", () => {
+    // Near-midnight fixture: two instants 40 minutes apart straddling UTC
+    // midnight. Expected values are derived from the same local Date getters
+    // the implementation uses, so the test stays timezone-independent on any
+    // host while still pinning local-day rendering: switching the formatter
+    // to UTC getters (getUTCHours/…) fails on every non-UTC machine, and a
+    // near-midnight instant is exactly where UTC and local days diverge.
+    const expectLocal = (iso: string) => {
+      const d = new Date(iso);
+      const pad = (n: number) => String(n).padStart(2, "0");
+      return (
+        `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+        `${pad(d.getHours())}:${pad(d.getMinutes())}`
+      );
+    };
+    const justBeforeMidnightUtc = "2026-03-08T23:40:00Z";
+    const justAfterMidnightUtc = "2026-03-09T00:20:00Z";
+    expect(formatSentAt(justBeforeMidnightUtc)).toBe(expectLocal(justBeforeMidnightUtc));
+    expect(formatSentAt(justAfterMidnightUtc)).toBe(expectLocal(justAfterMidnightUtc));
+  });
 });
 
 describe("snippet", () => {
