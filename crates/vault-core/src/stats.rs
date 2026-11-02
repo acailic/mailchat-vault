@@ -2,7 +2,7 @@
 //! and message counts grouped by source, day, chat, and author.
 //!
 //! [`Storage::archive_stats`] computes all of it from the trigger-
-//! maintained counter tables (schema migration 3) in one call, so the
+//! maintained counter tables (schema migration 4) in one call, so the
 //! dashboard answers within its 100 ms budget on million-message archives
 //! (asserted by `tests/stats_perf.rs`).
 

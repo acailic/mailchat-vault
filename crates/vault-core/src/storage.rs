@@ -351,14 +351,6 @@ const MIGRATIONS: &[(i64, &str)] = &[
         // chat_id groups are stored too and filtered on read, so the
         // counters always sum to COUNT(*).
         r#"
-        // Materialized counters for the statistics dashboard, maintained by
-        // triggers on every write so reads stay O(number of groups) instead
-        // of GROUP BY scans over every message row — the dashboard answers
-        // within its 100 ms budget on million-message archives (asserted by
-        // tests/stats_perf.rs). The `''` day (unknown sent_at) and `''`
-        // chat_id groups are stored too and filtered on read, so the
-        // counters always sum to COUNT(*).
-        r#"
         CREATE TABLE stats_source (
             source TEXT PRIMARY KEY,
             n      INTEGER NOT NULL
