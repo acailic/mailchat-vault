@@ -553,6 +553,97 @@ fn uninterpretable_legacy_rows_stay_unresolved() {
 }
 
 #[test]
+fn whatsapp_rekey_hash_matches_live_import_on_non_utc_zone() {
+    // The migration re-resolves legacy blind-`Z` stamps in the machine's
+    // local zone — here pinned to a non-UTC summer zone (+02:00) — so a
+    // migrated row's content_hash must equal what a live import of the
+    // same export hashes: the same resolution over the same wall time.
+    let prior_tz = std::env::var("TZ").ok();
+    std::env::set_var("TZ", "Europe/Paris");
+    let dir = scratch_dir();
+    let db = dir.path().join("wa-zone.db");
+    v2_db(&db);
+    {
+        let conn = raw(&db);
+        legacy_row(
+            &conn,
+            "whatsapp",
+            "generated-0000000000000001-0",
+            "WhatsApp Chat with Ana",
+            "",
+            "2026-07-01T09:00:00Z",
+            "Poruke i pozivi šifrirani.",
+        );
+        legacy_row(
+            &conn,
+            "whatsapp",
+            "generated-0000000000000002-0",
+            "WhatsApp Chat with Ana",
+            "Ana",
+            "2026-07-01T09:00:05Z",
+            "zdravo ekipo",
+        );
+        legacy_row(
+            &conn,
+            "whatsapp",
+            "generated-0000000000000003-0",
+            "WhatsApp Chat with Ana",
+            "Ana",
+            "2026-07-01T09:01:00Z",
+            "kako ste?",
+        );
+    }
+
+    let _s = Storage::open(&db).unwrap();
+
+    // The export whose stamps the legacy rows carry, re-imported through
+    // the M1.3 path in the same +02:00 summer zone.
+    let export = "[1.7.2026., 09:00:00] Poruke i pozivi šifrirani.\n\
+                  [1.7.2026., 09:00:05] Ana: zdravo ekipo\n\
+                  [1.7.2026., 09:01:00] Ana: kako ste?\n";
+    let tz = FixedOffset::east_opt(2 * 3600).unwrap();
+    let collected =
+        parse_whatsapp_tz(export.as_bytes(), "Ana (najnovije)", &tz, "Europe/Paris").unwrap();
+    assert_eq!(collected.messages.len(), 3);
+    assert_eq!(
+        collected.messages[1].sent_at, "2026-07-01T07:00:05Z",
+        "the live path resolves 09:00:05 in +02:00 to 07:00:05Z"
+    );
+
+    // Every migrated row's content_hash equals the live formula over the
+    // resolved instant: external_id, author, sent_at, body joined by
+    // U+001F and SHA-256'd.
+    let expected_hash = |m: &vault_core::message::NewMessage| {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            m.external_id, m.author, m.sent_at, m.body
+        ));
+        let mut out = String::new();
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{byte:02x}");
+        }
+        out
+    };
+    let conn = raw(&db);
+    for m in &collected.messages {
+        let hash: String = conn
+            .query_row(
+                "SELECT content_hash FROM archive_messages WHERE external_id = ?1",
+                rusqlite::params![m.external_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hash, expected_hash(m), "hash diverges for {}", m.body);
+    }
+    match prior_tz {
+        Some(tz) => std::env::set_var("TZ", tz),
+        None => std::env::remove_var("TZ"),
+    }
+}
+
+#[test]
 fn signal_uuid_prefixed_legacy_rows_key_and_reimport_dedups() {
     let dir = scratch_dir();
     let db = dir.path().join("signal-keyed.db");
