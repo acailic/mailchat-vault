@@ -79,34 +79,39 @@ pub fn integrity_check(db: &Path) -> Option<String> {
 }
 
 /// FTS5's own consistency oracle: the special `integrity-check` command
-/// verifies that the full-text index agrees with the external `messages`
-/// content table (it catches corrupt or inconsistent index entries, e.g.
-/// after recovery or VACUUM). Note it validates existing index entries, so
-/// an entirely *missing* index (see the wipe scenario) is not flagged by
-/// it — that case is covered behaviorally by search going blind.
+/// verifies that the canonical full-text index agrees with the external
+/// `archive_messages` content table (it catches corrupt or inconsistent
+/// index entries, e.g. after recovery or VACUUM). Note it validates
+/// existing index entries, so an entirely *missing* index (see the wipe
+/// scenario) is not flagged by it — that case is covered behaviorally by
+/// search going blind.
 pub fn fts_integrity_check(db: &Path) -> rusqlite::Result<()> {
     let conn = Connection::open(db)?;
     conn.execute(
-        "INSERT INTO messages_fts (messages_fts) VALUES ('integrity-check')",
+        "INSERT INTO archive_fts (archive_fts) VALUES ('integrity-check')",
         [],
     )
     .map(|_| ())
 }
 
-/// Read every stored message as a `Message`, in row-id order.
+/// Read every stored message as a `Message`, in row-id order (from the
+/// canonical `archive_messages` table; the legacy `messages` snapshot is
+/// never written and never read by the app).
 pub fn all_messages(db: &Path) -> Vec<Message> {
     let conn = raw(db);
     let mut stmt = conn
         .prepare(
-            "SELECT id, source, external_id, channel, chat_id,
-                    author, sent_at, body, raw_json
-             FROM messages ORDER BY id",
+            "SELECT m.id, si.legacy_namespace, m.external_id, m.channel, m.chat_id,
+                    m.author, COALESCE(m.sent_instant, ''), m.body, m.raw_json
+             FROM archive_messages AS m
+             JOIN source_instances AS si ON si.id = m.source_instance_id
+             ORDER BY m.id",
         )
         .expect("prepare select");
     stmt.query_map([], message_from_row)
-        .expect("query messages")
+        .expect("query archive_messages")
         .collect::<Result<Vec<_>, _>>()
-        .expect("read messages")
+        .expect("read archive_messages")
 }
 
 fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {

@@ -139,7 +139,7 @@ pub struct FixtureInfo {
     pub rows_per_sec: f64,
     /// Total on-disk size of the database file.
     pub db_bytes: u64,
-    /// Size of the FTS5 index (dbstat pages of `messages_fts%` tables).
+    /// Size of the FTS5 index (dbstat pages of `archive_fts%` tables).
     pub fts_index_bytes: u64,
     /// SQLite page count × page size.
     pub logical_bytes: u64,

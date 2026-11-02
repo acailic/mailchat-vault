@@ -37,11 +37,11 @@ fn vacuum_compacts_keeps_data_and_keeps_fts_in_sync() {
         "seeded db must be non-trivially large"
     );
 
-    // Delete half the archive through SQL (the FTS delete trigger fires),
-    // then compact and refresh planner statistics.
+    // Delete half the archive through SQL (the canonical FTS delete
+    // trigger fires), then compact and refresh planner statistics.
     {
         let conn = raw(&db);
-        conn.execute("DELETE FROM messages WHERE id % 2 = 1", [])
+        conn.execute("DELETE FROM archive_messages WHERE id % 2 = 1", [])
             .unwrap();
         conn.execute("VACUUM", []).unwrap();
         conn.execute("ANALYZE", []).unwrap();
