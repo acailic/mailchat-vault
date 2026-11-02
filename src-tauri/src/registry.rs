@@ -237,7 +237,7 @@ impl LlmRegistry {
         self.settings
             .default_provider
             .as_ref()
-            .filter(|default| self.settings.providers.iter().any(|p| &p.id == default))
+            .filter(|default| self.settings.providers.iter().any(|p| &p.id == *default))
             .cloned()
             .or_else(|| self.env.as_ref().map(|_| ENV_ID.to_string()))
     }
