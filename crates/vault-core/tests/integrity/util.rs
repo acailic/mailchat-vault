@@ -31,6 +31,19 @@ pub fn scratch_dir() -> tempfile::TempDir {
 /// `page_size + 24` bytes on top of the 32-byte WAL header.
 pub const PAGE_SIZE: u64 = 4096;
 
+/// Restores the process `TZ` variable on drop, so a failing assertion in
+/// a zone-pinned test cannot leak the pinned zone into sibling tests.
+pub struct TzGuard(pub Option<String>);
+
+impl Drop for TzGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(tz) => std::env::set_var("TZ", tz),
+            None => std::env::remove_var("TZ"),
+        }
+    }
+}
+
 /// A message with a known author and date; `source` namespaces the dedup key.
 pub fn msg(source: &str, external_id: &str, body: &str) -> NewMessage {
     NewMessage::new(

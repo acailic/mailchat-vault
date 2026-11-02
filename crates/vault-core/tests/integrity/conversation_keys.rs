@@ -14,7 +14,7 @@ use vault_core::storage::Storage;
 use vault_core::telegram::TelegramSource;
 use vault_core::whatsapp::parse_whatsapp_tz;
 
-use crate::util::{raw, scratch_dir};
+use crate::util::{raw, scratch_dir, TzGuard};
 
 /// The frozen schema-2 SQL, verbatim as migrations 1 and 2 created it
 /// (same fixture approach as the M1.1 canonical suite).
@@ -552,19 +552,6 @@ fn uninterpretable_legacy_rows_stay_unresolved() {
     );
 }
 
-/// Restores the process `TZ` variable on drop, so a failing assertion in
-/// the zone-pinned test cannot leak the pinned zone into sibling tests.
-struct TzGuard(Option<String>);
-
-impl Drop for TzGuard {
-    fn drop(&mut self) {
-        match self.0.take() {
-            Some(tz) => std::env::set_var("TZ", tz),
-            None => std::env::remove_var("TZ"),
-        }
-    }
-}
-
 #[test]
 fn whatsapp_rekey_hash_matches_live_import_on_non_utc_zone() {
     // The migration re-resolves legacy blind-`Z` stamps in the machine's
@@ -641,14 +628,28 @@ fn whatsapp_rekey_hash_matches_live_import_on_non_utc_zone() {
     };
     let conn = raw(&db);
     for m in &collected.messages {
-        let hash: String = conn
-            .query_row(
-                "SELECT content_hash FROM archive_messages WHERE external_id = ?1",
+        let (hash, sent_instant, timezone, confidence): (String, Option<String>, String, String) =
+            conn.query_row(
+                "SELECT content_hash, sent_instant, timezone, time_confidence
+                 FROM archive_messages WHERE external_id = ?1",
                 rusqlite::params![m.external_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .unwrap();
         assert_eq!(hash, expected_hash(m), "hash diverges for {}", m.body);
+        assert_eq!(
+            sent_instant.as_deref(),
+            Some(m.sent_at.as_str()),
+            "stored instant diverges for {}",
+            m.body
+        );
+        assert_eq!(
+            timezone,
+            iana_time_zone::get_timezone().unwrap_or_else(|_| "local".to_string()),
+            "zone label for {}",
+            m.body
+        );
+        assert_eq!(confidence, "legacy_assumed", "confidence for {}", m.body);
     }
 }
 

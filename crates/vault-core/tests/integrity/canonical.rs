@@ -295,6 +295,12 @@ fn count(db: &std::path::Path, sql: &str) -> i64 {
 
 #[test]
 fn old_schema_fixture_migrates_without_loss() {
+    // Migration 5 re-resolves the legacy WhatsApp stamps in the machine's
+    // local zone; pin it (Europe/Paris: both fixture dates are winter
+    // CET, +01:00) so the expectations below hold on any machine.
+    let _tz = crate::util::TzGuard(std::env::var("TZ").ok());
+    std::env::set_var("TZ", "Europe/Paris");
+
     let dir = scratch_dir();
     let db = dir.path().join("v2.db");
     let legacy = schema2_db_with_data(&db);
@@ -360,6 +366,19 @@ fn old_schema_fixture_migrates_without_loss() {
             assert_eq!(c.sent_instant, None, "unknown legacy time stays unknown");
             assert_eq!(c.original_timestamp, "");
             assert_eq!(c.time_confidence, "missing");
+        } else if c.namespace == "whatsapp" {
+            // The old release stored WhatsApp stamps blind-as-UTC; the
+            // migrated instant is the exporter wall time re-resolved in
+            // the pinned zone (+01:00), with the verbatim stamp kept.
+            let expected_instant = match (c.chat_id.as_str(), c.author.as_str()) {
+                ("family", "mom") => "2025-12-24T19:00:00Z",
+                ("family", "Ivan Ivić") => "2025-12-24T19:05:00Z",
+                ("work", "nina_dev") => "2026-01-02T07:30:00Z",
+                other => panic!("unexpected whatsapp row {other:?}"),
+            };
+            assert_eq!(c.sent_instant.as_deref(), Some(expected_instant));
+            assert_eq!(c.original_timestamp, l_sent_at(&legacy, c.id));
+            assert_eq!(c.time_confidence, "legacy_assumed");
         } else {
             assert_eq!(c.sent_instant.as_deref(), Some(l_sent_at(&legacy, c.id)));
             assert_eq!(c.original_timestamp, l_sent_at(&legacy, c.id));
