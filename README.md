@@ -2,8 +2,7 @@
 
 Local email & chat archive — Tauri desktop app with SQLite FTS5 full-text search over your own messages. Private tool; nothing leaves the machine, except what you explicitly send for optional [LLM-assisted search](#llm-assisted-search-v1) (your question + the matching result rows only, and only when an API key is configured).
 
-This is the **v0 foundation + usable search tool**: a complete vertical slice — import, store, dedup, search, filter, browse, read in thread context. **v1** adds LLM-assisted natural-language search with local-embedding **hybrid ranking** on top (see below), the first live mail source: **incremental IMAP/Gmail sync** (see below), and **automatic folder watching** (see below). The rest of the roadmap (chat platform formats, XOAUTH2) will land as separate tasks.
-This is the **v0 foundation + usable search tool**: a complete vertical slice — import, store, dedup, search, filter, browse, read in thread context. **v1** adds LLM-assisted natural-language search on top (see below), with **multiple configurable providers and a Settings screen**, and the first live mail source: **incremental IMAP/Gmail sync** (see below). The rest of the roadmap (chat platform formats, XOAUTH2) will land as separate tasks.
+This is the **v0 foundation + usable search tool**: a complete vertical slice — import, store, dedup, search, filter, browse, read in thread context. **v1** adds LLM-assisted natural-language search with local-embedding **hybrid ranking** on top (see below), with **multiple configurable providers and a Settings screen**, the first live mail source: **incremental IMAP/Gmail sync** (see below), and **automatic folder watching** (see below). The rest of the roadmap (chat platform formats, XOAUTH2) will land as separate tasks.
 
 ## What v0 does
 
@@ -28,9 +27,7 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice �
   - **message detail**: full body with highlighted query terms, full metadata, and clickable **thread neighbors** of the same chat;
   - **keyboard navigation**: `/` focus search, `↑`/`↓` move through results, `Enter` open detail, `↑`/`↓` walk the thread, `Esc` close.
 - **Performance contract**: queries answer in < 100 ms over 100k messages (asserted by a generated-fixture test; all queries are `LIMIT`-bounded and ride the FTS5 index plus the `sent_instant`/`(source_instance, chat_id)` indexes); the statistics dashboard answers in < 100 ms over 1M messages.
-- **Ask UI (v1)**: natural-language questions translated to FTS5 + date filters via an LLM, with a short summary over the top results — strictly privacy-scoped and fully optional (see below). Results are ranked **hybrid** — FTS5 fused with an offline local-vector leg once embeddings are built (see below).
-- **Performance contract**: queries answer in < 100 ms over 100k messages (asserted by a generated-fixture test; all queries are `LIMIT`-bounded and ride the FTS5 index plus the `sent_at`/`(source, chat_id)` indexes).
-- **Ask UI (v1)**: natural-language questions translated to FTS5 + date filters via an LLM, with a short summary over the top results — strictly privacy-scoped and fully optional (see below). A **provider menu** next to the question picks the backend per ask: any provider configured in Settings, the environment fallback, or **local full-text** (nothing sent anywhere).
+- **Ask UI (v1)**: natural-language questions translated to FTS5 + date filters via an LLM, with a short summary over the top results — strictly privacy-scoped and fully optional (see below). Results are ranked **hybrid** — FTS5 fused with an offline local-vector leg once embeddings are built (see below). A **provider menu** next to the question picks the backend per ask: any provider configured in Settings, the environment fallback, or **local full-text** (nothing sent anywhere).
 - **Settings (v1)**: LLM provider configuration in one place — z.ai/GLM (default), Anthropic, or a custom Anthropic-compatible endpoint — plus the default provider, UI theme, and summary scope. Values live in a `settings.json` file (never the database); API keys live in the OS keyring (see below).
 
 ## Repository layout
@@ -266,12 +263,11 @@ same webview reason; the formats themselves are round-trip tested in
 
 ## Out of scope for now (separate tasks)
 
-XOAUTH2 (OAuth) login for Gmail, multi-account UI, multi-provider menus, settings UI, push notifications. The media-extraction layer is source-generic: when further chat sources land, their exports plug into the same hash-named `media/` store and `raw_json` convention.
+XOAUTH2 (OAuth) login for Gmail, multi-account UI, push notifications. The media-extraction layer is source-generic: when further chat sources land, their exports plug into the same hash-named `media/` store and `raw_json` convention.
 
 ## Installers & releases
 
 Pushing a version tag (`v*`) builds distributable installers — Linux AppImage + `.deb` (defaults of the enabled Tauri bundling), plus macOS `.dmg` and Windows `.msi`/NSIS `.exe` from the release workflow — as a **draft GitHub Release**. Artifacts are **unsigned** in this round (no code signing; Gatekeeper/SmartScreen caveats apply on macOS/Windows). The app ships with a full icon set (Linux/mac/win) generated from `src-tauri/icons/source.png`. See [docs/release.md](docs/release.md) for the install smoke-test checklist, local build commands, and how to regenerate the icons.
-XOAUTH2 (OAuth) login for Gmail, multi-account UI, more chat sources (Signal, Discord), automatic folder watching, chat media extraction, local embedding models / vector search, icons/bundling/installers, result export, statistics dashboard, push notifications.
 
 ## Notes on chat import details
 
