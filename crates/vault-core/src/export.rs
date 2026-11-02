@@ -389,9 +389,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             String::from_utf8(buf).unwrap(),
-            concat!(
-                "'=cmd|' /C calc'!A0 probe,'+SUM(A1),'-2+3,'@x,plain text,normal -dash and +plus\r\n",
-            )
+            "'=cmd|' /C calc'!A0 probe,'+SUM(A1),'-2+3,'@x,plain text,normal -dash and +plus\r\n",
         );
     }
 

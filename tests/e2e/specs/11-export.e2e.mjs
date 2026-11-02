@@ -187,6 +187,45 @@ export async function run(ctx) {
       }
     }
 
+    // Scenario: formula-injection probe — chat bodies beginning with =, +,
+    // - or @ export to CSV with an apostrophe prefix so the cells open as
+    // inert text in Excel/LibreOffice; ordinary bodies stay unchanged.
+    const probeTxt = path.join(workDir, "formula-probe.txt");
+    writeFileSync(
+      probeTxt,
+      [
+        "[1.11.2026., 09:00:00] Formula Probe: =cmd|' /C calc'!A0 formula injection probe",
+        "[1.11.2026., 09:00:01] Formula Probe: +SUM(A1) plus-prefix probe",
+        "[1.11.2026., 09:00:02] Formula Probe: -2+3 minus-prefix probe",
+        "[1.11.2026., 09:00:03] Formula Probe: @everyone mention probe",
+        "[1.11.2026., 09:00:04] Formula Probe: plain probe body without prefix",
+      ].join("\n") + "\n",
+    );
+    const probeImport = await invoke(browser, "import_chat_export", { path: probeTxt });
+    assert.ok(probeImport.ok, `formula probe import succeeded: ${probeImport.error}`);
+    const probeCsv = await invoke(browser, "export_search", {
+      query: { ...uiQuery, text: "probe", sources: ["whatsapp"] },
+      format: "csv",
+      path: out("formula-probe.csv"),
+    });
+    assert.ok(probeCsv.ok, `formula probe export succeeded: ${probeCsv.error}`);
+    assert.equal(probeCsv.value.written, 5, "all five probe rows exported");
+    const probeRecords = parseCsv(await readFile(out("formula-probe.csv"), "utf8"));
+    const probeBodies = probeRecords.slice(1).filter((r) => r[3] === "formula-probe").map((r) => r[6]);
+    assert.equal(probeBodies.length, 5, "five probe body cells found");
+    // Search order is relevance-ranked, not insertion order — compare sets.
+    assert.equal(
+      JSON.stringify(probeBodies.sort()),
+      JSON.stringify([
+        "'=cmd|' /C calc'!A0 formula injection probe",
+        "'+SUM(A1) plus-prefix probe",
+        "'-2+3 minus-prefix probe",
+        "'@everyone mention probe",
+        "plain probe body without prefix",
+      ].sort()),
+      "every formula-prefix cell neutralized, plain body untouched",
+    );
+
     // Scenario: MBOX export over a browse-all of the mixed archive —
     // email rows written, chat rows skipped and reported in the summary.
     const allCsv = await invoke(browser, "export_search", {
