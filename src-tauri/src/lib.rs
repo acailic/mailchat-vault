@@ -252,7 +252,6 @@ fn import_chat_export(
     .map_err(|e: Error| e.to_string())
 }
 
-
 /// Incrementally sync an IMAP account (Gmail via app password, or any
 /// host/port/user/password server). Only messages new since the last sync
 /// are fetched; re-syncing never duplicates.
