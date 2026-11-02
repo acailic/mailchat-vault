@@ -884,9 +884,9 @@ impl Storage {
             |row| row.get(0),
         )?;
 
-        let mut source_stmt = self
-            .conn
-            .prepare("SELECT source, n FROM stats_source WHERE n > 0 ORDER BY n DESC, source")?;
+        let mut source_stmt = self.conn.prepare(
+            "SELECT COALESCE(si.legacy_namespace, si.id) AS label, s.n              FROM stats_source AS s              JOIN source_instances AS si ON si.id = s.source              WHERE s.n > 0 ORDER BY s.n DESC, label",
+        )?;
         let by_source = source_stmt
             .query_map([], |row| {
                 Ok(SourceCount {
