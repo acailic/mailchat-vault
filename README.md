@@ -147,8 +147,8 @@ imported in the background.
   the watcher keeps running. Skipped `.txt`/`.json` files that are not
   recognized exports are reported, not imported.
 - **Persistent**: watched folders are stored in the vault database and
-  re-armed on the next start (a folder that is missing at startup is reported
-  and re-arms when it is present again).
+  re-armed on the next start (a folder that is missing at startup is
+  reported; it re-arms on the next start once it is present again).
 
 The status line shows how many folders are watched and how many files are
 still settling; the events list below shows imports (with new/duplicate

@@ -175,9 +175,10 @@ pub fn parse_signal(bytes: &[u8], chat_id_fallback: &str) -> Result<Collected> {
 /// Same check, streaming from a reader: element-wise so the file is never
 /// buffered whole and a huge export costs no memory proportional to its
 /// size. The reader is wrapped in a [`std::io::BufReader`] so the scan is
-/// I/O-bound instead of issuing one read call per byte. Deserialization
-/// runs to end-of-sequence even after a match, so detection is a full
-/// scan — that keeps it exact (no prefix heuristics) at bounded memory.
+/// I/O-bound instead of issuing one read call per byte. Detection stops at
+/// the first message-shaped entry (the visitor aborts the parse with a
+/// sentinel error), keeping it exact (no prefix heuristics) at bounded
+/// memory and an early exit.
 pub fn is_signal_export_reader<R: std::io::Read>(reader: R) -> bool {
     // The visitor flags a match and aborts the parse (a sentinel error),
     // so detection stops reading at the first message-shaped entry.
