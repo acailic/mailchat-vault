@@ -295,16 +295,17 @@ pub fn is_discord_export(bytes: &[u8]) -> bool {
 }
 
 /// True when `root` looks importable as Discord: it resolves to a
-/// messages directory whose first channel file parses as a Discord
-/// export.
+/// messages directory in which any channel file parses as a Discord
+/// export. A corrupt file that sorts first must not hide a genuine
+/// package; the import itself still names unreadable files.
 pub fn is_discord_export_dir(root: &Path) -> bool {
     let Ok(files) = channel_files(root) else {
         return false;
     };
     files
-        .first()
-        .and_then(|f| fs::read(f).ok())
-        .is_some_and(|bytes| is_discord_export(&bytes))
+        .iter()
+        .filter_map(|f| fs::read(f).ok())
+        .any(|bytes| is_discord_export(&bytes))
 }
 
 /// Author display name: the server nickname wins, then the global

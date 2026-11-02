@@ -568,6 +568,19 @@ fn directory_import_error_names_the_offending_file() {
 }
 
 #[test]
+fn directory_detection_scans_past_a_corrupt_first_file() {
+    // Detection must not hinge on the lexically-first channel file: a
+    // truncated file sorting first must not hide a genuine package, and
+    // the import path then still names the corrupt file in its error.
+    let dir = tempfile::tempdir().unwrap();
+    let messages = dir.path().join("messages");
+    std::fs::create_dir(&messages).unwrap();
+    std::fs::write(messages.join("411116245892313088.json"), b"{truncated").unwrap();
+    std::fs::write(messages.join("900000000000000101.json"), GUILD_CHANNEL_JSON).unwrap();
+    assert!(vault_core::discord::is_discord_export_dir(dir.path()));
+}
+
+#[test]
 fn detection_distinguishes_discord_from_telegram() {
     // Both formats carry a top-level messages array; only the
     // channel/guild object makes it Discord.
