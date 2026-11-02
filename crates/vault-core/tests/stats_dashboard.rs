@@ -22,6 +22,11 @@ fn put(s: &Storage, source: &str, id: &str, author: &str, sent_at: &str, chat_id
         sent_at: sent_at.into(),
         body: format!("body of {id}"),
         raw_json: "{}".into(),
+        conversation_key: String::new(),
+        reply_refs: Vec::new(),
+        original_timestamp: String::new(),
+        timezone: String::new(),
+        time_confidence: String::new(),
     })
     .unwrap();
 }

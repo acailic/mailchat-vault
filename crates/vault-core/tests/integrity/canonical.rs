@@ -306,7 +306,7 @@ fn old_schema_fixture_migrates_without_loss() {
     assert_eq!(legacy.len(), 6);
 
     let s = Storage::open(&db).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 6);
+    assert_eq!(s.schema_version().unwrap(), 7);
     assert_eq!(
         raw(&db)
             .prepare("SELECT version FROM schema_migrations ORDER BY version")
@@ -315,14 +315,14 @@ fn old_schema_fixture_migrates_without_loss() {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap(),
-        vec![1, 2, 3, 4, 5, 6]
+        vec![1, 2, 3, 4, 5, 6, 7]
     );
 
     // The legacy snapshot is untouched: same rows, verbatim.
     assert_eq!(legacy_snapshot(&db), legacy);
 
     // Row-for-row copy: ids, namespaces, and payloads preserved. The one
-    // deliberate exception (M1.3, migration 6): WhatsApp external ids are
+    // deliberate exception (M1.3, migration 7): WhatsApp external ids are
     // re-keyed onto the stable-conversation-key hash formula, so a
     // re-import after a rename dedups; the legacy snapshot above keeps
     // the original spelling verbatim either way.
@@ -386,7 +386,7 @@ fn old_schema_fixture_migrates_without_loss() {
     }
 
     // One identity alias per legacy (source, external_id) — except
-    // WhatsApp, whose aliases migration 6 deliberately re-keys onto the
+    // WhatsApp, whose aliases migration 7 deliberately re-keys onto the
     // stable-conversation-key hash formula (see above).
     assert_eq!(
         count(
@@ -441,7 +441,7 @@ fn old_schema_fixture_migrates_without_loss() {
         3
     );
 
-    // One conversation per non-empty chat group; migration 6 then keys
+    // One conversation per non-empty chat group; migration 7 then keys
     // the WhatsApp conversations (participants + anchor derivation), so
     // both carry provider keys as 'verified' — distinct keys, so they
     // stay two conversations.
@@ -832,7 +832,7 @@ fn v3_database_upgrades_and_carries_embeddings_to_canonical() {
     }
 
     let s = Storage::open(&db).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 6);
+    assert_eq!(s.schema_version().unwrap(), 7);
     let counts = s.embedding_counts("test-model").unwrap();
     assert_eq!(counts.embedded, 1, "the v3 vector survives the migration");
     assert_eq!(counts.messages, 1, "the legacy row migrated");

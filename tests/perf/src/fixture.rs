@@ -335,6 +335,11 @@ pub fn generate(
                         "Inbox"
                     }
                 ),
+                conversation_key: String::new(),
+                reply_refs: Vec::new(),
+                original_timestamp: String::new(),
+                timezone: String::new(),
+                time_confidence: String::new(),
             }
         } else {
             // Chat (WhatsApp/Telegram): short body, session grouping.
@@ -363,6 +368,11 @@ pub fn generate(
                 sent_at: sent,
                 body,
                 raw_json: "{}".into(),
+                conversation_key: String::new(),
+                reply_refs: Vec::new(),
+                original_timestamp: String::new(),
+                timezone: String::new(),
+                time_confidence: String::new(),
             }
         };
         if matches!(storage.insert_message(&msg)?, InsertOutcome::Inserted(_)) {

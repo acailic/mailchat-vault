@@ -13,7 +13,7 @@
 //! the legacy tables afterwards. Removing the legacy snapshot is deferred
 //! until the recovery/upgrade experience justifies a separate migration.
 //!
-//! Schema version 6 (M1.3) adds **stable conversation keys** over the same
+//! Schema version 7 (M1.3) adds **stable conversation keys** over the same
 //! tables: `conversations.provider_key` holds a stable, provider-scoped
 //! identity (`telegram:chat:<id>`, `whatsapp:chat:sha256:…`,
 //! `signal:chat:<uuid>`, `email:thread:<root message id>`), the insert
@@ -2019,7 +2019,7 @@ fn migrate(conn: &Connection) -> Result<()> {
 // Migration 6 (M1.3): stable conversation keys over the M1.1 tables
 // -----------------------------------------------------------------------
 
-/// Backfill stable conversation keys (migration 6). See the migration's
+/// Backfill stable conversation keys (migration 7). See the migration's
 /// comment for the design; everything here is conservative — a
 /// conversation whose key cannot be derived safely is left exactly as
 /// M1.1 left it (`legacy_unresolved`).
