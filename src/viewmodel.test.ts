@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { ChatContext, Message, SearchHit } from "./types";
 import {
+  attachmentOf,
   groupHits,
   highlightSegments,
+  mediaOf,
   moveIndex,
   neighborId,
   pageModel,
@@ -235,6 +237,48 @@ describe("neighborId", () => {
     // Edges still allow stepping back inward.
     expect(neighborId(topEdge, 1)).toBe(10);
     expect(neighborId(bottomEdge, -1)).toBe(8);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Media links & attachment placeholders (raw_json conventions)
+// ---------------------------------------------------------------------------
+
+describe("mediaOf / attachmentOf", () => {
+  const rawJson = JSON.stringify({
+    attachment: { kind: "file", name: "IMG-1.jpg" },
+    media: [
+      { sha256: "a".repeat(64), path: `media/${"a".repeat(64)}.jpg`, name: "IMG-1.jpg", kind: "image", size: 12 },
+    ],
+  });
+
+  it("mediaOf returns the linked files", () => {
+    const media = mediaOf(rawJson);
+    expect(media.length).toBe(1);
+    expect(media[0]).toEqual({
+      sha256: "a".repeat(64),
+      path: `media/${"a".repeat(64)}.jpg`,
+      name: "IMG-1.jpg",
+      kind: "image",
+      size: 12,
+    });
+  });
+
+  it("attachmentOf returns kind and optional name", () => {
+    expect(attachmentOf(rawJson)).toEqual({ kind: "file", name: "IMG-1.jpg" });
+    expect(attachmentOf(JSON.stringify({ attachment: { kind: "media" } }))).toEqual({ kind: "media" });
+    expect(attachmentOf("{}")).toBeNull();
+  });
+
+  it("degrades on missing media, non-arrays, and broken JSON", () => {
+    expect(mediaOf("{}")).toEqual([]);
+    expect(mediaOf(JSON.stringify({ media: "nope" }))).toEqual([]);
+    expect(mediaOf("{broken")).toEqual([]);
+    expect(attachmentOf("{broken")).toBeNull();
+    // Telegram raw_json keeps the whole original message object.
+    const tg = JSON.stringify({ photo: "photos/p.jpg", text: "" });
+    expect(mediaOf(tg)).toEqual([]);
+    expect(attachmentOf(tg)).toBeNull();
   });
 });
 

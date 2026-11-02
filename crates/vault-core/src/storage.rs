@@ -714,6 +714,68 @@ impl Storage {
         }
         Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
     }
+
+    /// Merge media entries into an already-stored message's `raw_json`
+    /// `media` array (dedup by `sha256`).
+    ///
+    /// This is the backfill path: re-importing an export whose files were
+    /// previously missing links media into existing rows without touching
+    /// any other field (the FTS triggers re-index the unchanged body
+    /// harmlessly). Returns `true` when the row changed; an all-duplicates
+    /// merge is a no-op, so re-imports stay idempotent.
+    pub fn attach_media(&self, id: i64, entries: &[serde_json::Value]) -> Result<bool> {
+        if entries.is_empty() {
+            return Ok(false);
+        }
+        let existing_raw: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT raw_json FROM messages WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(existing_raw) = existing_raw else {
+            return Ok(false);
+        };
+        let mut raw: serde_json::Value = serde_json::from_str(&existing_raw)
+            .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
+        if !raw.is_object() {
+            raw = serde_json::Value::Object(Default::default());
+        }
+        let obj = raw.as_object_mut().expect("just wrapped into an object");
+        let media = obj
+            .entry("media".to_string())
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        if !media.is_array() {
+            *media = serde_json::Value::Array(Vec::new());
+        }
+        let array = media.as_array_mut().expect("just coerced to array");
+        let known: std::collections::HashSet<String> = array
+            .iter()
+            .filter_map(|e| {
+                e.get("sha256")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+        let mut changed = false;
+        for entry in entries {
+            let sha = entry.get("sha256").and_then(serde_json::Value::as_str);
+            if sha.is_none_or(str::is_empty) || sha.is_some_and(|s| known.contains(s)) {
+                continue;
+            }
+            array.push(entry.clone());
+            changed = true;
+        }
+        if changed {
+            self.conn.execute(
+                "UPDATE messages SET raw_json = ?1 WHERE id = ?2",
+                params![raw.to_string(), id],
+            )?;
+        }
+        Ok(changed)
+    }
 }
 
 fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {

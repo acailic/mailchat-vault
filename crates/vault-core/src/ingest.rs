@@ -2,7 +2,9 @@
 //! idempotently.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
+use crate::media::MediaSummary;
 use crate::message::{InsertOutcome, NewMessage};
 use crate::storage::Storage;
 use crate::Result;
@@ -48,19 +50,69 @@ pub struct IngestSummary {
 
 /// Pull every message from `source` into `storage`, idempotently.
 pub fn ingest(storage: &Storage, source: &dyn Source) -> Result<IngestSummary> {
-    let Collected { messages, failed } = source.collect()?;
+    let collected = source.collect()?;
+    ingest_collected(storage, source.name(), collected, None)
+}
+
+/// Store already-collected messages, optionally backfilling media links.
+///
+/// With `media` present, messages whose `raw_json` carries a `media` array
+/// are counted in [`MediaSummary::linked`] — newly inserted rows because
+/// their links were just written, duplicate rows when merging fresh media
+/// entries into the existing row's `raw_json` changed it (see
+/// [`Storage::attach_media`]). Chat imports pass a summary here; every
+/// other source passes `None`.
+pub fn ingest_collected(
+    storage: &Storage,
+    source_name: &str,
+    collected: Collected,
+    mut media: Option<&mut MediaSummary>,
+) -> Result<IngestSummary> {
+    let Collected { messages, failed } = collected;
     let mut summary = IngestSummary {
-        source: source.name().to_string(),
+        source: source_name.to_string(),
         seen: (messages.len() as u64) + failed,
         inserted: 0,
         skipped: 0,
         failed,
     };
     for msg in &messages {
+        // Only chat imports pass a media summary; skip the JSON parse
+        // entirely for every other source.
+        let entries = if media.is_some() {
+            media_entries(&msg.raw_json).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         match storage.insert_message(msg)? {
-            InsertOutcome::Inserted(_) => summary.inserted += 1,
-            InsertOutcome::Duplicate(_) => summary.skipped += 1,
+            InsertOutcome::Inserted(_) => {
+                summary.inserted += 1;
+                if let Some(summary) = media.as_deref_mut() {
+                    if !entries.is_empty() {
+                        summary.linked += 1;
+                    }
+                }
+            }
+            InsertOutcome::Duplicate(id) => {
+                summary.skipped += 1;
+                if let Some(summary) = media.as_deref_mut() {
+                    if !entries.is_empty() && storage.attach_media(id, &entries)? {
+                        summary.linked += 1;
+                    }
+                }
+            }
         }
     }
     Ok(summary)
+}
+
+/// The `media` array of a message's `raw_json`, if it has a non-empty one.
+fn media_entries(raw_json: &str) -> Option<Vec<Value>> {
+    let value: Value = serde_json::from_str(raw_json).ok()?;
+    let entries = value.get("media")?.as_array()?;
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries.clone())
+    }
 }

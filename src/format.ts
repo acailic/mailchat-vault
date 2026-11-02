@@ -18,3 +18,18 @@ export function snippet(body: string, max = 200): string {
   if (collapsed.length <= max) return collapsed;
   return collapsed.slice(0, max - 1).trimEnd() + "…";
 }
+
+/** Human-readable byte size: `12 B`, `3.4 KB`, `2.1 MB`, … */
+export function humanSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  const rounded = value >= 100 ? Math.round(value) : Math.round(value * 10) / 10;
+  return `${rounded} ${units[unit]}`;
+}

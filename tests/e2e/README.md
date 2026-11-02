@@ -98,10 +98,10 @@ inside the repo.
 
 - The suite has been validated against **both UI generations**: the current
   classic UI (5 active specs) and the filtered-search UI from
-  `fm/mailchat-search-ui` (8 active specs — the conditional paths and the
-  arrow-key/`/`/Esc keyboard extras all pass there too). `09-signal-import`
-  needs the filtered-search UI's source chips, so it does not run on the
-  classic UI.
+  `fm/mailchat-search-ui` (9 active specs — the conditional paths and the
+  arrow-key/`/`/Esc keyboard extras all pass there too; `10-media-extract`
+  was validated on this UI generation). `09-signal-import` needs the
+  filtered-search UI's source chips, so it does not run on the classic UI.
 - WebKitWebDriver quirks the specs deliberately work around: clicking
   `body` targets the page centre (a result row — opens the detail view), so
   focus is parked on the `h1` instead; `findElement` with a volatile

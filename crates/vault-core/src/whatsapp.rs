@@ -9,9 +9,11 @@
 //! Dates are the exporter's local time and carry no UTC offset, so they
 //! are stored verbatim in the RFC 3339 UTC form used across the archive.
 //! Messages have no ids in the export; `external_id` is a content hash
-//! (see [`parse_whatsapp`]), which keeps re-imports idempotent. Media is
-//! not extracted in v0 — attachment placeholders stay in the body and the
-//! kind/name is recorded in `raw_json`.
+//! (see [`parse_whatsapp`]), which keeps re-imports idempotent. Attachment
+//! placeholders stay in the body with kind/name recorded in `raw_json`;
+//! when the export ships with its files, the media pass (see
+//! [`crate::media`]) matches the names and links the stored copies via a
+//! `media` array in `raw_json`.
 
 use std::collections::HashMap;
 use std::fs;
@@ -397,9 +399,11 @@ fn split_quoted(body: &str) -> Option<(Option<String>, String, String)> {
     Some((quoted_author, quoted_text, reply))
 }
 
-/// Recognize WhatsApp's attachment placeholders. Media is not extracted in
-/// v0: the placeholder text stays searchable and the kind (and name, when
-/// present) is recorded for `raw_json`.
+/// Recognize WhatsApp's attachment placeholders. The placeholder text
+/// stays searchable and the kind (and name, when present) is recorded
+/// for `raw_json`; when the export ships with its files, the media pass
+/// (see [`crate::media`]) matches named attachments and links the stored
+/// copies via a `media` array in `raw_json`.
 fn detect_attachment(body: &str) -> Option<Value> {
     let stripped = strip_bidi(body);
     let text = stripped.trim();
