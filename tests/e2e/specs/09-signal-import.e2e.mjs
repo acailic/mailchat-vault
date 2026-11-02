@@ -47,7 +47,7 @@ export async function run(ctx) {
     // --- import via the real backend command ------------------------------
     const summary = await invoke(browser, "import_chat_export", { path: signalFixture });
     assert.ok(summary.ok, `import command succeeded: ${summary.error ?? ""}`);
-    const s = summary.value;
+    const s = summary.value.summary;
     assert.ok(s.source === "signal" && s.seen === 7 && s.inserted === 5 && s.skipped === 0 && s.failed === 2,
       "import summary: 5 archived, 2 broken entries counted, service entries skipped " +
       `(got source=${s.source} seen=${s.seen} inserted=${s.inserted} skipped=${s.skipped} failed=${s.failed})`,
@@ -99,9 +99,11 @@ export async function run(ctx) {
     const reimport = await invoke(browser, "import_chat_export", { path: signalFixture });
     assert.ok(reimport.ok, `re-import command succeeded: ${reimport.error ?? ""}`);
     assert.ok(
-      reimport.value.inserted === 0 && reimport.value.skipped === 5 && reimport.value.failed === 2,
+      reimport.value.summary.inserted === 0 &&
+        reimport.value.summary.skipped === 5 &&
+        reimport.value.summary.failed === 2,
       "re-import dedups (0 new, 5 already present) " +
-      `(got inserted=${reimport.value.inserted} skipped=${reimport.value.skipped} failed=${reimport.value.failed})`,
+      `(got inserted=${reimport.value.summary.inserted} skipped=${reimport.value.summary.skipped} failed=${reimport.value.summary.failed})`,
     );
 
     // --- renamed re-export dedups by conversation uuid ---------------------
@@ -110,9 +112,9 @@ export async function run(ctx) {
     const renamedSummary = await invoke(browser, "import_chat_export", { path: renamed });
     assert.ok(renamedSummary.ok, `renamed import command succeeded: ${renamedSummary.error ?? ""}`);
     assert.ok(
-      renamedSummary.value.inserted === 0 && renamedSummary.value.skipped === 5,
+      renamedSummary.value.summary.inserted === 0 && renamedSummary.value.summary.skipped === 5,
       "renamed re-export dedups by conversation uuid " +
-      `(got inserted=${renamedSummary.value.inserted} skipped=${renamedSummary.value.skipped})`,
+      `(got inserted=${renamedSummary.value.summary.inserted} skipped=${renamedSummary.value.summary.skipped})`,
     );
 
     // --- unrecognized file fails loudly, stores nothing --------------------
