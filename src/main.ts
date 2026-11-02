@@ -599,13 +599,16 @@ async function refreshWatchStatus(): Promise<void> {
   }
 }
 
-async function addWatchFolder(path: string): Promise<void> {
+/** Returns whether the folder is now watched. */
+async function addWatchFolder(path: string): Promise<boolean> {
   watchStatus.textContent = `Adding ${path}…`;
   try {
     renderWatchStatus(await invoke<WatchSnapshot>("watch_add_folder", { path }));
     await refreshStats();
+    return true;
   } catch (e) {
     watchStatus.textContent = `Could not watch folder: ${e}`;
+    return false;
   }
 }
 
@@ -618,8 +621,9 @@ async function watchTypedPath(): Promise<void> {
   }
   watchButton.disabled = true;
   try {
-    await addWatchFolder(path);
-    watchPathInput.value = "";
+    if (await addWatchFolder(path)) {
+      watchPathInput.value = "";
+    }
   } finally {
     watchButton.disabled = false;
   }

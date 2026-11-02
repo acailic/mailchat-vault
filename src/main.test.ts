@@ -947,6 +947,23 @@ describe("folder watching", () => {
     expect($<HTMLButtonElement>("#watch-add-btn").disabled).toBe(false);
   });
 
+  it("a failed typed-path add keeps the typed path for correction", async () => {
+    tauri.handlers.set("watch_status", () => EMPTY_WATCH);
+    tauri.handlers.set("watch_add_folder", () => Promise.reject("not a folder"));
+    await boot();
+
+    input("#watch-path").value = "/home/me/exportz";
+    pressKey(input("#watch-path"), "Enter");
+    await vi.waitFor(() =>
+      expect($("#watch-status").textContent).toContain("Could not watch folder"),
+    );
+    expect(input("#watch-path").value).toBe("/home/me/exportz");
+
+    tauri.handlers.set("watch_add_folder", () => ARMED_WATCH);
+    pressKey(input("#watch-path"), "Enter");
+    await vi.waitFor(() => expect(input("#watch-path").value).toBe(""));
+  });
+
   it("watch-status events re-render and an imported newest event refreshes stats", async () => {
     tauri.handlers.set("watch_status", () => EMPTY_WATCH);
     await boot();
