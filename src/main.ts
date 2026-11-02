@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { formatSentAt, snippet } from "./format";
-import { describePlan, type AskOutcome, type LlmStatus } from "./llmview";
+import { describePlan, privacyNoteFor, type AskOutcome, type LlmStatus } from "./llmview";
 import {
   renderDashboard,
   renderDetail,
