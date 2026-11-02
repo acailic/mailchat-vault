@@ -4,7 +4,7 @@
 //! [`FolderWatcher`] arms a `notify` (inotify/FSEvents/ReadDirectoryChangesW)
 //! watch on each folder the user picked — recursively, persisted in the
 //! vault database, so watched folders survive restarts. New or modified
-//! `.mbox`, WhatsApp `.txt`, and Telegram `.json` export files are imported
+//! `.mbox`, WhatsApp `.txt`, Telegram and Signal `.json` export files are imported
 //! in the background once they settle:
 //!
 //! - **Debounce/settle**: file writes arrive in bursts (a file being copied
@@ -42,13 +42,14 @@ use serde::Serialize;
 
 use crate::ingest::{ingest, IngestSummary, Source};
 use crate::mbox::MboxSource;
+use crate::signal::{is_signal_export_reader, SignalSource};
 use crate::storage::Storage;
 use crate::telegram::{is_telegram_export_reader, TelegramSource};
 use crate::whatsapp::{is_whatsapp_export, WhatsappSource};
 
 /// Largest prefix read for format sniffing: WhatsApp detection decides
-/// from the first lines, and Telegram detection streams the rest through
-/// a small fixed-size buffer, so an unrelated multi-gigabyte file never
+/// from the first lines, and Telegram/Signal detection streams the rest
+/// through a small fixed-size buffer, so an unrelated multi-gigabyte file never
 /// enters memory whole.
 const DETECT_SNIFF_BYTES: u64 = 64 * 1024;
 
@@ -656,7 +657,7 @@ fn import_file(
         },
         Ok(None) => WatchEvent::Skipped {
             path: display,
-            reason: "not a recognized export (.mbox, WhatsApp .txt, or Telegram result.json)"
+            reason: "not a recognized export (.mbox, WhatsApp .txt, Telegram result.json, or Signal conversation .json)"
                 .into(),
         },
         Err(e) => WatchEvent::Failed {
@@ -677,8 +678,8 @@ fn import_file(
 /// error — folders legitimately hold unrelated .txt/.json files).
 ///
 /// Detection is bounded: only a [`DETECT_SNIFF_BYTES`] prefix is read for
-/// the WhatsApp line check, and Telegram detection streams the file
-/// through a small fixed-size buffer, so an unrelated huge file costs
+/// the WhatsApp line check, and Telegram and Signal detection stream the
+/// file through a small fixed-size buffer, so an unrelated huge file costs
 /// neither a full read nor a parse tree.
 fn import_source_for(path: &Path) -> Result<Option<Box<dyn Source>>, String> {
     let ext = path
@@ -700,8 +701,13 @@ fn import_source_for(path: &Path) -> Result<Option<Box<dyn Source>>, String> {
     if is_whatsapp_export(&prefix) {
         return Ok(Some(Box::new(WhatsappSource::new(path))));
     }
-    if is_telegram_export_reader(file) {
+    if is_telegram_export_reader(&mut file) {
         return Ok(Some(Box::new(TelegramSource::new(path))));
+    }
+    file.rewind()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if is_signal_export_reader(&mut file) {
+        return Ok(Some(Box::new(SignalSource::new(path))));
     }
     Ok(None)
 }
@@ -872,6 +878,22 @@ mod tests {
         .unwrap();
         let source = import_source_for(&tg).unwrap().unwrap();
         assert_eq!(source.name(), "telegram");
+
+        // A Signal export larger than the sniff cap: also streamed, and
+        // the array shape is distinct from Telegram's object export.
+        let entries: String = (0..100)
+            .map(|i| {
+                format!(
+                    "{{\"id\": \"{i}\", \"type\": \"incoming\", \"sent_at\": {i}, \"body\": \"{}\"}}",
+                    "z".repeat(1024)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let sig = dir.path().join("conversation.json");
+        std::fs::write(&sig, format!("[{entries}]")).unwrap();
+        let source = import_source_for(&sig).unwrap().unwrap();
+        assert_eq!(source.name(), "signal");
     }
 
     #[test]

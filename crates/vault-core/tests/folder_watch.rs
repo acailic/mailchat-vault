@@ -86,6 +86,14 @@ fn telegram_export() -> Vec<u8> {
     .to_vec()
 }
 
+fn signal_export() -> Vec<u8> {
+    br#"[
+        {"id": "1", "type": "incoming", "conversationId": "c", "sent_at": 1000, "body": "hi"},
+        {"id": "2", "type": "outgoing", "conversationId": "c", "sent_at": 2000, "body": "zdravo"}
+    ]"#
+    .to_vec()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -95,11 +103,17 @@ fn initial_scan_imports_existing_export_files() {
     let tmp = tempfile::tempdir().unwrap();
     let watched = tmp.path().join("exports");
     std::fs::create_dir_all(watched.join("telegram")).unwrap();
+    std::fs::create_dir_all(watched.join("signal")).unwrap();
     std::fs::write(watched.join("mail.mbox"), mbox_bytes(&[("a-1", "One")])).unwrap();
     std::fs::write(watched.join("wa.txt"), WHATSAPP_EXPORT).unwrap();
     std::fs::write(
         watched.join("telegram").join("result.json"),
         telegram_export(),
+    )
+    .unwrap();
+    std::fs::write(
+        watched.join("signal").join("conversation.json"),
+        signal_export(),
     )
     .unwrap();
     // Not an export: must be skipped, not imported and not fatal.
@@ -110,11 +124,11 @@ fn initial_scan_imports_existing_export_files() {
     let watcher = spawn_watcher(&storage);
     watcher.add_folder(&watched).unwrap();
 
-    // mbox(1) + whatsapp(2) + telegram(2) = 5 messages; png is not even a
-    // candidate; notes.txt is skipped.
+    // mbox(1) + whatsapp(2) + telegram(2) + signal(2) = 7 messages; png is
+    // not even a candidate; notes.txt is skipped.
     assert!(
-        eventually(Duration::from_secs(10), || total(&storage) == 5),
-        "expected 5 messages, got {} (events: {:?})",
+        eventually(Duration::from_secs(10), || total(&storage) == 7),
+        "expected 7 messages, got {} (events: {:?})",
         total(&storage),
         latest_events(&watcher)
     );
