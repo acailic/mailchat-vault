@@ -474,9 +474,6 @@ async fn sync_imap(
     // username are distinct accounts until the server says otherwise.
     let host = host.trim().to_lowercase();
     let username = username.trim().to_string();
-    if host.is_empty() {
-        return Err("host is required (e.g. imap.gmail.com)".into());
-    }
     if username.is_empty() {
         return Err("username is required".into());
     }
@@ -488,7 +485,18 @@ async fn sync_imap(
     // Secret resolution (keyring), token refresh (blocking HTTP), and the
     // network sync itself all block; keep them off the UI thread.
     let (folders, saved_to) = tauri::async_runtime::spawn_blocking(move || {
-        let (imap_auth, saved_to) = match auth.as_deref().unwrap_or("password") {
+        let auth = auth.as_deref().unwrap_or("password");
+        // Only the Gmail sign-in flow has a sensible default host; every
+        // other server must be named explicitly.
+        if host.is_empty() && auth != "oauth" {
+            return Err("host is required (e.g. imap.gmail.com)".to_string());
+        }
+        let host = if host.is_empty() {
+            imap::GMAIL_IMAP_HOST.to_string()
+        } else {
+            host
+        };
+        let (imap_auth, saved_to) = match auth {
             "password" => {
                 // Resolve the password: entered now (and remembered) or
                 // stored before.
