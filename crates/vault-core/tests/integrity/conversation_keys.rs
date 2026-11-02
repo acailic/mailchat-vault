@@ -481,6 +481,17 @@ fn uninterpretable_legacy_rows_stay_unresolved() {
             "2026-11-02T09:00:00Z",
             "poruka signal",
         );
+        // A phone-number-shaped display name is not a chat id either:
+        // real Telegram chat ids never carry a leading '+'.
+        legacy_row(
+            &conn,
+            "telegram",
+            "+3859123456/1",
+            "+3859123456",
+            "Ana",
+            "2026-11-03T09:00:00Z",
+            "poruka",
+        );
         // Author-less WhatsApp export: nothing identifies the chat.
         legacy_row(
             &conn,
@@ -512,11 +523,12 @@ fn uninterpretable_legacy_rows_stay_unresolved() {
     // legacy-unresolved: nothing in them can be keyed safely. The
     // legacy mbox mail (threading headers never recorded) stays
     // conversationless exactly as M1.1 left it.
-    assert_eq!(convs.len(), 3, "{convs:?}");
+    assert_eq!(convs.len(), 4, "{convs:?}");
     assert!(convs.iter().all(|c| c.0.is_none()));
     assert!(convs.iter().all(|c| c.2 == "legacy_unresolved"));
     assert!(convs.iter().any(|c| c.1 == "Ime bez id"));
     assert!(convs.iter().any(|c| c.1 == "Signal bez id"));
+    assert!(convs.iter().any(|c| c.1 == "+3859123456"));
     assert!(convs.iter().any(|c| c.1 == "samo sistem"));
     assert_eq!(
         count(
