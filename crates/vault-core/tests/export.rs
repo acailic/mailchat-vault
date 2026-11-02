@@ -144,6 +144,33 @@ fn assert_same_ignoring_ids(a: &[Message], b: &[Message]) {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn csv_neutralizes_formula_prefix_cells() {
+    // A message body crafted as a spreadsheet formula exports inert:
+    // write_csv_row prefixes cells beginning with =, +, - or @ with an
+    // apostrophe, so opening the CSV in Excel/LibreOffice shows text
+    // instead of executing the cell.
+    let s = seeded(vec![NewMessage::new(
+        "mbox",
+        "formula@example.com",
+        "Ana Sender <ana@example.com>",
+        "2026-11-03T09:00:00Z",
+        "=cmd|' /C calc'!A0 formula injection probe",
+    )]);
+    let (_, bytes) = export_to_vec(&s, &SearchQuery::default(), ExportFormat::Csv);
+    let records = parse_csv(&bytes);
+    assert_eq!(records.len(), 2, "header + the one message");
+    let body_cell = &records[1][6];
+    assert!(
+        body_cell.starts_with('\''),
+        "formula body must be apostrophe-prefixed, got {body_cell:?}"
+    );
+    assert!(
+        body_cell.contains("=cmd|' /C calc'!A0"),
+        "body content preserved after the mitigation prefix"
+    );
+}
+
+#[test]
 fn csv_round_trip_preserves_every_field() {
     let rows = vec![
         email(

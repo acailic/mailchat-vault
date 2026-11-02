@@ -8,7 +8,7 @@
 // the product's own importer (round-trip via import_mbox).
 export const name = "export";
 
-import { mkdir, readFile, rm } from "node:fs/promises";
+import { access, mkdir, readFile, rm } from "node:fs/promises";
 import { writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -281,6 +281,16 @@ export async function run(ctx) {
     });
     assert.ok(missing.ok, `export_chat unknown id succeeded: ${missing.error}`);
     assert.equal(missing.value, null, "unknown id reports None");
+    let missingFileExists = true;
+    try {
+      await access(out("missing.csv"));
+    } catch {
+      missingFileExists = false;
+    }
+    assert.ok(
+      !missingFileExists,
+      "unknown id leaves no file at the chosen path",
+    );
 
     // Scenario: unknown format is a caller error, not a silent file.
     const badFormat = await invoke(browser, "export_search", {

@@ -184,7 +184,7 @@ Any IMAP server with implicit TLS works the same way: host, port (993), username
 
 The **Export results…** control writes the current search results — every row matching the active text + source/author/date filters, across all pages, in the order the UI lists them — to a file you choose. **Export chat…** (in the message detail panel) writes the whole chat thread of the open message, oldest → newest; a message with no thread exports as a single row. Formats:
 
-- **CSV** — RFC 4180 (`source,external_id,channel,chat_id,author,sent_at,body,raw_json`), UTF-8, fields quoted only when needed.
+- **CSV** — RFC 4180 (`source,external_id,channel,chat_id,author,sent_at,body,raw_json`), UTF-8, fields quoted only when needed; cells beginning with `=`, `+`, `-` or `@` get an apostrophe prefix so spreadsheet apps cannot execute them as formulas.
 - **JSON Lines** — one complete message object per line (`.jsonl`); the exact shape the app stores. Export-only for now: no app importer accepts this file yet.
 - **MBOX** — classic `From `-separated mailbox rebuilt from the stored row plus its recorded headers (`Message-ID`, `From`, `To`, `Subject`, `Date`); carries email-channel rows only, chat rows are skipped and reported in the status line.
 

@@ -397,6 +397,12 @@ async fn export_chat(
         let storage = storage
             .lock()
             .map_err(|e| format!("storage lock poisoned: {e}"))?;
+        // Existence is checked before the destination is touched: an
+        // unknown id (message deleted between list render and export
+        // click) must leave no file at the user-chosen path.
+        if storage.get(id).map_err(|e| e.to_string())?.is_none() {
+            return Ok(None);
+        }
         let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
         let mut out = BufWriter::new(file);
         export::export_chat(&storage, id, format, &mut out)

@@ -4,7 +4,9 @@
 //! Formats:
 //! - **CSV** — RFC 4180, one row per message, CRLF line endings, every
 //!   field quoted only when it contains a comma, quote, CR or LF; the
-//!   header names the columns.
+//!   header names the columns. Cells beginning with `=`, `+`, `-` or `@`
+//!   get an apostrophe prefix so spreadsheets cannot execute them as
+//!   formulas.
 //! - **JSON Lines** — one full `Message` object per line (the exact serde
 //!   shape the app already speaks, so a programmatic
 //!   [`crate::storage::Storage::insert_message`] loop re-imports it
@@ -198,6 +200,13 @@ fn write_csv_row<I: IntoIterator<Item = S>, S: AsRef<str>>(
             record.push(',');
         }
         let field = field.as_ref();
+        // Spreadsheet formula-injection mitigation: a cell beginning with
+        // `=`, `+`, `-` or `@` would be executed as a formula by Excel /
+        // LibreOffice; the standard mitigation prefixes such cells with an
+        // apostrophe so they open as inert text.
+        if matches!(field.as_bytes().first(), Some(b'=' | b'+' | b'-' | b'@')) {
+            record.push('\'');
+        }
         if field.chars().any(|c| matches!(c, ',' | '"' | '\r' | '\n')) {
             record.push('"');
             record.push_str(&field.replace('"', "\"\""));
@@ -361,6 +370,29 @@ mod tests {
         assert_eq!(ExportFormat::parse("JSON").unwrap(), ExportFormat::Json);
         assert_eq!(ExportFormat::parse(" mbox ").unwrap(), ExportFormat::Mbox);
         assert!(ExportFormat::parse("pdf").is_err());
+    }
+
+    #[test]
+    fn csv_neutralizes_formula_prefixes() {
+        let mut buf = Vec::new();
+        write_csv_row(
+            &mut buf,
+            [
+                "=cmd|' /C calc'!A0 probe",
+                "+SUM(A1)",
+                "-2+3",
+                "@x",
+                "plain text",
+                "normal -dash and +plus",
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            concat!(
+                "'=cmd|' /C calc'!A0 probe,'+SUM(A1),'-2+3,'@x,plain text,normal -dash and +plus\r\n",
+            )
+        );
     }
 
     #[test]
