@@ -516,7 +516,7 @@ async function importChatExport(): Promise<void> {
       title: "Import chat export",
       filters: [
         {
-          name: "Chat export (WhatsApp .txt, Telegram result.json, Signal .json)",
+          name: "Chat export (WhatsApp .txt, Telegram result.json, Signal .json, Discord messages.json)",
           extensions: ["txt", "json"],
         },
       ],

@@ -12,9 +12,9 @@
 //! - `embed_status` — embedding coverage for the UI (model, dim, pending).
 //! - `import_mbox` — manual `.mbox` import (the demo ingest source).
 //! - `import_chat_export` — WhatsApp `.txt` / Telegram `result.json` /
-//!   Signal `.json` import with format auto-detection and optional media
-//!   extraction into the app data `media/` store (the frontend picks the
-//!   file via the dialog plugin).
+//!   Signal `.json` / Discord Data Package import with format
+//!   auto-detection and optional media extraction into the app data
+//!   `media/` store (the frontend picks the file via the dialog plugin).
 //! - `sync_imap` — incremental IMAP/Gmail sync (first live mail source).
 //! - `watch_add_folder` / `watch_remove_folder` / `watch_status` —
 //!   automatic folder watching: new/modified export files in user-chosen
@@ -217,10 +217,12 @@ fn import_mbox(state: State<AppState>, path: String) -> Result<IngestSummary, St
 }
 
 /// Import a chat export: a WhatsApp `.txt` export, a Telegram
-/// `result.json`, or a Signal conversation `.json` (e.g. from
-/// `sigtop export-messages -f json`, one file per conversation). The
-/// format is detected from the file contents. Re-importing skips
-/// already-stored messages.
+/// `result.json` (a directory containing it works too), a Signal
+/// conversation `.json` (e.g. from `sigtop export-messages -f json`, one
+/// file per conversation), or a Discord Data Package messages export —
+/// a single channel `messages.json`, the package's `messages/` directory,
+/// or the package root. The format is detected from the file contents.
+/// Re-importing skips already-stored messages.
 ///
 /// With `extract_media` (default `true`), media files referenced by the
 /// export are copied into the app data `media/` store (hash-named,

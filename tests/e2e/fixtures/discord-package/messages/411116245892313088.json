@@ -1,0 +1,7 @@
+{
+  "channel": { "id": "411116245892313088" },
+  "messages": [
+    { "id": "1700000000000020001", "type": "Default", "timestamp": "2026-11-01 12:00:00.500+00:00", "content": "hej, needle-zzz u privatnoj poruci", "author": { "id": "5", "name": "ana" } },
+    { "id": "1700000000000020002", "type": "Default", "timestamp": "2026-11-01 12:01:00.000+00:00", "content": "vidimo se na sastanku", "author": { "id": "111000000000000001", "name": "marko", "nickname": "Marko Horvat" } }
+  ]
+}

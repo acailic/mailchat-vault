@@ -1,0 +1,11 @@
+{
+  "channel": { "id": "900000000000000101", "name": "general" },
+  "guild": { "id": "800000000000000001", "name": "Ekipa HQ" },
+  "messages": [
+    { "id": "1700000000000000001", "type": "Default", "timestamp": "2026-10-31 18:00:05.123+00:00", "content": "Zdravo ekipa! Ovo je demo Discord paket 🎉", "author": { "id": "111000000000000001", "name": "marko", "nickname": "Marko Horvat" } },
+    { "id": "1700000000000000002", "type": "Reply", "timestamp": "2026-10-31 18:00:41.999+00:00", "content": "radi li pretraga na ovo: ignition-key-nešto?", "author": { "id": "111000000000000002", "name": "jelena", "nickname": "Jelena Babić" } },
+    { "id": "1700000000000000003", "type": "Default", "timestamp": "2026-10-31 18:02:00.000+00:00", "content": "", "attachments": [ { "id": "1160000000000000003", "url": "https://cdn.discordapp.com/attachments/900000000000000101/1700000000000000003/plan.txt", "filename": "plan.txt", "size": 4096 } ], "reactions": [ { "emoji": { "name": "🔥", "id": null }, "count": 3, "me": false } ], "author": { "id": "111000000000000001", "name": "marko" } },
+    { "id": "1700000000000000004", "type": "Default", "timestamp": "2026-10-31 19:15:30.500+00:00", "content": "sastanak u petak u 10 — donesite izvještaje", "author": { "id": "111000000000000003", "name": "ana" } },
+    { "id": "1700000000000000005", "type": "GuildMemberJoin", "timestamp": "2026-10-31 19:20:00+00:00", "content": "" }
+  ]
+}
