@@ -53,7 +53,6 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL;
 use base64::Engine;
-use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -82,11 +81,6 @@ pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const REDIRECT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// Poll interval of the loopback accept loop.
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
-/// Refresh this many seconds before the advertised expiry, so a token that
-/// is "still valid" on paper is never used when it may already have
-/// expired on the wire.
-const EXPIRY_MARGIN: i64 = 60;
-
 /// Client credentials + endpoints for the OAuth2 flow. Gmail defaults via
 /// [`OAuthConfig::gmail`]; tests point the endpoints at a mock server.
 #[derive(Clone)]
@@ -176,17 +170,8 @@ pub struct TokenSet {
     /// Present after sign-in; minted into new access tokens via
     /// [`refresh_access_token`].
     pub refresh_token: Option<String>,
-    /// Local-clock expiry of the access token (already margin-discounted).
-    pub expires_at: DateTime<Utc>,
     /// Scopes the server actually granted.
     pub scope: String,
-}
-
-impl TokenSet {
-    /// Whether the access token should no longer be used at `now`.
-    pub fn expired(&self, now: DateTime<Utc>) -> bool {
-        now >= self.expires_at
-    }
 }
 
 impl fmt::Debug for TokenSet {
@@ -197,7 +182,6 @@ impl fmt::Debug for TokenSet {
                 "refresh_token",
                 &self.refresh_token.as_ref().map(|_| "<redacted>"),
             )
-            .field("expires_at", &self.expires_at)
             .field("scope", &self.scope)
             .finish()
     }
@@ -465,7 +449,6 @@ struct TokenResponse {
     access_token: String,
     #[serde(default)]
     refresh_token: Option<String>,
-    expires_in: i64,
     #[serde(default)]
     scope: Option<String>,
     token_type: String,
@@ -499,18 +482,9 @@ fn token_request(config: &OAuthConfig, grant: Vec<(&str, &str)>) -> Result<Token
             "token endpoint at {host} returned a non-bearer grant"
         )));
     }
-    if body.expires_in <= 0 {
-        return Err(Error::OAuth(format!(
-            "token endpoint at {host} returned a non-positive expiry"
-        )));
-    }
-    // Discount the advertised lifetime so a marginally-valid token is
-    // never used (clock skew, processing delay).
-    let effective = (body.expires_in - EXPIRY_MARGIN).max(body.expires_in / 2);
     Ok(TokenSet {
         access_token: body.access_token,
         refresh_token: body.refresh_token,
-        expires_at: Utc::now() + chrono::Duration::seconds(effective),
         scope: body.scope.unwrap_or_else(|| config.scope.clone()),
     })
 }
@@ -680,27 +654,12 @@ mod tests {
         let tokens = TokenSet {
             access_token: "atoken".into(),
             refresh_token: Some("rtoken".into()),
-            expires_at: Utc::now(),
             scope: GMAIL_SCOPE.into(),
         };
         let printed = format!("{tokens:?}");
         assert!(!printed.contains("atoken"));
         assert!(!printed.contains("rtoken"));
         assert!(printed.contains("<redacted>"));
-    }
-
-    #[test]
-    fn tokenset_expiry_takes_the_margin_into_account() {
-        let tokens = TokenSet {
-            access_token: "a".into(),
-            refresh_token: None,
-            // 3600 s advertised → 3540 s effective: expires_at is in the past
-            // 3541 s from now on.
-            expires_at: Utc::now() + chrono::Duration::seconds(3539),
-            scope: GMAIL_SCOPE.into(),
-        };
-        assert!(tokens.expired(Utc::now() + chrono::Duration::seconds(3540)));
-        assert!(!tokens.expired(Utc::now() + chrono::Duration::seconds(3538)));
     }
 
     #[test]

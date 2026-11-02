@@ -56,13 +56,6 @@ fn full_login_flow_returns_refreshable_tokens() {
         .clone()
         .expect("sign-in issues a refresh token");
     assert_eq!(refresh, "refresh-1");
-    // The advertised 3600 s minus the safety margin.
-    let lifetime = tokens.expires_at - chrono::Utc::now();
-    let seconds = lifetime.num_seconds();
-    assert!(
-        (3530..=3550).contains(&seconds),
-        "effective lifetime should be ~3540 s, got {seconds}"
-    );
     assert!(tokens.scope.contains("mail.google.com"));
 
     // The grant chain on the wire: one authorization, one token exchange.
