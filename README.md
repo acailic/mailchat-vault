@@ -130,8 +130,9 @@ FTS5 relevance and cosine similarity have incomparable scales, so the two ranked
 
 The **Folder watching** section turns the archive into a live mirror of your
 export folders: type a path (or use **Pick folder…**) and every new or
-modified `.mbox`, WhatsApp `.txt`, or Telegram `result.json` file under it —
-including files inside subfolders — is imported in the background.
+modified `.mbox`, WhatsApp `.txt`, Telegram `result.json`, or Signal
+conversation `.json` file under it — including files inside subfolders — is
+imported in the background.
 
 - **Debounced**: files being written or copied fire many filesystem events;
   a file is imported only once it has stayed quiet for ~1.5 s. A truncated
