@@ -13,7 +13,7 @@ use crate::util::{msg, raw};
 
 /// The schema version this build knows; bump expectation when a migration
 /// is added (the assertions below are version-agnostic where possible).
-const KNOWN_VERSION: i64 = 3;
+const KNOWN_VERSION: i64 = 4;
 
 fn migrations_rows(db: &std::path::Path) -> Vec<i64> {
     let conn = raw(db);
@@ -47,7 +47,7 @@ fn fresh_database_applies_every_migration_exactly_once() {
 
     let s = Storage::open(&db).unwrap();
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
-    assert_eq!(migrations_rows(&db), vec![1, 2, 3]);
+    assert_eq!(migrations_rows(&db), vec![1, 2, 3, 4]);
 
     // The migrated schema is immediately functional.
     let out = s
@@ -61,7 +61,7 @@ fn fresh_database_applies_every_migration_exactly_once() {
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
     assert_eq!(
         migrations_rows(&db),
-        vec![1, 2, 3],
+        vec![1, 2, 3, 4],
         "no duplicate bookkeeping rows"
     );
     assert_eq!(s.stats().unwrap().total, 1);
@@ -76,7 +76,7 @@ fn version0_database_upgrades_in_place() {
 
     let s = Storage::open(&db).unwrap();
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
-    assert_eq!(migrations_rows(&db), vec![1, 2, 3]);
+    assert_eq!(migrations_rows(&db), vec![1, 2, 3, 4]);
     // The upgraded database works end to end: write, index, read.
     s.insert_message(&msg("integrity", "up-1", "upgraded archive body"))
         .unwrap();
@@ -167,7 +167,7 @@ fn v1_database_with_data_upgrades_in_place_to_current() {
     // included) in the canonical store.
     let s = Storage::open(&db).unwrap();
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
-    assert_eq!(migrations_rows(&db), vec![1, 2, 3]);
+    assert_eq!(migrations_rows(&db), vec![1, 2, 3, 4]);
 
     // The v1 archive is fully intact and searchable (through the canonical
     // tables the migration copied it into).
@@ -229,7 +229,7 @@ fn v1_database_with_data_upgrades_in_place_to_current() {
     drop(s);
     let s = Storage::open(&db).unwrap();
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
-    assert_eq!(migrations_rows(&db), vec![1, 2, 3]);
+    assert_eq!(migrations_rows(&db), vec![1, 2, 3, 4]);
     assert_eq!(s.stats().unwrap().total, 7);
     let state = s
         .get_imap_state("imap/gmail", "INBOX")

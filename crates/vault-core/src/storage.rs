@@ -3,7 +3,7 @@
 //! The database bundles SQLite (via `rusqlite`'s `bundled` feature), so no
 //! system SQLite is required. FTS5 is enabled in the bundled build.
 //!
-//! Since schema version 3 the store is **canonical**: every application
+//! Since schema version 4 the store is **canonical**: every application
 //! read and write targets the `source_instances`, `conversations`,
 //! `archive_messages`, `message_identities`, `message_occurrences`, and
 //! `sync_checkpoints` tables plus the `archive_fts` index. The legacy
@@ -28,9 +28,10 @@ use crate::{Error, Result};
 
 /// Ordered schema migrations; each entry runs once, inside a transaction.
 ///
-/// Versions 1–2 are the frozen legacy schema; version 3 adds the canonical
-/// store and copies the legacy rows into it. Never edit an applied
-/// migration — append a new version instead.
+/// Versions 1–2 are the frozen legacy schema; version 3 adds local
+/// embeddings over the legacy table; version 4 adds the canonical store and
+/// copies the legacy rows into it. Never edit an applied migration — append
+/// a new version instead.
 const MIGRATIONS: &[(i64, &str)] = &[
     (
         1,
@@ -88,9 +89,27 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
     (
         3,
+        r#"
+        -- One embedding per message (PK), versioned by model id so a new
+        -- embedder invalidates old vectors simply by writing a different
+        -- model string. Vectors are i8-quantized (one byte per component)
+        -- and L2-normalized at write time (see crate::vector). Deleting a
+        -- message cascades.
+        CREATE TABLE message_embeddings (
+            message_id  INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+            model       TEXT    NOT NULL,
+            dim         INTEGER NOT NULL,
+            embedding   BLOB    NOT NULL,
+            embedded_at TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX idx_message_embeddings_model ON message_embeddings (model);
+        "#,
+    ),
+    (
+        4,
         // Canonical store (M1.1). Additive only: the legacy tables above
-        // stay exactly as versions 1–2 left them. The copies below run in
-        // the same transaction as the DDL, so an interrupted migration
+        // stay exactly as earlier versions left them. The copies below run
+        // in the same transaction as the DDL, so an interrupted migration
         // leaves no half-canonical database. `vault_uuid()` and
         // `sha256_hex()` are Rust-registered SQL functions (see
         // [`register_canonical_functions`]) — SQLite has no built-ins for
@@ -203,12 +222,14 @@ const MIGRATIONS: &[(i64, &str)] = &[
             PRIMARY KEY (source_instance_id, folder)
         );
 
-        -- One unresolved legacy source instance per existing namespace:
-        -- the old schema never recorded account/import provenance, and it
-        -- is not guessed here (users bind real accounts explicitly later).
+        -- One unresolved legacy source instance per namespace present in
+        -- either legacy table — messages or imap_sync_state (an account
+        -- may hold cursors with zero synced messages). The old schema
+        -- never recorded account/import provenance, and it is not guessed
+        -- here (users bind real accounts explicitly later).
         INSERT INTO source_instances (id, legacy_namespace, kind, label)
         SELECT vault_uuid(), source, 'legacy', source
-        FROM (SELECT DISTINCT source FROM messages);
+        FROM (SELECT source FROM messages UNION SELECT source FROM imap_sync_state);
 
         -- One legacy-unresolved conversation per non-empty
         -- (source, chat_id) group; MIN(channel) keeps the choice
@@ -290,18 +311,23 @@ const MIGRATIONS: &[(i64, &str)] = &[
 
         INSERT INTO archive_fts (archive_fts) VALUES ('rebuild');
 
-        -- One embedding per message (PK), versioned by model id so a new
-        -- embedder invalidates old vectors simply by writing a different
-        -- model string. Vectors are i8-quantized (one byte per component)
-        -- and L2-normalized at write time (see crate::vector). Deleting a
-        -- message cascades.
-        CREATE TABLE message_embeddings (
+        -- message_embeddings now binds to the canonical table: existing
+        -- vectors from a schema-v3 database carry over verbatim (row ids
+        -- are preserved by the copy above). Rebuilt in place via the
+        -- create-copy-drop-rename sequence.
+        CREATE TABLE message_embeddings_canonical (
             message_id  INTEGER PRIMARY KEY REFERENCES archive_messages(id) ON DELETE CASCADE,
             model       TEXT    NOT NULL,
             dim         INTEGER NOT NULL,
             embedding   BLOB    NOT NULL,
             embedded_at TEXT    NOT NULL DEFAULT (datetime('now'))
         );
+        INSERT INTO message_embeddings_canonical
+            (message_id, model, dim, embedding, embedded_at)
+        SELECT message_id, model, dim, embedding, embedded_at
+        FROM message_embeddings;
+        DROP TABLE message_embeddings;
+        ALTER TABLE message_embeddings_canonical RENAME TO message_embeddings;
         CREATE INDEX idx_message_embeddings_model ON message_embeddings (model);
         "#,
     ),
@@ -351,7 +377,7 @@ impl Storage {
     /// is returned with its id. A new row lands in `archive_messages`
     /// together with its identity alias and a first `import` occurrence —
     /// the legacy `messages` table is never written (it is a read-only
-    /// snapshot since schema version 3).
+    /// snapshot since schema version 4).
     pub fn insert_message(&self, msg: &NewMessage) -> Result<InsertOutcome> {
         let tx = self.conn.unchecked_transaction()?;
         let instance = resolve_legacy_instance(&tx, &msg.source)?;
@@ -1308,7 +1334,7 @@ fn sha256_hex(input: &str) -> String {
     out
 }
 
-/// Register the canonical-store SQL functions used by migration 3 (and any
+/// Register the canonical-store SQL functions used by migration 4 (and any
 /// caller of the same formulas): `vault_uuid()` and `sha256_hex(text)`.
 /// SQLite bundles neither.
 fn register_canonical_functions(conn: &Connection) -> Result<()> {

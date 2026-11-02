@@ -54,7 +54,7 @@ fn empty_file_is_a_fresh_valid_database() {
     // path, not corruption.
     let s = Storage::open(&db).unwrap();
     assert_eq!(s.stats().unwrap().total, 0);
-    assert_eq!(s.schema_version().unwrap(), 3);
+    assert_eq!(s.schema_version().unwrap(), 4);
 }
 
 #[test]

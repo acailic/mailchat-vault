@@ -301,7 +301,7 @@ fn old_schema_fixture_migrates_without_loss() {
     assert_eq!(legacy.len(), 6);
 
     let s = Storage::open(&db).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 3);
+    assert_eq!(s.schema_version().unwrap(), 4);
     assert_eq!(
         raw(&db)
             .prepare("SELECT version FROM schema_migrations ORDER BY version")
@@ -310,7 +310,7 @@ fn old_schema_fixture_migrates_without_loss() {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap(),
-        vec![1, 2, 3]
+        vec![1, 2, 3, 4]
     );
 
     // The legacy snapshot is untouched: same rows, verbatim.
@@ -687,4 +687,116 @@ fn migration_and_insert_paths_hash_identically() {
         Some(inserted_hash.as_str()),
         "migration SQL and the insert path must agree on the hash formula"
     );
+}
+
+#[test]
+fn cursor_only_namespace_keeps_its_checkpoint() {
+    // A namespace whose only legacy footprint is an imap_sync_state row
+    // (an account that synced cursors but zero messages) must still get a
+    // source instance, so its cursor migrates instead of vanishing with
+    // the checkpoint copy's inner join.
+    let dir = scratch_dir();
+    let db = dir.path().join("cursor-only.db");
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (
+                version    INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );",
+        )
+        .unwrap();
+        conn.execute_batch(V2_SCHEMA_SQL).unwrap();
+        conn.execute_batch(
+            "INSERT INTO schema_migrations (version) VALUES (1);
+             INSERT INTO schema_migrations (version) VALUES (2);
+             INSERT INTO imap_sync_state (source, folder, uidvalidity, last_uid)
+                 VALUES ('imap:quiet@example.com', 'INBOX', 11, 55);",
+        )
+        .unwrap();
+    }
+
+    let s = Storage::open(&db).unwrap();
+    let state = s
+        .get_imap_state("imap:quiet@example.com", "INBOX")
+        .unwrap()
+        .expect("cursor-only namespace keeps its checkpoint");
+    assert_eq!((state.uidvalidity, state.last_uid), (11, 55));
+
+    // The instance exists and the cursor keeps advancing canonically.
+    s.set_imap_state("imap:quiet@example.com", "INBOX", 11, 56)
+        .unwrap();
+    let state = s
+        .get_imap_state("imap:quiet@example.com", "INBOX")
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.last_uid, 56);
+    assert_eq!(
+        raw(&db).query_row(
+            "SELECT COUNT(*) FROM source_instances WHERE legacy_namespace = 'imap:quiet@example.com'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn v3_database_upgrades_and_carries_embeddings_to_canonical() {
+    // A database exactly as the schema-3 release left it (embeddings bound
+    // to the legacy messages table) upgrades cleanly: the canonical store
+    // is built on top, and existing vectors carry over onto the migrated
+    // archive_messages rows (ids preserved) instead of being lost.
+    let dir = scratch_dir();
+    let db = dir.path().join("v3.db");
+    {
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_migrations (
+                version    INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );",
+        )
+        .unwrap();
+        conn.execute_batch(V2_SCHEMA_SQL).unwrap();
+        conn.execute_batch(
+            "INSERT INTO schema_migrations (version) VALUES (1);
+             INSERT INTO schema_migrations (version) VALUES (2);
+             INSERT INTO schema_migrations (version) VALUES (3);
+             CREATE TABLE message_embeddings (
+                 message_id  INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+                 model       TEXT    NOT NULL,
+                 dim         INTEGER NOT NULL,
+                 embedding   BLOB    NOT NULL,
+                 embedded_at TEXT    NOT NULL DEFAULT (datetime('now'))
+             );
+             INSERT INTO messages (source, external_id, author, sent_at, body)
+                 VALUES ('mbox', 'v3-1', 'ana', '2026-01-01T00:00:00Z', 'vintage v3 body');
+             INSERT INTO message_embeddings (message_id, model, dim, embedding)
+                 VALUES ((SELECT id FROM messages WHERE external_id = 'v3-1'),
+                         'test-model', 4, x'7f000000');",
+        )
+        .unwrap();
+    }
+
+    let s = Storage::open(&db).unwrap();
+    assert_eq!(s.schema_version().unwrap(), 4);
+    let counts = s.embedding_counts("test-model").unwrap();
+    assert_eq!(counts.embedded, 1, "the v3 vector survives the migration");
+    assert_eq!(counts.messages, 1, "the legacy row migrated");
+    let hits = s
+        .vector_scan("test-model", 4, &[1.0, 0.0, 0.0, 0.0], None, None, 10)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].message_id, 1, "row id preserved");
+    // New canonical writes and embeddings work on the retargeted table.
+    let out = s
+        .insert_message(&msg("mbox", "v3-2", "fresh canonical body"))
+        .unwrap();
+    assert!(matches!(out, InsertOutcome::Inserted(_)));
+    let summary =
+        vault_core::vector::run_embedding_job(&s, &vault_core::vector::HashEmbedder::new(), None)
+            .unwrap();
+    assert_eq!(summary.embedded, 2, "retargeted table accepts new vectors");
 }

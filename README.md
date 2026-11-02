@@ -8,7 +8,7 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice �
 
 - **Tauri 2 desktop app** (Rust backend, vanilla TypeScript + Vite frontend).
 - **SQLite storage with FTS5 full-text index** (bundled SQLite via `rusqlite`; no system SQLite needed).
-  - **Canonical store** (schema v3): `source_instances`, `conversations`, `archive_messages` (ids, payload, and time provenance: resolved UTC instant, original timestamp text, confidence), `message_identities` (dedup aliases), `message_occurrences` (import/folder observations), `sync_checkpoints` (IMAP cursors), plus the `archive_fts` virtual table (external content, trigger-maintained). Every read and write targets these tables.
+  - **Canonical store** (schema v4): `source_instances`, `conversations`, `archive_messages` (ids, payload, and time provenance: resolved UTC instant, original timestamp text, confidence), `message_identities` (dedup aliases), `message_occurrences` (import/folder observations), `sync_checkpoints` (IMAP cursors), plus the `archive_fts` virtual table (external content, trigger-maintained). Every read and write targets these tables.
   - The legacy `messages` / `messages_fts` / `imap_sync_state` tables from earlier schema versions are preserved untouched as a pre-canonical snapshot; migration 3 copies every row (ids included) into the canonical tables, and nothing writes the legacy tables afterwards.
   - Versioned migrations applied automatically on open.
 - **Idempotent ingest**: a `Source` trait yields messages; writes dedup on the canonical identity alias — legacy `(source, external_id)` keys map to one `message_identities` row each — so re-importing is always safe.
