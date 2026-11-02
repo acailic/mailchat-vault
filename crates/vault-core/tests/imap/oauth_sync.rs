@@ -15,7 +15,7 @@ mod oauth_mock;
 use std::net::TcpStream;
 
 use oauth_mock::{browser_visit, MockOAuth};
-use vault_core::imap::{self as vimap, ImapAuth, ImapConfig};
+use vault_core::imap::{self as vimap, ImapAuth};
 use vault_core::oauth::{self, run_login, LOGIN_TIMEOUT};
 use vault_core::storage::Storage;
 
