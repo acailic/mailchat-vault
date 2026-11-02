@@ -1,10 +1,11 @@
 // Path: Gmail Google sign-in (OAuth2/XOAUTH2) in the IMAP sync section —
-// the auth-mode picker, the real oauth_status / oauth_gmail_login backend
-// commands, and their UI states. No Google credentials are involved: the
-// interesting real paths are exactly the unconfigured / not-signed-in /
-// browser-unavailable ones, asserted against the live Rust backend. The
-// full token flow (mock OAuth server → mock IMAP XOAUTH2 → archive) lives
-// in the vault-core integration suites.
+// the auth-mode picker, the real oauth_status backend command, and its UI
+// states. No Google credentials are involved: the interesting real paths
+// are exactly the unconfigured / not-signed-in ones, asserted against the
+// live Rust backend. The sign-in itself (token flow incl. the browser-open
+// failure) is covered hermetically in the vault-core integration suites
+// (tests/oauth_flow.rs), so this spec never depends on the host having —
+// or lacking — a browser opener.
 
 import { mkdirSync } from "node:fs";
 
@@ -94,13 +95,23 @@ export async function run(ctx) {
   });
 
   // Session 2: env vars set (the user's own client), still not signed in —
-  // and a headless machine has no browser, which exercises the real
-  // loopback-listener path up to the browser-open failure.
+  // the hint reflects the real keyring-backed oauth_status. The sign-in
+  // itself is deliberately not clicked here: with the client configured it
+  // runs the real browser flow, which blocks until the host's browser
+  // opener succeeds or times out — an environment-dependent outcome. The
+  // full flow incl. the browser-open failure is covered hermetically in
+  // tests/oauth_flow.rs (mock OAuth server + injected openers).
   await withSession(
     {
       env: {
         MAILCHAT_GMAIL_CLIENT_ID: "e2e-client.apps.googleusercontent.com",
+<<<<<<< HEAD
         MAILCHAT_GMAIL_CLIENT_SECRET: "e2e-fake-secret",
+||||||| parent of 7a99aad (fix(ci): drop GOCSPX marker from fake fixture secrets (GitGuardian); make imap-oauth spec host-browser-independent)
+        MAILCHAT_GMAIL_CLIENT_SECRET: "e2e-secret",
+=======
+        MAILCHAT_GMAIL_CLIENT_SECRET: "e2e-secret",
+>>>>>>> 7a99aad (fix(ci): drop GOCSPX marker from fake fixture secrets (GitGuardian); make imap-oauth spec host-browser-independent)
       },
     },
     async (browser) => {
@@ -114,22 +125,9 @@ export async function run(ctx) {
         { timeoutMsg: "configured-but-not-signed-in hint never appeared" },
       );
       assert.ok(hint.includes("Sign in with Google"), `hint invites the sign-in, got: ${hint}`);
-
-      // The sign-in starts for real (env is configured) and fails at the
-      // browser-open step — no xdg-open in this environment. The error
-      // carries the authorization URL so a human could finish manually.
-      await (await browser.$("#imap-oauth-btn")).click();
-      const status = await ui.waitForText(browser, "#imap-status", "Sign-in failed", {
-        timeout: 30_000,
-        timeoutMsg: "browser-open failure never surfaced",
-      });
       assert.ok(
-        status.includes("could not open a browser"),
-        `status names the browser-open failure, got: ${status}`,
-      );
-      assert.ok(
-        status.includes("accounts.google.com"),
-        `error carries the authorization URL, got: ${status}`,
+        await (await browser.$("#imap-oauth-btn")).isDisplayed(),
+        "sign-in button visible when configured",
       );
     },
   );
