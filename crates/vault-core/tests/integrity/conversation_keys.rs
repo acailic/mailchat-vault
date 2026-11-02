@@ -458,15 +458,28 @@ fn uninterpretable_legacy_rows_stay_unresolved() {
     v2_db(&db);
     {
         let conn = raw(&db);
-        // Id-less Telegram export: legacy name grouping is all there is.
+        // Id-less Telegram export: the archived ids carry the display
+        // name (`<name>/<msg id>` — the old name-fallback dedup), and a
+        // display name never keys a conversation.
         legacy_row(
             &conn,
             "telegram",
-            "bez-id-1",
+            "Ime bez id/1",
             "Ime bez id",
             "Ana",
             "2026-11-01T09:00:00Z",
             "poruka",
+        );
+        // Id-less Signal export: `<file stem>/<message id>` — a file stem
+        // is not a conversation uuid, so it never keys a conversation.
+        legacy_row(
+            &conn,
+            "signal",
+            "Signal bez id/1",
+            "Signal bez id",
+            "Ana",
+            "2026-11-02T09:00:00Z",
+            "poruka signal",
         );
         // Author-less WhatsApp export: nothing identifies the chat.
         legacy_row(
@@ -493,15 +506,17 @@ fn uninterpretable_legacy_rows_stay_unresolved() {
 
     Storage::open(&db).unwrap();
     let convs = conversations(&db);
-    // The id-less Telegram chat keeps its legacy name grouping, and the
-    // author-less WhatsApp export keeps its legacy stem conversation —
-    // both legacy-unresolved: nothing in them can be keyed safely. The
+    // The id-less Telegram chat keeps its legacy name grouping, the
+    // id-less Signal chat its legacy stem grouping, and the author-less
+    // WhatsApp export its legacy stem conversation — all
+    // legacy-unresolved: nothing in them can be keyed safely. The
     // legacy mbox mail (threading headers never recorded) stays
     // conversationless exactly as M1.1 left it.
-    assert_eq!(convs.len(), 2, "{convs:?}");
+    assert_eq!(convs.len(), 3, "{convs:?}");
     assert!(convs.iter().all(|c| c.0.is_none()));
     assert!(convs.iter().all(|c| c.2 == "legacy_unresolved"));
     assert!(convs.iter().any(|c| c.1 == "Ime bez id"));
+    assert!(convs.iter().any(|c| c.1 == "Signal bez id"));
     assert!(convs.iter().any(|c| c.1 == "samo sistem"));
     assert_eq!(
         count(
@@ -523,6 +538,54 @@ fn uninterpretable_legacy_rows_stay_unresolved() {
         ),
         1
     );
+}
+
+#[test]
+fn signal_uuid_prefixed_legacy_rows_key_and_reimport_dedups() {
+    let dir = scratch_dir();
+    let db = dir.path().join("signal-keyed.db");
+    v2_db(&db);
+    {
+        let conn = raw(&db);
+        // A pre-M1.3 Signal export with the conversation uuid namespacing
+        // its message ids (`<conversationId>/<id>`).
+        legacy_row(
+            &conn,
+            "signal",
+            "e7e0e0e3-1111-4a2b-9d3c-2a9d4b1e5c01/m-1",
+            "Ana",
+            "Ana",
+            "2026-11-01T09:00:00Z",
+            "poruka signal",
+        );
+    }
+
+    let s = Storage::open(&db).unwrap();
+    let convs = conversations(&db);
+    assert_eq!(convs.len(), 1, "{convs:?}");
+    assert_eq!(
+        convs[0].0.as_deref(),
+        Some("signal:chat:e7e0e0e3-1111-4a2b-9d3c-2a9d4b1e5c01")
+    );
+    assert_eq!(convs[0].2, "verified");
+
+    // Re-importing the same export (renamed file) through the M1.3 path
+    // dedups onto the migrated row.
+    let export = r#"[{"id": "m-1", "type": "incoming",
+        "conversationId": "e7e0e0e3-1111-4a2b-9d3c-2a9d4b1e5c01",
+        "source": "+3851", "sent_at": 1793538000000, "body": "poruka signal"}]"#;
+    let collected =
+        vault_core::signal::parse_signal(export.as_bytes(), "Ana (najnovije)").unwrap();
+    let summary = vault_core::ingest::ingest_collected(
+        &s,
+        vault_core::signal::SIGNAL_SOURCE,
+        collected,
+        None,
+    )
+    .unwrap();
+    assert_eq!(summary.inserted, 0, "re-import dedups onto the migrated row");
+    assert_eq!(summary.skipped, 1);
+    assert_eq!(s.stats().unwrap().total, 1);
 }
 
 #[test]

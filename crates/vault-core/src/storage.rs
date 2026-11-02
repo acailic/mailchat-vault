@@ -2164,6 +2164,7 @@ fn backfill_provider_id_conversations(conn: &Connection) -> Result<()> {
 }
 
 /// Whether an external-id prefix can only be a provider chat id of the
+<<<<<<< HEAD
 /// namespace and never a display name: Telegram chat ids are integers
 /// without a leading `+` (a display name is neither — phone-number-shaped
 /// names carry the `+`), Signal conversation ids are UUIDs (a file stem is
