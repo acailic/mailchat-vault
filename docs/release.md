@@ -17,7 +17,9 @@ builds a **draft** GitHub Release with:
 | Windows x64 | `windows-latest` | `mailchat-vault_<v>_x64_en-US.msi`, NSIS `.exe` setup |
 
 The release stays a **draft** until someone runs the smoke test below and
-publishes it. Version bump flow: raise `version` in `src-tauri/tauri.conf.json`
+publishes it. The bundles are also attached as workflow-run artifacts
+(`linux-bundles`, `macos-bundles`, `windows-bundles`) for inspection before
+publishing. Version bump flow: raise `version` in `src-tauri/tauri.conf.json`
 and the workspace `Cargo.toml`, commit, tag `v<version>`, push the tag.
 
 The same packaging can be built locally with:
