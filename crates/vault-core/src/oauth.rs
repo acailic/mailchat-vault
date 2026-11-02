@@ -170,8 +170,6 @@ pub struct TokenSet {
     /// Present after sign-in; minted into new access tokens via
     /// [`refresh_access_token`].
     pub refresh_token: Option<String>,
-    /// Scopes the server actually granted.
-    pub scope: String,
 }
 
 impl fmt::Debug for TokenSet {
@@ -182,7 +180,6 @@ impl fmt::Debug for TokenSet {
                 "refresh_token",
                 &self.refresh_token.as_ref().map(|_| "<redacted>"),
             )
-            .field("scope", &self.scope)
             .finish()
     }
 }
@@ -449,8 +446,6 @@ struct TokenResponse {
     access_token: String,
     #[serde(default)]
     refresh_token: Option<String>,
-    #[serde(default)]
-    scope: Option<String>,
     token_type: String,
 }
 
@@ -485,7 +480,6 @@ fn token_request(config: &OAuthConfig, grant: Vec<(&str, &str)>) -> Result<Token
     Ok(TokenSet {
         access_token: body.access_token,
         refresh_token: body.refresh_token,
-        scope: body.scope.unwrap_or_else(|| config.scope.clone()),
     })
 }
 
@@ -654,7 +648,6 @@ mod tests {
         let tokens = TokenSet {
             access_token: "atoken".into(),
             refresh_token: Some("rtoken".into()),
-            scope: GMAIL_SCOPE.into(),
         };
         let printed = format!("{tokens:?}");
         assert!(!printed.contains("atoken"));

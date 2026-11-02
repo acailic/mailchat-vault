@@ -196,7 +196,7 @@ The browser-based desktop OAuth2 flow: click **Sign in with Google…**, consent
 **You register the OAuth client yourself** (one-time, free):
 
 1. In [Google Cloud Console](https://console.cloud.google.com/apis/credentials) create an **OAuth client ID** of type **Desktop app** (any project works; no publishing needed for personal use).
-2. Add `http://localhost` as an **Authorized redirect URI** (the app redirects the browser to a loopback address with a random port — the port is ignored for loopback URIs).
+2. Add `http://127.0.0.1` as an **Authorized redirect URI** (the app redirects the browser to `http://127.0.0.1:<random port>` — the port is ignored for loopback URIs).
 3. Copy the **client ID** and **client secret** into the environment before starting the app:
 
    | Variable | Meaning |
