@@ -52,6 +52,8 @@ use vault_core::llm::{
 use vault_core::mbox::MboxSource;
 use vault_core::query::{ChatContext, SearchPage, SearchQuery};
 use vault_core::stats::{ArchiveStats, DEFAULT_TOP};
+use vault_core::oauth::{self, OAuthConfig};
+use vault_core::query::{ChatContext, SearchPage, SearchQuery};
 use vault_core::storage::Storage;
 use vault_core::vector::{self, EmbedJobSummary, EmbeddingStatus, HashEmbedder};
 use vault_core::watch::{FolderWatcher, WatchSnapshot};
