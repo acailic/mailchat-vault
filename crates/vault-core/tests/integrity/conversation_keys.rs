@@ -552,13 +552,26 @@ fn uninterpretable_legacy_rows_stay_unresolved() {
     );
 }
 
+/// Restores the process `TZ` variable on drop, so a failing assertion in
+/// the zone-pinned test cannot leak the pinned zone into sibling tests.
+struct TzGuard(Option<String>);
+
+impl Drop for TzGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(tz) => std::env::set_var("TZ", tz),
+            None => std::env::remove_var("TZ"),
+        }
+    }
+}
+
 #[test]
 fn whatsapp_rekey_hash_matches_live_import_on_non_utc_zone() {
     // The migration re-resolves legacy blind-`Z` stamps in the machine's
     // local zone — here pinned to a non-UTC summer zone (+02:00) — so a
     // migrated row's content_hash must equal what a live import of the
     // same export hashes: the same resolution over the same wall time.
-    let prior_tz = std::env::var("TZ").ok();
+    let _tz_guard = TzGuard(std::env::var("TZ").ok());
     std::env::set_var("TZ", "Europe/Paris");
     let dir = scratch_dir();
     let db = dir.path().join("wa-zone.db");
@@ -636,10 +649,6 @@ fn whatsapp_rekey_hash_matches_live_import_on_non_utc_zone() {
             )
             .unwrap();
         assert_eq!(hash, expected_hash(m), "hash diverges for {}", m.body);
-    }
-    match prior_tz {
-        Some(tz) => std::env::set_var("TZ", tz),
-        None => std::env::remove_var("TZ"),
     }
 }
 
