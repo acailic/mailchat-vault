@@ -132,6 +132,14 @@ fn mbox_fixture_and_imap_sync_produce_equivalent_archives() {
     let server = MockImap::start();
     server.set_mailbox("INBOX", MockMailbox::new(7, raw_mails(mbox.as_bytes())));
     let imap_storage = Storage::open_in_memory().unwrap();
+    let config = vimap::ImapConfig {
+        host: "mock.test".to_string(),
+        port: 993,
+        username: "alice@example.com".to_string(),
+        password: "pw".to_string(),
+        folders: Vec::new(),
+    };
+    let instance = vimap::ensure_source_instance(&imap_storage, &config).unwrap();
     let folders = vec!["INBOX".to_string()];
     let mut s = {
         let stream = std::net::TcpStream::connect(server.addr).unwrap();
@@ -142,12 +150,7 @@ fn mbox_fixture_and_imap_sync_produce_equivalent_archives() {
             .map_err(|(e, _)| e)
             .unwrap()
     };
-    let summaries = vimap::sync_session(
-        &mut s,
-        &imap_storage,
-        &vimap::source_name("alice@example.com"),
-        &folders,
-    );
+    let summaries = vimap::sync_session(&mut s, &imap_storage, &instance, &folders);
     let _ = s.logout();
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].inserted, 3);
@@ -161,7 +164,7 @@ fn mbox_fixture_and_imap_sync_produce_equivalent_archives() {
     // stored fields across both ingest paths.
     for id in ["kickoff-123@example.com", "b64-9@example.com"] {
         let a = message_by_id(&mbox_storage, "mbox", id);
-        let b = message_by_id(&imap_storage, "imap:alice@example.com", id);
+        let b = message_by_id(&imap_storage, &instance, id);
         assert_eq!(a.author, b.author, "{id}: author mismatch");
         assert_eq!(a.sent_at, b.sent_at, "{id}: sent_at mismatch");
         assert_eq!(
@@ -173,27 +176,32 @@ fn mbox_fixture_and_imap_sync_produce_equivalent_archives() {
     }
 
     // The base64 transfer-encoded body decoded identically.
-    let b64 = message_by_id(&imap_storage, "imap:alice@example.com", "b64-9@example.com");
+    let b64 = message_by_id(&imap_storage, &instance, "b64-9@example.com");
     assert!(b64.body.contains("Second body via base64."));
 
-    // The Message-ID-less mail: both sources hash the exact same raw
-    // RFC822 bytes (the mbox separator line is stripped before hashing),
-    // so even the derived ids agree — the content hash is stable across
-    // ingest paths.
+    // The Message-ID-less mail: both paths derive a stable id from the
+    // exact same raw RFC822 bytes (the mbox separator line is stripped
+    // before hashing) — the mbox path keeps its legacy fnv1a id, the
+    // connector path uses the contract's SHA-256 fallback key, and each
+    // dedups on re-ingest within its own namespace.
     let generated = |storage: &Storage| {
         storage
             .search_filtered(&build_match_query("Sorry I missed"), None, None, 10)
             .unwrap()
             .into_iter()
-            .find(|m| m.external_id.starts_with("generated-"))
-            .expect("generated id message")
+            .find(|m| m.external_id != "kickoff-123@example.com")
+            .expect("id-less message")
     };
     let a = generated(&mbox_storage);
     let b = generated(&imap_storage);
-    assert!(a.external_id.starts_with("generated-"));
+    assert!(
+        a.external_id.starts_with("generated-"),
+        "legacy path keeps the generated- fallback id"
+    );
     assert_eq!(
-        a.external_id, b.external_id,
-        "same raw bytes must hash identically"
+        b.external_id.len(),
+        64,
+        "connector fallback key is sha256 hex"
     );
     assert_eq!(a.author, b.author);
     assert_eq!(a.body, b.body);

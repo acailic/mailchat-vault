@@ -29,7 +29,7 @@ fn every_folder_becomes_its_own_channel_with_uid_provenance() {
     // name — and raw_json keeps the folder/uid/uidvalidity provenance.
     let first = &find(&storage, "chaninbody1")[0];
     assert_eq!(first.channel, "INBOX");
-    assert_eq!(first.source, format!("imap:{USER}"));
+    assert_eq!(first.source, crate::instance_of(&storage, USER));
     assert_eq!(first.external_id, "chanin-1@scenario.test");
     let raw: Value = serde_json::from_str(&first.raw_json).unwrap();
     assert_eq!(raw["folder"], "INBOX");
@@ -56,10 +56,10 @@ fn every_folder_becomes_its_own_channel_with_uid_provenance() {
 }
 
 /// Two accounts (two logins against the same server — the production
-/// model would be different servers, but the scoping under test,
-/// `imap:<username>`, is identical): the same mail delivered to both is
-/// archived once *per account*, both keep the folder as channel, and the
-/// cursors are independent per account.
+/// model would be different servers, but the scoping under test —
+/// per-username durable source instances — is identical): the same mail
+/// delivered to both is archived once *per account*, both keep the folder
+/// as channel, and the cursors are independent per account.
 #[test]
 fn two_accounts_archive_the_same_mail_independently() {
     let account = Account::start(USER);
@@ -84,8 +84,8 @@ fn two_accounts_archive_the_same_mail_independently() {
         assert_eq!(s.inserted, 1, "each account stores the mail once");
     }
 
-    // Two rows — one per (source, external_id) — and each account is its
-    // own source in the stats.
+    // Two rows — one per account's durable instance — and each account is
+    // its own source in the stats.
     assert_eq!(storage.stats().unwrap().total, 2);
     assert_eq!(storage.stats().unwrap().by_source.len(), 2);
 
@@ -94,10 +94,14 @@ fn two_accounts_archive_the_same_mail_independently() {
     assert!(hits.iter().all(|m| m.channel == "INBOX"));
     let mut sources: Vec<String> = hits.iter().map(|m| m.source.clone()).collect();
     sources.sort();
+    let mut expected = vec![
+        crate::instance_of(&storage, USER),
+        crate::instance_of(&storage, OTHER_USER),
+    ];
+    expected.sort();
     assert_eq!(
-        sources,
-        vec![format!("imap:{USER}"), format!("imap:{OTHER_USER}")],
-        "the two rows belong to the two accounts"
+        sources, expected,
+        "the two rows belong to the two accounts' instances"
     );
 
     // Independent cursors under each account's source.

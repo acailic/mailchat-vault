@@ -9,7 +9,7 @@ use mailparse::{parse_mail, MailHeaderMap, ParsedMail};
 use serde_json::json;
 
 use crate::message::NewMessage;
-use crate::util::fnv1a;
+use crate::util::{fnv1a, sha256_hex};
 
 /// Maximum MIME multipart nesting accepted from one mail.
 ///
@@ -39,6 +39,59 @@ const MAX_MIME_DEPTH: usize = 64;
 /// header resolved, `unresolved` when it did not parse, `missing` when
 /// absent).
 pub fn parse_raw_mail(raw: &[u8], source: &str, chat_id: &str) -> Option<NewMessage> {
+    parse_raw_mail_canonical(raw, source, chat_id).map(|parsed| parsed.message)
+}
+
+/// Connector-scoped identity of one raw mail (M1.2): what the durable
+/// source instance deduplicates on, independently of the legacy
+/// `(source, external_id)` aliases.
+///
+/// - `external_key` is the normalized `Message-ID` when the mail carries
+///   one; otherwise the SHA-256 of the raw message bytes is the fallback
+///   key (the identity contract's rule for id-less mail).
+/// - `revision_hash` is a semantic revision hash over decoded content and
+///   stable headers (`Message-ID`, `Subject`, `From`, `To`, the original
+///   `Date` text, and the decoded body). Transport-added headers
+///   (`Received` and friends) and folder state (folder/UID provenance is
+///   attached after parsing) never enter it, so the same mail re-fetched
+///   from another folder — or re-encoded in transit — hashes identically,
+///   while genuinely different decoded payloads behind one `Message-ID`
+///   hash differently and are preserved as separate revisions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailIdentity {
+    /// Normalized `Message-ID` (trimmed, angle brackets stripped), or
+    /// `None` when the mail carries none.
+    pub message_id: Option<String>,
+    /// Identity key: the `Message-ID` when present, else the SHA-256 of
+    /// the raw message bytes.
+    pub external_key: String,
+    /// Semantic revision hash over decoded content and stable headers.
+    pub revision_hash: String,
+}
+
+/// One parsed raw mail plus its connector identity parts
+/// (see [`parse_raw_mail_canonical`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedRawMail {
+    /// The ingest message, identical in shape to the legacy parse
+    /// (`body` still carries the subject prefix for FTS).
+    pub message: NewMessage,
+    /// The bare subject (also inside `raw_json`); the connector insert
+    /// path stores it in the dedicated `subject` column.
+    pub subject: String,
+    /// Connector-scoped identity (external key + revision hash).
+    pub identity: MailIdentity,
+}
+
+/// Parse one raw RFC 5322 message into a [`NewMessage`] plus its
+/// connector-scoped [`MailIdentity`] (see [`parse_raw_mail`] for the
+/// legacy-shape-only variant). Same parse rules; returns `None` when the
+/// mail fails to parse.
+pub(crate) fn parse_raw_mail_canonical(
+    raw: &[u8],
+    source: &str,
+    chat_id: &str,
+) -> Option<ParsedRawMail> {
     if mime_nesting_depth(raw) > MAX_MIME_DEPTH {
         return None;
     }
@@ -48,8 +101,7 @@ pub fn parse_raw_mail(raw: &[u8], source: &str, chat_id: &str) -> Option<NewMess
         .headers
         .get_first_value("Message-ID")
         .map(|v| v.trim().trim_matches(['<', '>']).to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| format!("generated-{:016x}", fnv1a(raw)));
+        .filter(|v| !v.is_empty());
 
     let author = mail
         .headers
@@ -126,6 +178,26 @@ pub fn parse_raw_mail(raw: &[u8], source: &str, chat_id: &str) -> Option<NewMess
     let text = extract_text(&mail)
         .or_else(|| decoded_body(&mail))
         .unwrap_or_default();
+
+    let to = mail.headers.get_first_value("To").unwrap_or_default();
+
+    // Semantic revision hash over decoded content and stable headers —
+    // fields joined by U+001F separators, mirroring the stored
+    // content-hash join. Folder/UID provenance and transport headers are
+    // absent by construction (they never enter this function's inputs).
+    let revision_hash = sha256_hex(
+        format!(
+            "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+            message_id.as_deref().unwrap_or(""),
+            subject,
+            author,
+            to,
+            date_header,
+            text,
+        )
+        .as_bytes(),
+    );
+
     let body = if subject.is_empty() {
         text
     } else if text.is_empty() {
@@ -134,11 +206,22 @@ pub fn parse_raw_mail(raw: &[u8], source: &str, chat_id: &str) -> Option<NewMess
         format!("{subject}\n\n{text}")
     };
 
+    // The legacy external id keeps the fnv1a generated fallback (existing
+    // archives deduped on it); the connector external key follows the
+    // contract instead: SHA-256 of the raw bytes.
+    let legacy_external_id = message_id
+        .clone()
+        .unwrap_or_else(|| format!("generated-{:016x}", fnv1a(raw)));
+    let external_key = match &message_id {
+        Some(id) => id.clone(),
+        None => sha256_hex(raw),
+    };
+
     let mut raw_json = json!({
-        "message_id": message_id,
+        "message_id": legacy_external_id,
         "subject": subject,
         "from": author,
-        "to": mail.headers.get_first_value("To").unwrap_or_default(),
+        "to": to,
         "date": date_header,
     });
     if let Some(obj) = raw_json.as_object_mut() {
@@ -150,14 +233,22 @@ pub fn parse_raw_mail(raw: &[u8], source: &str, chat_id: &str) -> Option<NewMess
         }
     }
 
-    let mut msg = NewMessage::new(source, message_id, author, sent_at, body);
-    msg.chat_id = chat_id.to_string();
-    msg.raw_json = raw_json.to_string();
-    msg.reply_refs = reply_refs;
-    msg.original_timestamp = date_header;
-    msg.timezone = timezone;
-    msg.time_confidence = time_confidence;
-    Some(msg)
+    let mut message = NewMessage::new(source, legacy_external_id, author, sent_at, body);
+    message.chat_id = chat_id.to_string();
+    message.raw_json = raw_json.to_string();
+    message.reply_refs = reply_refs;
+    message.original_timestamp = date_header;
+    message.timezone = timezone;
+    message.time_confidence = time_confidence;
+    Some(ParsedRawMail {
+        message,
+        subject,
+        identity: MailIdentity {
+            message_id,
+            external_key,
+            revision_hash,
+        },
+    })
 }
 
 /// Extract every `<…>` message id from a header value, in order, angle
