@@ -253,3 +253,28 @@ fn imap_config_debug_output_is_redacted() {
     let nested = format!("{:?}", (config, 42));
     assert!(!nested.contains(PASSWORD));
 }
+
+/// The same redaction contract covers the OAuth access token: an
+/// `Xoauth2` config's `Debug` output never prints the token, and the auth
+/// mode stays readable.
+#[test]
+fn imap_config_debug_output_redacts_the_oauth_token() {
+    let config = vimap::ImapConfig {
+        host: "imap.gmail.com".to_string(),
+        port: 993,
+        username: USER.to_string(),
+        auth: vimap::ImapAuth::Xoauth2 {
+            access_token: "access-1".to_string(),
+        },
+        folders: Vec::new(),
+    };
+    let printed = format!("{config:?}");
+    assert!(
+        !printed.contains("access-1"),
+        "Debug leaked the token: {printed}"
+    );
+    assert!(
+        printed.contains("xoauth2"),
+        "the auth mode stays readable: {printed}"
+    );
+}

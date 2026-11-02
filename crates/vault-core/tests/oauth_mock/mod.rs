@@ -14,7 +14,7 @@
 //!   verifier (S256 against the recorded challenge) for
 //!   `authorization_code`; validates the refresh token for
 //!   `refresh_token`. Issues `access-N` / `refresh-N` tokens with a
-//!   monotonically increasing grant counter and a configurable expiry.
+//!   monotonically increasing grant counter.
 //!
 //! No network access, no real credentials; everything stays on loopback.
 
@@ -31,6 +31,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL;
 use base64::Engine;
 use sha2::{Digest, Sha256};
 use vault_core::oauth::OAuthConfig;
+
+/// Access-token lifetime advertised in grants, seconds.
+const EXPIRES_IN: u32 = 3600;
 
 /// Handle to the running mock OAuth server.
 pub struct MockOAuth {
@@ -55,8 +58,6 @@ struct Shared {
     /// When set, the consent "screen" redirects back with
     /// `error=access_denied` (the user pressed "deny").
     deny_consent: Mutex<bool>,
-    /// Access-token lifetime advertised in grants, seconds.
-    expires_in: AtomicU32,
     /// Every token request's form pairs, in order.
     token_requests: Mutex<Vec<Vec<(String, String)>>>,
     /// Every authorization request's query pairs, in order.
@@ -86,7 +87,6 @@ impl MockOAuth {
             grants: AtomicU32::new(0),
             codes: AtomicU32::new(0),
             deny_consent: Mutex::new(false),
-            expires_in: AtomicU32::new(3600),
             token_requests: Mutex::new(Vec::new()),
             auth_requests: Mutex::new(Vec::new()),
             refresh_allowed: Mutex::new(true),
@@ -286,7 +286,6 @@ fn serve(mut stream: TcpStream, state: &Shared) -> std::io::Result<()> {
                 );
             }
             let grant = state.grants.fetch_add(1, Ordering::SeqCst) + 1;
-            let expires_in = state.expires_in.load(Ordering::SeqCst);
             match params.get("grant_type").map(String::as_str) {
                 Some("authorization_code") => {
                     let code = params.get("code").cloned().unwrap_or_default();
@@ -321,7 +320,7 @@ fn serve(mut stream: TcpStream, state: &Shared) -> std::io::Result<()> {
                     state.refresh_tokens.lock().unwrap().push(refresh.clone());
                     let body = format!(
                         "{{\"access_token\":\"access-{grant}\",\"refresh_token\":\"{refresh}\",\
-                         \"expires_in\":{expires_in},\"scope\":\"https://mail.google.com/\",\
+                         \"expires_in\":{EXPIRES_IN},\"scope\":\"https://mail.google.com/\",\
                          \"token_type\":\"Bearer\"}}"
                     );
                     respond_json(&mut stream, "200 OK", &body)
@@ -338,7 +337,7 @@ fn serve(mut stream: TcpStream, state: &Shared) -> std::io::Result<()> {
                     }
                     // Refresh grants rotate the access token only.
                     let body = format!(
-                        "{{\"access_token\":\"access-{grant}\",\"expires_in\":{expires_in},\
+                        "{{\"access_token\":\"access-{grant}\",\"expires_in\":{EXPIRES_IN},\
                          \"scope\":\"https://mail.google.com/\",\"token_type\":\"Bearer\"}}"
                     );
                     respond_json(&mut stream, "200 OK", &body)

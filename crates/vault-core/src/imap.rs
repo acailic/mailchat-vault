@@ -154,20 +154,6 @@ impl ImapConfig {
         }
     }
 
-    /// Gmail preset with OAuth2: authenticates via `AUTHENTICATE XOAUTH2`
-    /// with the given access token (see [`crate::oauth`]).
-    pub fn gmail_oauth(username: impl Into<String>, access_token: impl Into<String>) -> Self {
-        Self {
-            host: GMAIL_IMAP_HOST.to_string(),
-            port: GMAIL_IMAP_PORT,
-            username: username.into(),
-            auth: ImapAuth::Xoauth2 {
-                access_token: access_token.into(),
-            },
-            folders: Vec::new(),
-        }
-    }
-
     /// The canonical connector identity key: kind, case-folded host, port,
     /// TLS mode, and the exact username.
     ///
