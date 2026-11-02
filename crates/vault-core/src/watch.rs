@@ -367,14 +367,19 @@ fn arm_folder(watcher: &mut notify::RecommendedWatcher, dir: &Path) -> Result<()
         .map_err(|e| e.to_string())
 }
 
-/// Enqueue every candidate file under `dir` as immediately due: existing
-/// files are by definition settled, and re-importing is free (dedup
-/// contract).
-fn enqueue_initial_scan(dir: &Path, pending: &mut HashMap<PathBuf, Instant>) {
+/// Enqueue every candidate file under `dir` with the ordinary settle
+/// deadline (re-importing is free via the dedup contract). Going through
+/// the settle window — instead of importing immediately — keeps the loop's
+/// ack to `add_folder` strictly ahead of the imports: the snapshot returned
+/// to the UI shows the files as pending, and each import's `imported`/
+/// `skipped` event is published through `on_change` only afterwards, so a
+/// stats refresh can never overtake the event that explains it.
+fn enqueue_initial_scan(dir: &Path, pending: &mut HashMap<PathBuf, Instant>, settle: Duration) {
     let mut files = Vec::new();
     scan_dir(dir, 0, &mut files);
+    let due = Instant::now() + settle;
     for file in files {
-        pending.insert(file, Instant::now());
+        pending.insert(file, due);
     }
 }
 
@@ -451,7 +456,7 @@ fn run_loop(
                 match arm_folder(&mut watcher, &dir) {
                     Ok(()) => {
                         snap.folders.push(path.clone());
-                        enqueue_initial_scan(&dir, &mut pending);
+                        enqueue_initial_scan(&dir, &mut pending, config.settle);
                     }
                     Err(e) => push_event(
                         &mut snap,
@@ -576,7 +581,7 @@ fn add_folder(
     }
     snap.folders.push(key.clone());
     snap.folders.sort();
-    enqueue_initial_scan(&canonical, pending);
+    enqueue_initial_scan(&canonical, pending, config.settle);
     push_event(
         snap,
         WatchEvent::FolderAdded { path: key },
