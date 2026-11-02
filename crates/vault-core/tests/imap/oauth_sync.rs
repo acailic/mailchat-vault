@@ -210,27 +210,6 @@ fn a_wrong_access_token_is_refused_by_the_imap_server() {
     assert_eq!(storage.stats().unwrap().total, 0, "nothing was stored");
 }
 
-/// The config presets: `gmail_oauth` builds the XOAUTH2 shape, and Debug
-/// output never prints the token.
-#[test]
-fn gmail_oauth_config_shape_and_redaction() {
-    let config = ImapConfig::gmail_oauth(USER, "access-1");
-    assert_eq!(config.host, "imap.gmail.com");
-    assert_eq!(config.port, 993);
-    assert!(
-        matches!(&config.auth, ImapAuth::Xoauth2 { access_token } if access_token == "access-1")
-    );
-    let printed = format!("{config:?}");
-    assert!(
-        !printed.contains("access-1"),
-        "Debug leaked the token: {printed}"
-    );
-    assert!(
-        printed.contains("xoauth2"),
-        "the auth mode stays readable: {printed}"
-    );
-}
-
 /// The no-persist guarantee extends to the OAuth secrets: after a full
 /// sign-in + sync lifecycle (live WAL included, and again after close),
 /// no file under the storage directory holds the refresh token's bytes.

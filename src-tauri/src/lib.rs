@@ -298,7 +298,7 @@ fn import_chat_export(
 #[tauri::command]
 async fn sync_imap(
     state: State<'_, AppState>,
-    secrets: State<'_, secrets::Secrets>,
+    secrets: State<'_, Arc<secrets::Secrets>>,
     host: String,
     port: Option<u16>,
     username: String,
@@ -320,60 +320,64 @@ async fn sync_imap(
     let folders = folders.unwrap_or_default();
     let port = port.unwrap_or(imap::GMAIL_IMAP_PORT);
 
-    let (imap_auth, saved_to) = match auth.as_deref().unwrap_or("password") {
-        "password" => {
-            // Resolve the password: entered now (and remembered) or stored
-            // before.
-            let (password, saved_to) = if password.is_empty() {
-                let stored = secrets
-                    .load(&host, &username)
-                    .ok_or_else(|| "no password stored for this account — enter one".to_string())?;
-                (stored, None)
-            } else {
-                let store = secrets.save(&host, &username, &password);
-                (password, Some(store))
-            };
-            (ImapAuth::Password(password), saved_to)
-        }
-        "oauth" => {
-            // Refresh-token sign-in: mint a fresh access token and use SASL
-            // XOAUTH2. The refresh token itself never leaves the secret
-            // store (and never enters the vault database).
-            let config = oauth_config()?;
-            let refresh = secrets.load_refresh(&host, &username).ok_or_else(|| {
-                "no Google sign-in stored for this account — use “Sign in with Google” first"
-                    .to_string()
-            })?;
-            let tokens =
-                oauth::refresh_access_token(&config, &refresh).map_err(|e| e.to_string())?;
-            (
-                ImapAuth::Xoauth2 {
-                    access_token: tokens.access_token,
-                },
-                None,
-            )
-        }
-        other => {
-            return Err(format!(
-                "unknown auth mode {other:?} (expected \"password\" or \"oauth\")"
-            ))
-        }
-    };
-
-    let config = ImapConfig {
-        host,
-        port,
-        username,
-        auth: imap_auth,
-        folders,
-    };
     let storage = Arc::clone(&state.storage);
-    // Network sync can take minutes; keep it off the UI thread.
-    let folders = tauri::async_runtime::spawn_blocking(move || {
+    let secrets = Arc::clone(secrets.inner());
+    // Secret resolution (keyring), token refresh (blocking HTTP), and the
+    // network sync itself all block; keep them off the UI thread.
+    let (folders, saved_to) = tauri::async_runtime::spawn_blocking(move || {
+        let (imap_auth, saved_to) = match auth.as_deref().unwrap_or("password") {
+            "password" => {
+                // Resolve the password: entered now (and remembered) or
+                // stored before.
+                let (password, saved_to) = if password.is_empty() {
+                    let stored = secrets.load(&host, &username).ok_or_else(|| {
+                        "no password stored for this account — enter one".to_string()
+                    })?;
+                    (stored, None)
+                } else {
+                    let store = secrets.save(&host, &username, &password);
+                    (password, Some(store))
+                };
+                (ImapAuth::Password(password), saved_to)
+            }
+            "oauth" => {
+                // Refresh-token sign-in: mint a fresh access token and use
+                // SASL XOAUTH2. The refresh token itself never leaves the
+                // secret store (and never enters the vault database).
+                let config = oauth_config()?;
+                let refresh = secrets.load_refresh(&host, &username).ok_or_else(|| {
+                    "no Google sign-in stored for this account — use “Sign in with Google” first"
+                        .to_string()
+                })?;
+                let tokens =
+                    oauth::refresh_access_token(&config, &refresh).map_err(|e| e.to_string())?;
+                (
+                    ImapAuth::Xoauth2 {
+                        access_token: tokens.access_token,
+                    },
+                    None,
+                )
+            }
+            other => {
+                return Err(format!(
+                    "unknown auth mode {other:?} (expected \"password\" or \"oauth\")"
+                ))
+            }
+        };
+
+        let config = ImapConfig {
+            host,
+            port,
+            username,
+            auth: imap_auth,
+            folders,
+        };
         let storage = storage
             .lock()
             .map_err(|e| format!("storage lock poisoned: {e}"))?;
-        imap::sync(&config, &storage).map_err(|e| e.to_string())
+        imap::sync(&config, &storage)
+            .map_err(|e| e.to_string())
+            .map(|folders| (folders, saved_to))
     })
     .await
     .map_err(|e| format!("sync task failed: {e}"))??;
@@ -402,7 +406,7 @@ fn oauth_config() -> Result<OAuthConfig, String> {
 /// sync mints a fresh one from the refresh token.
 #[tauri::command]
 async fn oauth_gmail_login(
-    secrets: State<'_, secrets::Secrets>,
+    secrets: State<'_, Arc<secrets::Secrets>>,
     host: String,
     username: String,
 ) -> Result<OAuthLoginOutcome, String> {
@@ -418,25 +422,28 @@ async fn oauth_gmail_login(
     }
     let config = oauth_config()?;
     let hint = username.clone();
-    // Browser flow + token exchange are blocking; keep them off the UI
-    // thread.
-    let tokens = tauri::async_runtime::spawn_blocking(move || {
-        oauth::run_login(
+    let secrets = Arc::clone(secrets.inner());
+    // Browser flow, token exchange, and the keyring write all block; keep
+    // them off the UI thread.
+    let outcome = tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
+        let tokens = oauth::run_login(
             &config,
             Some(&hint),
             |url| webbrowser::open(url).map_err(|e| e.to_string()),
             oauth::LOGIN_TIMEOUT,
         )
+        .map_err(|e| e.to_string())?;
+        let refresh = tokens.refresh_token.ok_or_else(|| {
+            "Google returned no refresh token — consent must be granted; retry the sign-in"
+                .to_string()
+        })?;
+        let saved_to = secrets.save_refresh(&host, &username, &refresh);
+        Ok(OAuthLoginOutcome { username, saved_to })
     })
     .await
-    .map_err(|e| format!("sign-in task failed: {e}"))?
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("sign-in task failed: {e}"))??;
 
-    let refresh = tokens.refresh_token.ok_or_else(|| {
-        "Google returned no refresh token — consent must be granted; retry the sign-in".to_string()
-    })?;
-    let saved_to = secrets.save_refresh(&host, &username, &refresh);
-    Ok(OAuthLoginOutcome { username, saved_to })
+    Ok(outcome)
 }
 
 /// Gmail sign-in availability for the UI: whether the OAuth client is
@@ -444,7 +451,7 @@ async fn oauth_gmail_login(
 /// stored sign-in. Never exposes any secret.
 #[tauri::command]
 fn oauth_status(
-    secrets: State<'_, secrets::Secrets>,
+    secrets: State<'_, Arc<secrets::Secrets>>,
     host: Option<String>,
     username: Option<String>,
 ) -> OAuthStatus {
@@ -634,7 +641,7 @@ pub fn run() {
                 embedder: HashEmbedder::new(),
                 watcher,
             });
-            app.manage(secrets::Secrets::new());
+            app.manage(Arc::new(secrets::Secrets::new()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
