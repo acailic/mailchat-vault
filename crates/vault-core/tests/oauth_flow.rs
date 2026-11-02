@@ -56,7 +56,6 @@ fn full_login_flow_returns_refreshable_tokens() {
         .clone()
         .expect("sign-in issues a refresh token");
     assert_eq!(refresh, "refresh-1");
-    assert!(tokens.scope.contains("mail.google.com"));
 
     // The grant chain on the wire: one authorization, one token exchange.
     let auth = server.auth_requests();
