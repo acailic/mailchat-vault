@@ -348,12 +348,17 @@ impl LoginHandle {
             .find(|(k, _)| k == "error")
             .map(|(_, v)| v.to_string())
         {
+            let escaped = error
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('"', "&quot;");
             respond(
                 &mut stream,
                 "400 Bad Request",
                 &page(
                     "Sign-in was not completed.",
-                    &format!("Google reported: {error}. You can close this tab and try again."),
+                    &format!("Google reported: {escaped}. You can close this tab and try again."),
                 ),
             );
             return Err(Error::OAuth(format!("authorization was refused: {error}")));
