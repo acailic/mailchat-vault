@@ -3,22 +3,38 @@
 //! This is the first "live" mail source: it connects to an IMAP server —
 //! Gmail via app password in this first round (TODO: XOAUTH2/OAuth2 login
 //! later), or any other server over host/port/user/password — and pulls new
-//! messages into the archive through the same idempotent storage path as
-//! every other source (`(source, external_id)` dedup).
+//! messages into the archive.
+//!
+//! # Source identity (durable source instances)
+//!
+//! Each synced account is a **durable source instance** in the vault
+//! database, registered from the canonical connector configuration:
+//! case-folded host, port, TLS mode, and exact username
+//! ([`ImapConfig::connector_key`]). Re-registering the same configuration
+//! resolves to the same instance, so re-syncing — or reconfiguring the
+//! *password*, which is never part of the stored configuration — preserves
+//! identity. Two accounts on different hosts stay distinct instances even
+//! with the same username, because the host (unlike the pre-canonical
+//! `imap:<username>` namespace) is part of the key. Message identities are
+//! connector-scoped to the instance: the normalized `Message-ID` (or the
+//! SHA-256 of the raw bytes when absent) with a semantic revision hash, so
+//! the same mail seen in several folders is one archived message with
+//! several occurrences, while two conflicting payloads behind one
+//! `Message-ID` are preserved as two revisions (see [`crate::storage`]).
 //!
 //! # Incremental sync model
 //!
 //! Per folder, a sync cursor in the vault database stores the folder's
-//! `UIDVALIDITY` and the highest already-fetched UID. On each sync:
+//! `UIDVALIDITY` and the highest already-fetched UID, keyed by the source
+//! instance. On each sync:
 //!
 //! - if `UIDVALIDITY` is unchanged, only messages with UIDs above the stored
 //!   cursor are searched and fetched (`UID SEARCH last+1:*`, explicit UID
 //!   sets for the `FETCH`es);
 //! - if `UIDVALIDITY` changed (the folder was recreated; all UIDs are
 //!   reassigned), the cursor resets and the folder is re-scanned from UID 1
-//!   — re-fetched messages are simply deduped by `(source, external_id)`,
-//!   where `external_id` is the mail's `Message-ID` (or a deterministic
-//!   content hash when absent), so a reset never duplicates rows.
+//!   — re-fetched messages simply dedup by their connector identity, so a
+//!   reset never duplicates rows.
 //!
 //! The IMAP folder name maps to the message's `channel` field, so archived
 //! messages are grouped per folder.
@@ -26,10 +42,11 @@
 //! # Credentials
 //!
 //! [`ImapConfig`] holds the password only in memory for the duration of a
-//! sync. It is never written to the vault database (the sync-state table
-//! stores only folder cursors) and `Debug` output is redacted. The Tauri
-//! shell keeps entered passwords in the OS keyring when available and
-//! otherwise in process memory only — see `src-tauri/src/secrets.rs`.
+//! sync. It is never written to the vault database (the source instance
+//! stores host/port/TLS/username configuration and folder cursors only)
+//! and `Debug` output is redacted. The Tauri shell keeps entered passwords
+//! in the OS keyring when available and otherwise in process memory only —
+//! see `src-tauri/src/secrets.rs`.
 //!
 //! # Testing
 //!
@@ -51,9 +68,11 @@ use imap::Session;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::mail::{amend_raw_json, parse_raw_mail};
-use crate::message::{InsertOutcome, NewMessage};
-use crate::storage::Storage;
+use crate::mail::{amend_raw_json, parse_raw_mail_canonical};
+use crate::message::NewMessage;
+use crate::storage::{
+    ConnectorIdentity, MailInsertOutcome, NewSourceInstance, Occurrence, Storage,
+};
 use crate::Result;
 
 /// Gmail IMAP endpoint (implicit TLS).
@@ -76,15 +95,22 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// TLS stream type used by [`connect`].
 pub type TlsStream = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
 
-/// Dedup source name for an IMAP account: `imap:<username>`.
+/// Dedup source name for a legacy IMAP account: `imap:<username>`.
 ///
-/// The username (a full address for Gmail) scopes the `(source,
-/// external_id)` dedup namespace per account, so the same mailing-list mail
-/// in two accounts stays two rows while re-syncing one account never
-/// duplicates.
+/// Pre-canonical namespace kept by migrated archives; it deliberately
+/// carries no host, so the old schema could not tell two hosts apart for
+/// one username. New syncs register host/port/TLS/username-accurate durable
+/// source instances instead ([`ensure_source_instance`]); this name remains
+/// only to read the legacy snapshot's namespace.
 pub fn source_name(username: &str) -> String {
     format!("imap:{username}")
 }
+
+/// The one TLS mode this release speaks: implicit TLS on a dedicated port
+/// (993). It is part of the connector identity key, so a future STARTTLS
+/// mode will be a distinct configuration, never a silent reinterpretation
+/// of an existing instance.
+pub const TLS_MODE: &str = "implicit-tls";
 
 /// Connection settings for one IMAP account.
 ///
@@ -114,6 +140,50 @@ impl ImapConfig {
             password: password.into(),
             folders: Vec::new(),
         }
+    }
+
+    /// The canonical connector identity key: kind, case-folded host, port,
+    /// TLS mode, and the exact username.
+    ///
+    /// Hostnames are case-folded (`IMAP.Gmail.COM` and `imap.gmail.com` are
+    /// one server); usernames are not — the identity contract keeps them
+    /// exactly as configured. The password is never part of the key, so
+    /// reconfiguring credentials preserves source identity, and two
+    /// accounts on different hosts remain distinct instances even with the
+    /// same username.
+    pub fn connector_key(&self) -> String {
+        format!(
+            "imap|{}|{}|{TLS_MODE}|{}",
+            self.host.trim().to_lowercase(),
+            self.port,
+            self.username
+        )
+    }
+
+    /// The non-secret connector configuration stored on the source
+    /// instance: canonical host, port, TLS mode, exact username, and the
+    /// folder selection. Credentials are never included.
+    pub fn config_json(&self) -> String {
+        serde_json::json!({
+            "host": self.host.trim().to_lowercase(),
+            "port": self.port,
+            "tls_mode": TLS_MODE,
+            "username": self.username,
+            "folders": self.effective_folders(),
+        })
+        .to_string()
+    }
+
+    /// Human-readable label for the instance's UI projections: the
+    /// connector key composite minus the TLS mode (never a raw instance id
+    /// and never the password).
+    pub fn display_label(&self) -> String {
+        format!(
+            "imap:{host}:{port}:{username}",
+            host = self.host.trim().to_lowercase(),
+            port = self.port,
+            username = self.username
+        )
     }
 
     /// The folders to sync (`DEFAULT_FOLDERS` when none configured,
@@ -158,10 +228,16 @@ pub struct FolderSyncSummary {
     pub seen: u64,
     /// Messages newly stored.
     pub inserted: u64,
-    /// Messages skipped because `(source, external_id)` already existed.
+    /// Messages skipped because their connector identity (same external
+    /// key *and* revision) was already archived — including the same mail
+    /// already seen in another folder.
     pub skipped: u64,
     /// Messages that could not be parsed (not stored).
     pub failed: u64,
+    /// Newly archived rows that are a **conflicting revision**: another
+    /// revision of the same `Message-ID` was already archived under this
+    /// account (both stay searchable; see [`crate::storage`]).
+    pub conflicting_revisions: u64,
     /// Why syncing this folder failed, when it did; the remaining folders
     /// are still synced and reported.
     pub error: Option<String>,
@@ -207,50 +283,72 @@ pub fn connect(config: &ImapConfig) -> Result<Session<TlsStream>> {
         .map_err(crate::Error::from)
 }
 
+/// Register (or resolve) the durable source instance for `config` in
+/// `storage`: idempotent on the connector key, so the same account —
+/// host, port, TLS mode, username; never the password — always maps to
+/// one instance with its own identity scope and folder cursors.
+pub fn ensure_source_instance(storage: &Storage, config: &ImapConfig) -> Result<String> {
+    storage.ensure_source_instance(&NewSourceInstance {
+        kind: "imap",
+        label: &config.display_label(),
+        connector_key: &config.connector_key(),
+        config_json: &config.config_json(),
+    })
+}
+
 /// Sync every configured folder over an already-authenticated session.
 ///
 /// Generic over the stream so the production TLS path ([`sync`]) and the
 /// test path (plain TCP against a mock server) share one implementation.
 /// A failing folder never aborts the others: each folder reports its own
 /// outcome, with [`FolderSyncSummary::error`] set on failure.
+///
+/// `instance_id` is the durable source instance (see
+/// [`ensure_source_instance`]); identities, occurrences, and cursors are
+/// scoped to it.
 pub fn sync_session<T: Read + Write>(
     session: &mut Session<T>,
     storage: &Storage,
-    source: &str,
+    instance_id: &str,
     folders: &[String],
 ) -> Vec<FolderSyncSummary> {
     folders
         .iter()
-        .map(|folder| sync_folder(session, storage, source, folder))
+        .map(|folder| sync_folder(session, storage, instance_id, folder))
         .collect()
 }
 
-/// Connect, sync every configured folder, and log out.
+/// Connect, sync every configured folder, and log out. The account's
+/// durable source instance is registered first (idempotently), each
+/// attempt/success is stamped on it, and the run reports per-folder
+/// summaries.
 pub fn sync(config: &ImapConfig, storage: &Storage) -> Result<Vec<FolderSyncSummary>> {
-    let source = source_name(&config.username);
+    let instance = ensure_source_instance(storage, config)?;
+    storage.record_source_attempt(&instance)?;
     let mut session = connect(config)?;
     let folders = config.effective_folders();
-    let summaries = sync_session(&mut session, storage, &source, &folders);
+    let summaries = sync_session(&mut session, storage, &instance, &folders);
     // Best-effort logout; a failed logout must not mask a sync error.
     let _ = session.logout();
+    storage.record_source_success(&instance)?;
     Ok(summaries)
 }
 
 /// Incrementally sync one folder. See the [module documentation](self)
-/// for the UIDVALIDITY/UID cursor model.
+/// for the UIDVALIDITY/UID cursor model and the connector identity scope.
 ///
 /// The outcome is always a summary: when syncing fails partway, the counts
 /// already accumulated stay in it, alongside [`FolderSyncSummary::error`].
 pub fn sync_folder<T: Read + Write>(
     session: &mut Session<T>,
     storage: &Storage,
-    source: &str,
+    instance_id: &str,
     folder: &str,
 ) -> FolderSyncSummary {
     fn run<T: Read + Write>(
         session: &mut Session<T>,
         storage: &Storage,
-        source: &str,
+        instance_id: &str,
         folder: &str,
         summary: &mut FolderSyncSummary,
     ) -> Result<()> {
@@ -260,7 +358,7 @@ pub fn sync_folder<T: Read + Write>(
         let uidvalidity = mailbox.uid_validity.unwrap_or(0);
         summary.uidvalidity = uidvalidity;
 
-        let saved = storage.get_imap_state(source, folder)?;
+        let saved = storage.get_imap_checkpoint(instance_id, folder)?;
         let (start_uid, reset) = match &saved {
             Some(state) if state.uidvalidity == uidvalidity => {
                 (state.last_uid.saturating_add(1), false)
@@ -307,12 +405,35 @@ pub fn sync_folder<T: Read + Write>(
                     }
                 };
                 summary.seen += 1;
-                match parse_raw_mail(raw, source, "") {
-                    Some(mut msg) => {
-                        apply_folder_fields(&mut msg, folder, uid, uidvalidity);
-                        match storage.insert_message(&msg)? {
-                            InsertOutcome::Inserted(_) => summary.inserted += 1,
-                            InsertOutcome::Duplicate(_) => summary.skipped += 1,
+                match parse_raw_mail_canonical(raw, instance_id, "") {
+                    Some(mut parsed) => {
+                        apply_folder_fields(&mut parsed.message, folder, uid, uidvalidity);
+                        let outcome = storage.insert_mail_message(
+                            instance_id,
+                            &parsed.message,
+                            &parsed.subject,
+                            &ConnectorIdentity {
+                                namespace: "imap",
+                                external_key: &parsed.identity.external_key,
+                                revision_hash: &parsed.identity.revision_hash,
+                            },
+                            &Occurrence {
+                                scope: folder,
+                                provider_item_id: &uid.to_string(),
+                                uidvalidity: Some(uidvalidity),
+                            },
+                        )?;
+                        match outcome {
+                            MailInsertOutcome::Inserted {
+                                conflicting_revision,
+                                ..
+                            } => {
+                                summary.inserted += 1;
+                                if conflicting_revision {
+                                    summary.conflicting_revisions += 1;
+                                }
+                            }
+                            MailInsertOutcome::Duplicate { .. } => summary.skipped += 1,
                         }
                     }
                     None => summary.failed += 1,
@@ -323,13 +444,13 @@ pub fn sync_folder<T: Read + Write>(
             // resumes where it stopped instead of refetching the folder.
             if batch_max_uid > last_uid {
                 last_uid = batch_max_uid;
-                storage.set_imap_state(source, folder, uidvalidity, last_uid)?;
+                storage.set_imap_checkpoint(instance_id, folder, uidvalidity, last_uid)?;
             }
         }
 
         // Record the cursor even for empty/unchanged folders (the UIDVALIDITY
         // may have appeared or reset).
-        storage.set_imap_state(source, folder, uidvalidity, last_uid)?;
+        storage.set_imap_checkpoint(instance_id, folder, uidvalidity, last_uid)?;
         Ok(())
     }
 
@@ -341,9 +462,10 @@ pub fn sync_folder<T: Read + Write>(
         inserted: 0,
         skipped: 0,
         failed: 0,
+        conflicting_revisions: 0,
         error: None,
     };
-    if let Err(e) = run(session, storage, source, folder, &mut summary) {
+    if let Err(e) = run(session, storage, instance_id, folder, &mut summary) {
         summary.error = Some(e.to_string());
     }
     summary

@@ -14,8 +14,22 @@ const USER: &str = "alice@example.com";
 const PASSWORD: &str = "hunter2-app-password";
 const FOLDERS: &[&str] = &["INBOX"];
 
-fn source() -> String {
-    vimap::source_name(USER)
+/// The canonical connector configuration every test here syncs as: the
+/// mock server is a plain-TCP stand-in, but the durable instance it
+/// registers carries a real host/port/TLS/username identity.
+fn config() -> vimap::ImapConfig {
+    vimap::ImapConfig {
+        host: "mock.test".to_string(),
+        port: 993,
+        username: USER.to_string(),
+        password: PASSWORD.to_string(),
+        folders: Vec::new(),
+    }
+}
+
+/// The durable source instance for [`config`] (idempotent).
+fn instance(storage: &Storage) -> String {
+    vimap::ensure_source_instance(storage, &config()).unwrap()
 }
 
 /// One raw test mail.
@@ -53,8 +67,9 @@ fn session(server: &MockImap) -> imap::Session<std::net::TcpStream> {
 /// Sync the given folders once against the mock server.
 fn sync(server: &MockImap, storage: &Storage, folders: &[&str]) -> Vec<vimap::FolderSyncSummary> {
     let folders: Vec<String> = folders.iter().map(|f| f.to_string()).collect();
+    let instance = instance(storage);
     let mut s = session(server);
-    let summaries = vimap::sync_session(&mut s, storage, &source(), &folders);
+    let summaries = vimap::sync_session(&mut s, storage, &instance, &folders);
     let _ = s.logout();
     summaries
 }
@@ -104,20 +119,26 @@ fn initial_sync_stores_messages_with_folder_as_channel() {
     assert_eq!(s.skipped, 0);
     assert_eq!(s.failed, 0);
 
-    // Cursor saved at the highest fetched UID.
-    let state = storage.get_imap_state(&source(), "INBOX").unwrap().unwrap();
+    // Cursor saved at the highest fetched UID, keyed by the durable
+    // source instance.
+    let state = storage
+        .get_imap_checkpoint(&instance(&storage), "INBOX")
+        .unwrap()
+        .unwrap();
     assert_eq!(state.uidvalidity, 7);
     assert_eq!(state.last_uid, 2);
 
-    // Messages stored under the imap:<user> source, folder as channel,
-    // Message-ID as external id, and full-text searchable.
+    // Messages stored under the account's durable source instance (the
+    // connector label is the source of connector-archived rows, never the
+    // raw instance id), folder as channel, Message-ID as external id, and
+    // full-text searchable.
     assert_eq!(storage.stats().unwrap().total, 2);
     let hits = storage
         .search_filtered(&build_match_query("hello vault world"), None, None, 10)
         .unwrap();
     assert_eq!(hits.len(), 1);
     let m = &hits[0];
-    assert_eq!(m.source, format!("imap:{USER}"));
+    assert_eq!(m.source, config().display_label());
     assert_eq!(m.external_id, "m-1@example.com");
     assert_eq!(m.channel, "INBOX");
     assert_eq!(m.author, "Alice Smith <alice@example.com>");
@@ -193,7 +214,10 @@ fn incremental_sync_fetches_only_new_messages() {
     assert_eq!(log.searches.last().unwrap(), "3:*");
     assert_eq!(log.fetch_sets.last().unwrap(), "3");
 
-    let state = storage.get_imap_state(&source(), "INBOX").unwrap().unwrap();
+    let state = storage
+        .get_imap_checkpoint(&instance(&storage), "INBOX")
+        .unwrap()
+        .unwrap();
     assert_eq!((state.uidvalidity, state.last_uid), (7, 3));
 
     // The new mail is searchable.
@@ -226,13 +250,16 @@ fn uidvalidity_change_rescans_without_duplicates() {
     assert_eq!(s.seen, 2);
     assert_eq!(
         s.inserted, 0,
-        "rescanned mails must dedup by (source, external_id)"
+        "rescanned mails must dedup by their connector identity"
     );
     assert_eq!(s.skipped, 2);
     assert_eq!(storage.stats().unwrap().total, 2);
 
     // Cursor now tracks the new validity.
-    let state = storage.get_imap_state(&source(), "INBOX").unwrap().unwrap();
+    let state = storage
+        .get_imap_checkpoint(&instance(&storage), "INBOX")
+        .unwrap()
+        .unwrap();
     assert_eq!((state.uidvalidity, state.last_uid), (99, 2));
 }
 
@@ -307,19 +334,25 @@ fn folders_map_to_separate_channels_and_cursors() {
     assert_eq!(inbox_hits[0].channel, "INBOX");
     assert_eq!(archive_hits[0].channel, "Archive");
 
-    let inbox_state = storage.get_imap_state(&source(), "INBOX").unwrap().unwrap();
+    let inbox_state = storage
+        .get_imap_checkpoint(&instance(&storage), "INBOX")
+        .unwrap()
+        .unwrap();
     let archive_state = storage
-        .get_imap_state(&source(), "Archive")
+        .get_imap_checkpoint(&instance(&storage), "Archive")
         .unwrap()
         .unwrap();
     assert_eq!((inbox_state.uidvalidity, inbox_state.last_uid), (7, 1));
     assert_eq!((archive_state.uidvalidity, archive_state.last_uid), (3, 1));
 }
 
+/// The same Message-ID in two folders (e.g. INBOX and All Mail) is one
+/// archived message with **two folder occurrences**: the first folder
+/// writes the row, the second only records its observation (folder, UID,
+/// UIDVALIDITY) in `message_occurrences` — the multi-folder provenance the
+/// canonical store carries.
 #[test]
 fn same_mail_in_two_folders_dedups_within_one_account() {
-    // The same Message-ID in two folders (e.g. INBOX and All Mail) is one
-    // archived message: first folder wins, the second is skipped.
     let shared = mail(Some("shared-1@x"), "Shared", "shared body");
     let server = MockImap::start();
     server.set_mailbox("INBOX", MockMailbox::new(7, vec![shared.clone()]));
@@ -331,6 +364,34 @@ fn same_mail_in_two_folders_dedups_within_one_account() {
     assert_eq!(summaries[1].inserted, 0);
     assert_eq!(summaries[1].skipped, 1);
     assert_eq!(storage.stats().unwrap().total, 1);
+
+    // One row, two occurrences: INBOX/UID 1/UV 7 and All Mail/UID 1/UV 5.
+    let hits = storage
+        .search_filtered(&build_match_query("shared body"), None, None, 10)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    let occurrences = storage.message_occurrences(hits[0].id).unwrap();
+    let mut scopes: Vec<(&str, &str, u32)> = occurrences
+        .iter()
+        .map(|o| {
+            (
+                o.scope.as_str(),
+                o.provider_item_id.as_str(),
+                o.uidvalidity.unwrap(),
+            )
+        })
+        .collect();
+    scopes.sort();
+    assert_eq!(
+        scopes,
+        vec![("All Mail", "1", 5), ("INBOX", "1", 7)],
+        "both folder observations must be recorded on the one row"
+    );
+
+    // Re-syncing either folder adds no further occurrence rows (the
+    // occurrence tuple is unique).
+    sync(&server, &storage, &["INBOX", "All Mail"]);
+    assert_eq!(storage.message_occurrences(hits[0].id).unwrap().len(), 2);
 }
 
 #[test]
@@ -381,7 +442,7 @@ fn missing_folder_reports_error_without_breaking_others() {
     let summaries = vimap::sync_session(
         &mut s,
         &storage,
-        &source(),
+        &instance(&storage),
         &[
             "INBOX".to_string(),
             "NoSuch".to_string(),
@@ -463,7 +524,10 @@ fn partial_folder_failure_keeps_counts_and_resume_cursor() {
     assert_eq!(storage.stats().unwrap().total, 51);
 
     // The cursor persisted at the batch boundary survives the failure.
-    let state = storage.get_imap_state(&source(), "INBOX").unwrap().unwrap();
+    let state = storage
+        .get_imap_checkpoint(&instance(&storage), "INBOX")
+        .unwrap()
+        .unwrap();
     assert_eq!(state.last_uid, 50);
 
     // With the server failure gone, a retry resumes from the persisted

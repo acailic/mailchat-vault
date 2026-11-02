@@ -32,6 +32,19 @@ pub(crate) fn fnv1a_fields(parts: &[&str]) -> u64 {
     acc
 }
 
+/// SHA-256 of a byte slice as lowercase hex. Used for the mail connector's
+/// identity fallback (no `Message-ID`) and semantic revision hashes.
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

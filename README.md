@@ -8,12 +8,12 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice �
 
 - **Tauri 2 desktop app** (Rust backend, vanilla TypeScript + Vite frontend).
 - **SQLite storage with FTS5 full-text index** (bundled SQLite via `rusqlite`; no system SQLite needed).
-  - **Canonical store** (schema v4, plus the migration-7 conversation-key backfill): `source_instances`, `conversations`, `archive_messages` (ids, payload, and time provenance: resolved UTC instant, original timestamp text, timezone, confidence), `message_identities` (dedup aliases), `message_occurrences` (import/folder observations), `sync_checkpoints` (IMAP cursors), plus the `archive_fts` virtual table (external content, trigger-maintained). Every read and write targets these tables.
+  - **Canonical store** (schema v8): `source_instances` (durable connector entities: kind, label, non-secret configuration, connected state, last attempt/success), `conversations` (stable provider keys), `archive_messages` (ids, payload, and time provenance: resolved UTC instant, original timestamp text, timezone, confidence), `message_identities` (dedup identities — legacy `(source, external_id)` aliases plus connector-scoped keys with semantic revision hashes), `message_occurrences` (import/folder observations), `sync_checkpoints` (IMAP cursors), plus the `archive_fts` virtual table (external content, trigger-maintained). Every read and write targets these tables.
   - **Stable conversation keys**: Telegram/Signal chats key on the provider-guaranteed chat id and WhatsApp chats on a content-derived key (sorted participants + first authored message), so the same chat re-exported under a rename stays one conversation (the label follows the newest name) while different chats sharing a display name stay distinct. **Email reply graph**: `In-Reply-To`/`References` chains group mail into threads — one-hop resolution, so incomplete chains and reference cycles are safe — with replies imported before their roots adopting them into the right thread later. Timestamps carry **explicit timezone interpretation** (exporter-local WhatsApp stamps resolve DST-aware in the machine's IANA zone; Telegram's naive `date` fallback stores the exporter-UTC stamp verbatim; mail offsets and chat epochs are exact) with per-message confidence labels. Legacy databases upgrade in place (migration 7): renamed imports merge, same-name chats split, WhatsApp identities re-key so post-upgrade re-imports dedup, and their legacy blind-Z stamps resolve to stored true UTC instants (machine-zone interpretation), while whatever cannot be safely interpreted stays legacy-unresolved.
-  - The legacy `messages` / `messages_fts` / `imap_sync_state` tables from earlier schema versions are preserved untouched as a pre-canonical snapshot; migration 4 copies every row (ids included) into the canonical tables, and nothing writes the legacy tables afterwards.
+  - The legacy `messages` / `messages_fts` / `imap_sync_state` tables from earlier schema versions are preserved untouched as a pre-canonical snapshot; migration 4 copies every row (ids included) into the canonical tables, and nothing writes the legacy tables afterwards. Migration 8 adds the durable source-instance columns (connector identity key, state, attempt/success stamps).
   - Trigger-maintained counter tables (`stats_source`/`stats_day`/`stats_chat`/`stats_author`) power the statistics dashboard with O(groups) reads instead of GROUP BY scans.
   - Versioned migrations applied automatically on open.
-- **Idempotent ingest**: a `Source` trait yields messages; writes dedup on the canonical identity alias — legacy `(source, external_id)` keys map to one `message_identities` row each — so re-importing is always safe.
+- **Idempotent ingest**: a `Source` trait yields messages; writes dedup on the canonical identity — legacy `(source, external_id)` keys map to one `message_identities` row each, and the IMAP connector scopes identities to their durable source instance with a semantic revision hash (the same mail in several folders is one row with one occurrence per folder; two conflicting payloads behind one `Message-ID` are preserved as two revisions) — so re-importing and re-syncing are always safe.
 - **Manual/demo source**: import an `.mbox` file (no IMAP needed) — subjects, authors, dates, and decoded text bodies are archived and searchable.
 - **Chat imports**: WhatsApp `.txt` exports, Telegram Desktop `result.json` exports, Signal Desktop conversation `.json` exports (e.g. `sigtop export-messages -f json`), and Discord Data Package `messages.json` files — texts, authors, and timestamps are archived and searchable; quoted replies are kept as metadata, and Signal/Discord attachments are recorded in `raw_json` (Discord reactions too). **Media extraction** for WhatsApp and Telegram: files referenced by the export (images, documents, voice notes) are copied into a content-addressed `media/` store in app data — hash-named (SHA-256), deduplicated by content — and linked from the message's `raw_json`, with a media section in the detail view. Extraction can be switched off with the **extract media** toggle; text-only exports import fine (missing files are just counted), and re-importing an export with its files backfills media links into already-stored messages. The format is auto-detected from the file contents, so re-importing the same export never duplicates messages.
 - **IMAP sync (Gmail & friends)**: incremental, UIDVALIDITY/UID-tracked sync from any IMAP server over host/port/user/password — Gmail via app password in this first round (XOAUTH2 later). Folders map to the message `channel` field; re-syncing never duplicates. Passwords are prompted for, kept in the OS keyring when available and in session memory otherwise — never in the database.
@@ -35,7 +35,7 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice �
 crates/vault-core/   # storage (SQLite/FTS5, migrations), filtered/paged search queries, archive statistics (dashboard aggregates), ingest trait, mail parsing, mbox / WhatsApp / Telegram / Signal / Discord sources, media extraction into the content-addressed store, IMAP sync, LLM search pipeline, local embeddings + hybrid ranking, folder watching, CSV/JSON/MBOX export — no UI deps
 src-tauri/           # Tauri app shell: commands (search_messages, chat_context, llm_ask, llm_status, embed_messages, embed_status, import_mbox, import_chat_export with optional media extraction, sync_imap, watch_add_folder, watch_remove_folder, watch_status, seed_demo, stats, archive_stats, export_search, export_chat) + secret storage + watch-status events
 src/                 # frontend (vanilla TS): search + filters + pagination + detail view (with media links), ask UI + embedding controls, statistics dashboard (CSS bar charts, no chart library), import & IMAP sync controls, folder watching panel, export controls
-||index.html           # single-page shell
+index.html           # single-page shell
 ```
 
 ## Prerequisites
@@ -58,7 +58,7 @@ npm run tauri dev
 ```
 
 First run tip: click **Load demo** to seed the sample messages, then search for e.g. `vault`, click a hit to read it with its thread neighbors, or set the source/author/date filters to browse. Click **Update local embeddings** in the Ask section to build the local vector index (offline) — Ask then ranks results hybrid (FTS + local vectors). To import real data, point the import field at any `.mbox` file (e.g. exported from Thunderbird), use **Import chat export…** to pick a WhatsApp `Export chat` `.txt` file or a Telegram export's `result.json` (picking the export directory works too), or a Signal conversation `.json`, or a Discord Data Package export — the package root, its `messages/` directory, or a single channel `messages.json` — unzipped "Attach Media" WhatsApp exports also copy their files into the vault's media store unless **extract media** is unchecked — or fill in the **IMAP sync** section (see below). To take results out, run a search and press **Export results…** (or open a message and press **Export chat…**), pick a format and a destination — the export always covers every row of the current search, not just the page on screen.
-||
+
 The database lives in your app data dir (e.g. `~/.local/share/com.acailic.mailchatvault/vault.db` on Linux); extracted chat media lives next to it under `media/`, each file named by the SHA-256 of its contents.
 
 ## LLM-assisted search (v1)
@@ -162,7 +162,9 @@ refreshes the source chips and stats like any manual import.
 
 ## IMAP sync
 
-The **IMAP sync** section pulls mail straight from a server into the archive — incrementally: each folder's `UIDVALIDITY` + highest-seen UID are tracked in the vault database, so every sync fetches only new messages. If a folder is recreated (`UIDVALIDITY` changes), it is rescanned and re-fetched messages are deduped through the canonical identity alias — a reset never creates duplicate rows. The folder name is stored as the message `channel`, and mails archive under the source `imap:<username>`.
+The **IMAP sync** section pulls mail straight from a server into the archive — incrementally: each folder's `UIDVALIDITY` + highest-seen UID are tracked in the vault database (keyed by the account's durable source instance), so every sync fetches only new messages. If a folder is recreated (`UIDVALIDITY` changes), it is rescanned and re-fetched messages are deduped through the connector identity — a reset never creates duplicate rows. The folder name is stored as the message `channel`.
+
+Each synced account is a **durable source instance**: its identity is the canonical connector configuration — case-folded host, port, TLS mode, and the exact username — while the password stays only in the OS keyring (or process memory). Reconfiguring credentials preserves the instance; two accounts on different hosts stay distinct even with the same username; and the same mail seen in several folders is one archived message with one folder occurrence per sighting.
 
 ### Gmail (app password)
 
@@ -194,8 +196,8 @@ Rows stream straight to the file, so exports of very large result sets don't hol
 ## Tests
 
 ```sh
-cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram / Discord ingest, media extraction (real small fixture files), filtered/paged search, chat context, archive statistics (incl. the 1M-message dashboard perf contract), 100k FTS perf fixture, IMAP sync (mock server), LLM search pipeline (mock LLM, no network), local embeddings (deterministic embedder, incremental job, cosine scan, hybrid ranking, 100k vector perf budgets), folder watching (real temp folders), export (CSV/JSON/MBOX round-trips incl. unicode + large sets), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations)
-||npm test                 # frontend unit + UI-state snapshot tests (vitest)
+cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram / Discord ingest, media extraction (real small fixture files), filtered/paged search, chat context, archive statistics (incl. the 1M-message dashboard perf contract), 100k FTS perf fixture, IMAP sync (mock server; durable source instances, multi-folder occurrences, conflicting revisions), LLM search pipeline (mock LLM, no network), local embeddings (deterministic embedder, incremental job, cosine scan, hybrid ranking, 100k vector perf budgets), folder watching (real temp folders), export (CSV/JSON/MBOX round-trips incl. unicode + large sets), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations)
+npm test                 # frontend unit + UI-state snapshot tests (vitest)
 npm run check            # TypeScript type-check
 cargo test --workspace   # also compiles the Tauri app (needs the Linux libs above)
 ```
@@ -237,7 +239,7 @@ same webview reason; the formats themselves are round-trip tested in
 ## Out of scope for now (separate tasks)
 
 XOAUTH2 (OAuth) login for Gmail, multi-account UI, multi-provider menus, settings UI, push notifications. The media-extraction layer is source-generic: when further chat sources land, their exports plug into the same hash-named `media/` store and `raw_json` convention.
-||
+
 ## Installers & releases
 
 Pushing a version tag (`v*`) builds distributable installers — Linux AppImage + `.deb` (defaults of the enabled Tauri bundling), plus macOS `.dmg` and Windows `.msi`/NSIS `.exe` from the release workflow — as a **draft GitHub Release**. Artifacts are **unsigned** in this round (no code signing; Gatekeeper/SmartScreen caveats apply on macOS/Windows). The app ships with a full icon set (Linux/mac/win) generated from `src-tauri/icons/source.png`. See [docs/release.md](docs/release.md) for the install smoke-test checklist, local build commands, and how to regenerate the icons.
