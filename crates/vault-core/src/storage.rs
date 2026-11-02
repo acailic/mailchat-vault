@@ -22,12 +22,23 @@
 //! record the verbatim stamp, the timezone it was interpreted in, and a
 //! confidence label. What cannot be safely interpreted keeps the M1.1
 //! `legacy_unresolved` state.
+//!
+//! Since schema version 8, source instances are **durable connector
+//! entities** ([`Storage::ensure_source_instance`]): a connector (the IMAP
+//! sync, [`crate::imap`]) registers its canonical configuration — host,
+//! port, TLS mode, and exact username for IMAP — and re-registering the
+//! same configuration resolves to the same instance, while credentials
+//! stay out of the stored configuration entirely. Connector mail inserts
+//! ([`Storage::insert_mail_message`]) scope identities to the instance and
+//! preserve conflicting revisions of one `Message-ID` as separate archived
+//! rows.
 
 use std::path::Path;
 
 use chrono::{Datelike, Days, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
+use serde::{Deserialize, Serialize};
 
 use crate::message::{InsertOutcome, Message, NewMessage, SourceCount, Stats};
 use crate::query::{
@@ -465,6 +476,28 @@ const MIGRATIONS: &[(i64, &str)] = &[
         //   before threading headers were recorded.
         "",
     ),
+    (
+        8,
+        // Durable source instances (M1.2). Additive: connector-owned
+        // instances gain a canonical connector identity key (unique per
+        // (kind, connector_key), e.g. IMAP host/port/TLS/username), a
+        // connected/disconnected state, and last attempt/success stamps.
+        // Credentials are never part of the key or the stored config —
+        // they live in the OS keyring (see the Tauri shell's `secrets`
+        // module). Legacy instances keep `connector_key` NULL and never
+        // match a connector: binding a legacy namespace to a configured
+        // account is an explicit user action, never inferred here.
+        r#"
+        ALTER TABLE source_instances ADD COLUMN connector_key TEXT;
+        ALTER TABLE source_instances ADD COLUMN state TEXT NOT NULL DEFAULT 'disconnected'
+            CHECK (state IN ('connected', 'disconnected'));
+        ALTER TABLE source_instances ADD COLUMN last_attempt_at TEXT;
+        ALTER TABLE source_instances ADD COLUMN last_success_at TEXT;
+        CREATE UNIQUE INDEX idx_source_instances_connector
+            ON source_instances (kind, connector_key)
+            WHERE connector_key IS NOT NULL;
+        "#,
+    ),
 ];
 
 /// Rust halves of migrations, for backfill logic that SQL alone cannot
@@ -614,6 +647,297 @@ impl Storage {
         Ok(InsertOutcome::Inserted(id))
     }
 
+    // ------------------------------------------------------------------
+    // Durable source instances (M1.2)
+    // ------------------------------------------------------------------
+
+    /// Find or create the durable source instance for a connector
+    /// configuration, idempotently on `(kind, connector_key)`.
+    ///
+    /// The connector key is the canonical identity the connector itself
+    /// derives from its configuration (IMAP: case-folded host, port, TLS
+    /// mode, exact username — see [`crate::imap::ImapConfig::connector_key`]);
+    /// credentials are never part of it, so reconfiguring a password
+    /// resolves to the same instance. Re-registering an existing instance
+    /// refreshes its label and stored configuration (non-identity fields
+    /// such as the folder list) without touching its state or history.
+    /// Legacy-named instances never match a connector: they keep
+    /// `connector_key` NULL until a user explicitly binds them.
+    pub fn ensure_source_instance(&self, spec: &NewSourceInstance<'_>) -> Result<String> {
+        let tx = self.conn.unchecked_transaction()?;
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT id FROM source_instances
+                 WHERE kind = ?1 AND connector_key = ?2",
+                params![spec.kind, spec.connector_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let id = match existing {
+            Some(id) => {
+                tx.execute(
+                    "UPDATE source_instances SET label = ?1, config_json = ?2
+                     WHERE id = ?3",
+                    params![spec.label, spec.config_json, id],
+                )?;
+                id
+            }
+            None => {
+                let id = new_uuid();
+                tx.execute(
+                    "INSERT INTO source_instances
+                         (id, kind, label, connector_key, config_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        id,
+                        spec.kind,
+                        spec.label,
+                        spec.connector_key,
+                        spec.config_json
+                    ],
+                )?;
+                id
+            }
+        };
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Every source instance in the vault, oldest first: legacy-named
+    /// ones (connector key `None`) and connector-owned ones. The returned
+    /// configuration never contains credentials.
+    pub fn list_source_instances(&self) -> Result<Vec<SourceInstance>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, label, connector_key, config_json, state,
+                    last_attempt_at, last_success_at, created_at
+             FROM source_instances ORDER BY created_at, id",
+        )?;
+        let rows = stmt
+            .query_map([], source_instance_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Stamp a sync attempt on a source instance (`last_attempt_at`).
+    /// Unknown ids are a no-op: the caller just ensured the instance, and
+    /// attempt stamps must never fail a sync.
+    pub fn record_source_attempt(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE source_instances SET last_attempt_at = datetime('now')
+             WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Stamp a successful sync on a source instance and mark it connected
+    /// (`last_success_at`, `state = 'connected'`).
+    pub fn record_source_success(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE source_instances
+             SET last_success_at = datetime('now'), state = 'connected'
+             WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Mark a source instance disconnected. Archived content and cursors
+    /// are kept — disconnecting an account never deletes its archive.
+    pub fn disconnect_source_instance(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE source_instances SET state = 'disconnected' WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Insert one mail message through its connector, with the identity
+    /// scoped to a durable source instance and the first folder/import
+    /// occurrence.
+    ///
+    /// Dedup is on the full identity tuple
+    /// `(instance, namespace, external_key, revision_hash)`: an exact
+    /// repeat is [`MailInsertOutcome::Duplicate`] (only the new occurrence
+    /// is recorded — the same mail seen in another folder enriches the
+    /// provenance without duplicating the row). A different decoded
+    /// payload sharing the same external key (e.g. two conflicting
+    /// revisions of one `Message-ID`) becomes a **new archived row**: both
+    /// revisions stay searchable, and the outcome flags the conflict so
+    /// callers can count it. First write wins for the archived row's
+    /// fields; later revisions never rewrite an earlier one.
+    pub fn insert_mail_message(
+        &self,
+        instance_id: &str,
+        msg: &NewMessage,
+        subject: &str,
+        identity: &ConnectorIdentity<'_>,
+        occurrence: &Occurrence<'_>,
+    ) -> Result<MailInsertOutcome> {
+        let tx = self.conn.unchecked_transaction()?;
+
+        // Exact identity tuple (same revision): the message is already
+        // archived under this instance; record the observation only.
+        let existing: Option<i64> = tx
+            .query_row(
+                "SELECT message_id FROM message_identities
+                 WHERE source_instance_id = ?1 AND namespace = ?2
+                   AND external_key = ?3 AND revision_hash = ?4",
+                params![
+                    instance_id,
+                    identity.namespace,
+                    identity.external_key,
+                    identity.revision_hash
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(id) = existing {
+            tx.execute(
+                "INSERT OR IGNORE INTO message_occurrences
+                     (message_id, scope, provider_item_id, uidvalidity)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    id,
+                    occurrence.scope,
+                    occurrence.provider_item_id,
+                    occurrence.uidvalidity
+                ],
+            )?;
+            tx.commit()?;
+            return Ok(MailInsertOutcome::Duplicate { id });
+        }
+
+        // A new revision of a known external key — or a brand new key.
+        // Either way the row is archived; conflicting revisions of one
+        // key coexist as separate rows.
+        let sent_instant = if msg.sent_at.is_empty() {
+            None
+        } else {
+            Some(msg.sent_at.as_str())
+        };
+        // Connector mail carries its date evidence in the RFC 5322 Date
+        // header's explicit offset (resolved by the parser); absent dates
+        // are honestly `missing`. No interpretation is layered on top
+        // here — that is the time-confidence slice's job.
+        let time_confidence = if msg.sent_at.is_empty() {
+            "missing"
+        } else {
+            "explicit_offset"
+        };
+        let id: i64 = tx.query_row(
+            r#"
+            INSERT INTO archive_messages
+                (source_instance_id, conversation_id, external_id, channel, chat_id,
+                 author, subject, body, raw_json,
+                 sent_instant, original_timestamp, timezone, time_confidence,
+                 content_hash)
+            VALUES (?1, NULL, ?2, ?3, '', ?4, ?5, ?6, ?7, ?8, ?9, '', ?10, ?11)
+            RETURNING id
+            "#,
+            params![
+                instance_id,
+                identity.external_key,
+                msg.channel,
+                msg.author,
+                subject,
+                msg.body,
+                msg.raw_json,
+                sent_instant,
+                msg.sent_at,
+                time_confidence,
+                content_hash(msg),
+            ],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO message_identities
+                 (source_instance_id, namespace, external_key, revision_hash, message_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                instance_id,
+                identity.namespace,
+                identity.external_key,
+                identity.revision_hash,
+                id
+            ],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO message_occurrences
+                 (message_id, scope, provider_item_id, uidvalidity)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                id,
+                occurrence.scope,
+                occurrence.provider_item_id,
+                occurrence.uidvalidity
+            ],
+        )?;
+        // Visible conflict marker at the storage level: another archived
+        // revision of the same external key exists under this instance.
+        let revisions: i64 = tx.query_row(
+            "SELECT COUNT(DISTINCT revision_hash) FROM message_identities
+             WHERE source_instance_id = ?1 AND namespace = ?2 AND external_key = ?3",
+            params![instance_id, identity.namespace, identity.external_key],
+            |row| row.get(0),
+        )?;
+        tx.commit()?;
+        Ok(MailInsertOutcome::Inserted {
+            id,
+            conflicting_revision: revisions > 1,
+        })
+    }
+
+    /// The folder/import observations recorded for one message, oldest
+    /// first — a mail archived once keeps one row per folder that saw it
+    /// (see [`Storage::insert_mail_message`]).
+    pub fn message_occurrences(&self, message_id: i64) -> Result<Vec<MessageOccurrence>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT scope, provider_item_id, uidvalidity, observed_at
+             FROM message_occurrences WHERE message_id = ?1
+             ORDER BY observed_at, rowid",
+        )?;
+        let rows = stmt
+            .query_map(params![message_id], |row| {
+                Ok(MessageOccurrence {
+                    scope: row.get(0)?,
+                    provider_item_id: row.get(1)?,
+                    uidvalidity: row.get(2)?,
+                    observed_at: row.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Every archived revision sharing a message's identity external key
+    /// under its source instance — the message itself included. More than
+    /// one entry means conflicting revisions of one external key (e.g. two
+    /// payloads behind one `Message-ID`) are preserved; every revision
+    /// stays searchable, none silently wins.
+    pub fn message_revisions(&self, message_id: i64) -> Result<Vec<MessageRevision>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT mi.message_id, mi.revision_hash
+             FROM message_identities AS mi
+             WHERE mi.source_instance_id = (SELECT source_instance_id
+                                            FROM archive_messages WHERE id = ?1)
+               AND mi.namespace = (SELECT namespace FROM message_identities
+                                   WHERE message_id = ?1)
+               AND mi.external_key = (SELECT external_key FROM message_identities
+                                      WHERE message_id = ?1)
+             ORDER BY mi.revision_hash",
+        )?;
+        let rows = stmt
+            .query_map(params![message_id], |row| {
+                Ok(MessageRevision {
+                    message_id: row.get(0)?,
+                    revision_hash: row.get(1)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Full-text search with optional inclusive LOCAL-day sent-date bounds —
     /// the same date semantics as [`Storage::search_page`].
     ///
@@ -651,7 +975,7 @@ impl Storage {
         };
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id,
+            SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id,
                    m.channel, m.chat_id, m.author,
                    COALESCE(m.sent_instant, ''), m.body, m.raw_json
             FROM archive_fts
@@ -746,7 +1070,7 @@ impl Storage {
             bind.push(SqlValue::Integer(query.limit as i64));
             bind.push(SqlValue::Integer(query.offset as i64));
             let sql = format!(
-                "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+                "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
                  m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
                  m.body, m.raw_json, NULL \
                  FROM archive_messages AS m \
@@ -773,7 +1097,7 @@ impl Storage {
             bind.push(SqlValue::Integer(query.limit as i64));
             bind.push(SqlValue::Integer(query.offset as i64));
             let sql = format!(
-                "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+                "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
                  m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
                  m.body, m.raw_json, \
                  snippet(archive_fts, 0, ?1, ?2, '…', 16) \
@@ -818,7 +1142,7 @@ impl Storage {
         let (sql, bind): (String, Vec<SqlValue>) = if query.text.trim().is_empty() {
             (
                 format!(
-                    "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+                    "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
                      m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
                      m.body, m.raw_json \
                      FROM archive_messages AS m \
@@ -836,7 +1160,7 @@ impl Storage {
             bind.extend(filters.bind());
             (
                 format!(
-                    "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+                    "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
                      m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
                      m.body, m.raw_json \
                      FROM archive_fts \
@@ -890,7 +1214,7 @@ impl Storage {
         }
 
         let mut before_stmt = self.conn.prepare(
-            "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+            "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
              m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), m.body, m.raw_json \
              FROM archive_messages AS m \
              JOIN source_instances AS si ON si.id = m.source_instance_id \
@@ -909,7 +1233,7 @@ impl Storage {
         before.reverse(); // newest → oldest from the query; thread reads oldest → newest
 
         let mut after_stmt = self.conn.prepare(
-            "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+            "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
              m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), m.body, m.raw_json \
              FROM archive_messages AS m \
              JOIN source_instances AS si ON si.id = m.source_instance_id \
@@ -937,7 +1261,7 @@ impl Storage {
     pub fn get(&self, id: i64) -> Result<Option<Message>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id,
+            SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id,
                    m.channel, m.chat_id, m.author,
                    COALESCE(m.sent_instant, ''), m.body, m.raw_json
             FROM archive_messages AS m
@@ -960,7 +1284,7 @@ impl Storage {
     /// position).
     pub fn chat_thread_messages(&self, source: &str, chat_id: &str) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
-            "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+            "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
              m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), m.body, m.raw_json \
              FROM archive_messages AS m \
              JOIN conversations AS c ON c.id = m.conversation_id \
@@ -982,7 +1306,7 @@ impl Storage {
     /// construction because every write path maintains the counters.
     pub fn stats(&self) -> Result<Stats> {
         let mut stmt = self.conn.prepare(
-            "SELECT COALESCE(si.legacy_namespace, si.id) AS label, s.n \
+            "SELECT COALESCE(si.legacy_namespace, si.label, si.id) AS label, s.n \
              FROM stats_source AS s \
              JOIN source_instances AS si ON si.id = s.source \
              WHERE s.n > 0 ORDER BY s.n DESC, label",
@@ -1037,7 +1361,7 @@ impl Storage {
         )?;
 
         let mut source_stmt = self.conn.prepare(
-            "SELECT COALESCE(si.legacy_namespace, si.id) AS label, s.n              FROM stats_source AS s              JOIN source_instances AS si ON si.id = s.source              WHERE s.n > 0 ORDER BY s.n DESC, label",
+            "SELECT COALESCE(si.legacy_namespace, si.label, si.id) AS label, s.n              FROM stats_source AS s              JOIN source_instances AS si ON si.id = s.source              WHERE s.n > 0 ORDER BY s.n DESC, label",
         )?;
         let by_source = source_stmt
             .query_map([], |row| {
@@ -1063,7 +1387,7 @@ impl Storage {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         let mut chat_stmt = self.conn.prepare(
-            "SELECT COALESCE(si.legacy_namespace, si.id) AS label, c.chat_id, c.n \
+            "SELECT COALESCE(si.legacy_namespace, si.label, si.id) AS label, c.chat_id, c.n \
              FROM stats_chat AS c \
              JOIN source_instances AS si ON si.id = c.source \
              WHERE c.chat_id != '' AND c.n > 0 \
@@ -1184,6 +1508,55 @@ impl Storage {
             params![instance, folder, uidvalidity, last_uid],
         )?;
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Load the incremental-sync cursor for one `(source instance, folder)`
+    /// — the connector-scoped variant of [`Storage::get_imap_state`], keyed
+    /// by the durable instance id instead of the legacy namespace.
+    pub fn get_imap_checkpoint(
+        &self,
+        instance_id: &str,
+        folder: &str,
+    ) -> Result<Option<crate::message::ImapSyncState>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT uidvalidity, last_uid FROM sync_checkpoints
+                 WHERE source_instance_id = ?1 AND folder = ?2",
+                params![instance_id, folder],
+                |row| {
+                    Ok(crate::message::ImapSyncState {
+                        uidvalidity: row.get(0)?,
+                        last_uid: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Save (upsert) the incremental-sync cursor for one
+    /// `(source instance, folder)` — the connector-scoped variant of
+    /// [`Storage::set_imap_state`], keyed by the durable instance id.
+    /// Stores only folder cursors — never credentials.
+    pub fn set_imap_checkpoint(
+        &self,
+        instance_id: &str,
+        folder: &str,
+        uidvalidity: u32,
+        last_uid: u32,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO sync_checkpoints
+                 (source_instance_id, folder, uidvalidity, last_uid, updated_at)
+             VALUES (?1, ?2, ?3, ?4, datetime('now'))
+             ON CONFLICT (source_instance_id, folder) DO UPDATE SET
+                uidvalidity = excluded.uidvalidity,
+                last_uid    = excluded.last_uid,
+                updated_at  = excluded.updated_at",
+            params![instance_id, folder, uidvalidity, last_uid],
+        )?;
         Ok(())
     }
 
@@ -1377,7 +1750,7 @@ impl Storage {
         let mut by_id: std::collections::HashMap<i64, Message> =
             std::collections::HashMap::with_capacity(ids.len());
         let mut stmt = self.conn.prepare(
-            "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id,
+            "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id,
                     m.channel, m.chat_id, m.author,
                     COALESCE(m.sent_instant, ''), m.body, m.raw_json
              FROM archive_messages AS m
@@ -1761,6 +2134,116 @@ fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
     })
 }
 
+/// A connector's registration of a durable source instance
+/// (see [`Storage::ensure_source_instance`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSourceInstance<'a> {
+    /// Connector kind, e.g. `"imap"`. Kinds are connector-controlled
+    /// enums — only a connector constructs its own kind.
+    pub kind: &'a str,
+    /// Human-readable label; display only, never identity.
+    pub label: &'a str,
+    /// Canonical connector identity key (connector-defined; for IMAP:
+    /// case-folded host, port, TLS mode, exact username). Two
+    /// configurations producing the same key are the same instance.
+    pub connector_key: &'a str,
+    /// Non-secret connector configuration as JSON (validated by the
+    /// connector). Credentials never appear here.
+    pub config_json: &'a str,
+}
+
+/// A durable source instance as stored (see
+/// [`Storage::list_source_instances`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceInstance {
+    pub id: String,
+    /// Connector kind (`"imap"`, …) or `"legacy"` for pre-canonical
+    /// namespaces.
+    pub kind: String,
+    pub label: String,
+    /// Canonical connector identity key; `None` for legacy-named
+    /// instances that no connector has claimed.
+    pub connector_key: Option<String>,
+    /// Non-secret configuration JSON.
+    pub config_json: String,
+    /// `"connected"` after a successful sync, `"disconnected"` otherwise.
+    pub state: String,
+    pub last_attempt_at: Option<String>,
+    pub last_success_at: Option<String>,
+    pub created_at: String,
+}
+
+fn source_instance_from_row(row: &Row<'_>) -> rusqlite::Result<SourceInstance> {
+    Ok(SourceInstance {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        label: row.get(2)?,
+        connector_key: row.get(3)?,
+        config_json: row.get(4)?,
+        state: row.get(5)?,
+        last_attempt_at: row.get(6)?,
+        last_success_at: row.get(7)?,
+        created_at: row.get(8)?,
+    })
+}
+
+/// Connector-scoped message identity for [`Storage::insert_mail_message`]:
+/// the namespace a connector owns (e.g. `"imap"`), the external key within
+/// it (normalized `Message-ID`, or the SHA-256 of the raw message bytes
+/// when the mail has none — see [`crate::mail::parse_raw_mail_canonical`]),
+/// and the semantic revision hash over decoded content and stable headers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectorIdentity<'a> {
+    pub namespace: &'a str,
+    pub external_key: &'a str,
+    pub revision_hash: &'a str,
+}
+
+/// One observation of a message by a connector: the remote folder (or
+/// import scope), the provider's item id within it (the IMAP UID), and
+/// the folder's `UIDVALIDITY` where applicable. The unique occurrence
+/// tuple `(message, scope, provider_item_id)` keeps repeat observations
+/// from adding provenance rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Occurrence<'a> {
+    pub scope: &'a str,
+    pub provider_item_id: &'a str,
+    pub uidvalidity: Option<u32>,
+}
+
+/// Outcome of a connector mail insert
+/// (see [`Storage::insert_mail_message`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MailInsertOutcome {
+    /// New archived row. `conflicting_revision` is `true` when another
+    /// revision of the same external key was already archived under this
+    /// instance — both revisions are preserved and searchable.
+    Inserted { id: i64, conflicting_revision: bool },
+    /// The exact identity (same external key *and* revision) was already
+    /// archived; only the occurrence was recorded.
+    Duplicate { id: i64 },
+}
+
+/// A recorded observation of one archived message
+/// (see [`Storage::message_occurrences`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageOccurrence {
+    /// Remote folder name or import scope.
+    pub scope: String,
+    /// Provider item id within the scope (e.g. the IMAP UID).
+    pub provider_item_id: String,
+    pub uidvalidity: Option<u32>,
+    pub observed_at: String,
+}
+
+/// One archived revision behind an identity external key
+/// (see [`Storage::message_revisions`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageRevision {
+    pub message_id: i64,
+    pub revision_hash: String,
+}
+
 /// Coverage counts for one embedding model (see [`Storage::embedding_counts`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmbeddingCounts {
@@ -1809,7 +2292,13 @@ impl QueryFilters {
 
         if !query.sources.is_empty() {
             let placeholders = vec!["?"; query.sources.len()].join(", ");
-            sql.push_str(&format!(" AND si.legacy_namespace IN ({placeholders})"));
+            // Match the same source string the API reports (`Message.source`:
+            // the legacy namespace, or the connector label for connector-owned
+            // sources — never the raw instance id) so a facet value taken from
+            // stats/search filters the rows it came from.
+            sql.push_str(&format!(
+                " AND COALESCE(si.legacy_namespace, si.label, si.id) IN ({placeholders})"
+            ));
             values.extend(query.sources.iter().cloned().map(SqlValue::from));
         }
         let author = query.author.trim();
@@ -1917,14 +2406,7 @@ fn content_hash(msg: &NewMessage) -> String {
 }
 
 fn sha256_hex(input: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(input.as_bytes());
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+    crate::util::sha256_hex(input.as_bytes())
 }
 
 /// The UTC instant a fresh import on this machine derives from a legacy

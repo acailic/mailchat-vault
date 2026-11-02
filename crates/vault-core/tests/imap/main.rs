@@ -42,7 +42,8 @@ use vault_core::message::Message;
 use vault_core::search::build_match_query;
 use vault_core::storage::Storage;
 
-/// The account every scenario syncs as (source: `imap:alice@example.com`).
+/// The account every scenario syncs as (durable source instance for
+/// `alice@example.com` on the mock server).
 pub(crate) const USER: &str = "alice@example.com";
 /// A second, distinct account for source-scoping scenarios.
 pub(crate) const OTHER_USER: &str = "bob@example.com";
@@ -50,9 +51,24 @@ pub(crate) const OTHER_USER: &str = "bob@example.com";
 /// no-persist scenario byte-scans every storage file for it.
 pub(crate) const PASSWORD: &str = "ziggy42-app-password";
 
-/// The vault source name for a user (`imap:<username>`).
-pub(crate) fn source_of(user: &str) -> String {
-    vimap::source_name(user)
+/// The mock server's hostname in connector configurations.
+pub(crate) const MOCK_HOST: &str = "mock.test";
+
+/// The connector configuration an account syncs as on the mock server.
+pub(crate) fn config_for(user: &str) -> vimap::ImapConfig {
+    vimap::ImapConfig {
+        host: MOCK_HOST.to_string(),
+        port: 993,
+        username: user.to_string(),
+        password: PASSWORD.to_string(),
+        folders: Vec::new(),
+    }
+}
+
+/// The durable source instance for a user (`vimap::ensure_source_instance`,
+/// idempotent): identities, occurrences, and cursors scope to it.
+pub(crate) fn instance_of(storage: &Storage, user: &str) -> String {
+    vimap::ensure_source_instance(storage, &config_for(user)).unwrap()
 }
 
 /// One raw test mail: a Message-ID (or `None` for the content-hash path),
@@ -120,8 +136,8 @@ impl Account {
     }
 
     /// One sync round logged in as another user against the same server:
-    /// how two-accounts-on-one-backend scenarios are staged. The vault
-    /// source (`imap:<user>`) follows the login, not the server.
+    /// how two-accounts-on-one-backend scenarios are staged. The durable
+    /// source instance follows the login, not the server.
     pub fn sync_round_as(
         &self,
         user: &str,
@@ -129,8 +145,9 @@ impl Account {
         folders: &[&str],
     ) -> Vec<vimap::FolderSyncSummary> {
         let folders: Vec<String> = folders.iter().map(|f| f.to_string()).collect();
+        let instance = crate::instance_of(storage, user);
         let mut session = self.session_as(user);
-        let summaries = vimap::sync_session(&mut session, storage, &source_of(user), &folders);
+        let summaries = vimap::sync_session(&mut session, storage, &instance, &folders);
         let _ = session.logout();
         summaries
     }
@@ -159,10 +176,11 @@ pub(crate) fn summary_for<'a>(
 }
 
 /// The folder's persisted sync cursor as `(uidvalidity, last_uid)`, or
-/// `None` when the folder has never completed (or attempted) a scan.
+/// `None` when the folder has never completed (or attempted) a scan —
+/// scoped to the account's durable source instance.
 pub(crate) fn cursor(storage: &Storage, user: &str, folder: &str) -> Option<(u32, u32)> {
     storage
-        .get_imap_state(&source_of(user), folder)
+        .get_imap_checkpoint(&crate::instance_of(storage, user), folder)
         .unwrap()
         .map(|s| (s.uidvalidity, s.last_uid))
 }

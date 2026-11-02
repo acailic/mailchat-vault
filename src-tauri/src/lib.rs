@@ -269,11 +269,13 @@ async fn sync_imap(
     password: String,
     folders: Option<Vec<String>>,
 ) -> Result<ImapSyncOutcome, String> {
-    // Email addresses and hostnames are case-insensitive, so one account
-    // spelled with different casing must map to one dedup namespace
-    // (`imap:<username>`) and one keyring entry (`user@host`).
+    // Hostnames are case-insensitive, so one server spelled with different
+    // casing must map to one durable source instance. Usernames stay
+    // exactly as configured: the identity contract case-folds hosts, not
+    // usernames (see ImapConfig::connector_key), so two casings of a
+    // username are distinct accounts until the server says otherwise.
     let host = host.trim().to_lowercase();
-    let username = username.trim().to_lowercase();
+    let username = username.trim().to_string();
     if host.is_empty() {
         return Err("host is required (e.g. imap.gmail.com)".into());
     }

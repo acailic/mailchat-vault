@@ -95,7 +95,7 @@ fn no_trace_of_the_password_in_any_file_after_a_full_sync_lifecycle() {
 /// The only thing IMAP sync persists per folder is a cursor: the canonical
 /// `sync_checkpoints` table's columns are exactly the cursor fields (keyed
 /// by source instance), its rows are exactly one per synced folder under
-/// the account's legacy namespace, and no cell anywhere in the database
+/// the account's durable source instance, and no cell anywhere in the database
 /// holds the password.
 #[test]
 fn the_sync_state_table_persists_only_folder_cursors() {
@@ -134,12 +134,14 @@ fn the_sync_state_table_persists_only_folder_cursors() {
         "the sync-checkpoint table must persist cursors only — no credentials"
     );
 
-    // Exactly one cursor row per synced folder, holding the account's
-    // source namespace and folder names.
+    // Exactly one cursor row per synced folder, keyed by the account's
+    // durable source instance and holding the folder names (the connector
+    // configuration — host/port/TLS/username, never credentials — lives
+    // on the instance row itself).
     let rows: Vec<(String, String, i64, i64)> = {
         let mut stmt = conn
             .prepare(
-                "SELECT si.legacy_namespace, sc.folder, sc.uidvalidity, sc.last_uid \
+                "SELECT si.connector_key, sc.folder, sc.uidvalidity, sc.last_uid \
                  FROM sync_checkpoints AS sc \
                  JOIN source_instances AS si ON si.id = sc.source_instance_id \
                  ORDER BY sc.folder",
@@ -156,19 +158,35 @@ fn the_sync_state_table_persists_only_folder_cursors() {
         rows,
         vec![
             (
-                "imap:alice@example.com".to_string(),
+                format!("imap|{}|993|implicit-tls|{USER}", crate::MOCK_HOST),
                 "Archive".to_string(),
                 3,
                 1
             ),
             (
-                "imap:alice@example.com".to_string(),
+                format!("imap|{}|993|implicit-tls|{USER}", crate::MOCK_HOST),
                 "INBOX".to_string(),
                 7,
                 1
             ),
         ]
     );
+
+    // The instance row stores the non-secret connector configuration —
+    // and no password anywhere in it.
+    let config_json: String = conn
+        .query_row(
+            "SELECT config_json FROM source_instances WHERE kind = 'imap'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let config: serde_json::Value = serde_json::from_str(&config_json).unwrap();
+    assert_eq!(config["username"], USER);
+    assert_eq!(config["host"], crate::MOCK_HOST);
+    assert_eq!(config["port"], 993);
+    assert_eq!(config["tls_mode"], "implicit-tls");
+    assert!(!config.to_string().contains(PASSWORD));
 
     // Belt and braces: no table in the database contains the password in
     // any text cell. (The byte-level file scan lives in the sibling test;
