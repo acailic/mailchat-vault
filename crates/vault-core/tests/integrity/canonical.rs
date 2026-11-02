@@ -295,7 +295,7 @@ fn count(db: &std::path::Path, sql: &str) -> i64 {
 
 #[test]
 fn old_schema_fixture_migrates_without_loss() {
-    // Migration 6 re-resolves the legacy WhatsApp stamps in the machine's
+    // Migration 7 re-resolves the legacy WhatsApp stamps in the machine's
     // local zone; pin it (Europe/Paris: both fixture dates are winter
     // CET, +01:00) so the expectations below hold on any machine.
     let _tz = crate::util::TzGuard::pin("Europe/Paris");

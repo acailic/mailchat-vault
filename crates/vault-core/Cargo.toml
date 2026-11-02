@@ -26,6 +26,5 @@ webpki-roots = { workspace = true }
 [dev-dependencies]
 proptest = "1.7"
 tempfile = "3"
-iana-time-zone = "0.1"
 imap = { workspace = true }
 sha2 = { workspace = true }

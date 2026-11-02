@@ -2016,7 +2016,7 @@ fn migrate(conn: &Connection) -> Result<()> {
 }
 
 // -----------------------------------------------------------------------
-// Migration 6 (M1.3): stable conversation keys over the M1.1 tables
+// Migration 7 (M1.3): stable conversation keys over the M1.1 tables
 // -----------------------------------------------------------------------
 
 /// Backfill stable conversation keys (migration 7). See the migration's
