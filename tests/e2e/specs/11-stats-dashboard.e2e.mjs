@@ -133,7 +133,7 @@ export async function run(ctx) {
           (SELECT COALESCE(SUM(n), 0) FROM stats_day)    AS day_total,
           (SELECT COALESCE(SUM(n), 0) FROM stats_chat)   AS chat_total,
           (SELECT COALESCE(SUM(n), 0) FROM stats_author) AS author_total,
-          (SELECT COUNT(*) FROM messages)                AS msg_total
+          (SELECT COUNT(*) FROM archive_messages)       AS msg_total
       `);
       const row = sums[0];
       for (const key of ["src_total", "day_total", "chat_total", "author_total"]) {
