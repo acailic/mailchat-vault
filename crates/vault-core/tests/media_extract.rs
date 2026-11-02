@@ -566,7 +566,12 @@ fn directory_without_result_json_and_unknown_files_error() {
     let storage = Storage::open_in_memory().unwrap();
 
     let err = import(&storage, &sb.export_dir(), true, Some(&sb.data_dir())).unwrap_err();
-    assert!(err.to_string().contains("no result.json"), "{err}");
+    assert!(
+        err.to_string().contains(
+            "expected a directory containing a Telegram result.json or a Discord Data Package"
+        ),
+        "{err}"
+    );
 
     let junk = sb.root.join("junk.txt");
     fs::write(&junk, "not an export at all").unwrap();
