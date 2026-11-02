@@ -59,7 +59,7 @@ export async function run(ctx) {
     {
       env: {
         MAILCHAT_GMAIL_CLIENT_ID: "e2e-client.apps.googleusercontent.com",
-        MAILCHAT_GMAIL_CLIENT_SECRET: "e2e-secret-GOCSPX",
+        MAILCHAT_GMAIL_CLIENT_SECRET: "e2e-secret",
       },
     },
     async (browser) => {

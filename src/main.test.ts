@@ -1231,6 +1231,9 @@ describe("folder watching", () => {
     await vi.waitFor(() =>
       expect($("#watch-status").textContent).toContain("No folders watched yet"),
     );
+  });
+});
+
 // IMAP sync auth mode (app password vs Google sign-in)
 // ---------------------------------------------------------------------------
 

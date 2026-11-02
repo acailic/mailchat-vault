@@ -17,7 +17,7 @@ use vault_core::oauth::{
 };
 
 const CLIENT_ID: &str = "test-client.apps.googleusercontent.com";
-const CLIENT_SECRET: &str = "test-secret-GOCSPX";
+const CLIENT_SECRET: &str = "test-secret";
 const USER: &str = "alice@example.com";
 
 fn mock() -> MockOAuth {

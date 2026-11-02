@@ -24,7 +24,7 @@ use crate::{mails, USER};
 
 /// The client credentials the mock OAuth server accepts.
 const CLIENT_ID: &str = "test-client.apps.googleusercontent.com";
-const CLIENT_SECRET: &str = "test-secret-GOCSPX";
+const CLIENT_SECRET: &str = "test-secret";
 
 /// Start both halves of the chain: the mock OAuth server and an
 /// XOAUTH2-only mock IMAP server that currently accepts `access_token`.
