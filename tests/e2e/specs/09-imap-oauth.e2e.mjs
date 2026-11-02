@@ -105,13 +105,7 @@ export async function run(ctx) {
     {
       env: {
         MAILCHAT_GMAIL_CLIENT_ID: "e2e-client.apps.googleusercontent.com",
-<<<<<<< HEAD
-        MAILCHAT_GMAIL_CLIENT_SECRET: "e2e-fake-secret",
-||||||| parent of 7a99aad (fix(ci): drop GOCSPX marker from fake fixture secrets (GitGuardian); make imap-oauth spec host-browser-independent)
         MAILCHAT_GMAIL_CLIENT_SECRET: "e2e-secret",
-=======
-        MAILCHAT_GMAIL_CLIENT_SECRET: "e2e-secret",
->>>>>>> 7a99aad (fix(ci): drop GOCSPX marker from fake fixture secrets (GitGuardian); make imap-oauth spec host-browser-independent)
       },
     },
     async (browser) => {

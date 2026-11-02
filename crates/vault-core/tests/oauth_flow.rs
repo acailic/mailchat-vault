@@ -17,13 +17,7 @@ use vault_core::oauth::{
 };
 
 const CLIENT_ID: &str = "test-client.apps.googleusercontent.com";
-<<<<<<< HEAD
-const CLIENT_SECRET: &str = "test-fake-secret";
-||||||| parent of 7a99aad (fix(ci): drop GOCSPX marker from fake fixture secrets (GitGuardian); make imap-oauth spec host-browser-independent)
 const CLIENT_SECRET: &str = "test-secret";
-=======
-const CLIENT_SECRET: &str = "test-secret";
->>>>>>> 7a99aad (fix(ci): drop GOCSPX marker from fake fixture secrets (GitGuardian); make imap-oauth spec host-browser-independent)
 const USER: &str = "alice@example.com";
 
 fn mock() -> MockOAuth {
