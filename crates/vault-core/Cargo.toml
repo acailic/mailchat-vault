@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 chrono = { workspace = true }
+iana-time-zone = "0.1"
 imap = { workspace = true }
 mailparse = { workspace = true }
 notify = { workspace = true }

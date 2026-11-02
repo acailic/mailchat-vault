@@ -117,7 +117,14 @@ pub fn parse_signal(bytes: &[u8], chat_id_fallback: &str) -> Result<Collected> {
     let dedup_chat = if conversation_id.is_empty() {
         chat_id.clone()
     } else {
-        conversation_id
+        conversation_id.clone()
+    };
+    // The provider-guaranteed conversation uuid keys the conversation
+    // (M1.3); exports without one stay on the legacy file-stem grouping.
+    let conversation_key = if conversation_id.is_empty() {
+        String::new()
+    } else {
+        format!("signal:chat:{conversation_id}")
     };
 
     let mut messages = Vec::new();
@@ -139,7 +146,7 @@ pub fn parse_signal(bytes: &[u8], chat_id_fallback: &str) -> Result<Collected> {
         }
 
         let author = signal_author(obj);
-        let sent_at = signal_sent_at(obj);
+        let (sent_at, original_timestamp) = signal_sent_at(obj);
         let body = obj
             .get("body")
             .and_then(Value::as_str)
@@ -164,6 +171,14 @@ pub fn parse_signal(bytes: &[u8], chat_id_fallback: &str) -> Result<Collected> {
         let mut msg = NewMessage::new(SIGNAL_SOURCE, external_id, author, sent_at, body);
         msg.channel = "chat".to_string();
         msg.chat_id = chat_id.clone();
+        msg.conversation_key = conversation_key.clone();
+        // Signal timestamps are absolute epoch milliseconds: UTC-exact
+        // by construction, recorded as explicitly offset.
+        if !original_timestamp.is_empty() {
+            msg.original_timestamp = original_timestamp;
+            msg.timezone = "UTC".to_string();
+            msg.time_confidence = "explicit_offset".to_string();
+        }
         // The whole original object: attachments, quote, reactions,
         // group membership, edit history — all stay recorded verbatim.
         msg.raw_json = entry.to_string();
@@ -274,16 +289,16 @@ fn strip_device_suffix(source: &str) -> String {
 /// milliseconds, so the UTC form is exact. The first present field in
 /// preference order wins; empty when none parses (out of chrono's range
 /// counts as absent, never an error).
-fn signal_sent_at(obj: &serde_json::Map<String, Value>) -> String {
+fn signal_sent_at(obj: &serde_json::Map<String, Value>) -> (String, String) {
     const RFC3339: &str = "%Y-%m-%dT%H:%M:%SZ";
     for key in TIMESTAMP_FIELDS {
         if let Some(ms) = obj.get(key).and_then(epoch_ms) {
             if let Some(t) = Utc.timestamp_millis_opt(ms).single() {
-                return t.format(RFC3339).to_string();
+                return (t.format(RFC3339).to_string(), ms.to_string());
             }
         }
     }
-    String::new()
+    (String::new(), String::new())
 }
 
 /// Epoch milliseconds as a number, tolerating the string spelling some

@@ -9,6 +9,7 @@
 //! the storage layer's behavior when it meets them.
 
 mod canonical;
+mod conversation_keys;
 mod corruption;
 mod dedup;
 mod migrations;

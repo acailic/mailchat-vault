@@ -131,6 +131,7 @@ fn fixture() -> Storage {
             sent_at,
             body: buf.trim().into(),
             raw_json: "{}".into(),
+            ..NewMessage::new("", "", "", "", "")
         };
         msgs.push(m);
     }

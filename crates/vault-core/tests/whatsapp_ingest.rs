@@ -1,7 +1,19 @@
+use chrono::FixedOffset;
 use vault_core::ingest::{ingest, IngestSummary, Source};
 use vault_core::search::build_match_query;
 use vault_core::storage::Storage;
-use vault_core::whatsapp::{parse_whatsapp, WhatsappSource, WHATSAPP_SOURCE};
+use vault_core::whatsapp::{parse_whatsapp_tz, WhatsappSource, WHATSAPP_SOURCE};
+
+/// A fixed CET-like zone (+01:00) so timestamp expectations are
+/// deterministic regardless of the machine running the tests.
+fn zone() -> (chrono::FixedOffset, &'static str) {
+    (FixedOffset::east_opt(3600).unwrap(), "Europe/Belgrade")
+}
+
+fn parse(bytes: &[u8], chat_id: &str) -> vault_core::ingest::Collected {
+    let (tz, label) = zone();
+    parse_whatsapp_tz(bytes, chat_id, &tz, label).unwrap()
+}
 
 // Croatian-style export: dd.mm.yyyy with a trailing year dot, 24h clock,
 // unicode names and emoji, a system line, a multiline message, a quoted
@@ -40,7 +52,7 @@ const OLD_ANDROID_EXPORT: &str = "\
 
 #[test]
 fn parses_hr_export_fields() {
-    let collected = parse_whatsapp(HR_EXPORT.as_bytes(), "Arhiva ekipa").unwrap();
+    let collected = parse(HR_EXPORT.as_bytes(), "Arhiva ekipa");
     assert_eq!(collected.failed, 0);
     assert_eq!(collected.messages.len(), 8);
 
@@ -54,12 +66,21 @@ fn parses_hr_export_fields() {
     let raw: serde_json::Value = serde_json::from_str(&system.raw_json).unwrap();
     assert_eq!(raw["system"], true);
 
-    // Regular message: unicode author, emoji body, UTC-normalized stamp.
+    // Regular message: unicode author, emoji body, exporter-local stamp
+    // interpreted in the explicit zone (+01:00 → 08:00:05Z) with the
+    // provenance recorded (M1.3).
     let marko = &collected.messages[1];
     assert_eq!(marko.author, "Marko Horvat");
-    assert_eq!(marko.sent_at, "2026-11-01T09:00:05Z");
+    assert_eq!(marko.sent_at, "2026-11-01T08:00:05Z");
+    assert_eq!(marko.original_timestamp, "2026-11-01T09:00:05");
+    assert_eq!(marko.timezone, "Europe/Belgrade");
+    assert_eq!(marko.time_confidence, "legacy_assumed");
     assert!(marko.body.contains("FTS pretraga radi 🎉"));
     assert!(marko.external_id.starts_with("generated-"));
+    assert!(
+        !marko.conversation_key.is_empty(),
+        "key derived from participants"
+    );
 
     // Multiline continuation lines join into one body.
     let multiline = &collected.messages[2];
@@ -92,28 +113,28 @@ fn parses_hr_export_fields() {
 #[test]
 fn parses_us_export_month_first_12h_and_media() {
     // 28 in the month position proves mm/dd; times are 12h.
-    let collected = parse_whatsapp(US_EXPORT.as_bytes(), "family").unwrap();
+    let collected = parse(US_EXPORT.as_bytes(), "family");
     assert_eq!(collected.messages.len(), 3);
 
     let mom = &collected.messages[0];
-    assert_eq!(mom.sent_at, "2023-06-28T09:30:15Z");
+    assert_eq!(mom.sent_at, "2023-06-28T08:30:15Z");
     assert!(mom.body.contains("morning coffee"));
 
-    // 2:15:03 PM is 14:15:03.
+    // 2:15:03 PM is 14:15:03 local → 13:15:03Z in the +01:00 zone.
     let media = &collected.messages[2];
-    assert_eq!(media.sent_at, "2023-06-28T14:15:03Z");
+    assert_eq!(media.sent_at, "2023-06-28T13:15:03Z");
     let raw: serde_json::Value = serde_json::from_str(&media.raw_json).unwrap();
     assert_eq!(raw["attachment"]["kind"], "media");
 }
 
 #[test]
 fn parses_old_android_hyphen_export() {
-    let collected = parse_whatsapp(OLD_ANDROID_EXPORT.as_bytes(), "blagdani").unwrap();
+    let collected = parse(OLD_ANDROID_EXPORT.as_bytes(), "blagdani");
     assert_eq!(collected.messages.len(), 3);
 
     let first = &collected.messages[0];
     assert_eq!(first.author, "Marko");
-    assert_eq!(first.sent_at, "2026-12-25T19:04:00Z");
+    assert_eq!(first.sent_at, "2026-12-25T18:04:00Z");
     assert!(first.body.contains("🎄"));
 
     // A hyphen-form system line (no "Author: " part) has no author.
@@ -129,15 +150,15 @@ fn day_above_12_disambiguates_day_first() {
     // 25 cannot be a month, so this is dd/mm even though a US reader
     // might expect mm/dd.
     let export = "[25/01/26, 08:00:00] Ana: provjera\n";
-    let collected = parse_whatsapp(export.as_bytes(), "c").unwrap();
-    assert_eq!(collected.messages[0].sent_at, "2026-01-25T08:00:00Z");
+    let collected = parse(export.as_bytes(), "c");
+    assert_eq!(collected.messages[0].sent_at, "2026-01-25T07:00:00Z");
 }
 
 #[test]
 fn iso_stamp_parses() {
     let export = "[2026-11-01, 10:00] Ana: iso provjera\n";
-    let collected = parse_whatsapp(export.as_bytes(), "c").unwrap();
-    assert_eq!(collected.messages[0].sent_at, "2026-11-01T10:00:00Z");
+    let collected = parse(export.as_bytes(), "c");
+    assert_eq!(collected.messages[0].sent_at, "2026-11-01T09:00:00Z");
 }
 
 #[test]
@@ -169,13 +190,15 @@ fn reimport_of_same_file_is_idempotent() {
     assert_eq!(again.skipped, 8);
     assert_eq!(storage.stats().unwrap().total, 8);
 
-    // Same content under a different file name is a different chat, so it
-    // stores again (chat_id is part of the content hash).
+    // M1.3: the same content under a renamed file derives the same
+    // conversation key (participants + first authored message), so the
+    // rename dedups instead of duplicating.
     let other = dir.path().join("Arhiva ekipa — backup.txt");
     std::fs::write(&other, HR_EXPORT).unwrap();
     let summary = ingest(&storage, &WhatsappSource::new(&other)).unwrap();
-    assert_eq!(summary.inserted, 8);
-    assert_eq!(storage.stats().unwrap().total, 16);
+    assert_eq!(summary.inserted, 0);
+    assert_eq!(summary.skipped, 8);
+    assert_eq!(storage.stats().unwrap().total, 8);
 }
 
 #[test]

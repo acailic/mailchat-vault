@@ -85,6 +85,11 @@ fn fixture() -> Storage {
             sent_at,
             body: format!("slim body {i}"),
             raw_json: "{}".into(),
+            conversation_key: String::new(),
+            reply_refs: Vec::new(),
+            original_timestamp: String::new(),
+            timezone: String::new(),
+            time_confidence: String::new(),
         });
     }
     for m in &msgs {
