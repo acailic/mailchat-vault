@@ -29,6 +29,7 @@ use vault_core::llm::{
 use vault_core::message::NewMessage;
 use vault_core::search::build_match_query;
 use vault_core::storage::Storage;
+use vault_core::vector::HashEmbedder;
 
 fn today() -> NaiveDate {
     NaiveDate::from_ymd_opt(2026, 11, 1).unwrap()
@@ -560,6 +561,7 @@ fn wire_privacy_key_in_header_only_and_only_top_rows_in_body() {
     let outcome = ask(
         &s,
         Some(&backend),
+        &HashEmbedder::new(),
         question,
         50,
         DEFAULT_SUMMARIZE_TOP,
@@ -647,7 +649,16 @@ fn wire_privacy_key_in_header_only_and_only_top_rows_in_body() {
 fn without_a_key_outcome_equals_plain_search_exactly() {
     let s = seeded(12, "plain marker");
     let question = "vault topics";
-    let outcome = ask(&s, None, question, 50, DEFAULT_SUMMARIZE_TOP, today()).unwrap();
+    let outcome = ask(
+        &s,
+        None,
+        &HashEmbedder::new(),
+        question,
+        50,
+        DEFAULT_SUMMARIZE_TOP,
+        today(),
+    )
+    .unwrap();
 
     assert_eq!(outcome.plan_source, PlanSource::NoLlm);
     assert_eq!(outcome.plan, QueryPlan::plain(question));
@@ -670,6 +681,7 @@ fn search_results_never_depend_on_the_llm_succeeding() {
     let outcome = ask(
         &s,
         Some(&failing),
+        &HashEmbedder::new(),
         question,
         50,
         DEFAULT_SUMMARIZE_TOP,

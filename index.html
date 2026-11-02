@@ -155,6 +155,10 @@
         <input id="ask" type="text" placeholder="e.g. “what did Ana say about the vault in October?”" />
         <button id="ask-btn" type="button">Ask</button>
       </div>
+      <div class="row" style="margin-top: 6px">
+        <button id="embed-btn" type="button" title="Embed messages that don't have a local embedding yet (incremental, offline)">Update local embeddings</button>
+        <span id="embed-status" class="meta" style="min-height: 1em"></span>
+      </div>
       <div id="llm-note" class="meta"></div>
       <div id="ask-status" class="meta" style="margin-top: 6px; min-height: 1em"></div>
       <div id="answer" hidden></div>

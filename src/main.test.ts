@@ -633,3 +633,100 @@ describe("stats and chips", () => {
     await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
   });
 });
+
+// ---------------------------------------------------------------------------
+// Ask UI (natural-language search) + local embedding controls
+// ---------------------------------------------------------------------------
+
+import type { AskOutcome } from "./llmview";
+import type { EmbeddingStatus, EmbedJobSummary } from "./types";
+
+const EMBED_STATUS: EmbeddingStatus = {
+  model: "hash-ngram-v1",
+  dim: 512,
+  embedded: 3,
+  messages: 4,
+  pending: 1,
+};
+
+const ASK_OUTCOME: AskOutcome = {
+  plan: { match_expr: '"vault"', date_from: "2026-10-01", date_to: null },
+  plan_source: "llm",
+  ranking: "hybrid_fts_vector",
+  results: [
+    message(21, "mbox", "thread-a", "vault sync planning went fine"),
+    message(22, "demo", "", "the syncing of the vault had problems"),
+  ],
+  answer: "October covered sync [1] and problems [2].",
+  notes: [],
+};
+
+describe("ask and local embeddings", () => {
+  it("boots with the embedding coverage line", async () => {
+    tauri.handlers.set("embed_status", () => EMBED_STATUS);
+    await boot();
+    await vi.waitFor(() => expect($("#embed-status").textContent).toContain("3/4"));
+    expect($("#embed-status").textContent).toContain("1 pending");
+    expect($("#embed-status").textContent).toContain("hash-ngram-v1");
+  });
+
+  it("an embed_status failure leaves the line empty, not broken", async () => {
+    tauri.handlers.set("embed_status", () => Promise.reject("backend exploded"));
+    await boot();
+    await vi.waitFor(() => expect($("#embed-status").textContent).toBe(""));
+  });
+
+  it("Update local embeddings runs the incremental job and reports", async () => {
+    tauri.handlers.set("embed_status", () => EMBED_STATUS);
+    await boot();
+    const summary: EmbedJobSummary = {
+      model: "hash-ngram-v1",
+      dim: 512,
+      embedded: 4,
+      remaining: 0,
+      elapsed_ms: 12,
+    };
+    tauri.handlers.set("embed_messages", () => summary);
+    $("#embed-btn").click();
+    await vi.waitFor(() =>
+      expect($("#embed-status").textContent).toBe(
+        "Embedded 4 new · 0 pending (12 ms, hash-ngram-v1)",
+      ),
+    );
+    const call = tauri.calls.find((c) => c.cmd === "embed_messages");
+    expect(call?.args).toEqual({});
+    expect($<HTMLButtonElement>("#embed-btn").disabled).toBe(false);
+  });
+
+  it("an embedding job failure is reported inline", async () => {
+    tauri.handlers.set("embed_status", () => EMBED_STATUS);
+    await boot();
+    tauri.handlers.set("embed_messages", () => Promise.reject("disk full"));
+    $("#embed-btn").click();
+    await vi.waitFor(() => expect($("#embed-status").textContent).toBe("Embedding failed: disk full"));
+  });
+
+  it("Ask renders the ranking label, results, and the answer", async () => {
+    await boot();
+    tauri.handlers.set("llm_ask", () => ASK_OUTCOME);
+    input("#ask").value = "vault sync?";
+    pressKey(input("#ask"), "Enter");
+    await vi.waitFor(() =>
+      expect($("#ask-status").textContent).toContain("ranked: hybrid FTS + local vectors"),
+    );
+    expect($("#ask-status").textContent).toContain("planned by LLM");
+    expect($("#ask-results").querySelectorAll("li").length).toBe(2);
+    expect($("#answer").textContent).toBe(ASK_OUTCOME.answer);
+    expect($("#answer").hidden).toBe(false);
+    expect($("#ask-notes").hidden).toBe(true);
+  });
+
+  it("an empty question asks nothing", async () => {
+    await boot();
+    input("#ask").value = "   ";
+    pressKey(input("#ask"), "Enter");
+    await flush();
+    expect(tauri.calls.filter((c) => c.cmd === "llm_ask")).toHaveLength(0);
+    expect($("#ask-status").textContent).toBe("Ask a question first.");
+  });
+});

@@ -10,6 +10,9 @@ export interface QueryPlan {
 /** Mirrors `vault_core::llm::PlanSource` (snake_case serde). */
 export type PlanSource = "llm" | "llm_fallback" | "no_llm";
 
+/** Mirrors `vault_core::llm::RankingMode` (snake_case serde). */
+export type RankingMode = "fts_only" | "hybrid_fts_vector" | "vector_only";
+
 /** Mirrors `vault_core::llm::LlmStatus` (serde field names). */
 export interface LlmStatus {
   enabled: boolean;
@@ -22,6 +25,7 @@ export interface LlmStatus {
 export interface AskOutcome {
   plan: QueryPlan;
   plan_source: PlanSource;
+  ranking: RankingMode;
   results: unknown[];
   answer: string | null;
   notes: string[];
@@ -33,11 +37,20 @@ const PLAN_SOURCE_LABELS: Record<PlanSource, string> = {
   no_llm: "no LLM configured — plain term search",
 };
 
+const RANKING_LABELS: Record<RankingMode, string> = {
+  hybrid_fts_vector: "hybrid FTS + local vectors",
+  fts_only: "FTS only",
+  vector_only: "local vectors only",
+};
+
 /** One-line transparency description of the plan actually used. */
-export function describePlan(outcome: Pick<AskOutcome, "plan" | "plan_source">): string {
+export function describePlan(
+  outcome: Pick<AskOutcome, "plan" | "plan_source" | "ranking">,
+): string {
   const parts = [`FTS: ${outcome.plan.match_expr || "(none)"}`];
   const dates = [outcome.plan.date_from, outcome.plan.date_to].filter(Boolean).join(" → ");
   if (dates) parts.push(`dates: ${dates}`);
+  parts.push(`ranked: ${RANKING_LABELS[outcome.ranking]}`);
   return `${parts.join(" · ")} (${PLAN_SOURCE_LABELS[outcome.plan_source]})`;
 }
 
@@ -45,16 +58,18 @@ export function describePlan(outcome: Pick<AskOutcome, "plan" | "plan_source">):
 export function privacyNote(status: LlmStatus): string {
   if (!status.enabled) {
     return (
-      "LLM assist is off — no usable API key configured. Ask runs as a plain local " +
-      "full-text search; nothing leaves this machine. Set ZAI_API_KEY (or GLM_API_KEY) " +
-      "in the environment to enable, or ANTHROPIC_API_KEY together with ANTHROPIC_BASE_URL."
+      "LLM assist is off — no usable API key configured. Ask runs fully locally: " +
+      "plain full-text search plus local hybrid vector ranking once embeddings are " +
+      "built; nothing leaves this machine. Set ZAI_API_KEY (or GLM_API_KEY) in the " +
+      "environment to enable, or ANTHROPIC_API_KEY together with ANTHROPIC_BASE_URL."
     );
   }
   return (
     `LLM assist is on (${status.model} via ${status.host}): your question is sent ` +
     `to the provider to translate it into a search, and afterwards only the top ` +
     `${status.summarize_top} result messages (bodies truncated to 500 chars) are sent ` +
-    "for the summary. Nothing else leaves this machine; the API key is read from " +
+    "for the summary. Nothing else leaves this machine; embeddings for hybrid " +
+    "ranking are computed locally and never sent; the API key is read from " +
     "the environment only."
   );
 }

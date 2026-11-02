@@ -10,6 +10,8 @@ import {
 } from "./render";
 import type {
   ChatContext,
+  EmbedJobSummary,
+  EmbeddingStatus,
   IngestSummary,
   Message,
   SearchHit,
@@ -67,6 +69,8 @@ const llmNote = document.querySelector<HTMLElement>("#llm-note")!;
 const answerBox = document.querySelector<HTMLElement>("#answer")!;
 const askNotes = document.querySelector<HTMLElement>("#ask-notes")!;
 const askResults = document.querySelector<HTMLUListElement>("#ask-results")!;
+const embedButton = document.querySelector<HTMLButtonElement>("#embed-btn")!;
+const embedStatus = document.querySelector<HTMLElement>("#embed-status")!;
 const imapHostInput = document.querySelector<HTMLInputElement>("#imap-host")!;
 const imapPortInput = document.querySelector<HTMLInputElement>("#imap-port")!;
 const imapUserInput = document.querySelector<HTMLInputElement>("#imap-user")!;
@@ -208,6 +212,50 @@ async function refreshLlmNote(): Promise<void> {
     llmNote.textContent = privacyNote(status);
   } catch {
     llmNote.textContent = "";
+  }
+}
+
+// Local embedding coverage label for the Ask section (incremental job).
+function describeEmbedStatus(status: EmbeddingStatus): string {
+  if (status.messages === 0) {
+    return "no messages to embed yet";
+  }
+  const model = `${status.model}, ${status.dim}d`;
+  if (status.pending === 0) {
+    return `local embeddings: all ${status.embedded} embedded (${model})`;
+  }
+  return `local embeddings: ${status.embedded}/${status.messages} · ${status.pending} pending (${model})`;
+}
+
+// Sequential embed-status token: a late response from an earlier refresh
+// (e.g. one fired before an embedding job finished) must not overwrite
+// newer status text — the job itself joins the sequence when it starts.
+let embedSeq = 0;
+
+async function refreshEmbedStatus(): Promise<void> {
+  const seq = ++embedSeq;
+  try {
+    const status = await invoke<EmbeddingStatus>("embed_status");
+    if (seq !== embedSeq) return; // a newer refresh/job superseded this response
+    embedStatus.textContent = describeEmbedStatus(status);
+  } catch {
+    if (seq === embedSeq) embedStatus.textContent = "";
+  }
+}
+
+async function runEmbedJob(): Promise<void> {
+  embedSeq++; // supersede any in-flight embed_status refresh
+  embedButton.disabled = true;
+  embedStatus.textContent = "Embedding… (local, offline)";
+  try {
+    const summary = await invoke<EmbedJobSummary>("embed_messages", {});
+    embedStatus.textContent =
+      `Embedded ${summary.embedded} new · ${summary.remaining} pending` +
+      ` (${summary.elapsed_ms} ms, ${summary.model})`;
+  } catch (e) {
+    embedStatus.textContent = `Embedding failed: ${e}`;
+  } finally {
+    embedButton.disabled = false;
   }
 }
 
@@ -399,6 +447,7 @@ async function importMbox(): Promise<void> {
       `Imported ${summary.inserted} new, ${summary.skipped} already present` +
       `${failedPart} (of ${summary.seen} in ${summary.source}).`;
     await refreshStats();
+    void refreshEmbedStatus();
   } catch (e) {
     importStatus.textContent = `Import failed: ${e}`;
   } finally {
@@ -429,6 +478,7 @@ async function importChatExport(): Promise<void> {
       `Imported ${summary.inserted} new, ${summary.skipped} already present` +
       `${failedPart} (of ${summary.seen} in ${summary.source}).`;
     await refreshStats();
+    void refreshEmbedStatus();
   } catch (e) {
     importStatus.textContent = `Import failed: ${e}`;
   } finally {
@@ -442,6 +492,7 @@ async function seedDemo(): Promise<void> {
     const summary = await invoke<IngestSummary>("seed_demo");
     importStatus.textContent = `Demo messages: ${summary.inserted} new, ${summary.skipped} already present.`;
     await refreshStats();
+    void refreshEmbedStatus();
   } catch (e) {
     importStatus.textContent = `Seeding failed: ${e}`;
   } finally {
@@ -488,6 +539,7 @@ async function syncImap(): Promise<void> {
     imapStatus.textContent = lines.join(" · ") + note;
     imapPassInput.value = "";
     await refreshStats();
+    void refreshEmbedStatus();
   } catch (e) {
     imapStatus.textContent = `Sync failed: ${e}`;
   } finally {
@@ -517,8 +569,10 @@ importButton.addEventListener("click", () => void importMbox());
 chatImportButton.addEventListener("click", () => void importChatExport());
 seedButton.addEventListener("click", () => void seedDemo());
 imapSyncButton.addEventListener("click", () => void syncImap());
+embedButton.addEventListener("click", () => void runEmbedJob());
 
 setStatus("Type something to search, or set a filter to browse.");
 renderAll();
 void refreshStats();
 void refreshLlmNote();
+void refreshEmbedStatus();

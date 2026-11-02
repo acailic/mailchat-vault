@@ -2,7 +2,7 @@
 
 Local email & chat archive — Tauri desktop app with SQLite FTS5 full-text search over your own messages. Private tool; nothing leaves the machine, except what you explicitly send for optional [LLM-assisted search](#llm-assisted-search-v1) (your question + the matching result rows only, and only when an API key is configured).
 
-This is the **v0 foundation + usable search tool**: a complete vertical slice — import, store, dedup, search, filter, browse, read in thread context. **v1** adds LLM-assisted natural-language search on top (see below), and the first live mail source: **incremental IMAP/Gmail sync** (see below). The rest of the roadmap (chat platform formats, XOAUTH2) will land as separate tasks.
+This is the **v0 foundation + usable search tool**: a complete vertical slice — import, store, dedup, search, filter, browse, read in thread context. **v1** adds LLM-assisted natural-language search with local-embedding **hybrid ranking** on top (see below), and the first live mail source: **incremental IMAP/Gmail sync** (see below). The rest of the roadmap (chat platform formats, XOAUTH2) will land as separate tasks.
 
 ## What v0 does
 
@@ -22,14 +22,14 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice �
   - **message detail**: full body with highlighted query terms, full metadata, and clickable **thread neighbors** of the same chat;
   - **keyboard navigation**: `/` focus search, `↑`/`↓` move through results, `Enter` open detail, `↑`/`↓` walk the thread, `Esc` close.
 - **Performance contract**: queries answer in < 100 ms over 100k messages (asserted by a generated-fixture test; all queries are `LIMIT`-bounded and ride the FTS5 index plus the `sent_at`/`(source, chat_id)` indexes).
-- **Ask UI (v1)**: natural-language questions translated to FTS5 + date filters via an LLM, with a short summary over the top results — strictly privacy-scoped and fully optional (see below).
+- **Ask UI (v1)**: natural-language questions translated to FTS5 + date filters via an LLM, with a short summary over the top results — strictly privacy-scoped and fully optional (see below). Results are ranked **hybrid** — FTS5 fused with an offline local-vector leg once embeddings are built (see below).
 
 ## Repository layout
 
 ```
-crates/vault-core/   # storage (SQLite/FTS5, migrations), filtered/paged search queries, ingest trait, mail parsing, mbox / WhatsApp / Telegram / Signal sources, IMAP sync, LLM search pipeline — no UI deps
-src-tauri/           # Tauri app shell: commands (search_messages, chat_context, llm_ask, llm_status, import_mbox, import_chat_export, sync_imap, seed_demo, stats) + secret storage
-src/                 # frontend (vanilla TS): search + filters + pagination + detail view, ask UI, import & IMAP sync controls
+crates/vault-core/   # storage (SQLite/FTS5, migrations), filtered/paged search queries, ingest trait, mail parsing, mbox / WhatsApp / Telegram / Signal sources, IMAP sync, LLM search pipeline, local embeddings + hybrid ranking — no UI deps
+src-tauri/           # Tauri app shell: commands (search_messages, chat_context, llm_ask, llm_status, embed_messages, embed_status, import_mbox, import_chat_export, sync_imap, seed_demo, stats) + secret storage
+src/                 # frontend (vanilla TS): search + filters + pagination + detail view, ask UI + embedding controls, import & IMAP sync controls
 index.html           # single-page shell
 ```
 
@@ -52,7 +52,7 @@ npm install
 npm run tauri dev
 ```
 
-First run tip: click **Load demo** to seed the sample messages, then search for e.g. `vault`, click a hit to read it with its thread neighbors, or set the source/author/date filters to browse. To import real data, point the import field at any `.mbox` file (e.g. exported from Thunderbird), use **Import chat export…** to pick a WhatsApp `Export chat` `.txt` file, a Telegram export's `result.json` (picking the export directory works too), or a Signal conversation `.json`, or fill in the **IMAP sync** section (see below).
+First run tip: click **Load demo** to seed the sample messages, then search for e.g. `vault`, click a hit to read it with its thread neighbors, or set the source/author/date filters to browse. Click **Update local embeddings** in the Ask section to build the local vector index (offline) — Ask then ranks results hybrid (FTS + local vectors). To import real data, point the import field at any `.mbox` file (e.g. exported from Thunderbird), use **Import chat export…** to pick a WhatsApp `Export chat` `.txt` file or a Telegram export's `result.json` (picking the export directory works too), or a Signal conversation `.json`, or fill in the **IMAP sync** section (see below).
 
 The database lives in your app data dir (e.g. `~/.local/share/com.acailic.mailchatvault/vault.db` on Linux).
 
@@ -63,10 +63,10 @@ Ask a natural-language question (“what was said about the vault in October?”
 ### How it works
 
 1. **Translate** — the question is sent to the LLM, which replies with a JSON plan: an FTS5 MATCH expression over `body`/`author` plus an optional sent-date range (it understands relative wording like “last march” against today's date).
-2. **Search** — the plan runs locally against SQLite. The LLM's expression is validated against the index first; anything unparseable or referring to unknown columns is replaced by a plain term search (usable date filters are kept). The expression is always passed as a bound MATCH parameter, never spliced into SQL.
+2. **Search & rank** — the plan runs locally against SQLite. The LLM's expression is validated against the index first; anything unparseable or referring to unknown columns is replaced by a plain term search (usable date filters are kept). The expression is always passed as a bound MATCH parameter, never spliced into SQL. The FTS ranking is then fused with the local vector leg (see [Local embeddings](#local-embeddings--hybrid-search-v1)) when embeddings exist — a fully local step.
 3. **Summarize** — a short answer is synthesized from **only the top 8 result rows** (bodies truncated to 500 chars), cited as [1], [2], …
 
-The UI always shows the plan actually used (`FTS: … · dates: … · planned by LLM / fallback`) plus a privacy note describing exactly what the current mode sends.
+The UI always shows the plan actually used (`FTS: … · dates: … · ranked: … · planned by LLM / fallback`) plus a privacy note describing exactly what the current mode sends.
 
 ### Configuration (environment variables only — the key is never stored in the database or the repo)
 
@@ -85,8 +85,9 @@ The product promise is “nothing leaves the machine”; LLM mode is opt-in and 
 
 ### Fallback
 
-- No API key → plain FTS5 term search; the UI says so up front.
+- No API key → plain FTS5 term search with local hybrid ranking when embeddings exist; the UI says so up front.
 - LLM error, timeout, or invalid/unusable plan output → plain term search plus a visible note; search results never depend on the LLM succeeding.
+- No embeddings built → plain FTS5 ranking; search results never depend on the vector leg either.
 
 ### Costs & latency
 
@@ -95,6 +96,34 @@ Measured against `glm-5` at `https://api.z.ai/api/anthropic` (Nov 2026):
 - Translate: ~1.5–3 s, roughly 350 input / 100 output tokens.
 - Summarize (8 results × ≤500 chars): ~2–5 s, roughly 2,000 input / 200 output tokens.
 - One “Ask” ≈ two small requests, a few seconds end-to-end, well under a cent per ask at GLM pricing.
+
+## Local embeddings & hybrid search (v1)
+
+Ask queries are ranked **hybrid**: the FTS5 result list is fused with a **local vector search** over the same archive — entirely offline, no model downloads, no network.
+
+### Embedding model
+
+The bundled embedder (`hash-ngram-v1`, 512 dims) is dependency-free and deterministic: word unigrams, word bigrams, and character 3-grams of each token are FNV-1a-hashed into signed buckets and L2-normalized. Measured on the fixture families of the test suite: related texts score 0.18–0.55, unrelated ones ≤ 0.04, and a scan floor of 0.08 separates the two. Subword overlap gives recall beyond exact FTS tokens — "deploying" still finds "the deployment kept failing".
+
+Heavier options (fastembed / a GGUF mini model) were considered and deliberately deferred: both need model weights that either download at first run (breaking the offline promise) or ship as a multi-megabyte blob in the repo, plus a native ONNX/GGML runtime build. The `Embedder` trait and the model-id-versioned embedding rows keep a future bundled model a drop-in: it ships a new `id`, the incremental job re-embeds, old rows are replaced.
+
+### Vector index — manual cosine in SQLite (the simple choice)
+
+Embeddings live in a `message_embeddings` table (schema migration 3) as **one 512-byte i8-quantized blob per message**, and a query scans them with an integer dot product in Rust (vectors are stored normalized, so the dot product *is* the cosine; i8 keeps the index ≈ 0.5 KB per message). sqlite-vec was considered and rejected: it adds a C extension dependency for what is, at personal-archive scale, a linear scan — 100k messages ≈ 50 MB of vectors, measured at ~75 ms per scan (best of 5; `tests/vector_perf.rs` enforces the budget). Cost scales linearly with embedded messages, which is the right trade for the archive sizes this app targets.
+
+### Hybrid ranking
+
+FTS5 relevance and cosine similarity have incomparable scales, so the two ranked lists are fused with **Reciprocal Rank Fusion**: score(d) = Σ 1/(60 + rank). A row found by both legs outranks a row found by one. The plan's date bounds apply to the vector leg exactly as to the FTS leg. The Ask status line always shows the mode used: `ranked: hybrid FTS + local vectors`, `ranked: FTS only`, or `ranked: local vectors only`.
+
+### Incremental job
+
+**Update local embeddings** (in the Ask section) embeds only messages still lacking an embedding for the current model, in batches: the first run covers the whole archive (~5 s for 100k messages), later runs only new imports (~90 ms for 500 new messages — both budgets enforced by tests). Deleting a message cascades to its embedding; changing the model id makes every row pending again and re-embeds.
+
+### Fallback & privacy
+
+- No embeddings built yet → Ask is plain FTS5 exactly as before; the pipeline never depends on the vector leg.
+- No LLM key → the hybrid ranking is still fully local; nothing leaves the machine.
+- Embeddings are computed locally from message bodies and are **never sent anywhere** — not even in LLM mode (only the question and the top-8 result bodies go to the provider, as before).
 
 ## IMAP sync
 
@@ -120,11 +149,13 @@ Any IMAP server with implicit TLS works the same way: host, port (993), username
 ## Tests
 
 ```sh
-cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram ingest, filtered/paged search, chat context, 100k perf fixture, IMAP sync (mock server), LLM search pipeline (mock LLM, no network), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations)
+cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram ingest, filtered/paged search, chat context, 100k FTS perf fixture, IMAP sync (mock server), LLM search pipeline (mock LLM, no network), local embeddings (deterministic embedder, incremental job, cosine scan, hybrid ranking, 100k vector perf budgets), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations)
 npm test                 # frontend unit + UI-state snapshot tests (vitest)
 npm run check            # TypeScript type-check
 cargo test --workspace   # also compiles the Tauri app (needs the Linux libs above)
 ```
+
+The vector layer's budgets over 100k embedded messages (enforced by `tests/vector_perf.rs`): first-run embedding job < 15 s, cosine scan < 200 ms, full local hybrid ask < 250 ms; the FTS < 100 ms contract stays in `search_perf.rs`.
 
 The parser layer is also fuzzed (`crates/vault-core/tests/fuzz/`): a
 hand-crafted malformed-input corpus plus deterministic seeded structured
@@ -157,7 +188,7 @@ view, and keyboard navigation).
 
 ## Out of scope for now (separate tasks)
 
-XOAUTH2 (OAuth) login for Gmail, multi-account UI, more chat sources (Discord), automatic folder watching, chat media extraction, local embedding models / vector search, multi-provider menus, icons/bundling/installers, settings UI, result export, statistics dashboard, push notifications.
+XOAUTH2 (OAuth) login for Gmail, multi-account UI, more chat sources (Discord), automatic folder watching, chat media extraction, multi-provider menus, icons/bundling/installers, settings UI, result export, statistics dashboard, push notifications.
 
 ## Notes on chat import details
 

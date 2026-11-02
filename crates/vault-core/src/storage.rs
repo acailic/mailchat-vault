@@ -13,6 +13,7 @@ use crate::message::{InsertOutcome, Message, NewMessage, SourceCount, Stats};
 use crate::query::{
     ChatContext, SearchHit, SearchPage, SearchQuery, SNIPPET_CLOSE_MARK, SNIPPET_OPEN_MARK,
 };
+use crate::vector::VectorHit;
 use crate::{Error, Result};
 
 /// Ordered schema migrations; each entry runs once, inside a transaction.
@@ -69,6 +70,24 @@ const MIGRATIONS: &[(i64, &str)] = &[
             updated_at  TEXT    NOT NULL DEFAULT (datetime('now')),
             PRIMARY KEY (source, folder)
         );
+        "#,
+    ),
+    (
+        3,
+        r#"
+        -- One embedding per message (PK), versioned by model id so a new
+        -- embedder invalidates old vectors simply by writing a different
+        -- model string. Vectors are i8-quantized (one byte per component)
+        -- and L2-normalized at write time (see crate::vector). Deleting a
+        -- message cascades.
+        CREATE TABLE message_embeddings (
+            message_id  INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+            model       TEXT    NOT NULL,
+            dim         INTEGER NOT NULL,
+            embedding   BLOB    NOT NULL,
+            embedded_at TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX idx_message_embeddings_model ON message_embeddings (model);
         "#,
     ),
 ];
@@ -495,6 +514,206 @@ impl Storage {
         )?;
         Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // Local embeddings (crate::vector): incremental job support + cosine scan
+    // -----------------------------------------------------------------------
+
+    /// Upsert a batch of embeddings in one transaction (the embedding job's
+    /// write unit). Every vector's length must equal `dim`. Vectors are
+    /// stored quantized to one i8 byte per component ([`crate::vector::quantize_i8`]).
+    pub fn embed_messages_batch(
+        &self,
+        model: &str,
+        dim: u16,
+        items: &[(i64, Vec<f32>)],
+    ) -> Result<()> {
+        if items.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO message_embeddings (message_id, model, dim, embedding, embedded_at)
+                 VALUES (?1, ?2, ?3, ?4, datetime('now'))
+                 ON CONFLICT (message_id) DO UPDATE SET
+                    model      = excluded.model,
+                    dim        = excluded.dim,
+                    embedding  = excluded.embedding,
+                    embedded_at = excluded.embedded_at",
+            )?;
+            for (message_id, embedding) in items {
+                if embedding.len() != dim as usize {
+                    return Err(Error::Embedding(format!(
+                        "embedding for message {message_id} has {} floats, expected {dim}",
+                        embedding.len()
+                    )));
+                }
+                let blob = crate::vector::quantize_i8(embedding);
+                stmt.execute(params![message_id, model, dim, blob])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Up to `limit` messages (id + body) still lacking a `model` embedding,
+    /// oldest id first: the incremental embedding job's work list. A row
+    /// written for a different model counts as lacking (it gets replaced).
+    pub fn pending_embeddings(&self, model: &str, limit: u64) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id, m.body FROM messages AS m
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM message_embeddings AS e
+                 WHERE e.message_id = m.id AND e.model = ?1
+             )
+             ORDER BY m.id LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![model, limit], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Coverage counts for one model: rows embedded for it, total messages.
+    pub fn embedding_counts(&self, model: &str) -> Result<EmbeddingCounts> {
+        let embedded: u64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM message_embeddings WHERE model = ?1",
+            params![model],
+            |row| row.get(0),
+        )?;
+        let messages: u64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))?;
+        Ok(EmbeddingCounts { embedded, messages })
+    }
+
+    /// Vector search: cosine of `query` against every `model` embedding,
+    /// under the same LOCAL-day date bounds as [`Storage::search_filtered`]
+    /// (`None` = unbounded). Returns the best `limit` hits, score-descending
+    /// (ties by ascending id). Stored vectors are normalized at write time,
+    /// so cosine is a plain dot product. Rows whose blob length disagrees
+    /// with `dim` (a foreign model's leftovers) are skipped, not fatal.
+    /// This is the manual-cosine index described in [`crate::vector`].
+    pub fn vector_scan(
+        &self,
+        model: &str,
+        dim: u16,
+        query: &[f32],
+        date_from: Option<&str>,
+        date_to: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<VectorHit>> {
+        if query.len() != dim as usize {
+            return Err(Error::Embedding(format!(
+                "query has {} floats, expected {dim}",
+                query.len()
+            )));
+        }
+        let from = match parse_date_bound(date_from, "date_from")? {
+            Some(day) => Some(crate::query::local_day_instant_utc(day)?),
+            None => None,
+        };
+        // Inclusive date_to becomes an exclusive upper bound at local
+        // midnight of the next day (same semantics as search_filtered).
+        let to_exclusive = match parse_date_bound(date_to, "date_to")? {
+            Some(day) => {
+                let next = day
+                    .checked_add_days(Days::new(1))
+                    .filter(|next| (0..=9999).contains(&next.year()))
+                    .ok_or_else(|| Error::InvalidDate(format!("date_to={day} out of range")))?;
+                Some(crate::query::local_day_instant_utc(next)?)
+            }
+            None => None,
+        };
+
+        // Same bound-parameter shape as search_filtered: the date bounds
+        // are values, never spliced into the SQL text. Without bounds the
+        // scan skips the messages join entirely (the embedding table alone
+        // answers it); with bounds the join applies the same local-day
+        // sent_at filter as the FTS leg.
+        let (sql, has_bounds) = if from.is_some() || to_exclusive.is_some() {
+            (
+                "SELECT e.message_id, e.embedding
+                 FROM message_embeddings AS e
+                 JOIN messages AS m ON m.id = e.message_id
+                 WHERE e.model = ?1
+                   AND (?2 IS NULL OR m.sent_at >= ?2)
+                   AND (?3 IS NULL OR m.sent_at < ?3)
+                   AND ((?2 IS NULL AND ?3 IS NULL) OR m.sent_at != '')",
+                true,
+            )
+        } else {
+            (
+                "SELECT message_id, embedding FROM message_embeddings WHERE model = ?1",
+                false,
+            )
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let mut rows = if has_bounds {
+            stmt.query(params![model, from, to_exclusive])?
+        } else {
+            stmt.query(params![model])?
+        };
+        let mut hits: Vec<VectorHit> = Vec::new();
+        let quantized_query = crate::vector::quantize_query_i8(query);
+        while let Some(row) = rows.next()? {
+            let message_id = row.get::<_, i64>(0)?;
+            // Zero-copy blob read: hashing bytes straight off the row
+            // avoids a 512-byte allocation per scanned message.
+            let blob = match row.get_ref(1)? {
+                rusqlite::types::ValueRef::Blob(bytes) => bytes,
+                _ => &[],
+            };
+            if blob.len() != dim as usize {
+                continue; // a different model's row; not comparable
+            }
+            // Integer dot product over the i8-quantized vectors: the score
+            // is the cosine up to quantization error (both sides normalized
+            // and scaled by 127 at write/quantize time). Zipped slices keep
+            // the per-element loop bounds-check-free.
+            let mut acc: i32 = 0;
+            for (&byte, &q) in blob.iter().zip(quantized_query.iter()) {
+                acc += q as i32 * (byte as i8) as i32;
+            }
+            let score = acc as f32 / (crate::vector::I8_SCALE * crate::vector::I8_SCALE);
+            if score <= crate::vector::MIN_COSINE {
+                continue; // collision noise, not a similar message
+            }
+            hits.push(VectorHit { message_id, score });
+        }
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.message_id.cmp(&b.message_id))
+        });
+        hits.truncate(limit as usize);
+        Ok(hits)
+    }
+
+    /// Hydrate messages by id, preserving the input order; ids without a
+    /// row (deleted since ranking) are skipped.
+    pub fn get_many(&self, ids: &[i64]) -> Result<Vec<Message>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut by_id: std::collections::HashMap<i64, Message> =
+            std::collections::HashMap::with_capacity(ids.len());
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source, external_id, channel, chat_id,
+                    author, sent_at, body, raw_json
+             FROM messages WHERE id = ?1",
+        )?;
+        for id in ids {
+            if let Some(message) = stmt.query_row(params![id], message_from_row).optional()? {
+                by_id.insert(*id, message);
+            }
+        }
+        Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
+    }
 }
 
 fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
@@ -509,6 +728,15 @@ fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
         body: row.get(7)?,
         raw_json: row.get(8)?,
     })
+}
+
+/// Coverage counts for one embedding model (see [`Storage::embedding_counts`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmbeddingCounts {
+    /// Messages with a current-model embedding row.
+    pub embedded: u64,
+    /// Total messages in the archive.
+    pub messages: u64,
 }
 
 /// Parse an optional `YYYY-MM-DD` bound into a `NaiveDate`. Years outside

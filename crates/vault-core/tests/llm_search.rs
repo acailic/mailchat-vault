@@ -8,11 +8,12 @@ use std::sync::{Mutex, Once};
 use chrono::NaiveDate;
 use vault_core::llm::{
     ask, run_plan, summarize_results, translate, validate, LlmConfig, MockLlm, PlanSource,
-    PlannedQuery, QueryPlan, DEFAULT_SUMMARIZE_TOP,
+    PlannedQuery, QueryPlan, RankingMode, DEFAULT_SUMMARIZE_TOP,
 };
 use vault_core::message::NewMessage;
 use vault_core::search::build_match_query;
 use vault_core::storage::Storage;
+use vault_core::vector::{run_embedding_job, HashEmbedder};
 use vault_core::Error;
 
 fn today() -> NaiveDate {
@@ -78,6 +79,9 @@ fn seeded() -> Storage {
         let msg = NewMessage::new("test", id, author, sent_at, body);
         s.insert_message(&msg).unwrap();
     }
+    // Embeddings exist, so the ask pipeline below runs in hybrid mode —
+    // the mode the app is in once the user has run the embedding job.
+    run_embedding_job(&s, &HashEmbedder::new(), None).unwrap();
     s
 }
 
@@ -91,9 +95,19 @@ fn ask_end_to_end_with_mock_llm() {
         "October covered sync [2], pricing [3], and costs [4].",
     ]);
     let question = "what was said about the vault in october?";
-    let outcome = ask(&s, Some(&llm), question, 50, DEFAULT_SUMMARIZE_TOP, today()).unwrap();
+    let outcome = ask(
+        &s,
+        Some(&llm),
+        &HashEmbedder::new(),
+        question,
+        50,
+        DEFAULT_SUMMARIZE_TOP,
+        today(),
+    )
+    .unwrap();
 
     assert_eq!(outcome.plan_source, PlanSource::Llm);
+    assert_eq!(outcome.ranking, RankingMode::HybridFtsVector);
     assert_eq!(outcome.plan.match_expr, "\"vault\"");
     assert_eq!(outcome.plan.date_from.as_deref(), Some("2026-10-01"));
     assert_eq!(outcome.plan.date_to.as_deref(), Some("2026-10-31"));
@@ -175,8 +189,19 @@ fn summary_prompt_is_limited_to_top_n_results() {
 #[test]
 fn ask_without_llm_is_plain_local_search() {
     let s = seeded();
-    let outcome = ask(&s, None, "vault", 50, DEFAULT_SUMMARIZE_TOP, today()).unwrap();
+    let outcome = ask(
+        &s,
+        None,
+        &HashEmbedder::new(),
+        "vault",
+        50,
+        DEFAULT_SUMMARIZE_TOP,
+        today(),
+    )
+    .unwrap();
     assert_eq!(outcome.plan_source, PlanSource::NoLlm);
+    // Local hybrid ranking is active even without an LLM.
+    assert_eq!(outcome.ranking, RankingMode::HybridFtsVector);
     assert_eq!(
         outcome.plan,
         QueryPlan::plain("vault"),
@@ -196,6 +221,7 @@ fn ask_degrades_gracefully_when_llm_fails() {
     let outcome = ask(
         &s,
         Some(&llm),
+        &HashEmbedder::new(),
         "vault october",
         50,
         DEFAULT_SUMMARIZE_TOP,
@@ -204,12 +230,26 @@ fn ask_degrades_gracefully_when_llm_fails() {
     .unwrap();
 
     // Translation failed and the summary failed; results are still there.
-    // Plain fallback is an AND term search, so only the October vault rows
-    // match (the plain plan keeps no dates because translation failed).
+    // Plain fallback is an AND term search (the three October vault rows),
+    // and the date-less vector leg surfaces the other vault rows too.
     assert_eq!(outcome.plan_source, PlanSource::LlmFallback);
     assert_eq!(outcome.plan, QueryPlan::plain("vault october"));
+    assert_eq!(outcome.ranking, RankingMode::HybridFtsVector);
     assert_eq!(outcome.answer, None);
-    assert_eq!(outcome.results.len(), 3);
+    let bodies: Vec<&str> = outcome.results.iter().map(|m| m.body.as_str()).collect();
+    for expected in [
+        "october first marker about vault sync",
+        "october second marker on vault pricing",
+        "october boundary marker on vault costs",
+        "september marker about the vault migration",
+        "vault marker without a date",
+    ] {
+        assert!(
+            bodies.contains(&expected),
+            "missing {expected} in {bodies:?}"
+        );
+    }
+    assert_eq!(outcome.results.len(), 5);
     assert_eq!(outcome.notes.len(), 2);
     assert!(outcome.notes[0].contains("LLM translation failed"));
     assert!(outcome.notes[1].contains("LLM summary failed"));
@@ -305,10 +345,11 @@ fn ask_outcome_is_serializable_for_the_frontend() {
     // The Tauri command returns AskOutcome by value; it must round-trip
     // through serde with the exact field names the frontend expects.
     let s = seeded();
-    let outcome = ask(&s, None, "vault", 10, 8, today()).unwrap();
+    let outcome = ask(&s, None, &HashEmbedder::new(), "vault", 10, 8, today()).unwrap();
     let json = serde_json::to_value(&outcome).unwrap();
     assert!(json.get("plan_source").is_some());
     assert_eq!(json["plan_source"], serde_json::json!("no_llm"));
+    assert_eq!(json["ranking"], serde_json::json!("hybrid_fts_vector"));
     assert!(json["plan"]["match_expr"].is_string());
     assert_eq!(json["results"].as_array().unwrap().len(), 5);
     assert!(json["answer"].is_null());
