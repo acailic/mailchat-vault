@@ -310,8 +310,9 @@ fn seed_demo(state: State<AppState>) -> Result<IngestSummary, String> {
 }
 
 /// Arm a watched folder: existing and new/modified export files
-/// (`.mbox`, WhatsApp `.txt`, Telegram `.json`) under it are imported in
-/// the background; re-imports never duplicate. Returns the fresh status.
+/// (`.mbox`, WhatsApp `.txt`, Telegram `.json`, Signal conversation
+/// `.json`) under it are imported in the background; re-imports never
+/// duplicate. Returns the fresh status.
 #[tauri::command]
 fn watch_add_folder(state: State<AppState>, path: String) -> Result<WatchSnapshot, String> {
     let path = path.trim();

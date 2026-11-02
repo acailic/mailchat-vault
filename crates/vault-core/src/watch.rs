@@ -443,12 +443,27 @@ fn run_loop(
     let mut pending: HashMap<PathBuf, Instant> = HashMap::new();
 
     // Re-arm folders persisted by earlier runs. Errors here (missing dir,
-    // backend limit) are recorded, not fatal: the folder stays configured,
-    // so it re-arms on the next start once present again.
+    // backend limit, unreadable storage) are recorded, not fatal: the
+    // folder stays configured, so it re-arms on the next start once
+    // present again.
     {
-        let stored: Vec<String> = lock_storage(&storage)
+        let stored: Vec<String> = match lock_storage(&storage)
             .and_then(|s| s.watched_folders().map_err(|e| e.to_string()))
-            .unwrap_or_default();
+        {
+            Ok(stored) => stored,
+            Err(e) => {
+                let mut snap = lock_snap(&snapshot);
+                push_event(
+                    &mut snap,
+                    WatchEvent::Failed {
+                        path: "(startup)".into(),
+                        error: format!("cannot load watched folders: {e}"),
+                    },
+                    config.max_events,
+                );
+                Vec::new()
+            }
+        };
         {
             let mut snap = lock_snap(&snapshot);
             snap.running = true;
