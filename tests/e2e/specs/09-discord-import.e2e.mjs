@@ -63,11 +63,12 @@ export async function run(ctx) {
     await browser.setWindowRect(0, 0, 1280, 960).catch(() => {});
 
     // --- import the whole package directory through the real command ----
-    const summary = await tauriInvoke(browser, "import_chat_export", {
+    const outcome = await tauriInvoke(browser, "import_chat_export", {
       path: fixturesDir,
     });
     // 8 user messages across two guild channels and one DM; the
     // GuildMemberJoin system entry is skipped (and not counted as seen).
+    const summary = outcome.summary;
     assert.equal(summary.source, "discord", "summary source");
     assert.equal(summary.seen, 8, "summary seen");
     assert.equal(summary.inserted, 8, "summary inserted");
@@ -114,8 +115,8 @@ export async function run(ctx) {
     const reimport = await tauriInvoke(browser, "import_chat_export", {
       path: fixturesDir,
     });
-    assert.equal(reimport.inserted, 0, "re-import inserts nothing");
-    assert.equal(reimport.skipped, 8, "re-import skips every message");
+    assert.equal(reimport.summary.inserted, 0, "re-import inserts nothing");
+    assert.equal(reimport.summary.skipped, 8, "re-import skips every message");
     await (await browser.$("#clear-filters")).click();
     assert.equal(
       await ui.waitForText(browser, "#stats", "8 messages (discord: 8)"),
@@ -127,7 +128,7 @@ export async function run(ctx) {
     const channelFile = await tauriInvoke(browser, "import_chat_export", {
       path: path.join(fixturesDir, "messages", "900000000000000101.json"),
     });
-    assert.equal(channelFile.inserted, 0, "single channel file re-import dedups");
+    assert.equal(channelFile.summary.inserted, 0, "single channel file re-import dedups");
 
     // --- database state: grouping, ids, reactions/attachments in raw ----
     const db = vaultDbPath(dataDir);
@@ -137,7 +138,7 @@ export async function run(ctx) {
     }
     const chats = await ctx.sqlite.query(
       db,
-      "SELECT chat_id, COUNT(*) AS n FROM messages GROUP BY chat_id ORDER BY chat_id",
+      "SELECT chat_id, COUNT(*) AS n FROM archive_messages GROUP BY chat_id ORDER BY chat_id",
     );
     assert.equal(
       JSON.stringify(chats.map((c) => [c.chat_id, c.n])),
@@ -151,7 +152,7 @@ export async function run(ctx) {
 
     const ids = await ctx.sqlite.query(
       db,
-      "SELECT external_id FROM messages WHERE chat_id = 'Ekipa HQ/general' ORDER BY external_id LIMIT 1",
+      "SELECT external_id FROM archive_messages WHERE chat_id = 'Ekipa HQ/general' ORDER BY external_id LIMIT 1",
     );
     assert.equal(
       ids[0].external_id,
@@ -161,7 +162,7 @@ export async function run(ctx) {
 
     const raw = await ctx.sqlite.query(
       db,
-      "SELECT raw_json FROM messages WHERE external_id = '900000000000000101/1700000000000000003'",
+      "SELECT raw_json FROM archive_messages WHERE external_id = '900000000000000101/1700000000000000003'",
     );
     const parsed = JSON.parse(raw[0].raw_json);
     assert.equal(parsed.reactions[0].count, 3, "reaction count kept in raw_json");
@@ -170,10 +171,10 @@ export async function run(ctx) {
 
     const sentAt = await ctx.sqlite.query(
       db,
-      "SELECT sent_at FROM messages WHERE external_id = '900000000000000101/1700000000000000001'",
+      "SELECT sent_instant FROM archive_messages WHERE external_id = '900000000000000101/1700000000000000001'",
     );
     assert.equal(
-      sentAt[0].sent_at,
+      sentAt[0].sent_instant,
       "2026-10-31T18:00:05Z",
       "millisecond UTC timestamp normalized to whole seconds",
     );
@@ -184,7 +185,7 @@ export async function run(ctx) {
     for (const term of ["kava", "needle-zzz", "petak"]) {
       const fts = await ctx.sqlite.query(
         db,
-        `SELECT COUNT(*) AS n FROM messages_fts WHERE messages_fts MATCH '"${term}"'`,
+        `SELECT COUNT(*) AS n FROM archive_fts WHERE archive_fts MATCH '"${term}"'`,
       );
       assert.equal(fts[0].n, 1, `FTS index has ${term}`);
     }
