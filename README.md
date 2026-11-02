@@ -35,7 +35,7 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice �
 crates/vault-core/   # storage (SQLite/FTS5, migrations), filtered/paged search queries, archive statistics (dashboard aggregates), ingest trait, mail parsing, mbox / WhatsApp / Telegram / Signal / Discord sources, media extraction into the content-addressed store, IMAP sync, LLM search pipeline, local embeddings + hybrid ranking, folder watching, CSV/JSON/MBOX export — no UI deps
 src-tauri/           # Tauri app shell: commands (search_messages, chat_context, llm_ask, llm_status, embed_messages, embed_status, import_mbox, import_chat_export with optional media extraction, sync_imap, watch_add_folder, watch_remove_folder, watch_status, seed_demo, stats, archive_stats, export_search, export_chat) + secret storage + watch-status events
 src/                 # frontend (vanilla TS): search + filters + pagination + detail view (with media links), ask UI + embedding controls, statistics dashboard (CSS bar charts, no chart library), import & IMAP sync controls, folder watching panel, export controls
-||index.html           # single-page shell
+index.html           # single-page shell
 ```
 
 ## Prerequisites
@@ -58,7 +58,7 @@ npm run tauri dev
 ```
 
 First run tip: click **Load demo** to seed the sample messages, then search for e.g. `vault`, click a hit to read it with its thread neighbors, or set the source/author/date filters to browse. Click **Update local embeddings** in the Ask section to build the local vector index (offline) — Ask then ranks results hybrid (FTS + local vectors). To import real data, point the import field at any `.mbox` file (e.g. exported from Thunderbird), use **Import chat export…** to pick a WhatsApp `Export chat` `.txt` file or a Telegram export's `result.json` (picking the export directory works too), or a Signal conversation `.json`, or a Discord Data Package export — the package root, its `messages/` directory, or a single channel `messages.json` — unzipped "Attach Media" WhatsApp exports also copy their files into the vault's media store unless **extract media** is unchecked — or fill in the **IMAP sync** section (see below). To take results out, run a search and press **Export results…** (or open a message and press **Export chat…**), pick a format and a destination — the export always covers every row of the current search, not just the page on screen.
-||
+
 The database lives in your app data dir (e.g. `~/.local/share/com.acailic.mailchatvault/vault.db` on Linux); extracted chat media lives next to it under `media/`, each file named by the SHA-256 of its contents.
 
 ## LLM-assisted search (v1)
@@ -239,7 +239,7 @@ same webview reason; the formats themselves are round-trip tested in
 ## Out of scope for now (separate tasks)
 
 XOAUTH2 (OAuth) login for Gmail, multi-account UI, multi-provider menus, settings UI, push notifications. The media-extraction layer is source-generic: when further chat sources land, their exports plug into the same hash-named `media/` store and `raw_json` convention.
-||
+
 ## Installers & releases
 
 Pushing a version tag (`v*`) builds distributable installers — Linux AppImage + `.deb` (defaults of the enabled Tauri bundling), plus macOS `.dmg` and Windows `.msi`/NSIS `.exe` from the release workflow — as a **draft GitHub Release**. Artifacts are **unsigned** in this round (no code signing; Gatekeeper/SmartScreen caveats apply on macOS/Windows). The app ships with a full icon set (Linux/mac/win) generated from `src-tauri/icons/source.png`. See [docs/release.md](docs/release.md) for the install smoke-test checklist, local build commands, and how to regenerate the icons.
