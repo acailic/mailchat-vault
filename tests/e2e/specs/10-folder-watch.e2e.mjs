@@ -80,8 +80,11 @@ export async function run(ctx) {
     // --- direct database confirmation -------------------------------------
     const db = vaultDbPath(dataDir);
     if (ctx.sqlite) {
-      const count = await ctx.sqlite.query(db, "SELECT COUNT(*) AS n FROM messages");
-      assert.equal(count[0].n, 4, "row count in messages table");
+      const count = await ctx.sqlite.query(
+        db,
+        "SELECT COUNT(*) AS n FROM archive_messages",
+      );
+      assert.equal(count[0].n, 4, "row count in canonical archive_messages table");
       const folders = await ctx.sqlite.query(db, "SELECT path FROM watched_folders");
       assert.equal(folders.length, 1, "watched folder persisted");
     }
