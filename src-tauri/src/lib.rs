@@ -5,8 +5,11 @@
 //!   (relevance-ranked with match snippets, or newest-first browse).
 //! - `chat_context` — a message plus its adjacent messages in the same chat.
 //! - `llm_ask` — natural-language search: LLM-translated FTS5 plan +
-//!   optional date range + RAG answer over the top results.
+//!   optional date range + hybrid FTS/vector ranking + RAG answer over the
+//!   top results.
 //! - `llm_status` — LLM availability for the UI (never the key).
+//! - `embed_messages` — incremental local embedding job (new messages only).
+//! - `embed_status` — embedding coverage for the UI (model, dim, pending).
 //! - `import_mbox` — manual `.mbox` import (the demo ingest source).
 //! - `import_chat_export` — WhatsApp `.txt` / Telegram `result.json` /
 //!   Signal `.json` import with format auto-detection (the frontend picks
@@ -32,16 +35,19 @@ use vault_core::query::{ChatContext, SearchPage, SearchQuery};
 use vault_core::signal::SignalSource;
 use vault_core::storage::Storage;
 use vault_core::telegram::TelegramSource;
+use vault_core::vector::{self, EmbedJobSummary, EmbeddingStatus, HashEmbedder};
 use vault_core::whatsapp::WhatsappSource;
 use vault_core::{demo, message, Error, Result as CoreResult};
 
 mod secrets;
 
-/// Shared app state: one open storage handle guarded by a mutex, plus the
-/// optional LLM backend (`None` when no API key is configured).
+/// Shared app state: one open storage handle guarded by a mutex, the
+/// optional LLM backend (`None` when no API key is configured), and the
+/// local embedder behind hybrid ranking (offline, stateless).
 struct AppState {
     storage: Arc<Mutex<Storage>>,
     llm: Option<AnthropicLlm>,
+    embedder: HashEmbedder,
 }
 
 /// Result of an IMAP sync: per-folder summaries plus where an entered
@@ -83,10 +89,12 @@ fn chat_context(
 }
 
 /// Natural-language search: translate the question into an FTS5 plan
-/// (MATCH expression + optional date range), run it locally, then summarize
+/// (MATCH expression + optional date range), run it locally, fuse the FTS
+/// ranking with the local vector leg when embeddings exist, then summarize
 /// the top results (RAG). Degrades to the plain term search whenever the LLM
 /// is unavailable or misbehaves — search results never depend on the LLM
-/// succeeding. The storage lock is never held across an LLM round trip.
+/// succeeding, and ranking never depends on embeddings existing. The
+/// storage lock is never held across an LLM round trip.
 #[tauri::command]
 fn llm_ask(
     state: State<AppState>,
@@ -104,8 +112,8 @@ fn llm_ask(
     let today = Utc::now().date_naive();
 
     // Same steps as [`vault_core::llm::ask`], composed so that each storage
-    // lock is short-lived: translate (network) → validate (lock) → run
-    // (lock) → summarize (network).
+    // lock is short-lived: translate (network) → validate (lock) → run +
+    // hybrid-rank (lock, local CPU) → summarize (network).
     let planned = match &state.llm {
         None => PlannedQuery {
             plan: QueryPlan::plain(question),
@@ -118,9 +126,19 @@ fn llm_ask(
             llm::validate(&storage, question, candidate)
         }
     };
-    let results = {
+    let (results, ranking) = {
         let storage = lock(&state)?;
-        llm::run_plan(&storage, &planned, limit).map_err(|e| e.to_string())?
+        let fts_results = llm::run_plan(&storage, &planned, limit).map_err(|e| e.to_string())?;
+        let hybrid = llm::rank_hybrid(
+            &storage,
+            &state.embedder,
+            question,
+            &planned,
+            &fts_results,
+            limit,
+        )
+        .map_err(|e| e.to_string())?;
+        (hybrid.results, hybrid.ranking)
     };
     let (answer, summary_notes) = match &state.llm {
         Some(backend) => {
@@ -135,6 +153,7 @@ fn llm_ask(
     Ok(AskOutcome {
         plan: planned.plan,
         plan_source: planned.source,
+        ranking,
         results,
         answer,
         notes,
@@ -146,6 +165,32 @@ fn llm_ask(
 #[tauri::command]
 fn llm_status(state: State<AppState>) -> LlmStatus {
     LlmStatus::from_config(state.llm.as_ref().map(AnthropicLlm::config))
+}
+
+/// Run the incremental local embedding job: embeds only messages still
+/// lacking an embedding for the current model, in batches. Completely
+/// offline and CPU-bound; large first runs can take a moment, so the work
+/// runs off the UI thread.
+#[tauri::command]
+async fn embed_messages(state: State<'_, AppState>) -> Result<EmbedJobSummary, String> {
+    let storage = Arc::clone(&state.storage);
+    let embedder = state.embedder;
+    tauri::async_runtime::spawn_blocking(move || {
+        let storage = storage
+            .lock()
+            .map_err(|e| format!("storage lock poisoned: {e}"))?;
+        vector::run_embedding_job(&storage, &embedder, None).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("embedding task failed: {e}"))?
+}
+
+/// Local embedding coverage for the UI: model id, dimensionality, how many
+/// messages are embedded, and how many are still pending.
+#[tauri::command]
+fn embed_status(state: State<AppState>) -> Result<EmbeddingStatus, String> {
+    let storage = lock(&state)?;
+    vector::embedding_status(&storage, &state.embedder).map_err(|e| e.to_string())
 }
 
 /// Import every message of an `.mbox` file (idempotent; re-importing skips
@@ -298,6 +343,7 @@ pub fn run() {
             app.manage(AppState {
                 storage: Arc::new(Mutex::new(storage)),
                 llm,
+                embedder: HashEmbedder::new(),
             });
             app.manage(secrets::Secrets::new());
             Ok(())
@@ -307,6 +353,8 @@ pub fn run() {
             chat_context,
             llm_ask,
             llm_status,
+            embed_messages,
+            embed_status,
             import_mbox,
             import_chat_export,
             sync_imap,

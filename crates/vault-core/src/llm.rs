@@ -1,11 +1,14 @@
 //! LLM-assisted search: natural-language question → FTS5 plan → RAG answer.
 //!
-//! Two LLM round trips per [`ask`]:
+//! Three local steps plus two optional LLM round trips per [`ask`]:
 //! 1. **Translate**: the question becomes a [`QueryPlan`] — an FTS5 MATCH
 //!    expression plus an optional sent-date range. The expression is vetted
 //!    against the index ([`Storage::is_valid_match`]) and replaced by a plain
 //!    term search whenever the LLM output is unusable.
-//! 2. **Summarize** (RAG): a short answer synthesized from *only* the top
+//! 2. **Rank**: the plan runs locally against FTS5, then — when local
+//!    embeddings exist — a vector leg is scanned and both ranked lists are
+//!    fused with Reciprocal Rank Fusion ([`rank_hybrid`]). Fully local.
+//! 3. **Summarize** (RAG): a short answer synthesized from *only* the top
 //!    search-result rows — never the whole archive. This is the product's
 //!    privacy promise in LLM mode: only the question and the returned rows
 //!    leave the machine, and only when an API key is configured.
@@ -13,7 +16,8 @@
 //! The provider is any Anthropic-compatible `/v1/messages` endpoint (default:
 //! the z.ai GLM endpoint), configured purely through environment variables;
 //! the key is never persisted. With no key everything still works: [`ask`]
-//! degrades to plain FTS5 term search with no network traffic.
+//! degrades to plain FTS5 term search (plus local hybrid ranking when
+//! embeddings exist) with no network traffic.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -26,6 +30,7 @@ use url::Url;
 use crate::message::Message;
 use crate::search::build_match_query;
 use crate::storage::Storage;
+use crate::vector::{rrf_fuse, Embedder};
 use crate::{Error, Result};
 
 /// How many of the top search results feed the summary, by default.
@@ -439,6 +444,86 @@ pub fn run_plan(storage: &Storage, planned: &PlannedQuery, limit: u32) -> Result
 }
 
 // ---------------------------------------------------------------------------
+// Hybrid ranking (FTS5 + local vectors, step 2b — fully local)
+// ---------------------------------------------------------------------------
+
+/// How many vector candidates feed fusion (before truncating to `limit`).
+/// Enough depth for RRF to matter, still a bounded scan cost.
+pub const VECTOR_CANDIDATES: u32 = 200;
+
+/// Which legs produced the ranked result list the Ask pipeline returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RankingMode {
+    /// FTS5 only (no local embeddings exist, or none matched).
+    FtsOnly,
+    /// FTS5 and the local vector leg were fused (reciprocal rank fusion).
+    HybridFtsVector,
+    /// The vector leg only (FTS5 matched nothing).
+    VectorOnly,
+}
+
+/// Outcome of the hybrid ranking step: fused, hydrated results plus how
+/// they were ranked.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HybridRanking {
+    pub results: Vec<Message>,
+    pub ranking: RankingMode,
+}
+
+/// Rank the FTS leg against the local vector leg and fuse the two lists.
+///
+/// The question is embedded with `embedder` and scanned against the
+/// archive's embeddings under the plan's date bounds (same local-day
+/// semantics as the FTS leg); both ranked id lists are then fused with
+/// [`rrf_fuse`]. Without embeddings — or when none exist at all — the FTS
+/// order stands unchanged ([`RankingMode::FtsOnly`]), so the pipeline never
+/// depends on the vector leg. (Embedding coverage is surfaced by the UI's
+/// status line; `notes` stays reserved for degradation.)
+pub fn rank_hybrid(
+    storage: &Storage,
+    embedder: &dyn Embedder,
+    question: &str,
+    planned: &PlannedQuery,
+    fts_results: &[Message],
+    limit: u32,
+) -> Result<HybridRanking> {
+    let counts = storage.embedding_counts(embedder.id())?;
+    let vector_ids: Vec<i64> = if counts.embedded == 0 {
+        Vec::new()
+    } else {
+        storage
+            .vector_scan(
+                embedder.id(),
+                embedder.dim(),
+                &embedder.embed(question),
+                planned.plan.date_from.as_deref(),
+                planned.plan.date_to.as_deref(),
+                VECTOR_CANDIDATES.max(limit),
+            )?
+            .into_iter()
+            .map(|hit| hit.message_id)
+            .collect()
+    };
+    let fts_ids: Vec<i64> = fts_results.iter().map(|m| m.id).collect();
+
+    let (ids, ranking) = match (fts_ids.is_empty(), vector_ids.is_empty()) {
+        (_, true) => (fts_ids, RankingMode::FtsOnly),
+        (true, false) => {
+            let mut only = vector_ids;
+            only.truncate(limit as usize);
+            (only, RankingMode::VectorOnly)
+        }
+        (false, false) => (
+            rrf_fuse(&fts_ids, &vector_ids, limit as usize),
+            RankingMode::HybridFtsVector,
+        ),
+    };
+    let results = storage.get_many(&ids)?;
+    Ok(HybridRanking { results, ranking })
+}
+
+// ---------------------------------------------------------------------------
 // Summary (step 3, RAG over top results only)
 // ---------------------------------------------------------------------------
 
@@ -517,12 +602,14 @@ pub fn summarize_results(
 // Pipeline composition
 // ---------------------------------------------------------------------------
 
-/// Everything one "ask" returns: the plan used, the results, the RAG answer,
-/// and human-readable degradation notes for the UI.
+/// Everything one "ask" returns: the plan used, how the results were
+/// ranked, the results, the RAG answer, and human-readable degradation
+/// notes for the UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AskOutcome {
     pub plan: QueryPlan,
     pub plan_source: PlanSource,
+    pub ranking: RankingMode,
     pub results: Vec<Message>,
     pub answer: Option<String>,
     pub notes: Vec<String>,
@@ -538,6 +625,7 @@ impl AskOutcome {
                 date_to: None,
             },
             plan_source: PlanSource::NoLlm,
+            ranking: RankingMode::FtsOnly,
             results: Vec::new(),
             answer: None,
             notes: Vec::new(),
@@ -545,7 +633,8 @@ impl AskOutcome {
     }
 }
 
-/// The reference pipeline: translate → validate → search → summarize.
+/// The reference pipeline: translate → validate → rank (FTS + local
+/// vectors) → summarize.
 ///
 /// Used directly by tests and any future caller that already owns the
 /// storage handle. The Tauri command composes the same steps individually so
@@ -554,6 +643,7 @@ impl AskOutcome {
 pub fn ask(
     storage: &Storage,
     llm: Option<&dyn Llm>,
+    embedder: &dyn Embedder,
     question: &str,
     limit: u32,
     summarize_top: usize,
@@ -567,7 +657,9 @@ pub fn ask(
             notes: Vec::new(),
         },
     };
-    let results = run_plan(storage, &planned, limit)?;
+    let fts_results = run_plan(storage, &planned, limit)?;
+    let hybrid = rank_hybrid(storage, embedder, question, &planned, &fts_results, limit)?;
+    let results = hybrid.results;
     let (answer, summary_notes) = match llm {
         Some(llm) => {
             let s = summarize_results(llm, question, &results, summarize_top);
@@ -580,6 +672,7 @@ pub fn ask(
     Ok(AskOutcome {
         plan: planned.plan,
         plan_source: planned.source,
+        ranking: hybrid.ranking,
         results,
         answer,
         notes,

@@ -13,7 +13,7 @@ use crate::util::{msg, raw};
 
 /// The schema version this build knows; bump expectation when a migration
 /// is added (the assertions below are version-agnostic where possible).
-const KNOWN_VERSION: i64 = 2;
+const KNOWN_VERSION: i64 = 3;
 
 fn migrations_rows(db: &std::path::Path) -> Vec<i64> {
     let conn = raw(db);
@@ -47,7 +47,7 @@ fn fresh_database_applies_every_migration_exactly_once() {
 
     let s = Storage::open(&db).unwrap();
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
-    assert_eq!(migrations_rows(&db), vec![1, 2]);
+    assert_eq!(migrations_rows(&db), vec![1, 2, 3]);
 
     // The migrated schema is immediately functional.
     let out = s
@@ -61,7 +61,7 @@ fn fresh_database_applies_every_migration_exactly_once() {
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
     assert_eq!(
         migrations_rows(&db),
-        vec![1, 2],
+        vec![1, 2, 3],
         "no duplicate bookkeeping rows"
     );
     assert_eq!(s.stats().unwrap().total, 1);
@@ -76,7 +76,7 @@ fn version0_database_upgrades_in_place() {
 
     let s = Storage::open(&db).unwrap();
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
-    assert_eq!(migrations_rows(&db), vec![1, 2]);
+    assert_eq!(migrations_rows(&db), vec![1, 2, 3]);
     // The upgraded database works end to end: write, index, read.
     s.insert_message(&msg("integrity", "up-1", "upgraded archive body"))
         .unwrap();
@@ -157,16 +157,16 @@ fn version1_db_with_data(path: &std::path::Path, rows: usize) {
 }
 
 #[test]
-fn v1_database_with_data_upgrades_in_place_to_v2() {
+fn v1_database_with_data_upgrades_in_place() {
     let dir = crate::util::scratch_dir();
     let db = dir.path().join("v1.db");
     version1_db_with_data(&db, 7);
 
-    // Opening with the current build applies migration 2 (IMAP sync state)
-    // on top of the untouched v1 schema - in place, keeping every row.
+    // Opening with the current build applies migrations 2 and 3 on top of
+    // the untouched v1 schema - in place, keeping every row.
     let s = Storage::open(&db).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 2);
-    assert_eq!(migrations_rows(&db), vec![1, 2]);
+    assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
+    assert_eq!(migrations_rows(&db), vec![1, 2, 3]);
 
     // The v1 archive is fully intact and searchable.
     let stats = s.stats().unwrap();
@@ -193,11 +193,30 @@ fn v1_database_with_data_upgrades_in_place_to_v2() {
     assert_eq!(state.uidvalidity, 42);
     assert_eq!(state.last_uid, 1234);
 
+    // The schema v3 addition is live: the embedding table round-trips.
+    {
+        use vault_core::vector::{run_embedding_job, Embedder, HashEmbedder};
+        let embedder = HashEmbedder::new();
+        let summary = run_embedding_job(&s, &embedder, None).unwrap();
+        assert_eq!(summary.embedded, 7, "every upgraded row embeds");
+        let hits = s
+            .vector_scan(
+                embedder.id(),
+                embedder.dim(),
+                &embedder.embed("vintage body of the v1 era"),
+                None,
+                None,
+                3,
+            )
+            .unwrap();
+        assert!(!hits.is_empty(), "the scan reads migrated rows");
+    }
+
     // Idempotence: reopening applies nothing new and everything is still there.
     drop(s);
     let s = Storage::open(&db).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 2);
-    assert_eq!(migrations_rows(&db), vec![1, 2]);
+    assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
+    assert_eq!(migrations_rows(&db), vec![1, 2, 3]);
     assert_eq!(s.stats().unwrap().total, 7);
     let state = s
         .get_imap_state("imap/gmail", "INBOX")
