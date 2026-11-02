@@ -904,9 +904,11 @@ impl Storage {
             params![model],
             |row| row.get(0),
         )?;
-        let messages: u64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM archive_messages", [], |row| row.get(0))?;
+        let messages: u64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM archive_messages", [], |row| {
+                    row.get(0)
+                })?;
         Ok(EmbeddingCounts { embedded, messages })
     }
 
