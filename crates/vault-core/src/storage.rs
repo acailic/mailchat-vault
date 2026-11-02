@@ -77,9 +77,9 @@ const MIGRATIONS: &[(i64, &str)] = &[
         r#"
         -- One embedding per message (PK), versioned by model id so a new
         -- embedder invalidates old vectors simply by writing a different
-        -- model string. Vectors are i8-quantized (one byte per component,
-        -- see crate::vector), L2-normalized
-        -- at write time (see crate::vector). Deleting a message cascades.
+        -- model string. Vectors are i8-quantized (one byte per component)
+        -- and L2-normalized at write time (see crate::vector). Deleting a
+        -- message cascades.
         CREATE TABLE message_embeddings (
             message_id  INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
             model       TEXT    NOT NULL,
