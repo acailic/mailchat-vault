@@ -32,8 +32,15 @@
 //! ([`Storage::insert_mail_message`]) scope identities to the instance and
 //! preserve conflicting revisions of one `Message-ID` as separate archived
 //! rows.
+//!
+//! Safe migration (M1.4, [`crate::safe_migration`]): opening an existing
+//! database with pending migrations first refuses anything newer than
+//! this build ([`Error::SchemaTooNew`]), then preflights free space,
+//! snapshots the file, converts in a single transaction, validates the
+//! indexes, and — on any failure — restores the original from the
+//! snapshot (kept next to the database). See [`Storage::open_with`].
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{Datelike, Days, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use rusqlite::types::Value as SqlValue;
@@ -44,11 +51,15 @@ use crate::message::{InsertOutcome, Message, NewMessage, SourceCount, Stats};
 use crate::query::{
     ChatContext, SearchHit, SearchPage, SearchQuery, SNIPPET_CLOSE_MARK, SNIPPET_OPEN_MARK,
 };
+use crate::safe_migration::{self, MigrationFailPoint, OpenOptions};
 use crate::stats::{ArchiveStats, AuthorCount, ChatCount, DayCount};
 use crate::vector::VectorHit;
 use crate::{Error, Result};
 
-/// Ordered schema migrations; each entry runs once, inside a transaction.
+/// Ordered schema migrations; each entry runs exactly once. Since M1.4
+/// every *pending* migration commits in one single transaction on open
+/// (all or nothing), guarded by [`crate::safe_migration`]'s pre-migration
+/// snapshot and rollback path.
 ///
 /// Versions 1–2 are the frozen legacy schema; version 3 adds local
 /// embeddings over the legacy table; version 4 adds the canonical store and
@@ -517,30 +528,106 @@ pub struct Storage {
     conn: Connection,
 }
 
+/// The newest schema version this build knows how to produce. Databases
+/// recording a higher version are refused by [`Storage::open_with`]
+/// instead of being silently opened (M1.4 newer-schema refusal).
+const MAX_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
+
 impl Storage {
     /// Open (and migrate) a database file, creating it when missing.
+    ///
+    /// Existing files with pending migrations go through the M1.4
+    /// safe-migration path (snapshot, preflight, rollback — see
+    /// [`crate::safe_migration`]); for fault-injection tests use
+    /// [`Storage::open_with`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with(path, &OpenOptions::default())
+    }
+
+    /// [`Storage::open`] with explicit migration-safety options (failure
+    /// injection for the integrity suite; production callers use
+    /// [`Storage::open`]).
+    pub fn open_with(path: impl AsRef<Path>, opts: &OpenOptions) -> Result<Self> {
+        let path: &Path = path.as_ref();
+        let existed = path.try_exists().map_err(Error::Io)?;
         let conn = Connection::open(path)?;
-        Self::init(conn)
+        // Version probe before anything can touch the file: a newer
+        // schema must be refused with zero writes (not even pragmas).
+        let current = read_schema_version(&conn)?;
+        if current > MAX_SCHEMA_VERSION {
+            return Err(Error::SchemaTooNew {
+                db: current,
+                supported: MAX_SCHEMA_VERSION,
+            });
+        }
+        // Only an existing archive with pending conversions needs a
+        // snapshot: a fresh file has nothing to lose, and an up-to-date
+        // file has nothing to convert.
+        let snapshot: Option<PathBuf> = if existed && current < MAX_SCHEMA_VERSION {
+            Some(safe_migration::take_snapshot(&conn, path, current, opts)?)
+        } else {
+            None
+        };
+        match Self::init_with(conn, opts, existed.then_some(path), snapshot.as_deref()) {
+            Ok(storage) => {
+                // The conversion committed and validated; the snapshot's
+                // job is done.
+                if let Some(snap) = &snapshot {
+                    safe_migration::remove_snapshot(snap);
+                }
+                Ok(storage)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Open a private in-memory database (used by tests and demos).
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        Self::init(conn)
+        Self::init_with(conn, &OpenOptions::default(), None, None)
     }
 
-    fn init(conn: Connection) -> Result<Self> {
+    /// Configure pragmas/functions, migrate, and validate — restoring
+    /// from the pre-migration snapshot when anything fails after the
+    /// snapshot was taken (M1.4 rollback path).
+    fn init_with(
+        conn: Connection,
+        opts: &OpenOptions,
+        db_path: Option<&Path>,
+        snapshot: Option<&Path>,
+    ) -> Result<Self> {
+        let converted = Self::configure_and_migrate(&conn, opts);
+        match converted {
+            Ok(()) => Ok(Self { conn }),
+            Err(e) => {
+                if let Some((db, snap)) = db_path.zip(snapshot) {
+                    // Close the connection before touching its file, then
+                    // put the pre-migration original back. The snapshot
+                    // itself is kept as the reopen path.
+                    drop(conn);
+                    if let Err(restore) = safe_migration::restore_from_snapshot(db, snap) {
+                        return Err(Error::UnsafeMigration(format!(
+                            "{e}; restoring the pre-migration original also failed ({restore}) \
+                             — the snapshot copy is kept at {}",
+                            snap.display()
+                        )));
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    fn configure_and_migrate(conn: &Connection, opts: &OpenOptions) -> Result<()> {
         // journal_mode returns a row (the new mode), so read-and-ignore it
         // via query_row; synchronous/foreign_keys return no rows and need
         // pragma_update.
         conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        register_fold_function(&conn)?;
-        register_canonical_functions(&conn)?;
-        migrate(&conn)?;
-        Ok(Self { conn })
+        register_fold_function(conn)?;
+        register_canonical_functions(conn)?;
+        migrate(conn, opts)
     }
 
     /// Insert one message into the canonical store, idempotently on its
@@ -2469,8 +2556,31 @@ fn register_canonical_functions(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Apply pending migrations, each in its own transaction, exactly once.
-fn migrate(conn: &Connection) -> Result<()> {
+/// The schema version recorded in the database, or 0 when the
+/// bookkeeping table does not exist yet. Read-only: safe to call before
+/// any pragma or migration has touched the file.
+fn read_schema_version(conn: &Connection) -> Result<i64> {
+    let has_table: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_table {
+        return Ok(0);
+    }
+    Ok(conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// Apply pending migrations, exactly once each, in one single
+/// transaction (M1.4: the conversion is all-or-nothing), then validate
+/// the converted indexes. Any failure rolls the database back to its
+/// pre-conversion state — first logically (transaction rollback), then,
+/// when a snapshot exists, physically ([`crate::safe_migration`]).
+fn migrate(conn: &Connection, opts: &OpenOptions) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
             version    INTEGER PRIMARY KEY,
@@ -2482,18 +2592,31 @@ fn migrate(conn: &Connection) -> Result<()> {
         [],
         |row| row.get(0),
     )?;
-    for &(version, sql) in MIGRATIONS.iter().filter(|(v, _)| *v > current) {
+    let pending: Vec<&(i64, &str)> = MIGRATIONS.iter().filter(|(v, _)| *v > current).collect();
+    if pending.is_empty() {
+        return Ok(());
+    }
+    {
         let tx = conn.unchecked_transaction()?;
-        tx.execute_batch(sql)?;
-        if let Some(&(_, hook)) = RUST_MIGRATIONS.iter().find(|(v, _)| *v == version) {
-            hook(&tx)?;
+        for &&(version, sql) in &pending {
+            tx.execute_batch(sql)?;
+            if let Some(&(_, hook)) = RUST_MIGRATIONS.iter().find(|(v, _)| *v == version) {
+                hook(&tx)?;
+            }
+            tx.execute(
+                "INSERT INTO schema_migrations (version) VALUES (?1)",
+                params![version],
+            )?;
         }
-        tx.execute(
-            "INSERT INTO schema_migrations (version) VALUES (?1)",
-            params![version],
-        )?;
+        safe_migration::inject(opts, MigrationFailPoint::DuringMigration)?;
         tx.commit()?;
     }
+    // Post-conversion validation (M1.4): the committed database must
+    // pass whole-file integrity and have every full-text index in
+    // agreement with its content table. A failure here triggers the
+    // snapshot rollback like any other migration failure.
+    safe_migration::inject(opts, MigrationFailPoint::AfterMigration)?;
+    safe_migration::validate_post_migration(conn)?;
     Ok(())
 }
 
@@ -2874,4 +2997,71 @@ fn merge_conversations_onto_keys(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit coverage for the M1.4 post-conversion validation itself: it
+    //! must *detect* a drifted or corrupt full-text index, not just run.
+    //! (The injected-failure lifecycle lives in the integration suite,
+    //! `tests/integrity/safe_migration.rs`.)
+
+    use super::*;
+
+    fn seeded() -> Storage {
+        let s = Storage::open_in_memory().unwrap();
+        for i in 0..5 {
+            s.insert_message(&crate::message::NewMessage::new(
+                "test",
+                format!("m{i}"),
+                "ana",
+                "2026-01-01T00:00:00Z",
+                format!("indexed body number {i}"),
+            ))
+            .unwrap();
+        }
+        s
+    }
+
+    #[test]
+    fn validation_passes_on_a_healthy_database() {
+        let s = seeded();
+        safe_migration::validate_post_migration(&s.conn).unwrap();
+    }
+
+    #[test]
+    fn validation_catches_a_drifted_fts_row_count() {
+        let s = seeded();
+        // Simulate an index that lost entries (e.g. a crash between the
+        // content write and the trigger, or a torn rebuild): the docsize
+        // parity check must catch what a plain open would silently accept
+        // (`COUNT(*)` on the FTS table reads the content table and hides
+        // the drift).
+        s.conn
+            .execute("DELETE FROM archive_fts WHERE rowid <= 2", [])
+            .unwrap();
+        let err = safe_migration::validate_post_migration(&s.conn)
+            .expect_err("drifted index must fail validation");
+        assert!(
+            err.to_string().contains("archive_fts"),
+            "error must name the drifted index: {err}"
+        );
+    }
+
+    #[test]
+    fn validation_catches_corrupt_fts_segments() {
+        let s = seeded();
+        // Structurally corrupt the index segments (same document count):
+        // the FTS5 integrity-check command must flag the malformed index
+        // even though every document is still accounted for.
+        s.conn
+            .execute("DELETE FROM archive_fts_data WHERE id % 7 = 3", [])
+            .unwrap();
+        let err = safe_migration::validate_post_migration(&s.conn)
+            .expect_err("corrupt index must fail validation");
+        assert!(
+            err.to_string().contains("archive_fts"),
+            "error must name the corrupt index: {err}"
+        );
+    }
 }
