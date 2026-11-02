@@ -121,7 +121,7 @@ fn model_change_reembeds_and_replaces_rows() {
     // pending again for the current model, and re-embedding replaces the
     // foreign row (one row per message, keyed by message_id).
     let foreign = e.embed("vault sync");
-    s.embed_message(1, "future-model-v9", e.dim(), &foreign)
+    s.embed_messages_batch("future-model-v9", e.dim(), &[(1, foreign)])
         .unwrap();
     assert_eq!(
         s.pending_embeddings(e.id(), 10).unwrap(),
@@ -249,7 +249,7 @@ fn vector_scan_skips_foreign_dimension_rows() {
     // A leftover row from a different-dimension model under the same model
     // id: stored with dim 4. The 128-dim scan must skip it, not break.
     let foreign = vec![0.5, -0.5, 0.5, -0.5];
-    s.embed_message(1, e.id(), 4, &foreign).unwrap();
+    s.embed_messages_batch(e.id(), 4, &[(1, foreign)]).unwrap();
     let hits = s
         .vector_scan(e.id(), e.dim(), &e.embed("vault sync"), None, None, 10)
         .unwrap();

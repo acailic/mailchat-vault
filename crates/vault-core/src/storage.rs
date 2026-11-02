@@ -519,18 +519,6 @@ impl Storage {
     // Local embeddings (crate::vector): incremental job support + cosine scan
     // -----------------------------------------------------------------------
 
-    /// Upsert one message's embedding for `model`. `embedding.len()` must
-    /// equal `dim`; the caller normalizes (see [`crate::vector::Embedder`]).
-    pub fn embed_message(
-        &self,
-        message_id: i64,
-        model: &str,
-        dim: u16,
-        embedding: &[f32],
-    ) -> Result<()> {
-        self.embed_messages_batch(model, dim, &[(message_id, embedding.to_vec())])
-    }
-
     /// Upsert a batch of embeddings in one transaction (the embedding job's
     /// write unit). Every vector's length must equal `dim`. Vectors are
     /// stored quantized to one i8 byte per component ([`crate::vector::quantize_i8`]).
