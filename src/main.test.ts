@@ -809,6 +809,9 @@ describe("ask and local embeddings", () => {
     await flush();
     expect(tauri.calls.filter((c) => c.cmd === "llm_ask")).toHaveLength(0);
     expect($("#ask-status").textContent).toBe("Ask a question first.");
+  });
+});
+
 // Folder watching
 // ---------------------------------------------------------------------------
 
