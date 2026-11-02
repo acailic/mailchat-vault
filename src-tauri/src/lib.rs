@@ -6,10 +6,18 @@
 //! - `chat_context` — a message plus its adjacent messages in the same chat.
 //! - `llm_ask` — natural-language search: LLM-translated FTS5 plan +
 //!   optional date range + hybrid FTS/vector ranking + RAG answer over the
-//!   top results.
-//! - `llm_status` — LLM availability for the UI (never the key).
+//!   top results. The optional `provider` argument picks the LLM provider
+//!   from the Ask menu (a settings profile, `env`, or `local` for
+//!   local-only mode).
+//! - `llm_status` — LLM availability for the UI: the default selection
+//!   plus the full provider menu (never the key).
 //! - `embed_messages` — incremental local embedding job (new messages only).
-//! - `embed_status` — embedding coverage for the UI (model, dim, pending).
+//! - `embed_status` — embedding coverage for the UI (model, dim, pending),
+//!   behind hybrid ranking.
+//! - `settings_get` / `settings_save` / `llm_key_clear` — the Settings UI:
+//!   provider profiles, default provider, and app options live in
+//!   `settings.json` in the app data dir; API keys live in the OS keyring
+//!   (session-memory fallback) and never in the file or the database.
 //! - `import_mbox` — manual `.mbox` import (the demo ingest source).
 //! - `import_chat_export` — WhatsApp `.txt` / Telegram `result.json` /
 //!   Signal `.json` / Discord Data Package import with format
@@ -29,8 +37,9 @@
 //! - `export_chat` — write the whole chat thread of one message to a
 //!   user-chosen file in the same formats.
 
+use std::collections::HashSet;
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::Utc;
@@ -45,21 +54,27 @@ use vault_core::llm::{
 };
 use vault_core::mbox::MboxSource;
 use vault_core::query::{ChatContext, SearchPage, SearchQuery};
+use vault_core::settings::{self, Options, Settings, SETTINGS_VERSION};
 use vault_core::stats::{ArchiveStats, DEFAULT_TOP};
 use vault_core::storage::Storage;
 use vault_core::vector::{self, EmbedJobSummary, EmbeddingStatus, HashEmbedder};
 use vault_core::watch::{FolderWatcher, WatchSnapshot};
 use vault_core::{demo, message, Error, Result as CoreResult};
 
+mod registry;
 mod secrets;
 
-/// Shared app state: one open storage handle guarded by a mutex, the
-/// optional LLM backend (`None` when no API key is configured), and the
-/// local embedder behind hybrid ranking (offline, stateless), and the
+use registry::{LlmRegistry, SaveSettingsPayload, Selection, SettingsView};
+
+/// Shared app state: one open storage handle guarded by a mutex, plus the
+/// LLM provider registry (settings profiles + keyring keys + env fallback),
+/// the local offline embedder behind hybrid ranking (stateless), and the
 /// background folder watcher.
 struct AppState {
     storage: Arc<Mutex<Storage>>,
-    llm: Option<AnthropicLlm>,
+    registry: Arc<Mutex<LlmRegistry>>,
+    /// Where `settings_save` writes the settings file.
+    settings_path: PathBuf,
     embedder: HashEmbedder,
     watcher: FolderWatcher,
 }
@@ -109,11 +124,17 @@ fn chat_context(
 /// is unavailable or misbehaves — search results never depend on the LLM
 /// succeeding, and ranking never depends on embeddings existing. The
 /// storage lock is never held across an LLM round trip.
+///
+/// `provider` optionally picks the backend for this ask: a settings
+/// profile id, `env` (the environment fallback), or `local` (plain local
+/// search, nothing sent anywhere). `None` uses the default selection
+/// (settings default → env fallback → local-only).
 #[tauri::command]
 fn llm_ask(
     state: State<AppState>,
     question: String,
     limit: Option<u32>,
+    provider: Option<String>,
 ) -> Result<AskOutcome, String> {
     let question = question.trim();
     if question.is_empty() {
@@ -125,14 +146,45 @@ fn llm_ask(
     let limit = limit.unwrap_or(50).clamp(1, 200);
     let today = Utc::now().date_naive();
 
+    // Resolve the backend without holding the registry lock across any
+    // network round trip: the selection clones its LlmConfig out.
+    let backend: Option<AnthropicLlm>;
+    let mut local_source: Option<PlanSource> = None;
+    let mut local_note: Option<String> = None;
+    let summarize_top: usize;
+    {
+        let registry = state
+            .registry
+            .lock()
+            .map_err(|e| format!("registry lock poisoned: {e}"))?;
+        summarize_top = registry.settings().options.summarize_top as usize;
+        match registry.select(provider.as_deref()) {
+            Selection::Provider { config, .. } => backend = Some(AnthropicLlm::new(config)),
+            Selection::Local { reason } => {
+                backend = None;
+                // An explicitly requested (but unusable) provider is local
+                // mode with a note; no selection at all with nothing
+                // configured stays the classic no-LLM mode.
+                local_source = Some(if provider.is_some() {
+                    PlanSource::Local
+                } else {
+                    PlanSource::NoLlm
+                });
+                if !reason.is_empty() {
+                    local_note = Some(reason);
+                }
+            }
+        }
+    }
+
     // Same steps as [`vault_core::llm::ask`], composed so that each storage
     // lock is short-lived: translate (network) → validate (lock) → run +
     // hybrid-rank (lock, local CPU) → summarize (network).
-    let planned = match &state.llm {
+    let planned = match &backend {
         None => PlannedQuery {
             plan: QueryPlan::plain(question),
-            source: PlanSource::NoLlm,
-            notes: Vec::new(),
+            source: local_source.expect("local selection always sets a source"),
+            notes: local_note.into_iter().collect(),
         },
         Some(backend) => {
             let candidate = llm::translate(backend, question, today);
@@ -154,10 +206,9 @@ fn llm_ask(
         .map_err(|e| e.to_string())?;
         (hybrid.results, hybrid.ranking)
     };
-    let (answer, summary_notes) = match &state.llm {
+    let (answer, summary_notes) = match &backend {
         Some(backend) => {
-            let summarized =
-                llm::summarize_results(backend, question, &results, llm::DEFAULT_SUMMARIZE_TOP);
+            let summarized = llm::summarize_results(backend, question, &results, summarize_top);
             (summarized.answer, summarized.notes)
         }
         None => (None, Vec::new()),
@@ -174,11 +225,121 @@ fn llm_ask(
     })
 }
 
-/// LLM availability for the UI: enabled flag, model, endpoint host, and how
-/// many top results feed the summary. Never exposes the API key.
+/// LLM availability for the UI: the default selection (enabled flag,
+/// model, endpoint host) plus the full provider menu and how many top
+/// results feed the summary. Never exposes any API key.
 #[tauri::command]
-fn llm_status(state: State<AppState>) -> LlmStatus {
-    LlmStatus::from_config(state.llm.as_ref().map(AnthropicLlm::config))
+fn llm_status(state: State<AppState>) -> Result<LlmStatus, String> {
+    let registry = state
+        .registry
+        .lock()
+        .map_err(|e| format!("registry lock poisoned: {e}"))?;
+    Ok(registry.status())
+}
+
+/// Everything the Settings UI shows: provider profiles (with a `has_key`
+/// flag — never the keys), the default selection, options, and the
+/// environment-fallback diagnostics.
+#[tauri::command]
+fn settings_get(state: State<AppState>) -> Result<SettingsView, String> {
+    let registry = state
+        .registry
+        .lock()
+        .map_err(|e| format!("registry lock poisoned: {e}"))?;
+    Ok(SettingsView::from(&*registry))
+}
+
+/// Save the settings file and apply API-key updates. Order matters:
+/// validate first (an invalid configuration is refused with the pairing
+/// error and nothing is written), then the file, then the keyring — so a
+/// failed save never leaves keys orphaned in the keyring or an invalid
+/// file on disk. Returns the fresh view the UI re-renders from.
+#[tauri::command]
+fn settings_save(
+    state: State<'_, AppState>,
+    secrets: State<'_, secrets::Secrets>,
+    payload: SaveSettingsPayload,
+) -> Result<SettingsView, String> {
+    let mut settings = Settings {
+        version: SETTINGS_VERSION,
+        providers: payload.providers,
+        default_provider: payload.default_provider,
+        options: Options {
+            theme: payload.theme,
+            summarize_top: payload.summarize_top,
+        },
+    };
+    settings.normalize();
+    settings.validate().map_err(|e| e.to_string())?;
+
+    // Key updates must reference configured providers (ids are opaque, so
+    // a stale id from a removed row is a client bug we refuse, not ignore).
+    let ids: HashSet<&str> = settings.providers.iter().map(|p| p.id.as_str()).collect();
+    for update in &payload.api_keys {
+        let id = update.id.trim();
+        if !ids.contains(id) {
+            return Err(format!("API key update for unknown provider “{id}”"));
+        }
+    }
+
+    settings
+        .save(&state.settings_path)
+        .map_err(|e| e.to_string())?;
+
+    // Keys only change once the file is safely written.
+    let mut key_store = None;
+    for update in &payload.api_keys {
+        let id = update.id.trim();
+        let key = update.key.trim();
+        if key.is_empty() {
+            secrets.clear_llm_key(id);
+        } else {
+            key_store = Some(secrets.save_llm_key(id, key));
+        }
+    }
+    // Forget the keys of providers that no longer exist (keyring hygiene).
+    let old_ids: Vec<String> = {
+        let registry = state
+            .registry
+            .lock()
+            .map_err(|e| format!("registry lock poisoned: {e}"))?;
+        registry
+            .settings()
+            .providers
+            .iter()
+            .map(|p| p.id.clone())
+            .collect()
+    };
+    for id in old_ids {
+        if !ids.contains(id.as_str()) {
+            secrets.clear_llm_key(&id);
+        }
+    }
+
+    let mut registry = state
+        .registry
+        .lock()
+        .map_err(|e| format!("registry lock poisoned: {e}"))?;
+    registry.update(settings, key_store, |id| secrets.load_llm_key(id));
+    Ok(SettingsView::from(&*registry))
+}
+
+/// Remove one provider's API key from the keyring (and session memory).
+/// The settings file is untouched.
+#[tauri::command]
+fn llm_key_clear(
+    state: State<'_, AppState>,
+    secrets: State<'_, secrets::Secrets>,
+    id: String,
+) -> Result<SettingsView, String> {
+    let id = id.trim();
+    secrets.clear_llm_key(id);
+    let mut registry = state
+        .registry
+        .lock()
+        .map_err(|e| format!("registry lock poisoned: {e}"))?;
+    registry.drop_key(id);
+    Ok(SettingsView::from(&*registry))
 }
 
 /// Run the incremental local embedding job: embeds only messages still
@@ -456,13 +617,20 @@ pub fn run() {
             let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
             std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
             let storage = Storage::open(data_dir.join("vault.db")).map_err(|e| e.to_string())?;
-            let llm = match LlmConfig::from_env() {
-                Ok(config) => config.map(AnthropicLlm::new),
-                Err(e) => {
-                    eprintln!("LLM disabled: {e}");
-                    None
-                }
-            };
+            // Settings come from the file first; the environment keeps
+            // working as a read-only fallback provider exactly as before
+            // the Settings UI existed.
+            let secrets = secrets::Secrets::new();
+            let settings_path = data_dir.join(settings::SETTINGS_FILE);
+            let settings = Settings::load(&settings_path);
+            if let Err(e) = &settings {
+                eprintln!("Settings ignored: {e}");
+            }
+            let env = LlmConfig::from_env();
+            if let Err(e) = &env {
+                eprintln!("LLM env config ignored: {e}");
+            }
+            let registry = LlmRegistry::load(settings, env, |id| secrets.load_llm_key(id));
             let storage = Arc::new(Mutex::new(storage));
             // Folder watcher: imports new/modified export files from the
             // user's chosen folders in the background and pushes every
@@ -477,11 +645,12 @@ pub fn run() {
             );
             app.manage(AppState {
                 storage,
-                llm,
+                registry: Arc::new(Mutex::new(registry)),
+                settings_path,
                 embedder: HashEmbedder::new(),
                 watcher,
             });
-            app.manage(secrets::Secrets::new());
+            app.manage(secrets);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -491,6 +660,9 @@ pub fn run() {
             llm_status,
             embed_messages,
             embed_status,
+            settings_get,
+            settings_save,
+            llm_key_clear,
             import_mbox,
             import_chat_export,
             sync_imap,

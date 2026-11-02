@@ -29,6 +29,8 @@
 //! - [`vector`]: local embeddings (offline embedder, SQLite blob index,
 //!   incremental embedding job) and the FTS+vector hybrid ranking used by
 //!   the Ask pipeline.
+//! - [`settings`]: the Settings file — LLM provider profiles, default
+//!   provider, and app options (no keys; those live in the OS keyring).
 //! - [`query`]: paged/filtered search requests and chat-thread context.
 //! - [`stats`]: archive statistics for the dashboard (totals, date range,
 //!   counts by source/day/chat/author).
@@ -48,6 +50,7 @@ pub mod media;
 pub mod message;
 pub mod query;
 pub mod search;
+pub mod settings;
 pub mod signal;
 pub mod stats;
 pub mod storage;
@@ -75,6 +78,8 @@ pub enum Error {
     Llm(String),
     #[error("chat import error: {0}")]
     ChatImport(String),
+    #[error("settings error: {0}")]
+    Settings(String),
     #[error("invalid date filter: {0}")]
     InvalidDate(String),
     #[error("imap error: {0}")]
