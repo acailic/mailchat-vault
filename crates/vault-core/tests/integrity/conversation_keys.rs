@@ -686,8 +686,7 @@ fn signal_uuid_prefixed_legacy_rows_key_and_reimport_dedups() {
     let export = r#"[{"id": "m-1", "type": "incoming",
         "conversationId": "e7e0e0e3-1111-4a2b-9d3c-2a9d4b1e5c01",
         "source": "+3851", "sent_at": 1793538000000, "body": "poruka signal"}]"#;
-    let collected =
-        vault_core::signal::parse_signal(export.as_bytes(), "Ana (najnovije)").unwrap();
+    let collected = vault_core::signal::parse_signal(export.as_bytes(), "Ana (najnovije)").unwrap();
     let summary = vault_core::ingest::ingest_collected(
         &s,
         vault_core::signal::SIGNAL_SOURCE,
@@ -695,7 +694,10 @@ fn signal_uuid_prefixed_legacy_rows_key_and_reimport_dedups() {
         None,
     )
     .unwrap();
-    assert_eq!(summary.inserted, 0, "re-import dedups onto the migrated row");
+    assert_eq!(
+        summary.inserted, 0,
+        "re-import dedups onto the migrated row"
+    );
     assert_eq!(summary.skipped, 1);
     assert_eq!(s.stats().unwrap().total, 1);
 }

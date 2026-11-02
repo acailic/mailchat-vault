@@ -143,8 +143,7 @@ pub fn parse_telegram(bytes: &[u8], chat_id_fallback: &str) -> Result<Collected>
             .or_else(|| obj.get("from_id").and_then(Value::as_str))
             .unwrap_or_default()
             .to_string();
-        let (sent_at, original_timestamp, timezone, confidence) =
-            telegram_sent_at(obj);
+        let (sent_at, original_timestamp, timezone, confidence) = telegram_sent_at(obj);
         let body = message_text(obj.get("text"));
         let external_id = format!("{}/{}", dedup_chat, id);
 
