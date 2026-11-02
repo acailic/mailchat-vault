@@ -68,8 +68,11 @@ impl Secrets {
     }
 
     /// Load the stored password for `user@host`: OS keyring first, then the
-    /// session-memory fallback. `None` when nothing is stored (the UI
-    /// should prompt for it).
+    /// session-memory fallback. Pre-upgrade releases keyed the entry by
+    /// `lower(username)@host`; when the exact-case key holds nothing, the
+    /// legacy key fills the gap and the secret is migrated (re-stored)
+    /// under the exact-case key. `None` when nothing is stored anywhere
+    /// (the UI should prompt for it).
     pub fn load(&self, host: &str, username: &str) -> Option<String> {
         let key = Self::account_key(host, username);
         if let Some(password) = self.load_key(&key) {

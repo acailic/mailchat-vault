@@ -272,7 +272,7 @@ async fn sync_imap(
     // Hostnames are case-insensitive, so one server spelled with different
     // casing must map to one durable source instance. Usernames stay
     // exactly as configured: the identity contract case-folds hosts, not
-    // usernames (see docs/data-and-api-contracts.md), so two casings of a
+    // usernames (see ImapConfig::connector_key), so two casings of a
     // username are distinct accounts until the server says otherwise.
     let host = host.trim().to_lowercase();
     let username = username.trim().to_string();

@@ -29,7 +29,11 @@ fn every_folder_becomes_its_own_channel_with_uid_provenance() {
     // name — and raw_json keeps the folder/uid/uidvalidity provenance.
     let first = &find(&storage, "chaninbody1")[0];
     assert_eq!(first.channel, "INBOX");
-    assert_eq!(first.source, crate::config_for(USER).display_label(), "connector source renders as the human-readable label, never the raw instance id");
+    assert_eq!(
+        first.source,
+        crate::config_for(USER).display_label(),
+        "connector source renders as the human-readable label, never the raw instance id"
+    );
     assert_eq!(first.external_id, "chanin-1@scenario.test");
     let raw: Value = serde_json::from_str(&first.raw_json).unwrap();
     assert_eq!(raw["folder"], "INBOX");
