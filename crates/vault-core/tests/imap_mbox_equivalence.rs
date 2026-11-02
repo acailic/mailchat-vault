@@ -140,6 +140,7 @@ fn mbox_fixture_and_imap_sync_produce_equivalent_archives() {
         folders: Vec::new(),
     };
     let instance = vimap::ensure_source_instance(&imap_storage, &config).unwrap();
+    let label = config.display_label();
     let folders = vec!["INBOX".to_string()];
     let mut s = {
         let stream = std::net::TcpStream::connect(server.addr).unwrap();
@@ -164,7 +165,7 @@ fn mbox_fixture_and_imap_sync_produce_equivalent_archives() {
     // stored fields across both ingest paths.
     for id in ["kickoff-123@example.com", "b64-9@example.com"] {
         let a = message_by_id(&mbox_storage, "mbox", id);
-        let b = message_by_id(&imap_storage, &instance, id);
+        let b = message_by_id(&imap_storage, &label, id);
         assert_eq!(a.author, b.author, "{id}: author mismatch");
         assert_eq!(a.sent_at, b.sent_at, "{id}: sent_at mismatch");
         assert_eq!(
@@ -176,7 +177,7 @@ fn mbox_fixture_and_imap_sync_produce_equivalent_archives() {
     }
 
     // The base64 transfer-encoded body decoded identically.
-    let b64 = message_by_id(&imap_storage, &instance, "b64-9@example.com");
+    let b64 = message_by_id(&imap_storage, &label, "b64-9@example.com");
     assert!(b64.body.contains("Second body via base64."));
 
     // The Message-ID-less mail: both paths derive a stable id from the

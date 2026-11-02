@@ -29,7 +29,7 @@ fn every_folder_becomes_its_own_channel_with_uid_provenance() {
     // name — and raw_json keeps the folder/uid/uidvalidity provenance.
     let first = &find(&storage, "chaninbody1")[0];
     assert_eq!(first.channel, "INBOX");
-    assert_eq!(first.source, crate::instance_of(&storage, USER));
+    assert_eq!(first.source, crate::config_for(USER).display_label(), "connector source renders as the human-readable label, never the raw instance id");
     assert_eq!(first.external_id, "chanin-1@scenario.test");
     let raw: Value = serde_json::from_str(&first.raw_json).unwrap();
     assert_eq!(raw["folder"], "INBOX");
@@ -95,8 +95,8 @@ fn two_accounts_archive_the_same_mail_independently() {
     let mut sources: Vec<String> = hits.iter().map(|m| m.source.clone()).collect();
     sources.sort();
     let mut expected = vec![
-        crate::instance_of(&storage, USER),
-        crate::instance_of(&storage, OTHER_USER),
+        crate::config_for(USER).display_label(),
+        crate::config_for(OTHER_USER).display_label(),
     ];
     expected.sort();
     assert_eq!(
