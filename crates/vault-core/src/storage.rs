@@ -13,7 +13,7 @@
 //! the legacy tables afterwards. Removing the legacy snapshot is deferred
 //! until the recovery/upgrade experience justifies a separate migration.
 //!
-//! Schema version 5 (M1.3) adds **stable conversation keys** over the same
+//! Schema version 6 (M1.3) adds **stable conversation keys** over the same
 //! tables: `conversations.provider_key` holds a stable, provider-scoped
 //! identity (`telegram:chat:<id>`, `whatsapp:chat:sha256:…`,
 //! `signal:chat:<uuid>`, `email:thread:<root message id>`), the insert
