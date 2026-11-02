@@ -275,7 +275,7 @@ async fn sync_imap(
     // usernames (see docs/data-and-api-contracts.md), so two casings of a
     // username are distinct accounts until the server says otherwise.
     let host = host.trim().to_lowercase();
-    let username = username.trim();
+    let username = username.trim().to_string();
     if host.is_empty() {
         return Err("host is required (e.g. imap.gmail.com)".into());
     }

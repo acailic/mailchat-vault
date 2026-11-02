@@ -129,15 +129,16 @@ fn initial_sync_stores_messages_with_folder_as_channel() {
     assert_eq!(state.last_uid, 2);
 
     // Messages stored under the account's durable source instance (the
-    // instance id is the source of connector-archived rows), folder as
-    // channel, Message-ID as external id, and full-text searchable.
+    // connector label is the source of connector-archived rows, never the
+    // raw instance id), folder as channel, Message-ID as external id, and
+    // full-text searchable.
     assert_eq!(storage.stats().unwrap().total, 2);
     let hits = storage
         .search_filtered(&build_match_query("hello vault world"), None, None, 10)
         .unwrap();
     assert_eq!(hits.len(), 1);
     let m = &hits[0];
-    assert_eq!(m.source, instance(&storage));
+    assert_eq!(m.source, config().display_label());
     assert_eq!(m.external_id, "m-1@example.com");
     assert_eq!(m.channel, "INBOX");
     assert_eq!(m.author, "Alice Smith <alice@example.com>");

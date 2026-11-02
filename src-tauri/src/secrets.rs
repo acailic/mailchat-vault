@@ -72,7 +72,21 @@ impl Secrets {
     /// should prompt for it).
     pub fn load(&self, host: &str, username: &str) -> Option<String> {
         let key = Self::account_key(host, username);
-        if let Ok(entry) = keyring::Entry::new(SERVICE, &key) {
+        if let Some(password) = self.load_key(&key) {
+            return Some(password);
+        }
+        let legacy_key = Self::account_key(host, &username.to_lowercase());
+        if legacy_key == key {
+            return None;
+        }
+        let password = self.load_key(&legacy_key)?;
+        self.save(host, username, &password);
+        Some(password)
+    }
+
+    /// Read one keyring/memory key: OS keyring first, then session memory.
+    fn load_key(&self, key: &str) -> Option<String> {
+        if let Ok(entry) = keyring::Entry::new(SERVICE, key) {
             if let Ok(password) = entry.get_password() {
                 return Some(password);
             }
@@ -80,7 +94,7 @@ impl Secrets {
         self.memory
             .lock()
             .expect("secrets memory lock")
-            .get(&key)
+            .get(key)
             .cloned()
     }
 }

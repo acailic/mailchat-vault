@@ -186,14 +186,15 @@ fn same_username_on_different_hosts_stays_two_instances() {
     assert_ne!(instances[0].id, instances[1].id);
     assert!(instances.iter().all(|i| i.kind == "imap"));
 
-    // Two rows, one per instance — each correctly attributed.
+    // Two rows, one per instance — each correctly attributed under its
+    // human-readable connector label, never the raw instance id.
     let hits = storage
         .search_filtered(&build_match_query("sharedlist"), None, None, 10)
         .unwrap();
     assert_eq!(hits.len(), 2);
     let mut sources: Vec<String> = hits.iter().map(|m| m.source.clone()).collect();
     sources.sort();
-    let mut expected: Vec<String> = instances.iter().map(|i| i.id.clone()).collect();
+    let mut expected: Vec<String> = instances.iter().map(|i| i.label.clone()).collect();
     expected.sort();
     assert_eq!(sources, expected);
 
@@ -505,8 +506,8 @@ fn connector_identities_are_instance_scoped() {
 }
 
 /// The v1 search source facet uses the same string `Message.source`
-/// reports; for connector-owned instances that is the instance id, so a
-/// facet value taken from stats/search filters exactly its own rows.
+/// reports; for connector-owned instances that is the connector label, so
+/// a facet value taken from stats/search filters exactly its own rows.
 #[test]
 fn connector_sources_filter_by_their_reported_source_string() {
     use vault_core::query::SearchQuery;
@@ -530,18 +531,22 @@ fn connector_sources_filter_by_their_reported_source_string() {
         &["INBOX"],
     );
 
-    let ana =
-        vimap::ensure_source_instance(&storage, &config("imap.a.test", "ana@a.test")).unwrap();
+    let sources = storage.stats().unwrap().by_source;
+    let ana_label = "imap:imap.a.test:993:ana@a.test";
+    assert!(
+        sources.iter().any(|s| s.source == ana_label),
+        "stats surface the connector label, not the instance id: {sources:?}"
+    );
     let hits = storage
         .search_page(&SearchQuery {
             text: "facet".into(),
-            sources: vec![ana.clone()],
+            sources: vec![ana_label.to_string()],
             limit: 10,
             ..SearchQuery::default()
         })
         .unwrap();
     assert_eq!(hits.total, 1);
-    assert_eq!(hits.hits[0].message.source, ana);
+    assert_eq!(hits.hits[0].message.source, ana_label);
 }
 
 /// The storage-level insert API reports conflicts and preserves both

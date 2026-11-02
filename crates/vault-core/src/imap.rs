@@ -174,6 +174,18 @@ impl ImapConfig {
         .to_string()
     }
 
+    /// Human-readable label for the instance's UI projections: the
+    /// connector key composite minus the TLS mode (never a raw instance id
+    /// and never the password).
+    pub fn display_label(&self) -> String {
+        format!(
+            "imap:{host}:{port}:{username}",
+            host = self.host.trim().to_lowercase(),
+            port = self.port,
+            username = self.username
+        )
+    }
+
     /// The folders to sync (`DEFAULT_FOLDERS` when none configured,
     /// duplicates removed).
     pub fn effective_folders(&self) -> Vec<String> {
@@ -278,7 +290,7 @@ pub fn connect(config: &ImapConfig) -> Result<Session<TlsStream>> {
 pub fn ensure_source_instance(storage: &Storage, config: &ImapConfig) -> Result<String> {
     storage.ensure_source_instance(&NewSourceInstance {
         kind: "imap",
-        label: &config.username,
+        label: &config.display_label(),
         connector_key: &config.connector_key(),
         config_json: &config.config_json(),
     })

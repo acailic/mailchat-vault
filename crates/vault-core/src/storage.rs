@@ -975,7 +975,7 @@ impl Storage {
         };
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id,
+            SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id,
                    m.channel, m.chat_id, m.author,
                    COALESCE(m.sent_instant, ''), m.body, m.raw_json
             FROM archive_fts
@@ -1070,7 +1070,7 @@ impl Storage {
             bind.push(SqlValue::Integer(query.limit as i64));
             bind.push(SqlValue::Integer(query.offset as i64));
             let sql = format!(
-                "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+                "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
                  m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
                  m.body, m.raw_json, NULL \
                  FROM archive_messages AS m \
@@ -1097,7 +1097,7 @@ impl Storage {
             bind.push(SqlValue::Integer(query.limit as i64));
             bind.push(SqlValue::Integer(query.offset as i64));
             let sql = format!(
-                "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+                "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
                  m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
                  m.body, m.raw_json, \
                  snippet(archive_fts, 0, ?1, ?2, '…', 16) \
@@ -1142,7 +1142,7 @@ impl Storage {
         let (sql, bind): (String, Vec<SqlValue>) = if query.text.trim().is_empty() {
             (
                 format!(
-                    "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+                    "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
                      m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
                      m.body, m.raw_json \
                      FROM archive_messages AS m \
@@ -1160,7 +1160,7 @@ impl Storage {
             bind.extend(filters.bind());
             (
                 format!(
-                    "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+                    "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
                      m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
                      m.body, m.raw_json \
                      FROM archive_fts \
@@ -1214,7 +1214,7 @@ impl Storage {
         }
 
         let mut before_stmt = self.conn.prepare(
-            "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+            "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
              m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), m.body, m.raw_json \
              FROM archive_messages AS m \
              JOIN source_instances AS si ON si.id = m.source_instance_id \
@@ -1233,7 +1233,7 @@ impl Storage {
         before.reverse(); // newest → oldest from the query; thread reads oldest → newest
 
         let mut after_stmt = self.conn.prepare(
-            "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+            "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
              m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), m.body, m.raw_json \
              FROM archive_messages AS m \
              JOIN source_instances AS si ON si.id = m.source_instance_id \
@@ -1261,7 +1261,7 @@ impl Storage {
     pub fn get(&self, id: i64) -> Result<Option<Message>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id,
+            SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id,
                    m.channel, m.chat_id, m.author,
                    COALESCE(m.sent_instant, ''), m.body, m.raw_json
             FROM archive_messages AS m
@@ -1284,7 +1284,7 @@ impl Storage {
     /// position).
     pub fn chat_thread_messages(&self, source: &str, chat_id: &str) -> Result<Vec<Message>> {
         let mut stmt = self.conn.prepare(
-            "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+            "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
              m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), m.body, m.raw_json \
              FROM archive_messages AS m \
              JOIN conversations AS c ON c.id = m.conversation_id \
@@ -1306,7 +1306,7 @@ impl Storage {
     /// construction because every write path maintains the counters.
     pub fn stats(&self) -> Result<Stats> {
         let mut stmt = self.conn.prepare(
-            "SELECT COALESCE(si.legacy_namespace, si.id) AS label, s.n \
+            "SELECT COALESCE(si.legacy_namespace, si.label, si.id) AS label, s.n \
              FROM stats_source AS s \
              JOIN source_instances AS si ON si.id = s.source \
              WHERE s.n > 0 ORDER BY s.n DESC, label",
@@ -1361,7 +1361,7 @@ impl Storage {
         )?;
 
         let mut source_stmt = self.conn.prepare(
-            "SELECT COALESCE(si.legacy_namespace, si.id) AS label, s.n              FROM stats_source AS s              JOIN source_instances AS si ON si.id = s.source              WHERE s.n > 0 ORDER BY s.n DESC, label",
+            "SELECT COALESCE(si.legacy_namespace, si.label, si.id) AS label, s.n              FROM stats_source AS s              JOIN source_instances AS si ON si.id = s.source              WHERE s.n > 0 ORDER BY s.n DESC, label",
         )?;
         let by_source = source_stmt
             .query_map([], |row| {
@@ -1387,7 +1387,7 @@ impl Storage {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         let mut chat_stmt = self.conn.prepare(
-            "SELECT COALESCE(si.legacy_namespace, si.id) AS label, c.chat_id, c.n \
+            "SELECT COALESCE(si.legacy_namespace, si.label, si.id) AS label, c.chat_id, c.n \
              FROM stats_chat AS c \
              JOIN source_instances AS si ON si.id = c.source \
              WHERE c.chat_id != '' AND c.n > 0 \
@@ -1750,7 +1750,7 @@ impl Storage {
         let mut by_id: std::collections::HashMap<i64, Message> =
             std::collections::HashMap::with_capacity(ids.len());
         let mut stmt = self.conn.prepare(
-            "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id,
+            "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id,
                     m.channel, m.chat_id, m.author,
                     COALESCE(m.sent_instant, ''), m.body, m.raw_json
              FROM archive_messages AS m
@@ -2293,11 +2293,11 @@ impl QueryFilters {
         if !query.sources.is_empty() {
             let placeholders = vec!["?"; query.sources.len()].join(", ");
             // Match the same source string the API reports (`Message.source`:
-            // legacy namespace, or the instance id for connector-owned
-            // sources) so a facet value taken from stats/search filters the
-            // rows it came from.
+            // the legacy namespace, or the connector label for connector-owned
+            // sources — never the raw instance id) so a facet value taken from
+            // stats/search filters the rows it came from.
             sql.push_str(&format!(
-                " AND COALESCE(si.legacy_namespace, si.id) IN ({placeholders})"
+                " AND COALESCE(si.legacy_namespace, si.label, si.id) IN ({placeholders})"
             ));
             values.extend(query.sources.iter().cloned().map(SqlValue::from));
         }
