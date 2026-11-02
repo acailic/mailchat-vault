@@ -295,7 +295,7 @@ fn count(db: &std::path::Path, sql: &str) -> i64 {
 
 #[test]
 fn old_schema_fixture_migrates_without_loss() {
-    // Migration 5 re-resolves the legacy WhatsApp stamps in the machine's
+    // Migration 6 re-resolves the legacy WhatsApp stamps in the machine's
     // local zone; pin it (Europe/Paris: both fixture dates are winter
     // CET, +01:00) so the expectations below hold on any machine.
     let _tz = crate::util::TzGuard::pin("Europe/Paris");
@@ -322,7 +322,7 @@ fn old_schema_fixture_migrates_without_loss() {
     assert_eq!(legacy_snapshot(&db), legacy);
 
     // Row-for-row copy: ids, namespaces, and payloads preserved. The one
-    // deliberate exception (M1.3, migration 5): WhatsApp external ids are
+    // deliberate exception (M1.3, migration 6): WhatsApp external ids are
     // re-keyed onto the stable-conversation-key hash formula, so a
     // re-import after a rename dedups; the legacy snapshot above keeps
     // the original spelling verbatim either way.
@@ -386,7 +386,7 @@ fn old_schema_fixture_migrates_without_loss() {
     }
 
     // One identity alias per legacy (source, external_id) — except
-    // WhatsApp, whose aliases migration 5 deliberately re-keys onto the
+    // WhatsApp, whose aliases migration 6 deliberately re-keys onto the
     // stable-conversation-key hash formula (see above).
     assert_eq!(
         count(
@@ -441,7 +441,7 @@ fn old_schema_fixture_migrates_without_loss() {
         3
     );
 
-    // One conversation per non-empty chat group; migration 5 then keys
+    // One conversation per non-empty chat group; migration 6 then keys
     // the WhatsApp conversations (participants + anchor derivation), so
     // both carry provider keys as 'verified' — distinct keys, so they
     // stay two conversations.
