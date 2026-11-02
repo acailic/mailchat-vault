@@ -146,3 +146,14 @@ export interface EmbedJobSummary {
   remaining: number;
   elapsed_ms: number;
 }
+
+/** Outcome of one export run. */
+export interface ExportSummary {
+  format: "csv" | "json" | "mbox";
+  /** Rows written to the file. */
+  written: number;
+  /** Rows matching the selection but not representable in the format
+   * (non-email rows in an MBOX export). Always 0 for CSV/JSON. */
+  skipped: number;
+
+}

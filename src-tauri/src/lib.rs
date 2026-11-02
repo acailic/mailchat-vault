@@ -24,7 +24,12 @@
 //! - `stats` — archive counts per source (drives the source filter chips).
 //! - `archive_stats` — dashboard aggregates: totals, date range, counts by
 //!   source/day, top chats and top authors.
+//! - `export_search` — write the current search results (all pages, under
+//!   the active filters) to a user-chosen file as CSV, JSON Lines or MBOX.
+//! - `export_chat` — write the whole chat thread of one message to a
+//!   user-chosen file in the same formats.
 
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -32,6 +37,7 @@ use chrono::Utc;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use vault_core::chat_export::{self, ChatImportOutcome};
+use vault_core::export::{self, ExportFormat, ExportSummary};
 use vault_core::imap::{self, FolderSyncSummary, ImapConfig};
 use vault_core::ingest::{ingest, Collected, IngestSummary, Source};
 use vault_core::llm::{
@@ -343,6 +349,70 @@ fn watch_status(state: State<AppState>) -> WatchSnapshot {
     state.watcher.snapshot()
 }
 
+/// Export the current search results (every row matching the query's text
+/// and filters, ignoring pagination, in the order the UI shows) to `path`.
+///
+/// `format` is `"csv"`, `"json"` (JSON Lines) or `"mbox"`; MBOX carries
+/// only email-channel rows and reports the rest as `skipped`. Rows stream
+/// through a `BufWriter` (never all in memory); like `sync_imap`, the
+/// storage lock is held for the whole write, so searches wait for large
+/// exports instead of racing the streaming read.
+#[tauri::command]
+async fn export_search(
+    state: State<'_, AppState>,
+    query: SearchQuery,
+    format: String,
+    path: String,
+) -> Result<ExportSummary, String> {
+    let format = ExportFormat::parse(&format).map_err(|e| e.to_string())?;
+    let storage = Arc::clone(&state.storage);
+    tauri::async_runtime::spawn_blocking(move || {
+        let storage = storage
+            .lock()
+            .map_err(|e| format!("storage lock poisoned: {e}"))?;
+        let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+        let mut out = BufWriter::new(file);
+        let summary = export::export_search(&storage, &query, format, &mut out)
+            .and_then(|s| Ok(out.flush().map(|_| s)?))
+            .map_err(|e| e.to_string())?;
+        Ok(summary)
+    })
+    .await
+    .map_err(|e| format!("export task failed: {e}"))?
+}
+
+/// Export the whole chat thread containing message `id` (oldest → newest;
+/// a threadless message exports as one row) to `path`. `None` when no
+/// message has that id.
+#[tauri::command]
+async fn export_chat(
+    state: State<'_, AppState>,
+    id: i64,
+    format: String,
+    path: String,
+) -> Result<Option<ExportSummary>, String> {
+    let format = ExportFormat::parse(&format).map_err(|e| e.to_string())?;
+    let storage = Arc::clone(&state.storage);
+    tauri::async_runtime::spawn_blocking(move || {
+        let storage = storage
+            .lock()
+            .map_err(|e| format!("storage lock poisoned: {e}"))?;
+        // Existence is checked before the destination is touched: an
+        // unknown id (message deleted between list render and export
+        // click) must leave no file at the user-chosen path.
+        if storage.get(id).map_err(|e| e.to_string())?.is_none() {
+            return Ok(None);
+        }
+        let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+        let mut out = BufWriter::new(file);
+        export::export_chat(&storage, id, format, &mut out)
+            .and_then(|s| Ok(out.flush().map(|_| s)?))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("export task failed: {e}"))?
+}
+
 /// Archive counts: total and per source.
 #[tauri::command]
 fn stats(state: State<AppState>) -> Result<message::Stats, String> {
@@ -425,7 +495,9 @@ pub fn run() {
             watch_status,
             seed_demo,
             stats,
-            archive_stats
+            archive_stats,
+            export_search,
+            export_chat
         ])
         .run(tauri::generate_context!())
         .expect("error while running mailchat vault");

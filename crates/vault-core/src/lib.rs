@@ -29,9 +29,12 @@
 //! - [`query`]: paged/filtered search requests and chat-thread context.
 //! - [`stats`]: archive statistics for the dashboard (totals, date range,
 //!   counts by source/day/chat/author).
+//! - [`export`]: export search results or whole chats to CSV / JSON Lines /
+//!   MBOX.
 
 pub mod chat_export;
 pub mod demo;
+pub mod export;
 pub mod imap;
 pub mod ingest;
 pub mod llm;
@@ -80,4 +83,6 @@ pub enum Error {
     InvalidQuery(String),
     #[error("embedding error: {0}")]
     Embedding(String),
+    #[error("invalid export: {0}")]
+    InvalidExport(String),
 }

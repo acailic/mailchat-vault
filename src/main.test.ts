@@ -36,10 +36,13 @@ vi.mock("@tauri-apps/api/core", () => ({
   },
 }));
 
-// The chat-export import and the folder-watching panel both open the OS
-// file/folder picker; stub it per test.
-const dialog = vi.hoisted(() => ({ open: vi.fn() }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: dialog.open }));
+// The chat-export import, the folder-watching panel, and the export
+// controls use the OS file/folder/save pickers; stub them per test.
+const dialog = vi.hoisted(() => ({ open: vi.fn(), savedPath: "__unset__" as string | null }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: dialog.open,
+  save: () => Promise.resolve(dialog.savedPath),
+}));
 
 const tauriEvents = vi.hoisted(() => ({
   listeners: new Map<string, (e: { payload: unknown }) => void>(),
@@ -48,8 +51,7 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: (name: string, handler: (e: { payload: unknown }) => void) => {
     tauriEvents.listeners.set(name, handler);
     return Promise.resolve(() => tauriEvents.listeners.delete(name));
-  },
-}));
+  },}));
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -220,7 +222,7 @@ beforeEach(() => {
   tauri.handlers.set("stats", () => STATS);
   tauriEvents.listeners.clear();
   dialog.open.mockReset();
-});
+  dialog.savedPath = null;});
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -706,6 +708,128 @@ describe("chat export import", () => {
     tauri.handlers.set("import_chat_export", () => Promise.reject("bad export"));
     $("#chat-import-btn").click();
     await vi.waitFor(() => expect($("#import-status").textContent).toBe("Import failed: bad export"));
+  });
+});
+
+// Export
+// ---------------------------------------------------------------------------
+
+describe("export", () => {
+  it("exports the executed search with all its filters, not just the page", async () => {
+    await boot();
+    searchRespondsWith(() => pageOf(HITS.slice(0, 2), 120));
+    input("#author").value = "bruno";
+    pressKey(input("#author"), "Enter");
+    await vi.waitFor(() => expect($("#status").textContent).toContain("1–50 of 120"));
+
+    dialog.savedPath = "/tmp/out.csv";
+    tauri.handlers.set("export_search", () => ({ format: "csv", written: 120, skipped: 0 }));
+    $("#export-btn").click();
+    await vi.waitFor(() =>
+      expect($("#export-status").textContent).toBe("Exported 120 messages to /tmp/out.csv."),
+    );
+    const exportCalls = tauri.calls.filter((c) => c.cmd === "export_search");
+    expect(exportCalls).toHaveLength(1);
+    expect(exportCalls[0].args).toEqual({
+      query: {
+        text: "",
+        sources: [],
+        author: "bruno",
+        from_date: "",
+        to_date: "",
+        limit: 50,
+        offset: 0,
+      },
+      format: "csv",
+      path: "/tmp/out.csv",
+    });
+  });
+
+  it("passes the chosen format and notes skipped non-email rows for mbox", async () => {
+    await bootSearched();
+    dialog.savedPath = "/tmp/archive.mbox";
+    tauri.handlers.set("export_search", () => ({
+      format: "mbox",
+      written: 40,
+      skipped: 9,
+    }));
+    $<HTMLSelectElement>("#export-format").value = "mbox";
+    $("#export-btn").click();
+    await vi.waitFor(() =>
+      expect($("#export-status").textContent).toBe(
+        "Exported 40 messages (9 non-email skipped — MBOX carries email rows) to /tmp/archive.mbox.",
+      ),
+    );
+    expect(tauri.calls.find((c) => c.cmd === "export_search")?.args).toMatchObject({
+      format: "mbox",
+      path: "/tmp/archive.mbox",
+    });
+  });
+
+  it("a cancelled save dialog exports nothing", async () => {
+    await bootSearched();
+    dialog.savedPath = null; // cancelled
+    $("#export-btn").click();
+    await flush();
+    expect(tauri.calls.filter((c) => c.cmd === "export_search")).toHaveLength(0);
+    expect($("#export-status").textContent).toBe("");
+  });
+
+  it("with no executed search there is nothing to export and no dialog", async () => {
+    await boot();
+    dialog.savedPath = "/tmp/never.csv";
+    $("#export-btn").click();
+    await flush();
+    expect(tauri.calls.filter((c) => c.cmd === "export_search")).toHaveLength(0);
+    expect($("#export-status").textContent).toBe(
+      "Nothing to export — run a search (or set filters) first.",
+    );
+  });
+
+  it("a failing export surfaces the error", async () => {
+    await bootSearched();
+    dialog.savedPath = "/root/forbidden.csv";
+    tauri.handlers.set("export_search", () => Promise.reject("disk full"));
+    $("#export-btn").click();
+    await vi.waitFor(() =>
+      expect($("#export-status").textContent).toBe("Export failed: disk full"),
+    );
+    expect($<HTMLButtonElement>("#export-btn").disabled).toBe(false);
+  });
+
+  it("exports the whole chat from the detail view", async () => {
+    await bootSearched();
+    ($('.hit-item[data-id="1"]') as HTMLElement).click();
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
+
+    dialog.savedPath = "/tmp/thread.jsonl";
+    tauri.handlers.set("export_chat", () => ({ format: "json", written: 5, skipped: 0 }));
+    $<HTMLSelectElement>("#export-format").value = "json";
+    ($(".export-chat-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect($("#export-status").textContent).toBe("Exported 5 messages to /tmp/thread.jsonl."),
+    );
+    expect(tauri.calls.filter((c) => c.cmd === "export_chat")[0].args).toEqual({
+      id: 1,
+      format: "json",
+      path: "/tmp/thread.jsonl",
+    });
+  });
+
+  it("a vanished message in the chat export reports clearly", async () => {
+    await bootSearched();
+    ($('.hit-item[data-id="1"]') as HTMLElement).click();
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
+
+    dialog.savedPath = "/tmp/thread.csv";
+    tauri.handlers.set("export_chat", () => null);
+    ($(".export-chat-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect($("#export-status").textContent).toBe(
+        "Export failed: message no longer exists.",
+      ),
+    );
+
   });
 });
 
