@@ -649,7 +649,8 @@ async fn oauth_status(
         })
     })
     .await
-    .map_err(|e| format!("status task failed: {e}"))
+    .map_err(|e| format!("status task failed: {e}"))?
+    .map_err(|e: String| format!("status check failed: {e}"))
 }
 
 /// Insert the built-in demo messages so a fresh install has searchable data.
