@@ -155,9 +155,15 @@ pub fn is_telegram_export(bytes: &[u8]) -> bool {
 
 /// Same check, streaming from a reader: the file is walked token by token
 /// and never buffered whole, so detection reads of arbitrarily large files
-/// stay bounded.
+/// stay bounded. The reader is wrapped in a [`std::io::BufReader`] so the
+/// scan is I/O-bound instead of issuing one read call per byte —
+/// unbuffered, a 20 MB file costs ~20M single-byte reads and stalls the
+/// watch loop for seconds.
 pub fn is_telegram_export_reader<R: std::io::Read>(reader: R) -> bool {
-    serde_json::from_reader::<R, TelegramDetect>(reader).is_ok()
+    serde_json::from_reader::<std::io::BufReader<R>, TelegramDetect>(std::io::BufReader::new(
+        reader,
+    ))
+        .is_ok()
 }
 
 /// Timestamp: `date_unixtime` is UTC-correct and wins; the naive local

@@ -822,10 +822,18 @@ mod tests {
     fn detection_bounded_for_unrelated_and_large_exports() {
         let dir = tempfile::tempdir().unwrap();
 
-        // A large unrelated .json: skipped regardless of size.
+        // A large unrelated .json: skipped regardless of size, and
+        // detection stays I/O-bound — an unbuffered byte-at-a-time scan
+        // of a file this size stalls the watch loop for many seconds.
         let big = dir.path().join("dump.json");
-        std::fs::write(&big, format!("{{\"pad\": \"{}\"}}", "x".repeat(200_000))).unwrap();
+        std::fs::write(&big, format!("{{\"pad\": \"{}\"}}", "x".repeat(20_000_000))).unwrap();
+        let start = std::time::Instant::now();
         assert!(import_source_for(&big).unwrap().is_none());
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "detection of a 20 MB unrelated JSON took {:?}; it must stay buffered, not byte-at-a-time",
+            start.elapsed()
+        );
 
         // A WhatsApp export larger than the sniff cap: the header is in
         // line 1, so the prefix alone decides.
