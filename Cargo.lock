@@ -4793,6 +4793,7 @@ dependencies = [
  "thiserror 2.0.21",
  "ureq",
  "url",
+ "uuid",
  "webpki-roots 0.26.11",
 ]
 

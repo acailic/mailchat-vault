@@ -299,7 +299,7 @@ fn deleting_a_message_cascades_to_its_embedding() {
     {
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.pragma_update(None, "foreign_keys", "ON").unwrap();
-        conn.execute("DELETE FROM messages WHERE id = 1", [])
+        conn.execute("DELETE FROM archive_messages WHERE id = 1", [])
             .unwrap();
     }
     let s = Storage::open(&db).unwrap();

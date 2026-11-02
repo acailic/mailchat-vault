@@ -54,7 +54,7 @@ fn empty_file_is_a_fresh_valid_database() {
     // path, not corruption.
     let s = Storage::open(&db).unwrap();
     assert_eq!(s.stats().unwrap().total, 0);
-    assert_eq!(s.schema_version().unwrap(), 3);
+    assert_eq!(s.schema_version().unwrap(), 4);
 }
 
 #[test]
@@ -202,7 +202,7 @@ fn fts_index_corruption_is_detected_and_rebuildable() {
     let raw_conn = raw(&db);
     let bodies: usize = raw_conn
         .query_row(
-            "SELECT COUNT(*) FROM messages WHERE body LIKE 'tok%'",
+            "SELECT COUNT(*) FROM archive_messages WHERE body LIKE 'tok%'",
             [],
             |r| r.get::<_, i64>(0),
         )
