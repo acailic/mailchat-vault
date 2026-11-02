@@ -323,6 +323,187 @@ pub fn telegram_cases() -> Cases {
     cases
 }
 
+/// A realistic Discord Data Package channel file used as the truncation
+/// seed.
+fn valid_discord() -> Vec<u8> {
+    r#"{
+  "channel": { "id": "900000000000000101", "name": "general" },
+  "guild": { "id": "800000000000000001", "name": "Ekipa HQ" },
+  "messages": [
+    {"id": "1700000000000000001", "type": "Default", "timestamp": "2026-10-31 18:00:05.123+00:00", "content": "Zdravo ekipa! 🔥", "author": {"id": "111000000000000001", "name": "marko", "nickname": "Marko Horvat"}},
+    {"id": "1700000000000000002", "type": "Reply", "timestamp": "2026-10-31 18:00:41.999+00:00", "content": "odgovor", "attachments": [{"filename": "plan.txt", "size": 4096}], "reactions": [{"emoji": {"name": "🔥", "id": null}, "count": 2}], "author": {"id": "111000000000000002", "name": "jelena"}},
+    {"id": "1700000000000000003", "type": "GuildMemberJoin", "timestamp": "2026-10-31 18:05:00+00:00", "content": ""}
+  ]
+}"#
+        .as_bytes()
+        .to_vec()
+}
+
+pub fn discord_cases() -> Cases {
+    let mut cases = vec![
+        case("empty file", b""),
+        case("BOM then empty json", b"\xef\xbb\xbf{}"),
+        case("bare null", b"null"),
+        case("bare number", b"42"),
+        case("bare string", b"\"just a string\""),
+        case("empty object", b"{}"),
+        case("index.json shape", br#"{"entries": [{"id": "1", "channel_path": "Direct Messages/@x"}]}"#),
+        case("messages not array", br#"{"channel": {"id": "1"}, "messages": {"a": 1}}"#),
+        case("messages null", br#"{"channel": {"id": "1"}, "messages": null}"#),
+        case("messages string", br#"{"channel": {"id": "1"}, "messages": "x"}"#),
+        case("channel not object", br#"{"channel": "x", "messages": []}"#),
+        case("channel null", br#"{"channel": null, "messages": []}"#),
+        case("guild not object", br#"{"guild": 5, "messages": []}"#),
+        case(
+            "duplicate top-level keys",
+            br#"{"channel": {"id": "1"}, "channel": null, "messages": [], "messages": [{"id": "1"}]}"#,
+        ),
+        case(
+            "duplicate message keys",
+            br#"{"channel": {"id": "1"}, "messages": [{"type": "Default", "type": "GuildMemberJoin", "id": "1", "id": "2"}]}"#,
+        ),
+        case(
+            "entry not an object",
+            br#"{"channel": {"id": "1"}, "messages": ["str", 5, null, true, [], {}]}"#,
+        ),
+        case("entry without type", br#"{"channel": {"id": "1"}, "messages": [{"id": "1"}]}"#),
+        case(
+            "type not a string",
+            br#"{"channel": {"id": "1"}, "messages": [{"type": 5, "id": "1"}, {"type": null, "id": "2"}, {"type": [], "id": "3"}]}"#,
+        ),
+        case(
+            "type variants",
+            br#"{"channel": {"id": "1"}, "messages": [
+                {"id": "1", "type": "Default"},
+                {"id": "2", "type": "Reply"},
+                {"id": "3", "type": "ChatInputCommand"},
+                {"id": "4", "type": "ContextMenuCommand"},
+                {"id": "5", "type": "GuildMemberJoin"},
+                {"id": "6", "type": "ChannelPinnedMessage"},
+                {"id": "7", "type": "Call"},
+                {"id": "8", "type": ""},
+                {"id": "9", "type": "WeirdFutureType"}
+            ]}"#,
+        ),
+        case("entry without id", br#"{"channel": {"id": "1"}, "messages": [{"type": "Default"}]}"#),
+        case(
+            "id variants",
+            br#"{"channel": {"id": "1"}, "messages": [
+                {"type": "Default", "id": "1700000000000000001"},
+                {"type": "Default", "id": 1234567890123456789},
+                {"type": "Default", "id": 0},
+                {"type": "Default", "id": -5},
+                {"type": "Default", "id": 1.5},
+                {"type": "Default", "id": ""},
+                {"type": "Default", "id": " "},
+                {"type": "Default", "id": 9223372036854775807},
+                {"type": "Default", "id": null}
+            ]}"#,
+        ),
+        case(
+            "channel id variants",
+            br#"{"channel": {"id": 1234567890123456789}, "messages": []}"#,
+        ),
+        case(
+            "timestamp variants",
+            br#"{"channel": {"id": "1"}, "messages": [
+                {"id": "1", "type": "Default", "timestamp": "2026-10-31 18:00:05.123+00:00"},
+                {"id": "2", "type": "Default", "timestamp": "2026-10-31 18:00:05+00:00"},
+                {"id": "3", "type": "Default", "timestamp": "2026-10-31 18:00:05+0000"},
+                {"id": "4", "type": "Default", "timestamp": "2026-10-31T18:00:05Z"},
+                {"id": "5", "type": "Default", "timestamp": "2026-10-31 18:00:05.999999999+02:00"},
+                {"id": "6", "type": "Default", "timestamp": "2026-13-45 99:99:99+99:99"},
+                {"id": "7", "type": "Default", "timestamp": "not a date"},
+                {"id": "8", "type": "Default", "timestamp": ""},
+                {"id": "9", "type": "Default", "timestamp": 42},
+                {"id": "10", "type": "Default", "timestamp": null}
+            ]}"#,
+        ),
+        case(
+            "content variants",
+            r#"{"channel": {"id": "1"}, "messages": [
+                {"id": "1", "type": "Default", "content": "plain"},
+                {"id": "2", "type": "Default", "content": null},
+                {"id": "3", "type": "Default", "content": 123},
+                {"id": "4", "type": "Default", "content": []},
+                {"id": "5", "type": "Default", "content": ""},
+                {"id": "6", "type": "Default", "content": "prvi red\nvidi 🔥\r\nkraj"}
+            ]}"#
+                .as_bytes(),
+        ),
+        case(
+            "author variants",
+            br#"{"channel": {"id": "1"}, "messages": [
+                {"id": "1", "type": "Default", "author": {"id": "5", "name": "marko", "nickname": "Marko H."}},
+                {"id": "2", "type": "Default", "author": {"id": "5", "name": "marko"}},
+                {"id": "3", "type": "Default", "author": {"id": "5"}},
+                {"id": "4", "type": "Default", "author": {"nickname": ""}, "content": "x"},
+                {"id": "5", "type": "Default", "author": {"name": "", "id": 7}},
+                {"id": "6", "type": "Default", "author": "not an object"},
+                {"id": "7", "type": "Default", "author": null},
+                {"id": "8", "type": "Default", "author": []},
+                {"id": "9", "type": "Default", "author": {"id": 1.5, "name": 5}}
+            ]}"#,
+        ),
+        case(
+            "damaged reactions and attachments",
+            r#"{"channel": {"id": "1"}, "messages": [
+                {"id": "1", "type": "Default", "reactions": [{"emoji": {"name": "🔥"}, "count": 2}]},
+                {"id": "2", "type": "Default", "attachments": [{"filename": "plan.txt", "size": 4096}]},
+                {"id": "3", "type": "Default", "reactions": "not an array"},
+                {"id": "4", "type": "Default", "attachments": {"a": 1}}
+            ]}"#
+                .as_bytes(),
+        ),
+        case(
+            "dm without channel object",
+            br#"{"messages": [{"id": "1", "type": "Default"}]}"#,
+        ),
+        case(
+            "lone surrogate escape",
+            b"{\"channel\": {\"id\": \"1\", \"name\": \"\\ud800\"}, \"messages\": []}",
+        ),
+        case(
+            "bad escape",
+            b"{\"channel\": {\"id\": \"1\", \"name\": \"\\q\"}, \"messages\": []}",
+        ),
+        case(
+            "unterminated string",
+            b"{\"channel\": {\"id\": \"1\", \"name\": \"unterminated",
+        ),
+        case(
+            "nesting beyond serde limit",
+            format!(
+                "{{\"channel\": {{\"id\": \"1\"}}, \"messages\":{}1{}}}",
+                "[".repeat(400),
+                "]".repeat(400)
+            )
+            .into_bytes(),
+        ),
+        case("trailing garbage after json", br#"{"channel": {"id": "1"}, "messages": []} trailing"#),
+        case("json then null bytes", b"{\"channel\": {\"id\": \"1\"}, \"messages\": []}\x00\x00"),
+        case(
+            "huge single string value",
+            format!(
+                "{{\"channel\": {{\"id\": \"1\"}}, \"messages\": [{{\"id\": \"1\", \"type\": \"Default\", \"content\": \"{}\"}}]}}",
+                "y".repeat(2_000_000)
+            )
+            .into_bytes(),
+        ),
+        case(
+            "unicode escapes and marks",
+            b"{\"channel\": {\"id\": \"1\", \"name\": \"\\u0041\\u200e\\u200f\\u2028\"}, \"messages\": []}",
+        ),
+        case(
+            "telegram-shaped keys alongside discord shape",
+            br#"{"channel": {"id": "1"}, "name": "Arhiva", "id": 42, "type": "private_group", "messages": [{"id": "1", "type": "Default"}]}"#,
+        ),
+    ];
+    let mut tr = truncations("discord channel file", &valid_discord());
+    cases.append(&mut tr);
+    cases
+}
+
 pub fn mbox_cases() -> Cases {
     let mut cases = vec![
         case("empty file", b""),
@@ -493,7 +674,7 @@ pub fn signal_cases() -> Cases {
 /// Cross-format mixups for format detection: each format's bytes glued to
 /// or wrapped inside another's.
 pub fn mixed_format_cases() -> Cases {
-    vec![
+    let cases = vec![
         case(
             "whatsapp header inside json string",
             br#"{"messages": ["[1.11.2026., 09:00:05] Marko: Zdravo!"]}"#,
@@ -525,6 +706,7 @@ pub fn mixed_format_cases() -> Cases {
         case("all three glued", {
             let mut v = valid_whatsapp();
             v.extend_from_slice(&valid_telegram());
+            v.extend_from_slice(&valid_discord());
             v.extend_from_slice(&valid_mbox());
             v
         }),
@@ -544,14 +726,24 @@ pub fn mixed_format_cases() -> Cases {
             "signal array after json object glued",
             b"{}[{\"type\": \"incoming\", \"sent_at\": 1000, \"body\": \"x\"}]",
         ),
-        case("all four glued", {
+        case(
+            "discord channel object inside telegram export",
+            br#"{"channel": {"id": "1"}, "name": "Arhiva", "messages": [{"id": "1", "type": "message"}]}"#,
+        ),
+        case(
+            "telegram messages array with non-object channel member",
+            br#"{"messages": [{"id": 1, "type": "message"}], "channel": "not an object"}"#,
+        ),
+        case("all five glued", {
             let mut v = valid_whatsapp();
             v.extend_from_slice(&valid_telegram());
             v.extend_from_slice(&valid_signal());
+            v.extend_from_slice(&valid_discord());
             v.extend_from_slice(&valid_mbox());
             v
         }),
-    ]
+    ];
+    cases
 }
 
 /// A realistic Signal conversation export used as the truncation seed:
@@ -593,6 +785,7 @@ mod tests {
             ("whatsapp", whatsapp_cases()),
             ("telegram", telegram_cases()),
             ("signal", signal_cases()),
+            ("discord", discord_cases()),
             ("mbox", mbox_cases()),
             ("mixed", mixed_format_cases()),
         ] {

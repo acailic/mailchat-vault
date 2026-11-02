@@ -13,6 +13,7 @@
 //! - [`whatsapp`]: the WhatsApp `.txt` chat export source.
 //! - [`telegram`]: the Telegram `result.json` chat export source.
 //! - [`signal`]: the Signal Desktop conversation JSON export source.
+//! - [`discord`]: the Discord Data Package chat export source.
 //! - [`chat_export`]: chat export format detection plus the import flow
 //!   (with media extraction) for picked files.
 //! - [`media`]: content-addressed media store and the extraction pass that
@@ -34,6 +35,7 @@
 
 pub mod chat_export;
 pub mod demo;
+pub mod discord;
 pub mod export;
 pub mod imap;
 pub mod ingest;

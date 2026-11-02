@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::discord::{is_discord_export, is_discord_export_dir, DiscordSource, DISCORD_SOURCE};
 use crate::ingest::{ingest_collected, IngestSummary};
 use crate::media::{self, MediaSummary};
 use crate::signal::{is_signal_export, SignalSource, SIGNAL_SOURCE};
@@ -24,15 +25,22 @@ pub enum ChatFormat {
     WhatsApp,
     Telegram,
     Signal,
+    Discord,
 }
 
 /// Detect which chat export format `bytes` hold, if any.
 ///
-/// Telegram wins when the JSON parses into an export with a `messages`
-/// array; a top-level JSON array of Signal Desktop message objects is a
-/// Signal conversation export; otherwise a WhatsApp header within the
-/// first lines decides. Anything else returns `None`.
+/// Discord wins when the JSON carries a `messages` array plus a
+/// `channel`/`guild` object (Telegram exports also have a top-level
+/// `messages` array, so the Discord shapes must be checked first);
+/// a top-level JSON array of Signal Desktop message objects is a
+/// Signal conversation export; otherwise a Telegram `messages` array
+/// decides, then a WhatsApp header within the first lines. Anything
+/// else returns `None`.
 pub fn detect_chat_format(bytes: &[u8]) -> Option<ChatFormat> {
+    if is_discord_export(bytes) {
+        return Some(ChatFormat::Discord);
+    }
     if is_telegram_export(bytes) {
         return Some(ChatFormat::Telegram);
     }
@@ -54,10 +62,12 @@ pub struct ChatImportOutcome {
 }
 
 /// Import a chat export: a WhatsApp `.txt` export, a Telegram
-/// `result.json` (a directory containing `result.json` works too), or a
+/// `result.json` (a directory containing `result.json` works too), a
 /// Signal conversation `.json` (e.g. from `sigtop export-messages -f
-/// json`, one file per conversation). The format is detected from the
-/// file contents.
+/// json`, one file per conversation), or a Discord Data Package export —
+/// a single channel `messages.json`, the package's `messages/` directory,
+/// or the package root. The format is detected from the file contents
+/// (directory picks must be recognizable as a Discord Data Package).
 ///
 /// Media extraction runs when `extract_media` is set and `data_dir` (the
 /// app data dir that will hold the `media/` store) is given: export files
@@ -65,8 +75,8 @@ pub struct ChatImportOutcome {
 /// message's `raw_json`; messages already in the archive get their links
 /// backfilled, so re-importing an export with media enriches it. Pass
 /// `extract_media = false` (or `data_dir = None`) to import text only.
-/// Signal exports record attachments in `raw_json` only — media
-/// extraction is not implemented for Signal yet.
+/// Signal and Discord exports record attachments in `raw_json` only —
+/// media extraction is not implemented for Signal or Discord yet.
 pub fn import(
     storage: &Storage,
     picked: &Path,
@@ -74,13 +84,20 @@ pub fn import(
     data_dir: Option<&Path>,
 ) -> Result<ChatImportOutcome> {
     let file = resolve_export_file(picked)?;
-    let bytes = std::fs::read(&file)?;
-    let format = detect_chat_format(&bytes).ok_or_else(|| {
-        Error::ChatImport(format!(
-            "unrecognized chat export format: {} (expected a WhatsApp .txt export, a Telegram result.json, or a Signal conversation .json)",
-            file.display()
-        ))
-    })?;
+    // A directory pick is a Discord Data Package by this point
+    // (resolve_export_file returns the dir itself only in that case);
+    // there is no single file to sniff, so the format is decided here.
+    let format = if file.is_dir() {
+        ChatFormat::Discord
+    } else {
+        let bytes = std::fs::read(&file)?;
+        detect_chat_format(&bytes).ok_or_else(|| {
+            Error::ChatImport(format!(
+                "unrecognized chat export format: {} (expected a WhatsApp .txt export, a Telegram result.json, a Signal conversation .json, or a Discord messages.json)",
+                file.display()
+            ))
+        })?
+    };
 
     let collected = match format {
         ChatFormat::Telegram => {
@@ -94,6 +111,10 @@ pub fn import(
         ChatFormat::WhatsApp => {
             use crate::ingest::Source;
             WhatsappSource::new(&file).collect()?
+        }
+        ChatFormat::Discord => {
+            use crate::ingest::Source;
+            DiscordSource::new(&file).collect()?
         }
     };
 
@@ -116,9 +137,10 @@ pub fn import(
                     media::extract_whatsapp(&mut messages, &export_root, data_dir, &mut summary)?;
                     media_summary = Some(summary);
                 }
-                // Signal attachments stay recorded in `raw_json` only —
-                // media extraction is not implemented for Signal yet.
+                // Signal and Discord attachments stay recorded in `raw_json`
+                // only — media extraction is not implemented for them yet.
                 ChatFormat::Signal => {}
+                ChatFormat::Discord => {}
             }
         }
     }
@@ -127,6 +149,7 @@ pub fn import(
         ChatFormat::Telegram => crate::telegram::TELEGRAM_SOURCE,
         ChatFormat::Signal => SIGNAL_SOURCE,
         ChatFormat::WhatsApp => crate::whatsapp::WHATSAPP_SOURCE,
+        ChatFormat::Discord => DISCORD_SOURCE,
     };
     let summary = ingest_collected(
         storage,
@@ -144,20 +167,23 @@ pub fn import(
 }
 
 /// Resolve the picked path to the export file: `result.json` inside a
-/// picked directory, or the picked file itself.
+/// picked directory, the picked directory itself when it is a Discord
+/// Data Package, or the picked file itself.
 fn resolve_export_file(picked: &Path) -> Result<PathBuf> {
     if picked.is_dir() {
         let result_json = picked.join("result.json");
-        if !result_json.is_file() {
-            return Err(Error::ChatImport(format!(
-                "no result.json found in {}",
-                picked.display()
-            )));
+        if result_json.is_file() {
+            return Ok(result_json);
         }
-        Ok(result_json)
-    } else {
-        Ok(picked.to_path_buf())
+        if is_discord_export_dir(picked) {
+            return Ok(picked.to_path_buf());
+        }
+        return Err(Error::ChatImport(format!(
+            "unrecognized chat export format: {} (expected a directory containing a Telegram result.json or a Discord Data Package)",
+            picked.display()
+        )));
     }
+    Ok(picked.to_path_buf())
 }
 
 #[cfg(test)]
@@ -168,6 +194,11 @@ mod tests {
 
     fn telegram_bytes() -> Vec<u8> {
         br#"{"name": "Arhiva", "type": "private_group", "id": 42, "messages": [{"id": 1, "type": "message", "date": "2026-11-01T10:00:00", "from": "Marko", "text": "hi"}]}"#
+            .to_vec()
+    }
+
+    fn discord_bytes() -> Vec<u8> {
+        br#"{"channel": {"id": "900000000000000101", "name": "general"}, "guild": {"id": "800000000000000001", "name": "Ekipa"}, "messages": [{"id": "1700000000000000001", "type": "Default", "timestamp": "2026-10-31 18:00:05.123+00:00", "content": "Zdravo!"}]}"#
             .to_vec()
     }
 
@@ -201,6 +232,33 @@ mod tests {
             }
         ]"#;
         assert_eq!(detect_chat_format(signal), Some(ChatFormat::Signal));
+    }
+
+    #[test]
+    fn detects_discord_json() {
+        // Both the full guild shape and a bare DM channel file (no guild
+        // key) must be detected.
+        assert_eq!(
+            detect_chat_format(&discord_bytes()),
+            Some(ChatFormat::Discord)
+        );
+        let dm = br#"{"channel": {"id": "411116245892313088"}, "messages": []}"#;
+        assert_eq!(detect_chat_format(dm), Some(ChatFormat::Discord));
+    }
+
+    #[test]
+    fn messages_array_without_channel_or_guild_is_telegram() {
+        // The two JSON formats share a top-level messages array; only
+        // the channel/guild objects make it Discord.
+        assert_eq!(
+            detect_chat_format(&telegram_bytes()),
+            Some(ChatFormat::Telegram)
+        );
+        assert_eq!(
+            detect_chat_format(br#"{"messages": []}"#),
+            Some(ChatFormat::Telegram)
+        );
+        assert_eq!(detect_chat_format(br#"{"channel": {}}"#), None);
     }
 
     #[test]
