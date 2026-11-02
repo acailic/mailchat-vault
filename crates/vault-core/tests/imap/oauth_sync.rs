@@ -73,8 +73,10 @@ fn sync_round(
 ) -> Vec<vimap::FolderSyncSummary> {
     let folders: Vec<String> = folders.iter().map(|f| f.to_string()).collect();
     let mut session = session_xoauth2(server, access_token);
-    let source = vimap::source_name(USER);
-    let summaries = vimap::sync_session(&mut session, storage, &source, &folders);
+    // The durable source instance the account syncs as (mock host): the
+    // XOAUTH2 login changes the credentials, never the connector identity.
+    let instance = crate::instance_of(storage, USER);
+    let summaries = vimap::sync_session(&mut session, storage, &instance, &folders);
     let _ = session.logout();
     summaries
 }
@@ -105,7 +107,11 @@ fn a_full_google_sign_in_syncs_mail_over_xoauth2() {
     assert_eq!(storage.stats().unwrap().total, 3);
     let hits = crate::find(&storage, "oabody2");
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].source, format!("imap:{USER}"));
+    assert_eq!(
+        hits[0].source,
+        crate::config_for(USER).display_label(),
+        "the XOAUTH2 account renders with the same durable connector label as password syncs"
+    );
 
     // On the wire: no LOGIN (refused anyway), exactly one AUTHENTICATE
     // whose decoded SASL string is the XOAUTH2 format for this user+token.

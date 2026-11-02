@@ -22,7 +22,7 @@ fn config() -> vimap::ImapConfig {
         host: "mock.test".to_string(),
         port: 993,
         username: USER.to_string(),
-        password: PASSWORD.to_string(),
+        auth: vimap::ImapAuth::Password(PASSWORD.to_string()),
         folders: Vec::new(),
     }
 }
@@ -117,7 +117,8 @@ fn password_auth_via_the_shared_authenticate_helper_logs_in() {
     .expect("password authenticate opens a session");
 
     let folders: Vec<String> = FOLDERS.iter().map(|f| f.to_string()).collect();
-    let summaries = vimap::sync_session(&mut session, &storage, &source(), &folders);
+    let instance = instance(&storage);
+    let summaries = vimap::sync_session(&mut session, &storage, &instance, &folders);
     let _ = session.logout();
     assert_eq!(summaries[0].inserted, 1);
     assert!(server.log().logins.iter().any(|l| l.contains(USER)));

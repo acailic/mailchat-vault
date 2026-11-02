@@ -61,7 +61,7 @@ pub(crate) fn config_for(user: &str) -> vimap::ImapConfig {
         host: MOCK_HOST.to_string(),
         port: 993,
         username: user.to_string(),
-        password: PASSWORD.to_string(),
+        auth: vimap::ImapAuth::Password(PASSWORD.to_string()),
         folders: Vec::new(),
     }
 }
