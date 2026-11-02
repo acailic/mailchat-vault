@@ -29,7 +29,7 @@
 //! - `export_chat` — write the whole chat thread of one message to a
 //!   user-chosen file in the same formats.
 
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -347,6 +347,8 @@ fn watch_remove_folder(state: State<AppState>, path: String) -> Result<WatchSnap
 #[tauri::command]
 fn watch_status(state: State<AppState>) -> WatchSnapshot {
     state.watcher.snapshot()
+}
+
 /// Export the current search results (every row matching the query's text
 /// and filters, ignoring pagination, in the order the UI shows) to `path`.
 ///
@@ -371,7 +373,7 @@ async fn export_search(
         let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
         let mut out = BufWriter::new(file);
         let summary = export::export_search(&storage, &query, format, &mut out)
-            .and_then(|s| out.flush().map(|_| s))
+            .and_then(|s| Ok(out.flush().map(|_| s)?))
             .map_err(|e| e.to_string())?;
         Ok(summary)
     })
@@ -398,7 +400,7 @@ async fn export_chat(
         let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
         let mut out = BufWriter::new(file);
         export::export_chat(&storage, id, format, &mut out)
-            .and_then(|s| out.flush().map(|_| s))
+            .and_then(|s| Ok(out.flush().map(|_| s)?))
             .map_err(|e| e.to_string())
     })
     .await
