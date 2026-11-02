@@ -105,7 +105,8 @@ inside the repo.
   was validated on this UI generation). `09-signal-import` needs the
   filtered-search UI's source chips, so it does not run on the classic UI.
   The `10-stats-dashboard` spec belongs to the statistics dashboard UI
-  (this branch) and postdates that two-generation validation.
+  (added alongside it, after that validation) and postdates
+  the two-generation validation.
 - WebKitWebDriver quirks the specs deliberately work around: clicking
   `body` targets the page centre (a result row — opens the detail view), so
   focus is parked on the `h1` instead; `findElement` with a volatile
