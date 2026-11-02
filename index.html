@@ -99,6 +99,24 @@
       .watch-event { color: gray; word-break: break-all; }
       .watch-event.failed { color: crimson; }
       .watch-event.imported { color: inherit; }
+      select { padding: 6px 8px; font: inherit; }
+      #ask-provider { flex: 0 1 16em; min-width: 12em; }
+      #settings { margin-top: 24px; border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent); padding-top: 12px; }
+      #settings-note { margin-top: 6px; font-size: 13px; min-height: 1em; }
+      #settings-note.error { color: crimson; }
+      #env-info { margin-top: 4px; font-size: 12px; color: gray; }
+      .provider-row {
+        display: grid;
+        grid-template-columns: auto auto 1.1fr 1.4fr 1fr 1fr auto;
+        gap: 6px;
+        align-items: center;
+        margin-top: 8px;
+      }
+      .provider-row .kind-label { font-size: 12px; color: gray; white-space: nowrap; }
+      .provider-row input[type="text"] { min-width: 6em; }
+      .provider-row input[type="password"] { min-width: 8em; padding: 6px 8px; font: inherit; }
+      .provider-row .small-btn, #provider-rows ~ .row .small-btn { padding: 4px 8px; font-size: 12px; }
+      #settings .row { margin-top: 8px; }
 
       /* Detail panel: fixed right column, overlay on narrow windows. */
       #detail {
@@ -255,6 +273,9 @@
     <section>
       <h2>Ask the archive (natural language)</h2>
       <div class="row">
+        <select id="ask-provider" title="LLM provider for this ask (configured in Settings)">
+          <option value="local">Local full-text (no LLM)</option>
+        </select>
         <input id="ask" type="text" placeholder="e.g. “what did Ana say about the vault in October?”" />
         <button id="ask-btn" type="button">Ask</button>
       </div>
@@ -321,6 +342,41 @@
       <ul id="watch-events" class="watch-list"></ul>
       <p id="watch-hint" class="meta" style="margin: 6px 0 0">
         New or modified .mbox, WhatsApp .txt, and Telegram / Signal .json files in watched folders are imported automatically (debounced; re-imports never duplicate). Unrecognized files are skipped and reported above.
+    <section id="settings">
+      <h2>Settings</h2>
+      <div id="settings-note" class="meta"></div>
+      <div id="env-info" class="meta"></div>
+      <div id="provider-rows"></div>
+      <div class="row">
+        <label class="meta">Add provider
+          <select id="add-kind">
+            <option value="zai">z.ai GLM (default)</option>
+            <option value="anthropic">Anthropic</option>
+            <option value="custom">Custom endpoint</option>
+          </select>
+        </label>
+        <button id="add-provider-btn" type="button">Add provider</button>
+      </div>
+      <div class="row">
+        <label class="meta" title="Default provider for Ask; none = environment variables when set, else local-only">
+          <input type="radio" name="default-provider" value="" /> automatic (environment)
+        </label>
+        <label class="meta">Theme
+          <select id="theme">
+            <option value="system">System</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </label>
+        <label class="meta" title="How many top results are sent for the summary">Results for summary
+          <input id="summarize-top" type="number" min="1" max="50" style="max-width: 70px" />
+        </label>
+        <div class="spacer"></div>
+        <button id="settings-save-btn" type="button">Save settings</button>
+      </div>
+      <p class="meta" style="font-size: 12px; margin-top: 8px">
+        Providers live in settings.json in the app data dir; API keys are stored in the OS keyring
+        (session memory when none is available) — never in the settings file or the database.
       </p>
     </section>
 

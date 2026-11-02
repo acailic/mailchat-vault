@@ -2,7 +2,7 @@
 
 Local email & chat archive — Tauri desktop app with SQLite FTS5 full-text search over your own messages. Private tool; nothing leaves the machine, except what you explicitly send for optional [LLM-assisted search](#llm-assisted-search-v1) (your question + the matching result rows only, and only when an API key is configured).
 
-This is the **v0 foundation + usable search tool**: a complete vertical slice — import, store, dedup, search, filter, browse, read in thread context. **v1** adds LLM-assisted natural-language search with local-embedding **hybrid ranking** on top (see below), the first live mail source: **incremental IMAP/Gmail sync** (see below), and **automatic folder watching** (see below). The rest of the roadmap (chat platform formats, XOAUTH2) will land as separate tasks.
+This is the **v0 foundation + usable search tool**: a complete vertical slice — import, store, dedup, search, filter, browse, read in thread context. **v1** adds LLM-assisted natural-language search with local-embedding **hybrid ranking** on top (see below), with **multiple configurable providers and a Settings screen**, the first live mail source: **incremental IMAP/Gmail sync** (see below), and **automatic folder watching** (see below). The rest of the roadmap (chat platform formats, XOAUTH2) will land as separate tasks.
 
 ## What v0 does
 
@@ -27,7 +27,8 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice �
   - **message detail**: full body with highlighted query terms, full metadata, and clickable **thread neighbors** of the same chat;
   - **keyboard navigation**: `/` focus search, `↑`/`↓` move through results, `Enter` open detail, `↑`/`↓` walk the thread, `Esc` close.
 - **Performance contract**: queries answer in < 100 ms over 100k messages (asserted by a generated-fixture test; all queries are `LIMIT`-bounded and ride the FTS5 index plus the `sent_instant`/`(source_instance, chat_id)` indexes); the statistics dashboard answers in < 100 ms over 1M messages.
-- **Ask UI (v1)**: natural-language questions translated to FTS5 + date filters via an LLM, with a short summary over the top results — strictly privacy-scoped and fully optional (see below). Results are ranked **hybrid** — FTS5 fused with an offline local-vector leg once embeddings are built (see below).
+- **Ask UI (v1)**: natural-language questions translated to FTS5 + date filters via an LLM, with a short summary over the top results — strictly privacy-scoped and fully optional (see below). Results are ranked **hybrid** — FTS5 fused with an offline local-vector leg once embeddings are built (see below). A **provider menu** next to the question picks the backend per ask: any provider configured in Settings, the environment fallback, or **local full-text** (nothing sent anywhere).
+- **Settings (v1)**: LLM provider configuration in one place — z.ai/GLM (default), Anthropic, or a custom Anthropic-compatible endpoint — plus the default provider, UI theme, and summary scope. Values live in a `settings.json` file (never the database); API keys live in the OS keyring (see below).
 
 ## Repository layout
 
@@ -35,6 +36,9 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice �
 crates/vault-core/   # storage (SQLite/FTS5, migrations), filtered/paged search queries, archive statistics (dashboard aggregates), ingest trait, mail parsing, mbox / WhatsApp / Telegram / Signal / Discord sources, media extraction into the content-addressed store, IMAP sync, LLM search pipeline, local embeddings + hybrid ranking, folder watching, CSV/JSON/MBOX export — no UI deps
 src-tauri/           # Tauri app shell: commands (search_messages, chat_context, llm_ask, llm_status, embed_messages, embed_status, import_mbox, import_chat_export with optional media extraction, sync_imap, watch_add_folder, watch_remove_folder, watch_status, seed_demo, stats, archive_stats, export_search, export_chat) + secret storage + watch-status events
 src/                 # frontend (vanilla TS): search + filters + pagination + detail view (with media links), ask UI + embedding controls, statistics dashboard (CSS bar charts, no chart library), import & IMAP sync controls, folder watching panel, export controls
+crates/vault-core/   # storage (SQLite/FTS5, migrations), filtered/paged search queries, archive statistics (dashboard aggregates), ingest trait, mail parsing, mbox / WhatsApp / Telegram / Signal sources, media extraction into the content-addressed store, IMAP sync, LLM search pipeline, local embeddings + hybrid ranking, folder watching, settings model (providers, pairing rules) — no UI deps
+src-tauri/           # Tauri app shell: commands (search_messages, chat_context, llm_ask, llm_status, embed_messages, embed_status, import_mbox, import_chat_export with optional media extraction, sync_imap, watch_add_folder, watch_remove_folder, watch_status, seed_demo, stats, archive_stats, settings_get, settings_save, llm_key_clear) + LLM provider registry + secret storage (keyring) + watch-status events
+src/                 # frontend (vanilla TS): search + filters + pagination + detail view (with media links), ask UI with provider menu + embedding controls, settings screen, statistics dashboard (CSS bar charts, no chart library), import & IMAP sync controls, folder watching panel
 index.html           # single-page shell
 ```
 
@@ -73,7 +77,9 @@ Ask a natural-language question (“what was said about the vault in October?”
 
 The UI always shows the plan actually used (`FTS: … · dates: … · ranked: … · planned by LLM / fallback`) plus a privacy note describing exactly what the current mode sends.
 
-### Configuration (environment variables only — the key is never stored in the database or the repo)
+### Configuration (Settings UI, or environment variables)
+
+Providers are configured on the **Settings screen**; the key is stored in the OS keyring when one is available (session memory otherwise) — never in the database or the repo, and never in the settings file. Environment variables keep working as a read-only fallback for headless use:
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
@@ -82,7 +88,7 @@ The UI always shows the plan actually used (`FTS: … · dates: … · ranked: �
 | `ANTHROPIC_BASE_URL` | endpoint base URL; pairs with `ANTHROPIC_API_KEY`, or must point at the z.ai host (`api.z.ai`, any URL spelling) when a z.ai key is used | unset → `https://api.z.ai/api/anthropic` |
 | `MAILCHAT_LLM_MODEL` | model name | `glm-5` |
 
-A mismatched key/endpoint pairing (for example `ANTHROPIC_API_KEY` without `ANTHROPIC_BASE_URL`) is refused with a clear error instead of sending the key anywhere.
+A mismatched key/endpoint pairing (for example `ANTHROPIC_API_KEY` without `ANTHROPIC_BASE_URL`) is refused with a clear error instead of sending the key anywhere — the same rules the Settings screen enforces per provider (see below).
 
 ### Privacy
 
@@ -159,6 +165,23 @@ The status line shows how many folders are watched and how many files are
 still settling; the events list below shows folder add/removals, imports
 (with new/duplicate counts), skips, and errors. A background import
 refreshes the source chips and stats like any manual import.
+## Settings
+
+The **Settings screen** is where LLM providers are configured — one place, no environment variables needed:
+
+- **Providers**: add any number of named provider profiles. A profile has a *kind* that fixes the key/endpoint pairing rules:
+  - **z.ai GLM** (the default) — key for `https://api.z.ai/api/anthropic`; the base URL may be left empty (defaults apply, model defaults to `glm-5`) or must point at the z.ai host;
+  - **Anthropic** — the key is only ever sent to an explicitly configured endpoint (never the z.ai host), so base URL and model are explicit (prefilled with `https://api.anthropic.com`);
+  - **Custom** — any Anthropic-compatible `/v1/messages` endpoint, base URL and model fully explicit.
+  A profile that violates its pairing rule is **refused with a clear error before anything is saved** — the same policy the environment configuration enforces.
+- **Default provider**: which backend an Ask uses. None selected = automatic (the environment fallback when valid, else local-only mode).
+- **Options**: UI theme (system / light / dark) and how many top results feed the RAG summary (1–50, default 8).
+
+### Where values live
+
+- Non-secret settings — provider profiles (kind, base URL, model, name, id), the default provider, and options — live in `settings.json` in the app data dir (e.g. `~/.local/share/com.acailic.mailchatvault/settings.json` on Linux). The file is written atomically and versioned; nothing is ever stored in the vault database.
+- **API keys never touch the settings file**: they are stored in the OS keyring (service `mailchat-vault`, entry `llm:<provider-id>`; Secret Service/GNOME Keyring or KWallet on Linux, Keychain on macOS, Credential Manager on Windows). With no keyring reachable, a key is kept only in process memory for the current session and asked for again after a restart — the UI says so.
+- **Ask provider menu**: every ask picks its backend — a configured profile (shown with model and host, disabled until it has a key), the environment fallback (read-only, labeled *Environment variables*), or **local full-text**, which sends nothing anywhere. The privacy note under the question always describes exactly what the current selection sends.
 
 ## IMAP sync
 
@@ -196,10 +219,12 @@ Rows stream straight to the file, so exports of very large result sets don't hol
 ## Tests
 
 ```sh
-cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram / Discord ingest, media extraction (real small fixture files), filtered/paged search, chat context, archive statistics (incl. the 1M-message dashboard perf contract), 100k FTS perf fixture, IMAP sync (mock server; durable source instances, multi-folder occurrences, conflicting revisions), LLM search pipeline (mock LLM, no network), local embeddings (deterministic embedder, incremental job, cosine scan, hybrid ranking, 100k vector perf budgets), folder watching (real temp folders), export (CSV/JSON/MBOX round-trips incl. unicode + large sets), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations)
+cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram / Discord ingest, media extraction (real small fixture files), filtered/paged search, chat context, archive statistics (incl. the 1M-message dashboard perf contract), 100k FTS perf fixture, IMAP sync (mock server; durable source instances, multi-folder occurrences, conflicting revisions), LLM search pipeline (mock LLM, no network), settings model (file round-trip, provider pairing rules, menu building), local embeddings (deterministic embedder, incremental job, cosine scan, hybrid ranking, 100k vector perf budgets), folder watching (real temp folders), export (CSV/JSON/MBOX round-trips incl. unicode + large sets), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations)
 npm test                 # frontend unit + UI-state snapshot tests (vitest)
+cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram ingest, filtered/paged search, chat context, 100k perf fixture, IMAP sync (mock server), LLM search pipeline (mock LLM, no network), settings model (file round-trip, provider pairing rules, menu building), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations)
+npm test                 # frontend unit + UI-state snapshot tests (vitest), incl. settings helpers and the provider-menu / settings wiring
 npm run check            # TypeScript type-check
-cargo test --workspace   # also compiles the Tauri app (needs the Linux libs above)
+cargo test --workspace   # also compiles the Tauri app + its LLM provider registry tests (needs the Linux libs above)
 ```
 
 The vector layer's budgets over 100k embedded messages (enforced by `tests/vector_perf.rs`): first-run embedding job < 15 s, cosine scan < 200 ms, full local hybrid ask < 250 ms; the FTS < 100 ms contract stays in `search_perf.rs`.
@@ -238,7 +263,7 @@ same webview reason; the formats themselves are round-trip tested in
 
 ## Out of scope for now (separate tasks)
 
-XOAUTH2 (OAuth) login for Gmail, multi-account UI, multi-provider menus, settings UI, push notifications. The media-extraction layer is source-generic: when further chat sources land, their exports plug into the same hash-named `media/` store and `raw_json` convention.
+XOAUTH2 (OAuth) login for Gmail, multi-account UI, push notifications. The media-extraction layer is source-generic: when further chat sources land, their exports plug into the same hash-named `media/` store and `raw_json` convention.
 
 ## Installers & releases
 
