@@ -298,8 +298,7 @@ fn old_schema_fixture_migrates_without_loss() {
     // Migration 5 re-resolves the legacy WhatsApp stamps in the machine's
     // local zone; pin it (Europe/Paris: both fixture dates are winter
     // CET, +01:00) so the expectations below hold on any machine.
-    let _tz = crate::util::TzGuard(std::env::var("TZ").ok());
-    std::env::set_var("TZ", "Europe/Paris");
+    let _tz = crate::util::TzGuard::pin("Europe/Paris");
 
     let dir = scratch_dir();
     let db = dir.path().join("v2.db");

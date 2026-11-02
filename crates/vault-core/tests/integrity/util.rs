@@ -31,13 +31,31 @@ pub fn scratch_dir() -> tempfile::TempDir {
 /// `page_size + 24` bytes on top of the 32-byte WAL header.
 pub const PAGE_SIZE: u64 = 4096;
 
-/// Restores the process `TZ` variable on drop, so a failing assertion in
-/// a zone-pinned test cannot leak the pinned zone into sibling tests.
-pub struct TzGuard(pub Option<String>);
+/// Pins the process `TZ` variable for the guard's lifetime: the prior
+/// value is restored on drop (even on a failing assertion), and a shared
+/// mutex is held so two parallel zone-pinned tests in this binary never
+/// pin — and restore — the zone under each other.
+pub struct TzGuard {
+    prior: Option<String>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl TzGuard {
+    pub fn pin(zone: &str) -> Self {
+        static TZ_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let lock = TZ_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let prior = std::env::var("TZ").ok();
+        std::env::set_var("TZ", zone);
+        Self { prior, _lock: lock }
+    }
+}
 
 impl Drop for TzGuard {
     fn drop(&mut self) {
-        match self.0.take() {
+        match self.prior.take() {
             Some(tz) => std::env::set_var("TZ", tz),
             None => std::env::remove_var("TZ"),
         }
