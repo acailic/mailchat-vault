@@ -6,21 +6,38 @@
 //!   Android exports.
 //! - `1.11.2026., 09:00 - Marko: Zdravo!` — older Android exports.
 //!
-//! Dates are the exporter's local time and carry no UTC offset, so they
-//! are stored verbatim in the RFC 3339 UTC form used across the archive.
+//! Dates are the exporter's local time and carry no UTC offset, so M1.3
+//! interprets them in an **explicit timezone** (the importing machine's
+//! IANA zone by default) — DST-aware per stamp — and records the zone and
+//! a time-confidence label in the canonical store. Local wall-times that
+//! a DST transition makes nonexistent stay unresolved (no instant), with
+//! the verbatim stamp kept.
+//!
+//! The `.txt` export carries no chat id, so the conversation key (M1.3) is
+//! derived from the export's own content: the sorted participant set
+//! (message authors) plus a fingerprint of the first authored message.
+//! Re-importing the same chat under a renamed file derives the same key —
+//! one conversation, and message ids hash over the key, so renames dedup
+//! instead of duplicating. Two different chats that merely share a name
+//! (or a participant set) stay distinct because their first messages
+//! differ. Exports with no authored message at all cannot be safely keyed
+//! and fall back to the legacy file-stem grouping.
+//!
 //! Messages have no ids in the export; `external_id` is a content hash
-//! (see [`parse_whatsapp`]), which keeps re-imports idempotent. Attachment
+//! over the conversation key, author, naive timestamp, and body (see
+//! [`parse_whatsapp_tz`]), which keeps re-imports idempotent. Attachment
 //! placeholders stay in the body with kind/name recorded in `raw_json`;
 //! when the export ships with its files, the media pass (see
 //! [`crate::media`]) matches the names and links the stored copies via a
 //! `media` array in `raw_json`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use serde_json::{json, Map, Value};
+use sha2::Digest as _;
 
 use crate::ingest::{Collected, Source};
 use crate::message::NewMessage;
@@ -82,20 +99,36 @@ impl Source for WhatsappSource {
     }
 }
 
-/// Parse WhatsApp export text into messages.
-///
-/// `chat_id` groups the messages (typically the export file's name stem,
-/// e.g. `WhatsApp Chat with Ana`). Because the format has no message ids,
-/// `external_id` is a content hash over chat id, author, timestamp, and
-/// body, plus an occurrence counter so identical back-to-back messages
-/// still get distinct rows — while re-importing the same file dedups
-/// everything.
+/// Parse WhatsApp export text into messages, interpreting the exporter's
+/// naive local timestamps in the machine's local timezone (the IANA name
+/// is recorded when resolvable).
 pub fn parse_whatsapp(bytes: &[u8], chat_id: &str) -> Result<Collected> {
+    let zone_label = iana_time_zone::get_timezone().unwrap_or_else(|_| "local".to_string());
+    parse_whatsapp_tz(bytes, chat_id, &Local, &zone_label)
+}
+
+/// Parse WhatsApp export text into messages under an explicit timezone.
+///
+/// `chat_id` is the display grouping (typically the export file's name
+/// stem, e.g. `WhatsApp Chat with Ana`) and becomes the conversation
+/// label. The conversation key is derived from the export's participants
+/// plus its first authored message (see [`whatsapp_conversation_key`]),
+/// so it survives file renames. Because the format has no message ids,
+/// `external_id` is a content hash over the conversation key (or the
+/// legacy stem when no key can be derived), author, naive timestamp, and
+/// body, plus an occurrence counter so identical back-to-back messages
+/// still get distinct rows — while re-importing the same file (under any
+/// name, when a key was derived) dedups everything.
+pub fn parse_whatsapp_tz<Tz: TimeZone>(
+    bytes: &[u8],
+    chat_id: &str,
+    tz: &Tz,
+    zone_label: &str,
+) -> Result<Collected> {
     let text = decode_export(bytes);
     let day_first = detect_day_first(&text);
 
-    let mut messages: Vec<NewMessage> = Vec::new();
-    let mut occurrence: HashMap<u64, u32> = HashMap::new();
+    let mut finished: Vec<Finished> = Vec::new();
     let mut pending: Option<Pending> = None;
 
     for line in text.lines() {
@@ -105,7 +138,9 @@ pub fn parse_whatsapp(bytes: &[u8], chat_id: &str) -> Result<Collected> {
         let awaiting_quote = pending.as_ref().is_some_and(|p| p.awaiting_quote);
         if !awaiting_quote {
             if let Some(h) = parse_header(line, day_first) {
-                finalize(pending.take(), chat_id, &mut messages, &mut occurrence);
+                if let Some(p) = pending.take() {
+                    finished.push(finish_pending(p));
+                }
                 let awaiting_quote = is_quoted_marker(&strip_bidi(&h.body));
                 pending = Some(Pending {
                     datetime: h.datetime,
@@ -126,12 +161,120 @@ pub fn parse_whatsapp(bytes: &[u8], chat_id: &str) -> Result<Collected> {
         // Lines before the first header (BOM leftovers, stray text) are
         // dropped.
     }
-    finalize(pending, chat_id, &mut messages, &mut occurrence);
+    if let Some(p) = pending.take() {
+        finished.push(finish_pending(p));
+    }
+
+    // Conversation key from the export's own content: every distinct
+    // author (sorted) plus a fingerprint of the first authored message.
+    let authors: BTreeSet<&str> = finished
+        .iter()
+        .filter(|f| !f.author.is_empty())
+        .map(|f| f.author.as_str())
+        .collect();
+    let anchor = finished.iter().find(|f| !f.author.is_empty());
+    let conversation_key = whatsapp_conversation_key(
+        authors.iter().copied(),
+        anchor.map(|f| (f.author.as_str(), f.naive_text.as_str(), f.body.as_str())),
+    );
+    // When no key could be derived (no authored message at all) the ids
+    // hash over the display stem, exactly as the legacy path did.
+    let hash_chat = if conversation_key.is_empty() {
+        chat_id
+    } else {
+        &conversation_key
+    };
+
+    let mut messages: Vec<NewMessage> = Vec::new();
+    let mut occurrence: HashMap<u64, u32> = HashMap::new();
+    for f in finished {
+        // DST-aware interpretation in the explicit zone; a wall-time a
+        // DST gap removes has no instant at all (kept unresolved).
+        let (sent_at, time_confidence) = match local_to_utc(&f.naive, tz) {
+            Some(instant) => (
+                instant.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+                "legacy_assumed",
+            ),
+            None => (String::new(), "unresolved"),
+        };
+
+        // Content-hash dedup id over the stable conversation key; the
+        // occurrence counter keeps identical back-to-back messages
+        // distinct while re-imports stay idempotent.
+        let base = fnv1a_fields(&[hash_chat, &f.author, &f.naive_text, &f.body]);
+        let seen = occurrence.entry(base).or_insert(0);
+        let external_id = format!("generated-{:016x}-{}", base, seen);
+        *seen += 1;
+
+        let mut msg = NewMessage::new(WHATSAPP_SOURCE, external_id, f.author, sent_at, f.body);
+        msg.channel = "chat".to_string();
+        msg.chat_id = chat_id.to_string();
+        msg.raw_json = Value::Object(f.raw).to_string();
+        msg.conversation_key = conversation_key.clone();
+        msg.original_timestamp = f.naive_text.clone();
+        msg.timezone = zone_label.to_string();
+        msg.time_confidence = time_confidence.to_string();
+        messages.push(msg);
+    }
 
     Ok(Collected {
         messages,
         failed: 0,
     })
+}
+
+/// A parsed message with its raw fields ready for storage.
+struct Finished {
+    /// Stripped author; empty for system lines.
+    author: String,
+    /// The exporter's naive local stamp, verbatim (`YYYY-MM-DDTHH:MM:SS`).
+    naive_text: String,
+    naive: NaiveDateTime,
+    body: String,
+    raw: Map<String, Value>,
+}
+
+/// The stable conversation key for a WhatsApp export: the sorted
+/// participant set plus a fingerprint of the first authored message,
+/// SHA-256-hashed with length-prefixed fields (two exports hash equally
+/// only when every field byte matches). Returns `""` when the export has
+/// no authored message — nothing in it can then identify the chat, and
+/// the caller falls back to the legacy stem grouping.
+///
+/// Shared by the parser and the M1.3 migration (which re-derives keys for
+/// already-imported conversations from the archived rows); the formula is
+/// frozen — change it only with a migration that re-keys both sides.
+#[doc(alias = "whatsapp_key")]
+pub fn whatsapp_conversation_key<'a>(
+    authors: impl Iterator<Item = &'a str>,
+    anchor: Option<(&'a str, &'a str, &'a str)>,
+) -> String {
+    let mut authors: Vec<&str> = authors.collect();
+    if authors.is_empty() || anchor.is_none() {
+        return String::new();
+    }
+    authors.sort_unstable();
+    authors.dedup();
+    let Some((anchor_author, anchor_stamp, anchor_body)) = anchor else {
+        unreachable!("checked above");
+    };
+    let mut hasher = sha2::Sha256::new();
+    for part in authors
+        .iter()
+        .copied()
+        .chain([anchor_author, anchor_stamp, anchor_body])
+    {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut key = String::with_capacity("whatsapp:chat:sha256:".len() + 64);
+    key.push_str("whatsapp:chat:sha256:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(key, "{byte:02x}");
+    }
+    key
 }
 
 /// True when the text starts (within its first lines) with a parseable
@@ -321,20 +464,26 @@ fn strip_bidi(text: &str) -> String {
     text.chars().filter(|c| !BIDI_MARKS.contains(c)).collect()
 }
 
+fn local_to_utc<Tz: TimeZone>(naive: &NaiveDateTime, tz: &Tz) -> Option<DateTime<Utc>> {
+    match tz.from_local_datetime(naive) {
+        chrono::LocalResult::Single(dt) => Some(dt.with_timezone(&Utc)),
+        // A DST fold repeats the wall-time: the first occurrence, the
+        // same choice chrono's `earliest()` makes everywhere else.
+        chrono::LocalResult::Ambiguous(dt, _) => Some(dt.with_timezone(&Utc)),
+        // A DST gap removed this wall-time from the calendar: no instant
+        // exists to resolve to.
+        chrono::LocalResult::None => None,
+    }
+}
+
 fn is_quoted_marker(first_body_line: &str) -> bool {
     QUOTED_MARKERS.contains(&first_body_line)
 }
 
-/// Turn a finished [`Pending`] into a [`NewMessage`].
-fn finalize(
-    pending: Option<Pending>,
-    chat_id: &str,
-    messages: &mut Vec<NewMessage>,
-    occurrence: &mut HashMap<u64, u32>,
-) {
-    let Some(p) = pending else { return };
+/// Turn a finished [`Pending`] into a [`Finished`] (the conversation key
+/// and id hashing happen later, once the whole export has been seen).
+fn finish_pending(p: Pending) -> Finished {
     let author = p.author.map(|a| strip_bidi(&a)).unwrap_or_default();
-    let sent_at = p.datetime.format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let mut body = strip_bidi(&p.body);
     let mut raw = Map::new();
 
@@ -352,18 +501,13 @@ fn finalize(
         raw.insert("system".into(), json!(true));
     }
 
-    // Content-hash dedup id; the occurrence counter keeps identical
-    // back-to-back messages distinct while re-imports stay idempotent.
-    let base = fnv1a_fields(&[chat_id, &author, &sent_at, &body]);
-    let seen = occurrence.entry(base).or_insert(0);
-    let external_id = format!("generated-{:016x}-{}", base, seen);
-    *seen += 1;
-
-    let mut msg = NewMessage::new(WHATSAPP_SOURCE, external_id, author, sent_at, body);
-    msg.channel = "chat".to_string();
-    msg.chat_id = chat_id.to_string();
-    msg.raw_json = Value::Object(raw).to_string();
-    messages.push(msg);
+    Finished {
+        author,
+        naive_text: p.datetime.format("%Y-%m-%dT%H:%M:%S").to_string(),
+        naive: p.datetime,
+        body,
+        raw,
+    }
 }
 
 /// Split a quoted-reply body into `(quoted_author, quoted_text, reply)`.

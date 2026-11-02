@@ -12,10 +12,20 @@
 //! every row (ids included) into the canonical tables, and nothing writes
 //! the legacy tables afterwards. Removing the legacy snapshot is deferred
 //! until the recovery/upgrade experience justifies a separate migration.
+//!
+//! Schema version 5 (M1.3) adds **stable conversation keys** over the same
+//! tables: `conversations.provider_key` holds a stable, provider-scoped
+//! identity (`telegram:chat:<id>`, `whatsapp:chat:sha256:…`,
+//! `signal:chat:<uuid>`, `email:thread:<root message id>`), the insert
+//! path resolves conversations through it (then the email reply graph,
+//! then the legacy `chat_id` grouping), and the time-provenance columns
+//! record the verbatim stamp, the timezone it was interpreted in, and a
+//! confidence label. What cannot be safely interpreted keeps the M1.1
+//! `legacy_unresolved` state.
 
 use std::path::Path;
 
-use chrono::{Datelike, Days, NaiveDate};
+use chrono::{Datelike, Days, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 
@@ -427,7 +437,43 @@ const MIGRATIONS: &[(i64, &str)] = &[
             SELECT author, COUNT(*) FROM archive_messages GROUP BY author;
         "#,
     ),
+    (
+        7,
+        // Stable conversation keys (M1.3). The schema itself is already
+        // sufficient (M1.1 added `conversations.provider_key` and the
+        // time-provenance columns in anticipation); this migration is a
+        // pure data backfill, implemented in Rust
+        // (`backfill_conversation_keys`) because it needs deterministic
+        // aggregation SQL cannot express:
+        //
+        // - Telegram and Signal conversations derive their provider key
+        //   from the archived messages' `<chat-id>/<message-id>` external
+        //   ids (the provider-guaranteed chat id); conversations that
+        //   collapse onto the same key (a chat re-imported under a
+        //   rename) merge into one.
+        // - WhatsApp conversations derive a content key (sorted
+        //   participants + first authored message, the same frozen
+        //   formula as the parser), merge onto it, and every WhatsApp
+        //   message identity is re-keyed to the new hash formula so
+        //   re-imports after a rename dedup instead of duplicating;
+        //   the legacy blind-UTC stamp is re-resolved in the machine's
+        //   local zone and the resolved instant, zone, and confidence
+        //   stored alongside.
+        // - What cannot be safely interpreted stays legacy-unresolved:
+        //   exports without a provider id (id-less Telegram, uuid-less
+        //   Signal), author-less WhatsApp exports, and mail archived
+        //   before threading headers were recorded.
+        "",
+    ),
 ];
+
+/// Rust halves of migrations, for backfill logic that SQL alone cannot
+/// express faithfully (deterministic aggregation over archived rows).
+/// Each hook runs inside the same transaction as its SQL half, right
+/// after it. As with `MIGRATIONS`, never edit an applied version — add
+/// a new one.
+type RustMigration = fn(&Connection) -> Result<()>;
+const RUST_MIGRATIONS: &[(i64, RustMigration)] = &[(7, backfill_conversation_keys)];
 
 /// Handle to the vault database.
 ///
@@ -474,6 +520,13 @@ impl Storage {
     /// together with its identity alias and a first `import` occurrence —
     /// the legacy `messages` table is never written (it is a read-only
     /// snapshot since schema version 4).
+    ///
+    /// M1.3: the conversation resolves through the message's stable
+    /// [`NewMessage::conversation_key`] when present (one conversation per
+    /// provider chat, label following the newest display name), through
+    /// the email reply graph ([`NewMessage::reply_refs`]) for mail, and
+    /// through the legacy `chat_id` grouping otherwise. Time provenance
+    /// columns come from the message's explicit fields when set.
     pub fn insert_message(&self, msg: &NewMessage) -> Result<InsertOutcome> {
         let tx = self.conn.unchecked_transaction()?;
         let instance = resolve_legacy_instance(&tx, &msg.source)?;
@@ -497,24 +550,28 @@ impl Storage {
                  VALUES (?1, 'import', ?2)",
                 params![id, msg.external_id],
             )?;
+            // A re-import of the same chat under a rename still refreshes
+            // the conversation label (identity is stable, names follow).
+            if !msg.conversation_key.is_empty() && !msg.chat_id.is_empty() {
+                if let Some(conv) =
+                    find_provider_conversation(&tx, &instance, &msg.conversation_key)?
+                {
+                    tx.execute(
+                        "UPDATE conversations SET label = ?2 WHERE id = ?1 AND label <> ?2",
+                        params![conv, msg.chat_id],
+                    )?;
+                }
+            }
             tx.commit()?;
             return Ok(InsertOutcome::Duplicate(id));
         }
 
-        let conversation = if msg.chat_id.is_empty() {
-            None
-        } else {
-            Some(resolve_legacy_conversation(&tx, &instance, msg)?)
-        };
+        let conversation = resolve_conversation(&tx, &instance, msg)?;
+        let (original_timestamp, timezone, time_confidence) = time_provenance(msg)?;
         let sent_instant = if msg.sent_at.is_empty() {
             None
         } else {
             Some(msg.sent_at.as_str())
-        };
-        let confidence = if msg.sent_at.is_empty() {
-            "missing"
-        } else {
-            "legacy_assumed"
         };
         let id: i64 = tx.query_row(
             r#"
@@ -522,7 +579,7 @@ impl Storage {
                 (source_instance_id, conversation_id, external_id, channel, chat_id,
                  author, subject, body, raw_json,
                  sent_instant, original_timestamp, timezone, time_confidence, content_hash)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?7, ?8, ?9, ?10, '', ?11, ?12)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?7, ?8, ?9, ?10, ?11, ?12, ?13)
             RETURNING id
             "#,
             params![
@@ -535,8 +592,9 @@ impl Storage {
                 msg.body,
                 msg.raw_json,
                 sent_instant,
-                msg.sent_at,
-                confidence,
+                original_timestamp,
+                timezone,
+                time_confidence,
                 content_hash(msg),
             ],
             |row| row.get(0),
@@ -805,16 +863,25 @@ impl Storage {
     /// A message plus its adjacent messages in the same conversation.
     ///
     /// `before`/`after` each hold up to `radius` messages, oldest → newest.
-    /// Messages without a conversation (empty legacy `chat_id`) have no
-    /// thread peers. Ties and unknown instants order by id, matching the
-    /// legacy `sent_at`-text ordering exactly (COALESCE maps the unknown
-    /// NULL instant to the legacy empty-string position).
+    /// Messages without a conversation (standalone mail, ungrouped legacy
+    /// rows) have no thread peers. Ties and unknown instants order by id,
+    /// matching the legacy `sent_at`-text ordering exactly (COALESCE maps
+    /// the unknown NULL instant to the legacy empty-string position).
     pub fn chat_context(&self, id: i64, radius: u32) -> Result<Option<ChatContext>> {
         let radius = radius.clamp(1, crate::query::MAX_LIMIT) as i64;
         let Some(message) = self.get(id)? else {
             return Ok(None);
         };
-        if message.chat_id.is_empty() {
+        // Peers exist only inside a conversation: M1.3 resolved rows
+        // (provider keys, email threads) group there, while messages
+        // without one (empty legacy `chat_id`, standalone mail) stand
+        // alone.
+        let has_conversation: bool = self.conn.query_row(
+            "SELECT conversation_id IS NOT NULL FROM archive_messages WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if !has_conversation {
             return Ok(Some(ChatContext {
                 before: Vec::new(),
                 message,
@@ -1441,9 +1508,10 @@ fn resolve_legacy_instance(conn: &Connection, namespace: &str) -> Result<String>
 }
 
 /// Find the legacy conversation for `msg.chat_id` within `instance`,
-/// creating a legacy-unresolved one when the chat is new. The stable
-/// provider keys and email reply graph arrive with the conversation-key
-/// slice; the legacy chat key is the grouping M1.1 actually has.
+/// creating a legacy-unresolved one when the chat is new. Used when a
+/// message carries no stable key and no reply refs — sources that do
+/// carry one resolve through [`resolve_provider_conversation`] or
+/// [`resolve_email_thread`] instead.
 fn resolve_legacy_conversation(
     conn: &Connection,
     instance: &str,
@@ -1469,6 +1537,215 @@ fn resolve_legacy_conversation(
     )?;
     Ok(id)
 }
+
+/// Resolve the conversation for a message per M1.3: a stable provider
+/// key wins (identity from the export itself), then the email reply
+/// graph, then the legacy `chat_id` grouping; `None` stands alone.
+fn resolve_conversation(
+    conn: &Connection,
+    instance: &str,
+    msg: &NewMessage,
+) -> Result<Option<String>> {
+    if !msg.conversation_key.is_empty() {
+        return Ok(Some(resolve_provider_conversation(conn, instance, msg)?));
+    }
+    if !msg.reply_refs.is_empty() {
+        return Ok(Some(resolve_email_thread(conn, instance, msg)?));
+    }
+    if !msg.chat_id.is_empty() {
+        return Ok(Some(resolve_legacy_conversation(conn, instance, msg)?));
+    }
+    Ok(None)
+}
+
+/// The conversation carrying `key` in `instance`, if any.
+fn find_provider_conversation(
+    conn: &Connection,
+    instance: &str,
+    key: &str,
+) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT id FROM conversations
+         WHERE source_instance_id = ?1 AND provider_key = ?2",
+        params![instance, key],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// Find or create the conversation for a message carrying a stable
+/// provider key (`telegram:chat:<id>`, `whatsapp:chat:sha256:…`, …).
+/// The key is the identity: re-imports after a rename resolve here and
+/// only the label follows the newest display name.
+fn resolve_provider_conversation(
+    conn: &Connection,
+    instance: &str,
+    msg: &NewMessage,
+) -> Result<String> {
+    if let Some(id) = find_provider_conversation(conn, instance, &msg.conversation_key)? {
+        if !msg.chat_id.is_empty() {
+            conn.execute(
+                "UPDATE conversations SET label = ?2 WHERE id = ?1 AND label <> ?2",
+                params![id, msg.chat_id],
+            )?;
+        }
+        return Ok(id);
+    }
+    let id = new_uuid();
+    let label = if msg.chat_id.is_empty() {
+        msg.conversation_key.clone()
+    } else {
+        msg.chat_id.clone()
+    };
+    conn.execute(
+        "INSERT INTO conversations
+             (id, source_instance_id, legacy_chat_key, provider_key, label, kind, confidence)
+         VALUES (?1, ?2, NULL, ?3, ?4, ?5, 'verified')",
+        params![id, instance, msg.conversation_key, label, msg.channel],
+    )?;
+    Ok(id)
+}
+
+/// Resolve the conversation for an email carrying reply-graph refs
+/// (`In-Reply-To` + `References`, root-most first — see [`crate::mail`]).
+///
+/// The reply graph is resolved one hop at a time, never traversed, so
+/// incomplete chains and reference cycles can never loop:
+///
+/// 1. The first ref that matches an already-stored identity with a
+///    conversation joins that conversation — whichever it is, so a
+///    reply that cross-links two threads lands in the root-most one
+///    seen first.
+/// 2. Otherwise the conversation is keyed `email:thread:<root-most ref>`:
+///    the thread root's own message id. The root itself carries no refs,
+///    so when it arrives after its replies it stays standalone until the
+///    next reply in the thread derives the key and adopts it (and any
+///    other conversationless message the refs reach).
+///
+/// Both paths also *adopt*: refs whose stored messages never got a
+/// conversation (a parent imported before M1.3, or a root that arrived
+/// alone) are attached to the resolved thread.
+fn resolve_email_thread(conn: &Connection, instance: &str, msg: &NewMessage) -> Result<String> {
+    for reference in &msg.reply_refs {
+        let joined: Option<String> = conn
+            .query_row(
+                "SELECT m.conversation_id
+                 FROM message_identities AS mi
+                 JOIN archive_messages AS m ON m.id = mi.message_id
+                 WHERE mi.source_instance_id = ?1 AND mi.namespace = 'legacy'
+                   AND mi.revision_hash = '' AND mi.external_key = ?2
+                   AND m.conversation_id IS NOT NULL
+                 LIMIT 1",
+                params![instance, reference],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(conversation) = joined {
+            adopt_refs(conn, instance, &msg.reply_refs, &conversation)?;
+            return Ok(conversation);
+        }
+    }
+
+    let key = format!("email:thread:{}", msg.reply_refs[0]);
+    if let Some(id) = find_provider_conversation(conn, instance, &key)? {
+        adopt_refs(conn, instance, &msg.reply_refs, &id)?;
+        return Ok(id);
+    }
+    let id = new_uuid();
+    // Display label: the mail's subject (the first body line for mail
+    // bodies, see [`crate::mail`]) when present, else the key itself.
+    let label = msg
+        .body
+        .split('\n')
+        .next()
+        .filter(|l| !l.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| key.clone());
+    conn.execute(
+        "INSERT INTO conversations
+             (id, source_instance_id, legacy_chat_key, provider_key, label, kind, confidence)
+         VALUES (?1, ?2, NULL, ?3, ?4, 'email', 'verified')",
+        params![id, instance, key, label],
+    )?;
+    adopt_refs(conn, instance, &msg.reply_refs, &id)?;
+    Ok(id)
+}
+
+/// Attach already-stored refs of one source instance that have no
+/// conversation yet to `conversation` (see [`resolve_email_thread`]).
+fn adopt_refs(
+    conn: &Connection,
+    instance: &str,
+    refs: &[String],
+    conversation: &str,
+) -> Result<()> {
+    if refs.is_empty() {
+        return Ok(());
+    }
+    let placeholders = vec!["?"; refs.len()].join(", ");
+    let sql = format!(
+        "UPDATE archive_messages SET conversation_id = ?1
+         WHERE conversation_id IS NULL AND id IN (
+             SELECT mi.message_id FROM message_identities AS mi
+             WHERE mi.source_instance_id = ?2 AND mi.namespace = 'legacy'
+               AND mi.revision_hash = ''
+               AND mi.external_key IN ({placeholders}))"
+    );
+    let mut bind: Vec<SqlValue> =
+        vec![conversation.to_string().into(), instance.to_string().into()];
+    bind.extend(refs.iter().cloned().map(SqlValue::from));
+    conn.execute(&sql, params_from_iter(bind))?;
+    Ok(())
+}
+
+/// The time-provenance triple `(original_timestamp, timezone,
+/// time_confidence)` for an insert.
+///
+/// Messages that carry no explicit provenance fields keep the M1.1
+/// behavior: the resolved instant doubles as the original text, no zone
+/// is recorded, and the confidence is derived from `sent_at`
+/// (`missing`/`legacy_assumed`). An explicit confidence label must be one
+/// of the canonical-store CHECK values.
+fn time_provenance(msg: &NewMessage) -> Result<(&str, &str, &str)> {
+    let derived = if msg.sent_at.is_empty() {
+        "missing"
+    } else {
+        "legacy_assumed"
+    };
+    if msg.time_confidence.is_empty()
+        && msg.timezone.is_empty()
+        && msg.original_timestamp.is_empty()
+    {
+        return Ok((msg.sent_at.as_str(), "", derived));
+    }
+    let confidence = if msg.time_confidence.is_empty() {
+        derived
+    } else if TIME_CONFIDENCE.contains(&msg.time_confidence.as_str()) {
+        msg.time_confidence.as_str()
+    } else {
+        return Err(Error::ChatImport(format!(
+            "invalid time_confidence {:?} (expected one of {TIME_CONFIDENCE:?})",
+            msg.time_confidence
+        )));
+    };
+    let original = if msg.original_timestamp.is_empty() {
+        msg.sent_at.as_str()
+    } else {
+        msg.original_timestamp.as_str()
+    };
+    Ok((original, msg.timezone.as_str(), confidence))
+}
+
+/// The canonical time-confidence labels (the `archive_messages
+/// .time_confidence` CHECK values).
+const TIME_CONFIDENCE: [&str; 5] = [
+    "explicit_offset",
+    "user_confirmed",
+    "legacy_assumed",
+    "unresolved",
+    "missing",
+];
 
 fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
     Ok(Message {
@@ -1650,6 +1927,31 @@ fn sha256_hex(input: &str) -> String {
     out
 }
 
+/// The UTC instant a fresh import on this machine derives from a legacy
+/// blind-`Z` stamp (`2026-07-01T09:00:05Z`): the exporter-local wall time
+/// interpreted in the machine's local zone, formatted exactly like the
+/// live parser's `sent_at`. A wall-time a DST gap removes (or any
+/// unparseable stamp) has no instant and resolves to the empty string,
+/// exactly like the parser's unresolved marker.
+fn resolve_blind_z_utc(text: &str) -> String {
+    const RFC3339: &str = "%Y-%m-%dT%H:%M:%SZ";
+    let Some(naive_text) = text.strip_suffix('Z') else {
+        return String::new();
+    };
+    let Ok(naive) = NaiveDateTime::parse_from_str(naive_text, "%Y-%m-%dT%H:%M:%S") else {
+        return String::new();
+    };
+    match Local.from_local_datetime(&naive) {
+        chrono::LocalResult::Single(dt) => dt.with_timezone(&Utc).format(RFC3339).to_string(),
+        // A DST fold repeats the wall-time: the first occurrence, the
+        // same choice the parser makes everywhere else.
+        chrono::LocalResult::Ambiguous(dt, _) => dt.with_timezone(&Utc).format(RFC3339).to_string(),
+        // A DST gap removed this wall-time from the calendar: no instant
+        // exists to resolve to.
+        chrono::LocalResult::None => String::new(),
+    }
+}
+
 /// Register the canonical-store SQL functions used by migration 4 (and any
 /// caller of the same formulas): `vault_uuid()` and `sha256_hex(text)`.
 /// SQLite bundles neither.
@@ -1701,11 +2003,393 @@ fn migrate(conn: &Connection) -> Result<()> {
     for &(version, sql) in MIGRATIONS.iter().filter(|(v, _)| *v > current) {
         let tx = conn.unchecked_transaction()?;
         tx.execute_batch(sql)?;
+        if let Some(&(_, hook)) = RUST_MIGRATIONS.iter().find(|(v, _)| *v == version) {
+            hook(&tx)?;
+        }
         tx.execute(
             "INSERT INTO schema_migrations (version) VALUES (?1)",
             params![version],
         )?;
         tx.commit()?;
+    }
+    Ok(())
+}
+
+// -----------------------------------------------------------------------
+// Migration 6 (M1.3): stable conversation keys over the M1.1 tables
+// -----------------------------------------------------------------------
+
+/// Backfill stable conversation keys (migration 6). See the migration's
+/// comment for the design; everything here is conservative — a
+/// conversation whose key cannot be derived safely is left exactly as
+/// M1.1 left it (`legacy_unresolved`).
+fn backfill_conversation_keys(conn: &Connection) -> Result<()> {
+    backfill_provider_id_conversations(conn)?;
+    backfill_whatsapp_conversations(conn)?;
+    Ok(())
+}
+
+/// Telegram/Signal half: the provider-guaranteed chat id is recoverable
+/// from the archived external ids (`<chat-id>/<message-id>`), so every
+/// message re-groups onto the conversation keyed by its own prefix —
+/// merging chats that pre-M1.3 grouping split across two names (a
+/// re-import under a rename) and splitting chats that legacy name
+/// grouping wrongly merged (two different chats sharing a display name).
+/// Messages without the `<chat-id>/` shape stay in their legacy
+/// conversation, unresolved.
+fn backfill_provider_id_conversations(conn: &Connection) -> Result<()> {
+    // (conversation, instance, namespace) for every unkeyed provider-id
+    // source conversation.
+    let conversations: Vec<(String, String, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT c.id, si.id, si.legacy_namespace
+             FROM conversations AS c
+             JOIN source_instances AS si ON si.id = c.source_instance_id
+             WHERE si.legacy_namespace IN (?1, ?2)
+               AND c.provider_key IS NULL",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![
+                    crate::telegram::TELEGRAM_SOURCE,
+                    crate::signal::SIGNAL_SOURCE
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?
+            .collect::<std::result::Result<_, _>>()?;
+        rows
+    };
+
+    // Determinism is data-driven: process conversations by their earliest
+    // archived message, so when several legacy conversations collapse onto
+    // one provider key the first import is keyed in place and its label
+    // survives — independent of row order in the table.
+    let mut conversations = conversations;
+    {
+        let mut keyed: Vec<(i64, (String, String, String))> = Vec::new();
+        for entry in conversations.drain(..) {
+            let earliest: i64 = conn.query_row(
+                "SELECT MIN(id) FROM archive_messages WHERE conversation_id = ?1",
+                params![entry.0],
+                |row| row.get(0),
+            )?;
+            keyed.push((earliest, entry));
+        }
+        keyed.sort_by_key(|(earliest, _)| *earliest);
+        conversations = keyed.into_iter().map(|(_, entry)| entry).collect();
+    }
+
+    for (conversation, instance, namespace) in conversations {
+        // Group this conversation's messages by external-id prefix.
+        let groups: Vec<(String, Vec<i64>)> = {
+            let mut stmt = conn.prepare(
+                "SELECT CASE WHEN m.external_id LIKE '%/%'
+                         THEN substr(m.external_id, 1, instr(m.external_id, '/') - 1)
+                         ELSE '' END AS prefix,
+                        m.id
+                 FROM archive_messages AS m
+                 WHERE m.conversation_id = ?1
+                 ORDER BY m.id",
+            )?;
+            let mut by_prefix: std::collections::BTreeMap<String, Vec<i64>> =
+                std::collections::BTreeMap::new();
+            for row in stmt.query_map(params![conversation], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })? {
+                let (prefix, id) = row?;
+                by_prefix.entry(prefix).or_default().push(id);
+            }
+            by_prefix.into_iter().collect()
+        };
+
+        for (prefix, ids) in &groups {
+            if !prefix_is_provider_id(&namespace, prefix) {
+                continue; // not safely interpretable; stays legacy-unresolved
+            }
+            let key = format!("{namespace}:chat:{prefix}");
+            // Find or create the keyed conversation for this prefix.
+            let target = match find_provider_conversation(conn, &instance, &key)? {
+                Some(id) => id,
+                None => {
+                    // If this conversation holds only this prefix, key it
+                    // in place; otherwise spawn a dedicated conversation.
+                    let sole_group = groups.len() == 1;
+                    if sole_group {
+                        conn.execute(
+                            "UPDATE conversations SET provider_key = ?2,
+                                 confidence = 'verified' WHERE id = ?1",
+                            params![conversation, key],
+                        )?;
+                        conversation.clone()
+                    } else {
+                        let id = new_uuid();
+                        let (label, kind): (String, String) = conn.query_row(
+                            "SELECT label, kind FROM conversations WHERE id = ?1",
+                            params![conversation],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )?;
+                        conn.execute(
+                            "INSERT INTO conversations
+                                 (id, source_instance_id, legacy_chat_key,
+                                  provider_key, label, kind, confidence)
+                             VALUES (?1, ?2, NULL, ?3, ?4, ?5, 'verified')",
+                            params![id, instance, key, label, kind],
+                        )?;
+                        id
+                    }
+                }
+            };
+            for message_id in ids {
+                conn.execute(
+                    "UPDATE archive_messages SET conversation_id = ?1 WHERE id = ?2",
+                    params![target, message_id],
+                )?;
+            }
+        }
+
+        // Drop the legacy conversation when nothing is left in it.
+        let remaining: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM archive_messages WHERE conversation_id = ?1",
+            params![conversation],
+            |row| row.get(0),
+        )?;
+        if remaining == 0 {
+            conn.execute(
+                "DELETE FROM conversations WHERE id = ?1 AND provider_key IS NULL",
+                params![conversation],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether an external-id prefix can only be a provider chat id of the
+/// namespace and never a display name: Telegram chat ids are integers
+/// without a leading `+` (a display name is neither — phone-number-shaped
+/// names carry the `+`), Signal conversation ids are UUIDs (a file stem is
+/// not). Anything else is not safely interpretable and stays
+/// legacy-unresolved, matching the live parsers, which key nothing for
+/// id-less exports.
+fn prefix_is_provider_id(namespace: &str, prefix: &str) -> bool {
+    if namespace == crate::telegram::TELEGRAM_SOURCE {
+        !prefix.starts_with('+') && prefix.parse::<i64>().is_ok()
+    } else {
+        uuid::Uuid::parse_str(prefix).is_ok()
+    }
+}
+
+/// WhatsApp half: derive the content key — sorted participants plus the
+/// first authored message, the same frozen formula as the parser — merge
+/// renamed duplicates onto it, then re-key every WhatsApp message
+/// identity to the M1.3 hash formula (conversation key, author, naive
+/// timestamp, body) so re-imports after a rename dedup instead of
+/// duplicating. Author-less exports cannot be keyed; they keep the
+/// legacy stem grouping but their identities still re-key to the new
+/// formula over the stem.
+fn backfill_whatsapp_conversations(conn: &Connection) -> Result<()> {
+    // (conversation, instance, legacy stem) for every WhatsApp conversation.
+    let conversations: Vec<(String, String, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT c.id, si.id, COALESCE(c.legacy_chat_key, c.label)
+             FROM conversations AS c
+             JOIN source_instances AS si ON si.id = c.source_instance_id
+             WHERE si.legacy_namespace = ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![crate::whatsapp::WHATSAPP_SOURCE], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        rows
+    };
+
+    let mut candidates: Vec<(String, String, String)> = Vec::new();
+    for (conversation, instance, _) in &conversations {
+        let authors: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT author FROM archive_messages
+                 WHERE conversation_id = ?1 AND author != ''",
+            )?;
+            let mut rows: Vec<String> = stmt
+                .query_map(params![conversation], |row| row.get(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            rows.sort();
+            rows
+        };
+        if authors.is_empty() {
+            continue; // nothing in the export identifies the chat safely
+        }
+        // The anchor: the first authored message by insertion order
+        // (imports follow the export's file order), with the naive
+        // timestamp (legacy rows carry the exporter-local stamp with a
+        // blind `Z`, which the shared formula strips).
+        let anchor: Option<(String, String, String)> = conn
+            .query_row(
+                "SELECT author, original_timestamp, body
+                 FROM archive_messages
+                 WHERE conversation_id = ?1 AND author != ''
+                 ORDER BY id LIMIT 1",
+                params![conversation],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let key = crate::whatsapp::whatsapp_conversation_key(
+            authors.iter().map(String::as_str),
+            anchor.as_ref().map(|(author, stamp, body)| {
+                (
+                    author.as_str(),
+                    stamp.strip_suffix('Z').unwrap_or(stamp.as_str()),
+                    body.as_str(),
+                )
+            }),
+        );
+        if !key.is_empty() {
+            candidates.push((conversation.clone(), instance.clone(), key));
+        }
+    }
+    merge_conversations_onto_keys(conn, candidates)?;
+
+    // Re-key every WhatsApp message to the M1.3 formula. The hash chat is
+    // the derived key when present, else the legacy stem — matching what
+    // the parser hashes for key-less exports.
+    let mut resolved: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    for (conversation, _, _) in &conversations {
+        let key: Option<String> = conn
+            .query_row(
+                "SELECT provider_key FROM conversations WHERE id = ?1",
+                params![conversation],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        resolved.insert(conversation.clone(), key);
+    }
+    let zone_label = iana_time_zone::get_timezone().unwrap_or_else(|_| "local".to_string());
+    for (conversation, _, stem) in &conversations {
+        let hash_chat = resolved
+            .get(conversation)
+            .and_then(|k| k.as_ref().filter(|k| !k.is_empty()).cloned())
+            .unwrap_or_else(|| stem.clone());
+        let rows: Vec<(i64, String, String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT id, author, original_timestamp, body
+                 FROM archive_messages WHERE conversation_id = ?1
+                 ORDER BY id",
+            )?;
+            let out = stmt
+                .query_map(params![conversation], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<std::result::Result<_, _>>()?;
+            out
+        };
+        let mut occurrence: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
+        for (id, author, original_timestamp, body) in rows {
+            let naive = original_timestamp
+                .strip_suffix('Z')
+                .unwrap_or(&original_timestamp);
+            let base = crate::util::fnv1a_fields(&[&hash_chat, &author, naive, &body]);
+            let seen = occurrence.entry(base).or_insert(0);
+            let external_id = format!("generated-{:016x}-{}", base, seen);
+            *seen += 1;
+            let resolved = resolve_blind_z_utc(&original_timestamp);
+            let sent_instant: Option<&str> = if resolved.is_empty() {
+                None
+            } else {
+                Some(resolved.as_str())
+            };
+            let confidence = if original_timestamp.is_empty() {
+                "missing"
+            } else if resolved.is_empty() {
+                "unresolved"
+            } else {
+                "legacy_assumed"
+            };
+            let content_hash = sha256_hex(&format!(
+                "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+                external_id, author, resolved, body
+            ));
+            conn.execute(
+                "UPDATE archive_messages SET external_id = ?2, sent_instant = ?3,
+                     timezone = ?4, time_confidence = ?5, content_hash = ?6
+                 WHERE id = ?1",
+                params![
+                    id,
+                    external_id,
+                    sent_instant,
+                    zone_label,
+                    confidence,
+                    content_hash
+                ],
+            )?;
+            conn.execute(
+                "UPDATE message_identities SET external_key = ?2
+                 WHERE message_id = ?1 AND namespace = 'legacy'",
+                params![id, external_id],
+            )?;
+            conn.execute(
+                "UPDATE message_occurrences SET provider_item_id = ?2 WHERE message_id = ?1",
+                params![id, external_id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Merge candidate conversations that derived the same provider key: the
+/// conversation holding the earliest message survives (deterministic —
+/// it is the first import), the others' messages re-point to it and the
+/// losers are deleted; the survivor takes the key with confidence
+/// `verified`.
+fn merge_conversations_onto_keys(
+    conn: &Connection,
+    candidates: Vec<(String, String, String)>,
+) -> Result<()> {
+    let mut groups: std::collections::BTreeMap<(String, String), Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (conversation, instance, key) in candidates {
+        groups
+            .entry((instance, key))
+            .or_default()
+            .push(conversation);
+    }
+    for ((_instance, key), conversations) in groups {
+        let mut by_age: Vec<(i64, &String)> = Vec::with_capacity(conversations.len());
+        for conversation in &conversations {
+            let earliest: i64 = conn.query_row(
+                "SELECT MIN(id) FROM archive_messages WHERE conversation_id = ?1",
+                params![conversation],
+                |row| row.get(0),
+            )?;
+            by_age.push((earliest, conversation));
+        }
+        by_age.sort();
+        let survivor = by_age[0].1.clone();
+        for (_, loser) in &by_age[1..] {
+            conn.execute(
+                "UPDATE archive_messages SET conversation_id = ?1
+                 WHERE conversation_id = ?2",
+                params![survivor, loser],
+            )?;
+            conn.execute("DELETE FROM conversations WHERE id = ?1", params![loser])?;
+        }
+        conn.execute(
+            "UPDATE conversations SET provider_key = ?2, confidence = 'verified'
+             WHERE id = ?1",
+            params![survivor, key],
+        )?;
     }
     Ok(())
 }

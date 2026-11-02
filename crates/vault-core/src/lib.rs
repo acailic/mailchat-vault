@@ -6,9 +6,11 @@
 //! Layout:
 //! - [`message`]: the message model (`NewMessage` in, `Message` out).
 //! - [`storage`]: SQLite database with FTS5 full-text index, migrations,
-//!   idempotent inserts, search, IMAP sync cursors.
+//!   idempotent inserts, stable conversation keys (M1.3), search, IMAP
+//!   sync cursors.
 //! - [`ingest`]: the [`ingest::Source`] abstraction and idempotent ingest.
-//! - [`mail`]: shared RFC 5322 raw-mail parsing (used by mbox and IMAP).
+//! - [`mail`]: shared RFC 5322 raw-mail parsing (used by mbox and IMAP),
+//!   including the In-Reply-To/References reply graph.
 //! - [`mbox`]: the manual/demo `.mbox` file source.
 //! - [`whatsapp`]: the WhatsApp `.txt` chat export source.
 //! - [`telegram`]: the Telegram `result.json` chat export source.

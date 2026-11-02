@@ -23,6 +23,7 @@ fn to_new(m: &Message) -> NewMessage {
         sent_at: m.sent_at.clone(),
         body: m.body.clone(),
         raw_json: m.raw_json.clone(),
+        ..NewMessage::new("", "", "", "", "")
     }
 }
 

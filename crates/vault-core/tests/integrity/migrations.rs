@@ -13,7 +13,7 @@ use crate::util::{msg, raw};
 
 /// The schema version this build knows; bump expectation when a migration
 /// is added (the assertions below are version-agnostic where possible).
-const KNOWN_VERSION: i64 = 6;
+const KNOWN_VERSION: i64 = 7;
 
 fn migrations_rows(db: &std::path::Path) -> Vec<i64> {
     let conn = raw(db);
@@ -168,9 +168,9 @@ fn v1_database_with_data_upgrades_in_place_to_current() {
     let db = dir.path().join("v1.db");
     version1_db_with_data(&db, 7);
 
-    // Opening with the current build applies every newer migration (2–6:
+    // Opening with the current build applies every newer migration (2–7:
     // IMAP sync state, embeddings, the canonical store, watched folders,
-    // the stats counters)
+    // the stats counters, the conversation-key backfill)
     // on top of the untouched v1 schema - in place, keeping every row (ids
     // included) in the canonical store.
     let s = Storage::open(&db).unwrap();

@@ -6,14 +6,23 @@
 //! references, and forwarded metadata stay recorded; when the export
 //! ships with its files, the media pass (see [`crate::media`]) copies
 //! them into the content-addressed store and adds a `media` array to
-//! `raw_json`. Timestamps prefer `date_unixtime` (timezone-correct); the
-//! naive local `date` string is a fallback, stored as UTC. Service
-//! entries (calls, joins, pins) carry no body and are skipped.
+//! `raw_json`. Timestamps prefer `date_unixtime` (UTC-exact; recorded
+//! with confidence `explicit_offset`); the naive local `date` string is a
+//! fallback interpreted in the machine's local timezone (confidence
+//! `legacy_assumed`, zone recorded). Service entries (calls, joins,
+//! pins) carry no body and are skipped.
+//!
+//! The conversation key (M1.3) is `telegram:chat:<export id>` — the
+//! provider-guaranteed chat id — so the same chat re-exported after a
+//! rename stays one conversation (the label follows the newest name),
+//! while two different chats sharing a display name stay distinct.
+//! Exports without an id cannot be safely keyed and keep the legacy
+//! name grouping.
 
 use std::fs;
 use std::path::PathBuf;
 
-use chrono::{NaiveDateTime, TimeZone, Utc};
+use chrono::{Local, NaiveDateTime, TimeZone, Utc};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -48,7 +57,8 @@ impl Source for TelegramSource {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        parse_telegram(&bytes, &chat_id_fallback)
+        let zone_label = iana_time_zone::get_timezone().unwrap_or_else(|_| "local".to_string());
+        parse_telegram_tz(&bytes, &chat_id_fallback, &Local, &zone_label)
     }
 }
 
@@ -64,7 +74,15 @@ struct TelegramExport {
     messages: Vec<Value>,
 }
 
-/// Parse Telegram export JSON into messages.
+/// Parse Telegram export JSON into messages, interpreting the naive
+/// `date` fallback stamps in the machine's local timezone.
+pub fn parse_telegram(bytes: &[u8], chat_id_fallback: &str) -> Result<Collected> {
+    let zone_label = iana_time_zone::get_timezone().unwrap_or_else(|_| "local".to_string());
+    parse_telegram_tz(bytes, chat_id_fallback, &Local, &zone_label)
+}
+
+/// Parse Telegram export JSON into messages under an explicit timezone
+/// (used for the naive `date` fallback stamps; `date_unixtime` is absolute).
 ///
 /// `chat_id_fallback` is used when the export carries neither a chat name
 /// nor a chat id. `external_id` is `<chat>/<message id>`: message ids
@@ -74,7 +92,12 @@ struct TelegramExport {
 /// contact rename dedups instead of duplicating. Entries that are not
 /// objects or have no id count as failed; service entries are skipped
 /// silently.
-pub fn parse_telegram(bytes: &[u8], chat_id_fallback: &str) -> Result<Collected> {
+pub fn parse_telegram_tz<Tz: TimeZone>(
+    bytes: &[u8],
+    chat_id_fallback: &str,
+    tz: &Tz,
+    zone_label: &str,
+) -> Result<Collected> {
     let export: TelegramExport = serde_json::from_slice(bytes)?;
     let chat_id = export
         .name
@@ -90,6 +113,18 @@ pub fn parse_telegram(bytes: &[u8], chat_id_fallback: &str) -> Result<Collected>
         .map(id_to_string)
         .filter(|c| !c.is_empty())
         .unwrap_or_else(|| chat_id.clone());
+    // The provider-guaranteed chat id keys the conversation (M1.3);
+    // exports without one stay on the legacy display-name grouping.
+    let conversation_key = if export
+        .id
+        .as_ref()
+        .map(id_to_string)
+        .is_some_and(|c| !c.is_empty())
+    {
+        format!("telegram:chat:{dedup_chat}")
+    } else {
+        String::new()
+    };
 
     let mut messages = Vec::new();
     let mut failed: u64 = 0;
@@ -122,13 +157,18 @@ pub fn parse_telegram(bytes: &[u8], chat_id_fallback: &str) -> Result<Collected>
             .or_else(|| obj.get("from_id").and_then(Value::as_str))
             .unwrap_or_default()
             .to_string();
-        let sent_at = telegram_sent_at(obj);
+        let (sent_at, original_timestamp, timezone, confidence) =
+            telegram_sent_at(obj, tz, zone_label);
         let body = message_text(obj.get("text"));
         let external_id = format!("{}/{}", dedup_chat, id);
 
         let mut msg = NewMessage::new(TELEGRAM_SOURCE, external_id, author, sent_at, body);
         msg.channel = "chat".to_string();
         msg.chat_id = chat_id.clone();
+        msg.conversation_key = conversation_key.clone();
+        msg.original_timestamp = original_timestamp;
+        msg.timezone = timezone;
+        msg.time_confidence = confidence;
         // The whole original object: attachments, reply_to, forwarded
         // metadata, … all stay recorded in raw_json.
         msg.raw_json = entry.to_string();
@@ -166,24 +206,56 @@ pub fn is_telegram_export_reader<R: std::io::Read>(reader: R) -> bool {
     .is_ok()
 }
 
-/// Timestamp: `date_unixtime` is UTC-correct and wins; the naive local
-/// `date` string is a fallback stored as UTC. Empty when neither parses.
-fn telegram_sent_at(obj: &serde_json::Map<String, Value>) -> String {
+/// Timestamp: `date_unixtime` is UTC-exact and wins (recorded with
+/// confidence `explicit_offset`, zone `UTC`); the naive local `date`
+/// string is a fallback interpreted in `tz` (confidence `legacy_assumed`,
+/// zone label recorded). Returns `(sent_at, original, timezone,
+/// confidence)`; a stamp a DST gap removes stays unresolved (no instant,
+/// verbatim text kept).
+fn telegram_sent_at<Tz: TimeZone>(
+    obj: &serde_json::Map<String, Value>,
+    tz: &Tz,
+    zone_label: &str,
+) -> (String, String, String, String) {
     const RFC3339: &str = "%Y-%m-%dT%H:%M:%SZ";
-    if let Some(unix) = obj
-        .get("date_unixtime")
-        .and_then(Value::as_str)
-        .and_then(|s| s.parse::<i64>().ok())
-    {
-        if let Some(t) = Utc.timestamp_opt(unix, 0).single() {
-            return t.format(RFC3339).to_string();
+    if let Some(unix_text) = obj.get("date_unixtime").and_then(Value::as_str) {
+        if let Ok(unix) = unix_text.parse::<i64>() {
+            if let Some(t) = Utc.timestamp_opt(unix, 0).single() {
+                return (
+                    t.format(RFC3339).to_string(),
+                    unix_text.to_string(),
+                    "UTC".to_string(),
+                    "explicit_offset".to_string(),
+                );
+            }
         }
     }
-    obj.get("date")
-        .and_then(Value::as_str)
-        .and_then(|d| NaiveDateTime::parse_from_str(d, "%Y-%m-%dT%H:%M:%S").ok())
-        .map(|t| t.format(RFC3339).to_string())
-        .unwrap_or_default()
+    if let Some(date_text) = obj.get("date").and_then(Value::as_str) {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(date_text, "%Y-%m-%dT%H:%M:%S") {
+            let naive_text = naive.format("%Y-%m-%dT%H:%M:%S").to_string();
+            return match tz.from_local_datetime(&naive) {
+                chrono::LocalResult::Single(dt) => (
+                    dt.with_timezone(&Utc).format(RFC3339).to_string(),
+                    naive_text,
+                    zone_label.to_string(),
+                    "legacy_assumed".to_string(),
+                ),
+                chrono::LocalResult::Ambiguous(dt, _) => (
+                    dt.with_timezone(&Utc).format(RFC3339).to_string(),
+                    naive_text,
+                    zone_label.to_string(),
+                    "legacy_assumed".to_string(),
+                ),
+                chrono::LocalResult::None => (
+                    String::new(),
+                    naive_text,
+                    zone_label.to_string(),
+                    "unresolved".to_string(),
+                ),
+            };
+        }
+    }
+    (String::new(), String::new(), String::new(), String::new())
 }
 
 /// Telegram `text` is either a plain string or an array of plain strings

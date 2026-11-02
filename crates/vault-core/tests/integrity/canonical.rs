@@ -316,13 +316,25 @@ fn old_schema_fixture_migrates_without_loss() {
     // The legacy snapshot is untouched: same rows, verbatim.
     assert_eq!(legacy_snapshot(&db), legacy);
 
-    // Row-for-row copy: ids, namespaces, and payloads preserved.
+    // Row-for-row copy: ids, namespaces, and payloads preserved. The one
+    // deliberate exception (M1.3, migration 5): WhatsApp external ids are
+    // re-keyed onto the stable-conversation-key hash formula, so a
+    // re-import after a rename dedups; the legacy snapshot above keeps
+    // the original spelling verbatim either way.
     let canonical = canonical_rows(&db);
     assert_eq!(canonical.len(), legacy.len());
     for (c, l) in canonical.iter().zip(&legacy) {
         assert_eq!(c.id, l.id, "row id preserved");
         assert_eq!(c.namespace, l.source);
-        assert_eq!(c.external_id, l.external_id);
+        if l.source == "whatsapp" {
+            assert!(
+                c.external_id.starts_with("generated-") && c.external_id.ends_with("-0"),
+                "whatsapp ids re-key to the M1.3 formula: {}",
+                c.external_id
+            );
+        } else {
+            assert_eq!(c.external_id, l.external_id);
+        }
         assert_eq!(c.channel, l.channel);
         assert_eq!(c.chat_id, l.chat_id);
         assert_eq!(c.author, l.author);
@@ -355,7 +367,9 @@ fn old_schema_fixture_migrates_without_loss() {
         }
     }
 
-    // One identity alias per legacy (source, external_id).
+    // One identity alias per legacy (source, external_id) — except
+    // WhatsApp, whose aliases migration 5 deliberately re-keys onto the
+    // stable-conversation-key hash formula (see above).
     assert_eq!(
         count(
             &db,
@@ -367,6 +381,7 @@ fn old_schema_fixture_migrates_without_loss() {
         count(
             &db,
             "SELECT COUNT(*) FROM (SELECT source, external_id FROM messages
+              WHERE source != 'whatsapp'
               EXCEPT
               SELECT si.legacy_namespace, mi.external_key
               FROM message_identities mi
@@ -374,7 +389,18 @@ fn old_schema_fixture_migrates_without_loss() {
               WHERE mi.namespace = 'legacy')"
         ),
         0,
-        "every legacy identity has an alias"
+        "every non-whatsapp legacy identity has an alias"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM message_identities mi
+             JOIN source_instances si ON si.id = mi.source_instance_id
+             WHERE si.legacy_namespace = 'whatsapp'
+               AND mi.external_key LIKE 'generated-%'"
+        ),
+        3,
+        "whatsapp identities re-key to the generated-id formula"
     );
 
     // One occurrence per archived message recording the legacy import.
@@ -397,26 +423,33 @@ fn old_schema_fixture_migrates_without_loss() {
         3
     );
 
-    // One legacy-unresolved conversation per non-empty chat group.
+    // One conversation per non-empty chat group; migration 5 then keys
+    // the WhatsApp conversations (participants + anchor derivation), so
+    // both carry provider keys as 'verified' — distinct keys, so they
+    // stay two conversations.
     assert_eq!(count(&db, "SELECT COUNT(*) FROM conversations"), 2);
     assert_eq!(
         count(
             &db,
-            "SELECT COUNT(*) FROM conversations WHERE confidence = 'legacy_unresolved'"
+            "SELECT COUNT(*) FROM conversations
+             WHERE confidence = 'verified'
+               AND provider_key LIKE 'whatsapp:chat:sha256:%'"
         ),
         2
     );
-    let family = canonical
-        .iter()
-        .find(|c| c.external_id == "wa-family-1")
-        .unwrap();
-    let family2 = canonical
-        .iter()
-        .find(|c| c.external_id == "wa-family-2")
-        .unwrap();
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(DISTINCT provider_key) FROM conversations"
+        ),
+        2,
+        "same-name-adjacent chats keep distinct keys"
+    );
+    let family = canonical.iter().find(|c| c.body == "sretan božić").unwrap();
+    let family2 = canonical.iter().find(|c| c.body == "hvala mama").unwrap();
     let work = canonical
         .iter()
-        .find(|c| c.external_id == "wa-work-1")
+        .find(|c| c.body == "standup moved to ten")
         .unwrap();
     let mail = canonical
         .iter()

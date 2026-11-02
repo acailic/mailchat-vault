@@ -1,7 +1,8 @@
+use chrono::FixedOffset;
 use vault_core::ingest::{ingest, IngestSummary, Source};
 use vault_core::search::build_match_query;
 use vault_core::storage::Storage;
-use vault_core::telegram::{parse_telegram, TelegramSource, TELEGRAM_SOURCE};
+use vault_core::telegram::{parse_telegram, parse_telegram_tz, TelegramSource, TELEGRAM_SOURCE};
 
 // Realistic Telegram Desktop export: unix timestamps (UTC) alongside naive
 // local dates, string and array texts with entities, an attachment, a
@@ -71,7 +72,11 @@ const RESULT_JSON: &str = r#"{
 
 #[test]
 fn parses_fields_from_result_json() {
-    let collected = parse_telegram(RESULT_JSON.as_bytes(), "fallback").unwrap();
+    // Fixed CET-like zone so the naive `date` fallback expectations are
+    // deterministic regardless of the machine running the tests.
+    let tz = FixedOffset::east_opt(3600).unwrap();
+    let collected =
+        parse_telegram_tz(RESULT_JSON.as_bytes(), "fallback", &tz, "Europe/Belgrade").unwrap();
     // 5 real messages; phone_call is a service entry (skipped); one entry
     // lacks an id and one is not an object (both failed).
     assert_eq!(collected.messages.len(), 5);
@@ -83,9 +88,14 @@ fn parses_fields_from_result_json() {
     assert_eq!(first.chat_id, "Arhiva ekipa");
     assert_eq!(first.external_id, "123456789/100");
     assert_eq!(first.author, "Marko Horvat");
-    // date_unixtime is UTC and wins over the naive local date string
-    // (exporter timezone here is UTC+1).
+    // date_unixtime is absolute UTC and wins over the naive local date
+    // string (exporter timezone here is UTC+1); the M1.3 provenance
+    // records it as explicitly offset.
     assert_eq!(first.sent_at, "2023-11-01T10:00:00Z");
+    assert_eq!(first.original_timestamp, "1698832800");
+    assert_eq!(first.timezone, "UTC");
+    assert_eq!(first.time_confidence, "explicit_offset");
+    assert_eq!(first.conversation_key, "telegram:chat:123456789");
     assert!(first.body.contains("Arhiva je gotova"));
 
     // Array text concatenates plain parts and entity texts in order.
@@ -111,10 +121,14 @@ fn parses_fields_from_result_json() {
     assert_eq!(raw["reply_to_message_id"], 101);
 
     // Without "from", the author falls back to from_id; without
-    // date_unixtime, the naive date is stored as UTC.
+    // date_unixtime, the naive local date is interpreted in the explicit
+    // zone (+01:00 → 11:30:45Z, M1.3).
     let anon = &collected.messages[4];
     assert_eq!(anon.author, "user333");
-    assert_eq!(anon.sent_at, "2023-11-01T12:30:45Z");
+    assert_eq!(anon.sent_at, "2023-11-01T11:30:45Z");
+    assert_eq!(anon.original_timestamp, "2023-11-01T12:30:45");
+    assert_eq!(anon.timezone, "Europe/Belgrade");
+    assert_eq!(anon.time_confidence, "legacy_assumed");
 }
 
 #[test]
