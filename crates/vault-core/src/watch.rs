@@ -606,9 +606,11 @@ fn add_folder(
     Ok(())
 }
 
-/// Remove a folder (command handler): unwatch (best-effort — the folder may
-/// already be gone), drop its pending candidates, forget in storage.
-/// Removing a path that is not watched is a successful no-op.
+/// Remove a folder (command handler): forget in storage first (a failure
+/// here is recorded and reported with the folder still watched, so the
+/// user can retry), then unwatch (best-effort — the folder may already be
+/// gone), drop its pending candidates, and delist it. Removing a path that
+/// is not watched is a successful no-op.
 fn remove_folder(
     watcher: &mut notify::RecommendedWatcher,
     storage: &Arc<Mutex<Storage>>,
@@ -629,14 +631,25 @@ fn remove_folder(
         .unwrap_or_default();
     for key in &keys {
         let ks = key.to_string_lossy().into_owned();
+        if let Err(e) = lock_storage(storage)
+            .and_then(|s| s.remove_watched_folder(&ks).map_err(|e| e.to_string()))
+        {
+            push_event(
+                snap,
+                WatchEvent::Failed {
+                    path: ks,
+                    error: format!("cannot forget watched folder: {e}"),
+                },
+                config.max_events,
+            );
+            return Err(e);
+        }
         let _ = watcher.unwatch(key);
         pending.retain(|p, _| !p.starts_with(key));
         if snap.folders.contains(&ks) {
             removed_key = ks.clone();
         }
         snap.folders.retain(|f| f != &ks);
-        lock_storage(storage)
-            .and_then(|s| s.remove_watched_folder(&ks).map_err(|e| e.to_string()))?;
     }
     push_event(
         snap,
