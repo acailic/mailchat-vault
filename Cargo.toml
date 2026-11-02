@@ -25,6 +25,7 @@ sha2 = "0.10"
 thiserror = "2"
 ureq = { version = "2", features = ["json"] }
 url = "2"
+uuid = { version = "1", features = ["v4"] }
 webpki-roots = "0.26"
 
 [profile.dev.package."libsqlite3-sys"]

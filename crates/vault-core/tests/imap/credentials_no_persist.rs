@@ -92,10 +92,11 @@ fn no_trace_of_the_password_in_any_file_after_a_full_sync_lifecycle() {
     assert_no_password_in_any_file(dir.path());
 }
 
-/// The only thing IMAP sync persists per folder is a cursor: the
-/// `imap_sync_state` table's columns are exactly the cursor fields, its
-/// rows are exactly one per synced folder, and no cell anywhere in the
-/// database holds the password.
+/// The only thing IMAP sync persists per folder is a cursor: the canonical
+/// `sync_checkpoints` table's columns are exactly the cursor fields (keyed
+/// by source instance), its rows are exactly one per synced folder under
+/// the account's legacy namespace, and no cell anywhere in the database
+/// holds the password.
 #[test]
 fn the_sync_state_table_persists_only_folder_cursors() {
     let dir = tempfile::tempdir().unwrap();
@@ -114,7 +115,7 @@ fn the_sync_state_table_persists_only_folder_cursors() {
     // The sync-state schema is cursors and nothing else.
     let columns: Vec<String> = {
         let mut stmt = conn
-            .prepare("SELECT name FROM pragma_table_info('imap_sync_state') ORDER BY cid")
+            .prepare("SELECT name FROM pragma_table_info('sync_checkpoints') ORDER BY cid")
             .unwrap();
         stmt.query_map([], |row| row.get(0))
             .unwrap()
@@ -123,16 +124,25 @@ fn the_sync_state_table_persists_only_folder_cursors() {
     };
     assert_eq!(
         columns,
-        vec!["source", "folder", "uidvalidity", "last_uid", "updated_at"],
-        "the sync-state table must persist cursors only — no credentials"
+        vec![
+            "source_instance_id",
+            "folder",
+            "uidvalidity",
+            "last_uid",
+            "updated_at"
+        ],
+        "the sync-checkpoint table must persist cursors only — no credentials"
     );
 
     // Exactly one cursor row per synced folder, holding the account's
-    // source and folder names.
+    // source namespace and folder names.
     let rows: Vec<(String, String, i64, i64)> = {
         let mut stmt = conn
             .prepare(
-                "SELECT source, folder, uidvalidity, last_uid FROM imap_sync_state ORDER BY folder",
+                "SELECT si.legacy_namespace, sc.folder, sc.uidvalidity, sc.last_uid \
+                 FROM sync_checkpoints AS sc \
+                 JOIN source_instances AS si ON si.id = sc.source_instance_id \
+                 ORDER BY sc.folder",
             )
             .unwrap();
         stmt.query_map([], |row| {
@@ -175,8 +185,8 @@ fn the_sync_state_table_persists_only_folder_cursors() {
     tables.sort();
     for table in &tables {
         // FTS shadow tables have no text of their own worth scanning;
-        // they mirror the messages tables anyway.
-        if table.starts_with("messages_fts_") {
+        // they mirror the message tables anyway.
+        if table.starts_with("messages_fts_") || table.starts_with("archive_fts_") {
             continue;
         }
         let quoted = table.replace('\"', "\"\"");

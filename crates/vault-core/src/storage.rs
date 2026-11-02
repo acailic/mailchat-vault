@@ -2,6 +2,16 @@
 //!
 //! The database bundles SQLite (via `rusqlite`'s `bundled` feature), so no
 //! system SQLite is required. FTS5 is enabled in the bundled build.
+//!
+//! Since schema version 3 the store is **canonical**: every application
+//! read and write targets the `source_instances`, `conversations`,
+//! `archive_messages`, `message_identities`, `message_occurrences`, and
+//! `sync_checkpoints` tables plus the `archive_fts` index. The legacy
+//! `messages` / `messages_fts` / `imap_sync_state` tables from versions 1–2
+//! are preserved untouched as the pre-canonical snapshot — migration copies
+//! every row (ids included) into the canonical tables, and nothing writes
+//! the legacy tables afterwards. Removing the legacy snapshot is deferred
+//! until the recovery/upgrade experience justifies a separate migration.
 
 use std::path::Path;
 
@@ -17,6 +27,10 @@ use crate::vector::VectorHit;
 use crate::{Error, Result};
 
 /// Ordered schema migrations; each entry runs once, inside a transaction.
+///
+/// Versions 1–2 are the frozen legacy schema; version 3 adds the canonical
+/// store and copies the legacy rows into it. Never edit an applied
+/// migration — append a new version instead.
 const MIGRATIONS: &[(i64, &str)] = &[
     (
         1,
@@ -74,14 +88,215 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
     (
         3,
+        // Canonical store (M1.1). Additive only: the legacy tables above
+        // stay exactly as versions 1–2 left them. The copies below run in
+        // the same transaction as the DDL, so an interrupted migration
+        // leaves no half-canonical database. `vault_uuid()` and
+        // `sha256_hex()` are Rust-registered SQL functions (see
+        // [`register_canonical_functions`]) — SQLite has no built-ins for
+        // either.
         r#"
+        CREATE TABLE source_instances (
+            id               TEXT PRIMARY KEY,
+            -- Legacy dedup namespace this instance stands for ("mbox",
+            -- "imap:user@example.com", …). NULL once connector-owned
+            -- source instances arrive; UNIQUE keeps the legacy namespace
+            -- → instance mapping unambiguous.
+            legacy_namespace TEXT UNIQUE,
+            kind             TEXT NOT NULL,
+            label            TEXT NOT NULL,
+            -- Connector configuration, never credentials. M1.1 stores
+            -- nothing here; the legacy namespace column carries the
+            -- provenance M1.1 actually has.
+            config_json      TEXT NOT NULL DEFAULT '{}',
+            created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE conversations (
+            id                 TEXT PRIMARY KEY,
+            source_instance_id TEXT NOT NULL REFERENCES source_instances (id),
+            -- Pre-canonical grouping key (the legacy chat_id within the
+            -- source namespace). Stable provider keys arrive with the
+            -- conversation-key slice; NULL then.
+            legacy_chat_key    TEXT,
+            provider_key       TEXT,
+            label              TEXT NOT NULL DEFAULT '',
+            kind               TEXT NOT NULL DEFAULT '',
+            confidence         TEXT NOT NULL DEFAULT 'legacy_unresolved'
+                CHECK (confidence IN ('verified', 'user_linked', 'legacy_unresolved')),
+            created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (source_instance_id, legacy_chat_key),
+            UNIQUE (source_instance_id, provider_key)
+        );
+
+        CREATE TABLE archive_messages (
+            id                 INTEGER PRIMARY KEY,
+            source_instance_id TEXT NOT NULL REFERENCES source_instances (id),
+            conversation_id    TEXT REFERENCES conversations (id),
+            -- Verbatim legacy payload: external key, channel, chat
+            -- grouping, author, body, and source-specific JSON are copied
+            -- unchanged so row IDs and IPC shapes stay stable.
+            external_id        TEXT NOT NULL DEFAULT '',
+            channel            TEXT NOT NULL DEFAULT '',
+            chat_id            TEXT NOT NULL DEFAULT '',
+            author             TEXT NOT NULL DEFAULT '',
+            subject            TEXT NOT NULL DEFAULT '',
+            body               TEXT NOT NULL DEFAULT '',
+            raw_json           TEXT NOT NULL DEFAULT '{}',
+            -- Time provenance: the resolved UTC instant (NULL when
+            -- unknown), the original timestamp text as stored, the
+            -- timezone it was interpreted in ('' = not recorded), and a
+            -- confidence label. Legacy timestamps keep their values and
+            -- carry 'legacy_assumed'.
+            sent_instant       TEXT,
+            original_timestamp TEXT NOT NULL DEFAULT '',
+            timezone           TEXT NOT NULL DEFAULT '',
+            time_confidence    TEXT NOT NULL
+                CHECK (time_confidence IN ('explicit_offset', 'user_confirmed',
+                                           'legacy_assumed', 'unresolved', 'missing')),
+            -- SHA-256 fingerprint over the canonical field join (see
+            -- [`content_hash`]); revision comparison builds on it later.
+            content_hash       TEXT NOT NULL DEFAULT '',
+            created_at         TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX idx_archive_messages_sent ON archive_messages (sent_instant);
+        CREATE INDEX idx_archive_messages_source ON archive_messages (source_instance_id);
+        CREATE INDEX idx_archive_messages_conversation ON archive_messages (conversation_id);
+        CREATE INDEX idx_archive_messages_chat ON archive_messages (source_instance_id, chat_id);
+
+        CREATE TABLE message_identities (
+            source_instance_id TEXT NOT NULL REFERENCES source_instances (id),
+            -- 'legacy' for the (source, external_id) aliases migrated
+            -- from v1/v2 and still created by the legacy ingest path;
+            -- connector-scoped namespaces arrive with the source-instance
+            -- slice.
+            namespace          TEXT NOT NULL,
+            external_key       TEXT NOT NULL,
+            revision_hash      TEXT NOT NULL DEFAULT '',
+            message_id         INTEGER NOT NULL REFERENCES archive_messages (id)
+                ON DELETE CASCADE,
+            created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (source_instance_id, namespace, external_key, revision_hash)
+        );
+        CREATE INDEX idx_message_identities_message ON message_identities (message_id);
+
+        CREATE TABLE message_occurrences (
+            message_id       INTEGER NOT NULL REFERENCES archive_messages (id)
+                ON DELETE CASCADE,
+            -- What observed the message: 'legacy-import' for rows carried
+            -- over by this migration, 'import' for current-path inserts;
+            -- remote folders arrive with the occurrence slice.
+            scope            TEXT NOT NULL,
+            provider_item_id TEXT NOT NULL DEFAULT '',
+            uidvalidity      INTEGER,
+            observed_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (message_id, scope, provider_item_id)
+        );
+        CREATE INDEX idx_message_occurrences_message ON message_occurrences (message_id);
+
+        CREATE TABLE sync_checkpoints (
+            source_instance_id TEXT NOT NULL REFERENCES source_instances (id),
+            folder             TEXT NOT NULL,
+            uidvalidity        INTEGER NOT NULL,
+            last_uid           INTEGER NOT NULL DEFAULT 0,
+            updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (source_instance_id, folder)
+        );
+
+        -- One unresolved legacy source instance per existing namespace:
+        -- the old schema never recorded account/import provenance, and it
+        -- is not guessed here (users bind real accounts explicitly later).
+        INSERT INTO source_instances (id, legacy_namespace, kind, label)
+        SELECT vault_uuid(), source, 'legacy', source
+        FROM (SELECT DISTINCT source FROM messages);
+
+        -- One legacy-unresolved conversation per non-empty
+        -- (source, chat_id) group; MIN(channel) keeps the choice
+        -- deterministic if a group ever mixed channels.
+        INSERT INTO conversations (id, source_instance_id, legacy_chat_key, label, kind)
+        SELECT vault_uuid(), si.id, g.chat_id, g.chat_id, g.channel
+        FROM (
+            SELECT source, chat_id, MIN(channel) AS channel
+            FROM messages
+            WHERE chat_id != ''
+            GROUP BY source, chat_id
+        ) g
+        JOIN source_instances si ON si.legacy_namespace = g.source;
+
+        -- Canonical message rows: same ids, verbatim payload, time
+        -- provenance derived from the stored instant.
+        INSERT INTO archive_messages (
+            id, source_instance_id, conversation_id,
+            external_id, channel, chat_id, author, subject, body, raw_json,
+            sent_instant, original_timestamp, timezone, time_confidence,
+            content_hash, created_at)
+        SELECT
+            m.id, si.id, cv.id,
+            m.external_id, m.channel, m.chat_id, m.author, '', m.body, m.raw_json,
+            NULLIF(m.sent_at, ''), m.sent_at, '',
+            CASE WHEN m.sent_at = '' THEN 'missing' ELSE 'legacy_assumed' END,
+            sha256_hex(m.external_id || char(31) || m.author || char(31) || m.sent_at
+                       || char(31) || m.body),
+            m.created_at
+        FROM messages m
+        JOIN source_instances si ON si.legacy_namespace = m.source
+        LEFT JOIN conversations cv
+               ON cv.source_instance_id = si.id AND cv.legacy_chat_key = m.chat_id;
+
+        -- Alias identity for every legacy (source, external_id).
+        INSERT INTO message_identities
+            (source_instance_id, namespace, external_key, message_id, created_at)
+        SELECT si.id, 'legacy', m.external_id, m.id, m.created_at
+        FROM messages m
+        JOIN source_instances si ON si.legacy_namespace = m.source;
+
+        -- One occurrence per archived message recording the legacy import
+        -- observation.
+        INSERT INTO message_occurrences (message_id, scope, provider_item_id, observed_at)
+        SELECT m.id, 'legacy-import', m.external_id, m.created_at
+        FROM messages m;
+
+        -- IMAP cursors move to the canonical checkpoint table, keyed by
+        -- source instance; the legacy cursor table is left as a snapshot.
+        INSERT INTO sync_checkpoints (source_instance_id, folder, uidvalidity, last_uid, updated_at)
+        SELECT si.id, s.folder, s.uidvalidity, s.last_uid, s.updated_at
+        FROM imap_sync_state s
+        JOIN source_instances si ON si.legacy_namespace = s.source;
+
+        -- Canonical FTS over body/author/subject, kept in sync by
+        -- triggers; created after the copy so the one-time 'rebuild'
+        -- below indexes the migrated rows in a single pass.
+        CREATE VIRTUAL TABLE archive_fts USING fts5 (
+            body,
+            author,
+            subject,
+            content = 'archive_messages',
+            content_rowid = 'id'
+        );
+        CREATE TRIGGER archive_fts_ai AFTER INSERT ON archive_messages BEGIN
+            INSERT INTO archive_fts (rowid, body, author, subject)
+            VALUES (new.id, new.body, new.author, new.subject);
+        END;
+        CREATE TRIGGER archive_fts_ad AFTER DELETE ON archive_messages BEGIN
+            INSERT INTO archive_fts (archive_fts, rowid, body, author, subject)
+            VALUES ('delete', old.id, old.body, old.author, old.subject);
+        END;
+        CREATE TRIGGER archive_fts_au AFTER UPDATE ON archive_messages BEGIN
+            INSERT INTO archive_fts (archive_fts, rowid, body, author, subject)
+            VALUES ('delete', old.id, old.body, old.author, old.subject);
+            INSERT INTO archive_fts (rowid, body, author, subject)
+            VALUES (new.id, new.body, new.author, new.subject);
+        END;
+
+        INSERT INTO archive_fts (archive_fts) VALUES ('rebuild');
+
         -- One embedding per message (PK), versioned by model id so a new
         -- embedder invalidates old vectors simply by writing a different
         -- model string. Vectors are i8-quantized (one byte per component)
         -- and L2-normalized at write time (see crate::vector). Deleting a
         -- message cascades.
         CREATE TABLE message_embeddings (
-            message_id  INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+            message_id  INTEGER PRIMARY KEY REFERENCES archive_messages(id) ON DELETE CASCADE,
             model       TEXT    NOT NULL,
             dim         INTEGER NOT NULL,
             embedding   BLOB    NOT NULL,
@@ -122,50 +337,101 @@ impl Storage {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         register_fold_function(&conn)?;
+        register_canonical_functions(&conn)?;
         migrate(&conn)?;
         Ok(Self { conn })
     }
 
-    /// Insert one message, idempotently on `(source, external_id)`.
+    /// Insert one message into the canonical store, idempotently on its
+    /// identity alias (legacy `(source, external_id)`, namespace
+    /// `'legacy'`).
     ///
-    /// Inserting a message whose dedup key already exists is not an error:
-    /// the existing row is left untouched and `InsertOutcome::Duplicate` is
-    /// returned with its id.
+    /// Inserting a message whose identity already exists is not an error:
+    /// the archived row is left untouched and `InsertOutcome::Duplicate`
+    /// is returned with its id. A new row lands in `archive_messages`
+    /// together with its identity alias and a first `import` occurrence —
+    /// the legacy `messages` table is never written (it is a read-only
+    /// snapshot since schema version 3).
     pub fn insert_message(&self, msg: &NewMessage) -> Result<InsertOutcome> {
-        let inserted_id = self
-            .conn
+        let tx = self.conn.unchecked_transaction()?;
+        let instance = resolve_legacy_instance(&tx, &msg.source)?;
+
+        // Dedup on the canonical identity: first write wins forever.
+        let existing: Option<i64> = tx
             .query_row(
-                r#"
-                INSERT INTO messages
-                    (source, external_id, channel, chat_id, author, sent_at, body, raw_json)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                ON CONFLICT (source, external_id) DO NOTHING
-                RETURNING id
-                "#,
-                params![
-                    msg.source,
-                    msg.external_id,
-                    msg.channel,
-                    msg.chat_id,
-                    msg.author,
-                    msg.sent_at,
-                    msg.body,
-                    msg.raw_json,
-                ],
-                |row| row.get::<_, i64>(0),
+                "SELECT message_id FROM message_identities
+                 WHERE source_instance_id = ?1 AND namespace = 'legacy'
+                   AND external_key = ?2 AND revision_hash = ''",
+                params![instance, msg.external_id],
+                |row| row.get(0),
             )
             .optional()?;
-        match inserted_id {
-            Some(id) => Ok(InsertOutcome::Inserted(id)),
-            None => {
-                let existing = self.conn.query_row(
-                    "SELECT id FROM messages WHERE source = ?1 AND external_id = ?2",
-                    params![msg.source, msg.external_id],
-                    |row| row.get::<_, i64>(0),
-                )?;
-                Ok(InsertOutcome::Duplicate(existing))
-            }
+        if let Some(id) = existing {
+            // Record the repeat observation only (idempotent on the
+            // occurrence tuple); the archived row itself stays untouched.
+            tx.execute(
+                "INSERT OR IGNORE INTO message_occurrences
+                     (message_id, scope, provider_item_id)
+                 VALUES (?1, 'import', ?2)",
+                params![id, msg.external_id],
+            )?;
+            tx.commit()?;
+            return Ok(InsertOutcome::Duplicate(id));
         }
+
+        let conversation = if msg.chat_id.is_empty() {
+            None
+        } else {
+            Some(resolve_legacy_conversation(&tx, &instance, msg)?)
+        };
+        let sent_instant = if msg.sent_at.is_empty() {
+            None
+        } else {
+            Some(msg.sent_at.as_str())
+        };
+        let confidence = if msg.sent_at.is_empty() {
+            "missing"
+        } else {
+            "legacy_assumed"
+        };
+        let id: i64 = tx.query_row(
+            r#"
+            INSERT INTO archive_messages
+                (source_instance_id, conversation_id, external_id, channel, chat_id,
+                 author, subject, body, raw_json,
+                 sent_instant, original_timestamp, timezone, time_confidence, content_hash)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?7, ?8, ?9, ?10, '', ?11, ?12)
+            RETURNING id
+            "#,
+            params![
+                instance,
+                conversation,
+                msg.external_id,
+                msg.channel,
+                msg.chat_id,
+                msg.author,
+                msg.body,
+                msg.raw_json,
+                sent_instant,
+                msg.sent_at,
+                confidence,
+                content_hash(msg),
+            ],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO message_identities
+                 (source_instance_id, namespace, external_key, message_id)
+             VALUES (?1, 'legacy', ?2, ?3)",
+            params![instance, msg.external_id, id],
+        )?;
+        tx.execute(
+            "INSERT INTO message_occurrences (message_id, scope, provider_item_id)
+             VALUES (?1, 'import', ?2)",
+            params![id, msg.external_id],
+        )?;
+        tx.commit()?;
+        Ok(InsertOutcome::Inserted(id))
     }
 
     /// Full-text search with optional inclusive LOCAL-day sent-date bounds —
@@ -174,11 +440,11 @@ impl Storage {
     /// `date_from`/`date_to` are `YYYY-MM-DD` strings; anything else is an
     /// error. `date_to` is inclusive (messages sent any time that day count).
     /// Each bound is translated to the UTC instant of local midnight before
-    /// being compared with the stored UTC `sent_at`, so a day bound selects
+    /// being compared with the stored UTC instant, so a day bound selects
     /// exactly what the UI renders as that local day. Messages with an
-    /// unknown (`empty`) `sent_at` are excluded while a bound is active —
-    /// they cannot be placed in time. The MATCH expression is a bound
-    /// parameter throughout, so it can never spill into SQL text.
+    /// unknown (NULL) instant are excluded while a bound is active — they
+    /// cannot be placed in time. The MATCH expression is a bound parameter
+    /// throughout, so it can never spill into SQL text.
     pub fn search_filtered(
         &self,
         match_query: &str,
@@ -205,14 +471,16 @@ impl Storage {
         };
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT m.id, m.source, m.external_id, m.channel, m.chat_id,
-                   m.author, m.sent_at, m.body, m.raw_json
-            FROM messages_fts
-            JOIN messages AS m ON m.id = messages_fts.rowid
-            WHERE messages_fts MATCH ?1
-              AND (?2 IS NULL OR m.sent_at >= ?2)
-              AND (?3 IS NULL OR m.sent_at < ?3)
-              AND ((?2 IS NULL AND ?3 IS NULL) OR m.sent_at != '')
+            SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id,
+                   m.channel, m.chat_id, m.author,
+                   COALESCE(m.sent_instant, ''), m.body, m.raw_json
+            FROM archive_fts
+            JOIN archive_messages AS m ON m.id = archive_fts.rowid
+            JOIN source_instances AS si ON si.id = m.source_instance_id
+            WHERE archive_fts MATCH ?1
+              AND (?2 IS NULL OR m.sent_instant >= ?2)
+              AND (?3 IS NULL OR m.sent_instant < ?3)
+              AND ((?2 IS NULL AND ?3 IS NULL) OR m.sent_instant IS NOT NULL)
             ORDER BY rank, m.id
             LIMIT ?4
             "#,
@@ -234,7 +502,7 @@ impl Storage {
     pub fn is_valid_match(&self, expr: &str) -> bool {
         let Ok(mut stmt) = self
             .conn
-            .prepare("SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?1 LIMIT 1")
+            .prepare("SELECT rowid FROM archive_fts WHERE archive_fts MATCH ?1 LIMIT 1")
         else {
             return false;
         };
@@ -246,14 +514,17 @@ impl Storage {
         rows.next().is_ok()
     }
 
-    /// Paged, filtered search: FTS5 relevance when `query.text` is non-empty,
-    /// newest-first browse otherwise, under the same facet filters.
+    /// Paged, filtered search over the canonical store: FTS5 relevance when
+    /// `query.text` is non-empty, newest-first browse otherwise, under the
+    /// same facet filters.
     ///
     /// Returns one page plus the total match count (for pagination UI). All
     /// row access stays index-backed: the FTS5 index drives text queries, the
-    /// `idx_messages_sent_at` / `idx_messages_source_chat` indexes back the
-    /// browse ordering and the source/date filters, and `LIMIT`/`OFFSET` bound
-    /// every response.
+    /// `idx_archive_messages_sent` / `idx_archive_messages_chat` indexes
+    /// (plus the source-instance join when filtering by source) back the
+    /// browse ordering and the filters, and `LIMIT`/`OFFSET` bound every
+    /// response. The `source` facet filters by legacy namespace via the
+    /// unique `source_instances.legacy_namespace` index.
     pub fn search_page(&self, query: &SearchQuery) -> Result<SearchPage> {
         let mut query = query.clone();
         query.normalize()?;
@@ -263,7 +534,9 @@ impl Storage {
             let (sql, bind) = if query.text.trim().is_empty() {
                 (
                     format!(
-                        "SELECT COUNT(*) FROM messages AS m WHERE 1=1 {}",
+                        "SELECT COUNT(*) FROM archive_messages AS m \
+                         JOIN source_instances AS si ON si.id = m.source_instance_id \
+                         WHERE 1=1 {}",
                         filters.sql
                     ),
                     filters.bind(),
@@ -275,9 +548,10 @@ impl Storage {
                 bind.extend(filters.bind());
                 (
                     format!(
-                        "SELECT COUNT(*) FROM messages_fts \
-                         JOIN messages AS m ON m.id = messages_fts.rowid \
-                         WHERE messages_fts MATCH ?1 {}",
+                        "SELECT COUNT(*) FROM archive_fts \
+                         JOIN archive_messages AS m ON m.id = archive_fts.rowid \
+                         JOIN source_instances AS si ON si.id = m.source_instance_id \
+                         WHERE archive_fts MATCH ?1 {}",
                         filters.sql
                     ),
                     bind,
@@ -292,10 +566,13 @@ impl Storage {
             bind.push(SqlValue::Integer(query.limit as i64));
             bind.push(SqlValue::Integer(query.offset as i64));
             let sql = format!(
-                "SELECT m.id, m.source, m.external_id, m.channel, m.chat_id, \
-                 m.author, m.sent_at, m.body, m.raw_json, NULL \
-                 FROM messages AS m WHERE 1=1 {} \
-                 ORDER BY m.sent_at DESC, m.id DESC LIMIT ? OFFSET ?",
+                "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+                 m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
+                 m.body, m.raw_json, NULL \
+                 FROM archive_messages AS m \
+                 JOIN source_instances AS si ON si.id = m.source_instance_id \
+                 WHERE 1=1 {} \
+                 ORDER BY m.sent_instant DESC, m.id DESC LIMIT ? OFFSET ?",
                 filters.sql
             );
             let mut stmt = self.conn.prepare(&sql)?;
@@ -316,12 +593,14 @@ impl Storage {
             bind.push(SqlValue::Integer(query.limit as i64));
             bind.push(SqlValue::Integer(query.offset as i64));
             let sql = format!(
-                "SELECT m.id, m.source, m.external_id, m.channel, m.chat_id, \
-                 m.author, m.sent_at, m.body, m.raw_json, \
-                 snippet(messages_fts, 0, ?1, ?2, '…', 16) \
-                 FROM messages_fts \
-                 JOIN messages AS m ON m.id = messages_fts.rowid \
-                 WHERE messages_fts MATCH ?3 {} \
+                "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+                 m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
+                 m.body, m.raw_json, \
+                 snippet(archive_fts, 0, ?1, ?2, '…', 16) \
+                 FROM archive_fts \
+                 JOIN archive_messages AS m ON m.id = archive_fts.rowid \
+                 JOIN source_instances AS si ON si.id = m.source_instance_id \
+                 WHERE archive_fts MATCH ?3 {} \
                  ORDER BY rank, m.id LIMIT ? OFFSET ?",
                 filters.sql
             );
@@ -340,10 +619,13 @@ impl Storage {
         })
     }
 
-    /// A message plus its adjacent messages in the same chat thread.
+    /// A message plus its adjacent messages in the same conversation.
     ///
     /// `before`/`after` each hold up to `radius` messages, oldest → newest.
-    /// Messages without a `chat_id` have no thread peers.
+    /// Messages without a conversation (empty legacy `chat_id`) have no
+    /// thread peers. Ties and unknown instants order by id, matching the
+    /// legacy `sent_at`-text ordering exactly (COALESCE maps the unknown
+    /// NULL instant to the legacy empty-string position).
     pub fn chat_context(&self, id: i64, radius: u32) -> Result<Option<ChatContext>> {
         let radius = radius.clamp(1, crate::query::MAX_LIMIT) as i64;
         let Some(message) = self.get(id)? else {
@@ -358,42 +640,38 @@ impl Storage {
         }
 
         let mut before_stmt = self.conn.prepare(
-            "SELECT id, source, external_id, channel, chat_id, author, sent_at, body, raw_json \
-             FROM messages \
-             WHERE source = ?1 AND chat_id = ?2 \
-               AND (sent_at < ?3 OR (sent_at = ?3 AND id < ?4)) \
-             ORDER BY sent_at DESC, id DESC LIMIT ?5",
+            "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+             m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), m.body, m.raw_json \
+             FROM archive_messages AS m \
+             JOIN source_instances AS si ON si.id = m.source_instance_id \
+             WHERE m.conversation_id = ( \
+                 SELECT conversation_id FROM archive_messages WHERE id = ?1) \
+               AND (COALESCE(m.sent_instant, '') < ?2 \
+                    OR (COALESCE(m.sent_instant, '') = ?2 AND m.id < ?3)) \
+             ORDER BY m.sent_instant DESC, m.id DESC LIMIT ?4",
         )?;
         let mut before: Vec<Message> = before_stmt
             .query_map(
-                params![
-                    message.source,
-                    message.chat_id,
-                    message.sent_at,
-                    message.id,
-                    radius
-                ],
+                params![message.id, message.sent_at, message.id, radius],
                 message_from_row,
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         before.reverse(); // newest → oldest from the query; thread reads oldest → newest
 
         let mut after_stmt = self.conn.prepare(
-            "SELECT id, source, external_id, channel, chat_id, author, sent_at, body, raw_json \
-             FROM messages \
-             WHERE source = ?1 AND chat_id = ?2 \
-               AND (sent_at > ?3 OR (sent_at = ?3 AND id > ?4)) \
-             ORDER BY sent_at ASC, id ASC LIMIT ?5",
+            "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+             m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), m.body, m.raw_json \
+             FROM archive_messages AS m \
+             JOIN source_instances AS si ON si.id = m.source_instance_id \
+             WHERE m.conversation_id = ( \
+                 SELECT conversation_id FROM archive_messages WHERE id = ?1) \
+               AND (COALESCE(m.sent_instant, '') > ?2 \
+                    OR (COALESCE(m.sent_instant, '') = ?2 AND m.id > ?3)) \
+             ORDER BY m.sent_instant ASC, m.id ASC LIMIT ?4",
         )?;
         let after = after_stmt
             .query_map(
-                params![
-                    message.source,
-                    message.chat_id,
-                    message.sent_at,
-                    message.id,
-                    radius
-                ],
+                params![message.id, message.sent_at, message.id, radius],
                 message_from_row,
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -409,9 +687,12 @@ impl Storage {
     pub fn get(&self, id: i64) -> Result<Option<Message>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT id, source, external_id, channel, chat_id,
-                   author, sent_at, body, raw_json
-            FROM messages WHERE id = ?1
+            SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id,
+                   m.channel, m.chat_id, m.author,
+                   COALESCE(m.sent_instant, ''), m.body, m.raw_json
+            FROM archive_messages AS m
+            JOIN source_instances AS si ON si.id = m.source_instance_id
+            WHERE m.id = ?1
             "#,
         )?;
         stmt.query_row(params![id], message_from_row)
@@ -419,13 +700,18 @@ impl Storage {
             .map_err(Into::into)
     }
 
-    /// Archive counts: total and per source.
+    /// Archive counts: total and per source (by legacy namespace).
     pub fn stats(&self) -> Result<Stats> {
-        let total: u64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))?;
+        let total: u64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM archive_messages", [], |row| {
+                    row.get(0)
+                })?;
         let mut stmt = self.conn.prepare(
-            "SELECT source, COUNT(*) FROM messages GROUP BY source ORDER BY COUNT(*) DESC, source",
+            "SELECT COALESCE(si.legacy_namespace, si.id) AS source, COUNT(*) \
+             FROM archive_messages AS m \
+             JOIN source_instances AS si ON si.id = m.source_instance_id \
+             GROUP BY si.id ORDER BY COUNT(*) DESC, source",
         )?;
         let by_source = stmt
             .query_map([], |row| {
@@ -447,24 +733,25 @@ impl Storage {
         )?)
     }
 
-    /// Rebuild the FTS index from scratch from the `messages` table.
+    /// Rebuild the canonical FTS index from scratch from the
+    /// `archive_messages` table.
     ///
     /// Only needed if the index is ever corrupted; triggers keep it in sync
     /// during normal operation.
     pub fn rebuild_fts(&self) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO messages_fts (messages_fts) VALUES ('rebuild')",
+            "INSERT INTO archive_fts (archive_fts) VALUES ('rebuild')",
             [],
         )?;
         Ok(())
     }
 
-    /// Test support: drop every FTS row (leaving `messages` intact) so index
-    /// recovery paths can be exercised. Not used by the app.
+    /// Test support: drop every FTS row (leaving `archive_messages` intact)
+    /// so index recovery paths can be exercised. Not used by the app.
     #[doc(hidden)]
     pub fn wipe_fts_for_tests(&self) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO messages_fts (messages_fts) VALUES ('delete-all')",
+            "INSERT INTO archive_fts (archive_fts) VALUES ('delete-all')",
             [],
         )?;
         Ok(())
@@ -480,8 +767,9 @@ impl Storage {
         let row = self
             .conn
             .query_row(
-                "SELECT uidvalidity, last_uid FROM imap_sync_state
-                 WHERE source = ?1 AND folder = ?2",
+                "SELECT sc.uidvalidity, sc.last_uid FROM sync_checkpoints AS sc
+                 JOIN source_instances AS si ON si.id = sc.source_instance_id
+                 WHERE si.legacy_namespace = ?1 AND sc.folder = ?2",
                 params![source, folder],
                 |row| {
                     Ok(crate::message::ImapSyncState {
@@ -494,8 +782,10 @@ impl Storage {
         Ok(row)
     }
 
-    /// Save (upsert) the incremental-sync cursor for one `(source, folder)`.
-    /// Stores only folder cursors — never credentials.
+    /// Save (upsert) the incremental-sync cursor for one `(source, folder)`
+    /// in the canonical `sync_checkpoints` table (the legacy
+    /// `imap_sync_state` table is never written). Stores only folder
+    /// cursors — never credentials.
     pub fn set_imap_state(
         &self,
         source: &str,
@@ -503,15 +793,19 @@ impl Storage {
         uidvalidity: u32,
         last_uid: u32,
     ) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO imap_sync_state (source, folder, uidvalidity, last_uid, updated_at)
+        let tx = self.conn.unchecked_transaction()?;
+        let instance = resolve_legacy_instance(&tx, source)?;
+        tx.execute(
+            "INSERT INTO sync_checkpoints
+                 (source_instance_id, folder, uidvalidity, last_uid, updated_at)
              VALUES (?1, ?2, ?3, ?4, datetime('now'))
-             ON CONFLICT (source, folder) DO UPDATE SET
+             ON CONFLICT (source_instance_id, folder) DO UPDATE SET
                 uidvalidity = excluded.uidvalidity,
                 last_uid    = excluded.last_uid,
                 updated_at  = excluded.updated_at",
-            params![source, folder, uidvalidity, last_uid],
+            params![instance, folder, uidvalidity, last_uid],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -562,7 +856,7 @@ impl Storage {
     /// written for a different model counts as lacking (it gets replaced).
     pub fn pending_embeddings(&self, model: &str, limit: u64) -> Result<Vec<(i64, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT m.id, m.body FROM messages AS m
+            "SELECT m.id, m.body FROM archive_messages AS m
              WHERE NOT EXISTS (
                  SELECT 1 FROM message_embeddings AS e
                  WHERE e.message_id = m.id AND e.model = ?1
@@ -586,7 +880,7 @@ impl Storage {
         )?;
         let messages: u64 = self
             .conn
-            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))?;
+            .query_row("SELECT COUNT(*) FROM archive_messages", [], |row| row.get(0))?;
         Ok(EmbeddingCounts { embedded, messages })
     }
 
@@ -638,11 +932,11 @@ impl Storage {
             (
                 "SELECT e.message_id, e.embedding
                  FROM message_embeddings AS e
-                 JOIN messages AS m ON m.id = e.message_id
+                 JOIN archive_messages AS m ON m.id = e.message_id
                  WHERE e.model = ?1
-                   AND (?2 IS NULL OR m.sent_at >= ?2)
-                   AND (?3 IS NULL OR m.sent_at < ?3)
-                   AND ((?2 IS NULL AND ?3 IS NULL) OR m.sent_at != '')",
+                   AND (?2 IS NULL OR m.sent_instant >= ?2)
+                   AND (?3 IS NULL OR m.sent_instant < ?3)
+                   AND ((?2 IS NULL AND ?3 IS NULL) OR m.sent_instant IS NOT NULL)",
                 true,
             )
         } else {
@@ -703,9 +997,12 @@ impl Storage {
         let mut by_id: std::collections::HashMap<i64, Message> =
             std::collections::HashMap::with_capacity(ids.len());
         let mut stmt = self.conn.prepare(
-            "SELECT id, source, external_id, channel, chat_id,
-                    author, sent_at, body, raw_json
-             FROM messages WHERE id = ?1",
+            "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id,
+                    m.channel, m.chat_id, m.author,
+                    COALESCE(m.sent_instant, ''), m.body, m.raw_json
+             FROM archive_messages AS m
+             JOIN source_instances AS si ON si.id = m.source_instance_id
+             WHERE m.id = ?1",
         )?;
         for id in ids {
             if let Some(message) = stmt.query_row(params![id], message_from_row).optional()? {
@@ -730,7 +1027,7 @@ impl Storage {
         let existing_raw: Option<String> = self
             .conn
             .query_row(
-                "SELECT raw_json FROM messages WHERE id = ?1",
+                "SELECT raw_json FROM archive_messages WHERE id = ?1",
                 params![id],
                 |row| row.get(0),
             )
@@ -770,12 +1067,65 @@ impl Storage {
         }
         if changed {
             self.conn.execute(
-                "UPDATE messages SET raw_json = ?1 WHERE id = ?2",
+                "UPDATE archive_messages SET raw_json = ?1 WHERE id = ?2",
                 params![raw.to_string(), id],
             )?;
         }
         Ok(changed)
     }
+}
+
+/// Find the legacy source instance for `namespace`, creating an unresolved
+/// one when the namespace is new (kind/label record what is actually known:
+/// a legacy-namespaced source with no connector provenance).
+fn resolve_legacy_instance(conn: &Connection, namespace: &str) -> Result<String> {
+    if let Some(id) = conn
+        .query_row(
+            "SELECT id FROM source_instances WHERE legacy_namespace = ?1",
+            params![namespace],
+            |row| row.get(0),
+        )
+        .optional()?
+    {
+        return Ok(id);
+    }
+    let id = new_uuid();
+    conn.execute(
+        "INSERT INTO source_instances (id, legacy_namespace, kind, label)
+         VALUES (?1, ?2, 'legacy', ?2)",
+        params![id, namespace],
+    )?;
+    Ok(id)
+}
+
+/// Find the legacy conversation for `msg.chat_id` within `instance`,
+/// creating a legacy-unresolved one when the chat is new. The stable
+/// provider keys and email reply graph arrive with the conversation-key
+/// slice; the legacy chat key is the grouping M1.1 actually has.
+fn resolve_legacy_conversation(
+    conn: &Connection,
+    instance: &str,
+    msg: &NewMessage,
+) -> Result<String> {
+    if let Some(id) = conn
+        .query_row(
+            "SELECT id FROM conversations
+             WHERE source_instance_id = ?1 AND legacy_chat_key = ?2",
+            params![instance, msg.chat_id],
+            |row| row.get(0),
+        )
+        .optional()?
+    {
+        return Ok(id);
+    }
+    let id = new_uuid();
+    conn.execute(
+        "INSERT INTO conversations
+             (id, source_instance_id, legacy_chat_key, label, kind, confidence)
+         VALUES (?1, ?2, ?3, ?3, ?4, 'legacy_unresolved')",
+        params![id, instance, msg.chat_id, msg.channel],
+    )?;
+    Ok(id)
 }
 
 fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
@@ -804,7 +1154,7 @@ pub struct EmbeddingCounts {
 /// Parse an optional `YYYY-MM-DD` bound into a `NaiveDate`. Years outside
 /// `0000..=9999` (chrono also accepts signed 5+ digit spellings) are
 /// rejected: they cannot be ordered as text against the stored RFC 3339
-/// `sent_at` strings.
+/// instants.
 fn parse_date_bound(value: Option<&str>, field: &str) -> Result<Option<NaiveDate>> {
     match value.map(str::trim).filter(|v| !v.is_empty()) {
         None => Ok(None),
@@ -823,9 +1173,11 @@ fn hit_from_row(row: &Row<'_>) -> rusqlite::Result<SearchHit> {
     })
 }
 
-/// Filter SQL fragments (`AND ...` clauses referencing table alias `m`) plus
-/// the bound values for them, shared by the page and count statements of
-/// [`Storage::search_page`].
+/// Filter SQL fragments (`AND ...` clauses referencing table aliases `m`
+/// and `si`) plus the bound values for them, shared by the page and count
+/// statements of [`Storage::search_page`]. Every statement joins
+/// `source_instances` (alias `si`) — `Message.source` is read through its
+/// unique `legacy_namespace` index and the source facet filters on it.
 struct QueryFilters {
     sql: String,
     values: Vec<SqlValue>,
@@ -838,7 +1190,7 @@ impl QueryFilters {
 
         if !query.sources.is_empty() {
             let placeholders = vec!["?"; query.sources.len()].join(", ");
-            sql.push_str(&format!(" AND m.source IN ({placeholders})"));
+            sql.push_str(&format!(" AND si.legacy_namespace IN ({placeholders})"));
             values.extend(query.sources.iter().cloned().map(SqlValue::from));
         }
         let author = query.author.trim();
@@ -855,7 +1207,7 @@ impl QueryFilters {
             // midnight is resolved per date, so historical DST periods use
             // their own offset.
             if let Some(day) = crate::query::parse_day(&query.from_date) {
-                sql.push_str(" AND m.sent_at >= ?");
+                sql.push_str(" AND m.sent_instant >= ?");
                 values.push(SqlValue::from(crate::query::local_day_instant_utc(day)?));
             }
         }
@@ -869,15 +1221,15 @@ impl QueryFilters {
                     .ok_or_else(|| {
                         Error::InvalidDate(format!("date_to={} out of range", query.to_date))
                     })?;
-                sql.push_str(" AND m.sent_at < ?");
+                sql.push_str(" AND m.sent_instant < ?");
                 values.push(SqlValue::from(crate::query::local_day_instant_utc(next)?));
             }
         }
         if !query.from_date.is_empty() || !query.to_date.is_empty() {
-            // An unparseable date stored as empty sent_at has no defined
-            // position on the timeline; exclude it whenever a date filter is
-            // active so both bounds agree on the same set.
-            sql.push_str(" AND m.sent_at != ''");
+            // A message without a resolved instant has no defined position
+            // on the timeline; exclude it whenever a date filter is active
+            // so both bounds agree on the same set.
+            sql.push_str(" AND m.sent_instant IS NOT NULL");
         }
         Ok(Self { sql, values })
     }
@@ -917,6 +1269,72 @@ fn register_fold_function(conn: &Connection) -> Result<()> {
                         )
                     })?;
                     Ok(Some(fold_for_search(s)))
+                }
+                _ => Ok(None),
+            }
+        },
+    )?;
+    Ok(())
+}
+
+/// A fresh random UUID string (canonical source/conversation ids).
+fn new_uuid() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// SHA-256 fingerprint of a message's stable payload fields, joined by
+/// U+001F unit separators: `external_id`, `author`, `sent_at`, `body`.
+///
+/// The exact same join is computed by the migration's SQL
+/// (`sha256_hex(... || char(31) || ...)`), so a migrated row and a row
+/// inserted through the current path hash identically. The richer semantic
+/// revision hash over decoded content arrives with the revisions slice;
+/// this fingerprint is the foundation it builds on.
+fn content_hash(msg: &NewMessage) -> String {
+    sha256_hex(&format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        msg.external_id, msg.author, msg.sent_at, msg.body
+    ))
+}
+
+fn sha256_hex(input: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(input.as_bytes());
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// Register the canonical-store SQL functions used by migration 3 (and any
+/// caller of the same formulas): `vault_uuid()` and `sha256_hex(text)`.
+/// SQLite bundles neither.
+fn register_canonical_functions(conn: &Connection) -> Result<()> {
+    conn.create_scalar_function(
+        "vault_uuid",
+        0,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+        |_| Ok(Some(new_uuid())),
+    )?;
+    conn.create_scalar_function(
+        "sha256_hex",
+        1,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let value = ctx.get_raw(0);
+            match value {
+                rusqlite::types::ValueRef::Text(bytes) => {
+                    let s = std::str::from_utf8(bytes).map_err(|_| {
+                        rusqlite::Error::InvalidColumnType(
+                            0,
+                            "sha256_hex".into(),
+                            rusqlite::types::Type::Text,
+                        )
+                    })?;
+                    Ok(Some(sha256_hex(s)))
                 }
                 _ => Ok(None),
             }

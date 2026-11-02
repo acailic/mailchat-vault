@@ -8,6 +8,7 @@
 //! bulk deletes) that the application itself never produces — then assert
 //! the storage layer's behavior when it meets them.
 
+mod canonical;
 mod corruption;
 mod dedup;
 mod migrations;

@@ -157,18 +157,20 @@ fn version1_db_with_data(path: &std::path::Path, rows: usize) {
 }
 
 #[test]
-fn v1_database_with_data_upgrades_in_place() {
+fn v1_database_with_data_upgrades_in_place_to_current() {
     let dir = crate::util::scratch_dir();
     let db = dir.path().join("v1.db");
     version1_db_with_data(&db, 7);
 
-    // Opening with the current build applies migrations 2 and 3 on top of
-    // the untouched v1 schema - in place, keeping every row.
+    // Opening with the current build applies every newer migration on top
+    // of the untouched v1 schema - in place, keeping every row (ids
+    // included) in the canonical store.
     let s = Storage::open(&db).unwrap();
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
     assert_eq!(migrations_rows(&db), vec![1, 2, 3]);
 
-    // The v1 archive is fully intact and searchable.
+    // The v1 archive is fully intact and searchable (through the canonical
+    // tables the migration copied it into).
     let stats = s.stats().unwrap();
     assert_eq!(stats.total, 7);
     assert_eq!(stats.by_source.len(), 1);
@@ -182,6 +184,17 @@ fn v1_database_with_data_upgrades_in_place() {
             .len(),
         7
     );
+    let ids: Vec<i64> = {
+        let conn = raw(&db);
+        let mut stmt = conn
+            .prepare("SELECT id FROM archive_messages ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(ids, (1..=7).collect::<Vec<_>>(), "v1 row ids preserved");
 
     // The schema v2 addition is live: the IMAP cursor round-trips.
     assert!(s.get_imap_state("imap/gmail", "INBOX").unwrap().is_none());

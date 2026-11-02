@@ -43,7 +43,7 @@ pools), so numbers are comparable across runs on the same machine.
 - **Startup**: `Storage::open` (migrations + pragmas) and open + `stats()`,
   the app's launch data path, 10 runs. Warm OS file cache (fixtures were
   just generated or reused).
-- **Sizes**: FTS5 index bytes via SQLite `dbstat` (`messages_fts%` shadow
+- **Sizes**: FTS5 index bytes via SQLite `dbstat` (`archive_fts%` shadow
   tables), plus database file and logical size. Measured after
   `wal_checkpoint(TRUNCATE)`.
 

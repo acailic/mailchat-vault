@@ -36,8 +36,8 @@ export async function run(ctx) {
     const db = vaultDbPath(dataDir);
     assert.ok(existsSync(db), `vault.db created at ${db}`);
     if (ctx.sqlite) {
-      const rows = await ctx.sqlite.query(db, "SELECT COUNT(*) AS n FROM messages");
-      assert.equal(rows[0].n, 0, "messages table is empty");
+      const rows = await ctx.sqlite.query(db, "SELECT COUNT(*) AS n FROM archive_messages");
+      assert.equal(rows[0].n, 0, "canonical archive_messages table is empty");
     }
   });
 }

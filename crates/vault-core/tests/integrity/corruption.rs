@@ -202,7 +202,7 @@ fn fts_index_corruption_is_detected_and_rebuildable() {
     let raw_conn = raw(&db);
     let bodies: usize = raw_conn
         .query_row(
-            "SELECT COUNT(*) FROM messages WHERE body LIKE 'tok%'",
+            "SELECT COUNT(*) FROM archive_messages WHERE body LIKE 'tok%'",
             [],
             |r| r.get::<_, i64>(0),
         )

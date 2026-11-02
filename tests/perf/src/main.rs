@@ -494,11 +494,11 @@ fn count_hits(conn: &Connection, spec: &QuerySpec) -> Result<u64, String> {
         .and_then(|d| d.checked_add_days(chrono::Days::new(1)))
         .map(|d| d.to_string());
     let sql = if spec.date_from.is_some() {
-        "SELECT COUNT(*) FROM messages_fts \
-         JOIN messages AS m ON m.id = messages_fts.rowid \
-         WHERE messages_fts MATCH ?1 AND m.sent_at >= ?2 AND m.sent_at < ?3"
+        "SELECT COUNT(*) FROM archive_fts \
+         JOIN archive_messages AS m ON m.id = archive_fts.rowid \
+         WHERE archive_fts MATCH ?1 AND m.sent_instant >= ?2 AND m.sent_instant < ?3"
     } else {
-        "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH ?1"
+        "SELECT COUNT(*) FROM archive_fts WHERE archive_fts MATCH ?1"
     };
     let default_from = String::new();
     let default_to = String::new();
@@ -532,7 +532,7 @@ fn db_sizes(db_path: &Path) -> Result<(u64, u64, u64), String> {
         .map_err(|e| format!("page_size: {e}"))?;
     let fts_pages: Option<i64> = conn
         .query_row(
-            "SELECT SUM(pgsize) FROM dbstat WHERE name LIKE 'messages_fts%'",
+            "SELECT SUM(pgsize) FROM dbstat WHERE name LIKE 'archive_fts%'",
             [],
             |r| r.get(0),
         )
