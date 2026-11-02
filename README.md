@@ -188,7 +188,11 @@ view, and keyboard navigation).
 
 ## Out of scope for now (separate tasks)
 
-XOAUTH2 (OAuth) login for Gmail, multi-account UI, more chat sources (Discord), automatic folder watching, multi-provider menus, icons/bundling/installers, settings UI, result export, statistics dashboard, push notifications. The media-extraction layer is source-generic: when further chat sources land, their exports plug into the same hash-named `media/` store and `raw_json` convention.
+XOAUTH2 (OAuth) login for Gmail, multi-account UI, more chat sources (Discord), automatic folder watching, multi-provider menus, settings UI, result export, statistics dashboard, push notifications. The media-extraction layer is source-generic: when further chat sources land, their exports plug into the same hash-named `media/` store and `raw_json` convention.
+
+## Installers & releases
+
+Pushing a version tag (`v*`) builds distributable installers — Linux AppImage + `.deb` (defaults of the enabled Tauri bundling), plus macOS `.dmg` and Windows `.msi`/NSIS `.exe` from the release workflow — as a **draft GitHub Release**. Artifacts are **unsigned** in this round (no code signing; Gatekeeper/SmartScreen caveats apply on macOS/Windows). The app ships with a full icon set (Linux/mac/win) generated from `src-tauri/icons/source.png`. See [docs/release.md](docs/release.md) for the install smoke-test checklist, local build commands, and how to regenerate the icons.
 
 ## Notes on chat import details
 
