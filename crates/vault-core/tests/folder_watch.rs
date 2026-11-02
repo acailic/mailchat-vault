@@ -250,6 +250,11 @@ fn removing_a_folder_stops_its_imports() {
         .iter()
         .any(|e| matches!(e, WatchEvent::FolderRemoved { .. })));
 
+    // Removing again is a silent no-op: no second FolderRemoved event.
+    let events_before = watcher.snapshot().events;
+    watcher.remove_folder(&watched).unwrap();
+    assert_eq!(watcher.snapshot().events, events_before);
+
     // Files appearing after removal are not imported.
     std::fs::write(watched.join("b.mbox"), mbox_bytes(&[("d-2", "Two")])).unwrap();
     std::thread::sleep(Duration::from_millis(800));

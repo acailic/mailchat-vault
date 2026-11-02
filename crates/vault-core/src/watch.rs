@@ -637,20 +637,24 @@ fn remove_folder(
         .first()
         .map(|k| k.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let mut removed_any = false;
     for key in &keys {
         let ks = key.to_string_lossy().into_owned();
-        if let Err(e) = lock_storage(storage)
+        match lock_storage(storage)
             .and_then(|s| s.remove_watched_folder(&ks).map_err(|e| e.to_string()))
         {
-            push_event(
-                snap,
-                WatchEvent::Failed {
-                    path: ks,
-                    error: format!("cannot forget watched folder: {e}"),
-                },
-                config.max_events,
-            );
-            return Err(e);
+            Ok(deleted) => removed_any |= deleted,
+            Err(e) => {
+                push_event(
+                    snap,
+                    WatchEvent::Failed {
+                        path: ks,
+                        error: format!("cannot forget watched folder: {e}"),
+                    },
+                    config.max_events,
+                );
+                return Err(e);
+            }
         }
     }
     for key in &keys {
@@ -659,14 +663,17 @@ fn remove_folder(
         pending.retain(|p, _| !p.starts_with(key));
         if snap.folders.contains(&ks) {
             removed_key = ks.clone();
+            removed_any = true;
         }
         snap.folders.retain(|f| f != &ks);
     }
-    push_event(
-        snap,
-        WatchEvent::FolderRemoved { path: removed_key },
-        config.max_events,
-    );
+    if removed_any {
+        push_event(
+            snap,
+            WatchEvent::FolderRemoved { path: removed_key },
+            config.max_events,
+        );
+    }
     Ok(())
 }
 
