@@ -621,29 +621,35 @@ async fn oauth_gmail_login(
 /// configured (env vars set) and whether the account already has a
 /// stored sign-in. Never exposes any secret.
 #[tauri::command]
-fn oauth_status(
+async fn oauth_status(
     secrets: State<'_, Arc<secrets::Secrets>>,
     host: Option<String>,
     username: Option<String>,
-) -> OAuthStatus {
-    let configured = OAuthConfig::from_env()
-        .map(|c| c.is_some())
-        .unwrap_or(false);
-    let signed_in = match username {
-        Some(username) if !username.trim().is_empty() => {
-            let host = host
-                .map(|h| h.trim().to_lowercase())
-                .filter(|h| !h.is_empty())
-                .unwrap_or_else(|| imap::GMAIL_IMAP_HOST.to_string());
-            let username = username.trim().to_lowercase();
-            secrets.load_refresh(&host, &username).is_some()
-        }
-        _ => false,
-    };
-    OAuthStatus {
-        configured,
-        signed_in,
-    }
+) -> Result<OAuthStatus, String> {
+    let secrets = Arc::clone(secrets.inner());
+    // The keyring read can block on the OS; keep it off the UI thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        let configured = OAuthConfig::from_env()
+            .map(|c| c.is_some())
+            .unwrap_or(false);
+        let signed_in = match username {
+            Some(username) if !username.trim().is_empty() => {
+                let host = host
+                    .map(|h| h.trim().to_lowercase())
+                    .filter(|h| !h.is_empty())
+                    .unwrap_or_else(|| imap::GMAIL_IMAP_HOST.to_string());
+                let username = username.trim().to_lowercase();
+                secrets.load_refresh(&host, &username).is_some()
+            }
+            _ => false,
+        };
+        Ok(OAuthStatus {
+            configured,
+            signed_in,
+        })
+    })
+    .await
+    .map_err(|e| format!("status task failed: {e}"))
 }
 
 /// Insert the built-in demo messages so a fresh install has searchable data.
