@@ -152,9 +152,9 @@ imported in the background.
   reported; it re-arms on the next start once it is present again).
 
 The status line shows how many folders are watched and how many files are
-still settling; the events list below shows imports (with new/duplicate
-counts), skips, and errors. A background import refreshes the source chips
-and stats like any manual import.
+still settling; the events list below shows folder add/removals, imports
+(with new/duplicate counts), skips, and errors. A background import
+refreshes the source chips and stats like any manual import.
 
 ## IMAP sync
 
