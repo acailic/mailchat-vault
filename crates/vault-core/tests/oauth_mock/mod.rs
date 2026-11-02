@@ -131,11 +131,6 @@ impl MockOAuth {
         *self.state.deny_consent.lock().unwrap() = true;
     }
 
-    /// Advertise this access-token lifetime instead of 3600 s.
-    pub fn set_expires_in(&self, seconds: u32) {
-        self.state.expires_in.store(seconds, Ordering::SeqCst);
-    }
-
     /// Refuse refresh grants (simulates a revoked refresh token).
     pub fn revoke_refresh(&self) {
         *self.state.refresh_allowed.lock().unwrap() = false;
