@@ -194,12 +194,7 @@ impl LlmRegistry {
     /// like `None`.
     fn select_default(&self) -> Selection {
         if let Some(default) = &self.settings.default_provider {
-            if let Some(profile) = self
-                .settings
-                .providers
-                .iter()
-                .find(|p| &p.id == default)
-            {
+            if let Some(profile) = self.settings.providers.iter().find(|p| &p.id == default) {
                 return match self.keys.get(default) {
                     Some(key) => {
                         let mut config = Self::config_for(profile);
@@ -481,8 +476,9 @@ mod tests {
     fn invalid_settings_are_ignored_at_load_with_the_error_surfaced() {
         let mut settings = settings_with(vec![profile("glm", ProviderKind::Zai)], Some("glm"));
         settings.providers[0].base_url = "http://attacker.example/api".into();
-        let key_map: HashMap<String, String> =
-            [("glm".to_string(), "stored-zai-key".to_string())].into_iter().collect();
+        let key_map: HashMap<String, String> = [("glm".to_string(), "stored-zai-key".to_string())]
+            .into_iter()
+            .collect();
         let r = LlmRegistry::load(Ok(Some(settings)), Ok(Some(env_config())), |id| {
             key_map.get(id).cloned()
         });

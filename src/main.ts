@@ -350,6 +350,8 @@ async function runEmbedJob(): Promise<void> {
   } finally {
     embedButton.disabled = false;
   }
+}
+
 /** Rebuild the menu, preselecting the default (used when a save changed
  * the default provider, so a freshly configured default takes effect). */
 function preferDefaultInMenu(): void {

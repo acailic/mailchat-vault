@@ -1231,6 +1231,10 @@ describe("folder watching", () => {
     await vi.waitFor(() =>
       expect($("#watch-status").textContent).toContain("No folders watched yet"),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Ask provider menu (multi-provider)
 // ---------------------------------------------------------------------------
 

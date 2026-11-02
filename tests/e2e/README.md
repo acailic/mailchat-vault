@@ -61,6 +61,7 @@ Useful knobs:
 | `10-folder-watch` | folder watching: arm a folder (initial scan + skip of unrecognized files), background import of new/modified files, dedup on rewrite, direct DB confirmation, removal stops imports | active |
 | `11-stats-dashboard` | statistics dashboard: empty-archive summary, aggregates after demo seed + mbox import, auto-refresh on import, Refresh button, idempotent row (counters must not double-count), counter-vs-table consistency via direct DB check | active |
 | `09-settings-providers` | Settings UI: configure a provider through the form (never env vars) → **settings.json on disk holds the profile but never the key**; provider menu in Ask; per-ask **local mode sends nothing**; mis-paired provider (z.ai kind + Anthropic host) refused before saving; clearing the key disables the menu entry | active |
+| `10-settings-guards` | Adversarial save/load guards: plaintext `http://` non-loopback base URL **refused before saving** (key never travels unencrypted); parseable-but-invalid `settings.json` refused at **load** with a visible error in a restarted session, nothing enabled, app stays functional | active |
 
 ### Conditional specs
 
