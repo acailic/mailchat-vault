@@ -1,7 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
-import { formatSentAt, snippet } from "./format";
+import { open, save } from "@tauri-apps/plugin-dialog";import { formatSentAt, snippet } from "./format";
 import { describePlan, privacyNote, type AskOutcome, type LlmStatus } from "./llmview";
 import {
   renderDashboard,
@@ -16,7 +15,7 @@ import type {
   EmbedJobSummary,
   EmbeddingStatus,
   ChatImportOutcome,
-  IngestSummary,
+  ExportSummary,  IngestSummary,
   MediaSummary,
   Message,
   SearchHit,
@@ -95,6 +94,9 @@ const watchEventsList = document.querySelector<HTMLUListElement>("#watch-events"
 const dashboard = document.querySelector<HTMLElement>("#dashboard")!;
 const dashboardStatus = document.querySelector<HTMLElement>("#dashboard-status")!;
 const dashboardRefreshButton = document.querySelector<HTMLButtonElement>("#stats-refresh")!;
+const exportFormatSelect = document.querySelector<HTMLSelectElement>("#export-format")!;
+const exportButton = document.querySelector<HTMLButtonElement>("#export-btn")!;
+const exportStatus = document.querySelector<HTMLElement>("#export-status")!;
 
 // ---------------------------------------------------------------------------
 // State
@@ -168,6 +170,7 @@ function renderAll(): void {
       ctx: state.detail,
       queryText: state.text,
       onOpenMessage: (id) => void openDetail(id),
+      onExportChat: () => void exportChat(),
       onClose: closeDetail,
     });
     detailPanel.classList.add("open");
@@ -692,6 +695,94 @@ void listen<WatchSnapshot>("watch-status", (event) => {
   }
 });
 
+// Export
+// ---------------------------------------------------------------------------
+
+/** File metadata per export format (IPC id, label, extension). */
+const EXPORT_FORMATS: Record<string, { label: string; ext: string }> = {
+  csv: { label: "CSV file", ext: "csv" },
+  json: { label: "JSON Lines file", ext: "jsonl" },
+  mbox: { label: "MBOX file", ext: "mbox" },
+};
+
+/** Ask the user where to save an export of the chosen format. */
+async function pickExportPath(format: string): Promise<string | null> {
+  const meta = EXPORT_FORMATS[format] ?? { label: `${format} file`, ext: format };
+  const picked = await save({
+    title: "Export",
+    defaultPath: `mailchat-export.${meta.ext}`,
+    filters: [{ name: meta.label, extensions: [meta.ext] }],
+  });
+  return typeof picked === "string" ? picked : null;
+}
+
+function exportStatusLine(summary: ExportSummary, path: string): string {
+  const skipped =
+    summary.skipped > 0 ? ` (${summary.skipped} non-email skipped — MBOX carries email rows)` : "";
+  const rows = summary.written === 1 ? "1 message" : `${summary.written} messages`;
+  return `Exported ${rows}${skipped} to ${path}.`;
+}
+
+/** Export every row of the currently executed search (all its pages, under
+ * the same filters), not just the visible page. */
+async function exportResults(): Promise<void> {
+  exportStatus.textContent = "";
+  if (state.total === 0) {
+    exportStatus.textContent = "Nothing to export — run a search (or set filters) first.";
+    return;
+  }
+  const format = exportFormatSelect.value;
+  const path = await pickExportPath(format);
+  if (path === null) return; // cancelled
+  exportButton.disabled = true;
+  exportStatus.textContent = "Exporting…";
+  try {
+    const summary = await invoke<ExportSummary>("export_search", {
+      query: {
+        text: state.text,
+        sources: state.sources,
+        author: state.author,
+        from_date: state.fromDate,
+        to_date: state.toDate,
+        limit: PAGE_SIZE,
+        offset: 0,
+      },
+      format,
+      path,
+    });
+    exportStatus.textContent = exportStatusLine(summary, path);
+  } catch (e) {
+    exportStatus.textContent = `Export failed: ${e}`;
+  } finally {
+    exportButton.disabled = false;
+  }
+}
+
+/** Export the whole chat thread of the message open in the detail view. */
+async function exportChat(): Promise<void> {
+  const detail = state.detail;
+  if (!detail) return;
+  exportStatus.textContent = "";
+  const format = exportFormatSelect.value;
+  const path = await pickExportPath(format);
+  if (path === null) return; // cancelled
+  exportStatus.textContent = "Exporting chat…";
+  try {
+    const summary = await invoke<ExportSummary | null>("export_chat", {
+      id: detail.message.id,
+      format,
+      path,
+    });
+    if (summary === null) {
+      exportStatus.textContent = "Export failed: message no longer exists.";
+      return;
+    }
+    exportStatus.textContent = exportStatusLine(summary, path);
+  } catch (e) {
+    exportStatus.textContent = `Export failed: ${e}`;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
@@ -721,6 +812,7 @@ watchPathInput.addEventListener("keydown", (event) => {
 });
 watchAddButton.addEventListener("click", () => void pickWatchFolder());
 dashboardRefreshButton.addEventListener("click", () => void refreshDashboard());
+exportButton.addEventListener("click", () => void exportResults());
 
 setStatus("Type something to search, or set a filter to browse.");
 renderAll();

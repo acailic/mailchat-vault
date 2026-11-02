@@ -86,6 +86,9 @@
       }
       #pagination { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
       .page-info { font-size: 13px; color: gray; }
+      #export-controls { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+      #export-controls select { font: inherit; padding: 4px 6px; }
+      #export-status { font-size: 13px; color: gray; }
       #import { margin-top: 24px; border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent); padding-top: 12px; }
       #keyboard-hint { margin-top: 8px; font-size: 12px; color: gray; }
       .watch-list { list-style: none; margin: 6px 0 0; padding: 0; font-size: 13px; }
@@ -111,6 +114,8 @@
       }
       #detail.open { display: block; }
       .detail-card header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+      .detail-card header .header-actions { display: flex; gap: 6px; }
+      .export-chat-btn { font-size: 13px; }
       .detail-card h2 { font-size: 16px; margin: 0 0 8px; }
       .close-btn { font-size: 13px; }
       .meta-table {
@@ -231,6 +236,16 @@
       <div id="status"></div>
       <div id="results"></div>
       <div id="pagination"></div>
+      <div id="export-controls">
+        <span class="meta">export:</span>
+        <select id="export-format" title="File format for exports">
+          <option value="csv" selected>CSV</option>
+          <option value="json">JSON Lines</option>
+          <option value="mbox">MBOX (email rows)</option>
+        </select>
+        <button id="export-btn" type="button" title="Export every row of the current search results (all pages), not just this page">Export results…</button>
+        <span id="export-status" class="meta"></span>
+      </div>
       <p id="keyboard-hint">
         <kbd>/</kbd> search · <kbd>↑</kbd><kbd>↓</kbd> move · <kbd>Enter</kbd> open ·
         <kbd>Esc</kbd> close

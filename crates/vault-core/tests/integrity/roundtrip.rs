@@ -1,9 +1,10 @@
-//! Export/import round-trips. The archive has no dedicated export command,
-//! so the round trip runs at the level the app itself uses: rows serialized
-//! as JSON (the exact shape the Tauri layer would export) re-imported into a
-//! fresh database through the public `insert_message` path. Every field —
-//! including `raw_json` payloads and adversarial text — must come back
-//! bit-identical, and the rebuilt FTS index must answer identically.
+//! Export/import round-trips. The archive's dedicated export lives in
+//! `vault_core::export` (JSON Lines over the same `Message` serde shape,
+//! covered by its own suite); this integrity test rounds trips at the same
+//! level the app itself stores rows: JSON-serialized `Message`s re-imported
+//! into a fresh database through the public `insert_message` path. Every
+//! field — including `raw_json` payloads and adversarial text — must come
+//! back bit-identical, and the rebuilt FTS index must answer identically.
 
 use vault_core::message::{InsertOutcome, Message, NewMessage};
 use vault_core::storage::Storage;

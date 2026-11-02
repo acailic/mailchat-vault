@@ -741,6 +741,67 @@ impl Storage {
         })
     }
 
+    /// Stream every message matching `query`'s text and filters, ignoring
+    /// the pagination fields, through `sink` one row at a time. Used by
+    /// export, which must cover the entire result set — rows are visited in
+    /// the same order [`Storage::search_page`] paginates through (FTS5
+    /// relevance for text queries, newest-first otherwise), so an export
+    /// lists exactly what the UI shows across all its pages. Returns the
+    /// number of rows streamed.
+    pub fn search_export_stream(
+        &self,
+        query: &SearchQuery,
+        sink: &mut dyn FnMut(&Message) -> Result<()>,
+    ) -> Result<u64> {
+        let mut query = query.clone();
+        query.normalize()?;
+        let filters = QueryFilters::build(&query)?;
+
+        let (sql, bind): (String, Vec<SqlValue>) = if query.text.trim().is_empty() {
+            (
+                format!(
+                    "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+                     m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
+                     m.body, m.raw_json \
+                     FROM archive_messages AS m \
+                     JOIN source_instances AS si ON si.id = m.source_instance_id \
+                     WHERE 1=1 {} \
+                     ORDER BY m.sent_instant DESC, m.id DESC",
+                    filters.sql
+                ),
+                filters.bind(),
+            )
+        } else {
+            let mut bind = vec![SqlValue::from(crate::search::build_match_query(
+                &query.text,
+            ))];
+            bind.extend(filters.bind());
+            (
+                format!(
+                    "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+                     m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
+                     m.body, m.raw_json \
+                     FROM archive_fts \
+                     JOIN archive_messages AS m ON m.id = archive_fts.rowid \
+                     JOIN source_instances AS si ON si.id = m.source_instance_id \
+                     WHERE archive_fts MATCH ?1 {} \
+                     ORDER BY rank, m.id",
+                    filters.sql
+                ),
+                bind,
+            )
+        };
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(params_from_iter(bind))?;
+        let mut count = 0;
+        while let Some(row) = rows.next()? {
+            sink(&message_from_row(row)?)?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
     /// A message plus its adjacent messages in the same conversation.
     ///
     /// `before`/`after` each hold up to `radius` messages, oldest → newest.
@@ -820,6 +881,30 @@ impl Storage {
         stmt.query_row(params![id], message_from_row)
             .optional()
             .map_err(Into::into)
+    }
+
+    /// Every message of one chat thread, oldest → newest (same order the
+    /// detail view walks the thread in, but without the radius bound). The
+    /// legacy `(source namespace, chat_id)` key resolves through the
+    /// conversation rows the canonical store maintains; a message with no
+    /// conversation has no thread and yields no rows. Ties and unknown
+    /// instants order by id, matching the legacy ordering exactly
+    /// (COALESCE maps the unknown NULL instant to the legacy empty-string
+    /// position).
+    pub fn chat_thread_messages(&self, source: &str, chat_id: &str) -> Result<Vec<Message>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id, COALESCE(si.legacy_namespace, si.id), m.external_id, \
+             m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), m.body, m.raw_json \
+             FROM archive_messages AS m \
+             JOIN conversations AS c ON c.id = m.conversation_id \
+             JOIN source_instances AS si ON si.id = c.source_instance_id \
+             WHERE si.legacy_namespace = ?1 AND c.legacy_chat_key = ?2 \
+             ORDER BY COALESCE(m.sent_instant, '') ASC, m.id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![source, chat_id], message_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// Archive counts: total and per source.

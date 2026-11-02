@@ -22,6 +22,7 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice �
   - results with **match highlighting** (FTS5 snippets, rendered as `<mark>` runs), **grouped by chat/thread**;
   - **filters**: source chips (email/whatsapp/telegram/… — whatever the archive holds), author substring, and a from–to date range; an empty query with filters set browses newest-first;
   - **result count + pagination** (`1–50 of 1,234 · page 1/25`);
+  - **export**: the current search results — every row under the active filters, all pages, not just the visible one — or the whole chat thread from the detail view, written to a file you pick (native save dialog) as **CSV** (RFC 4180), **JSON Lines** (one full message object per line; export-only for now — no importer accepts this file yet) or **MBOX** (email rows; non-email rows are skipped and reported);
   - **message detail**: full body with highlighted query terms, full metadata, and clickable **thread neighbors** of the same chat;
   - **keyboard navigation**: `/` focus search, `↑`/`↓` move through results, `Enter` open detail, `↑`/`↓` walk the thread, `Esc` close.
 - **Performance contract**: queries answer in < 100 ms over 100k messages (asserted by a generated-fixture test; all queries are `LIMIT`-bounded and ride the FTS5 index plus the `sent_instant`/`(source_instance, chat_id)` indexes); the statistics dashboard answers in < 100 ms over 1M messages.
@@ -30,9 +31,9 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice �
 ## Repository layout
 
 ```
-crates/vault-core/   # storage (SQLite/FTS5, migrations), filtered/paged search queries, archive statistics (dashboard aggregates), ingest trait, mail parsing, mbox / WhatsApp / Telegram / Signal sources, media extraction into the content-addressed store, IMAP sync, LLM search pipeline, local embeddings + hybrid ranking, folder watching — no UI deps
-src-tauri/           # Tauri app shell: commands (search_messages, chat_context, llm_ask, llm_status, embed_messages, embed_status, import_mbox, import_chat_export with optional media extraction, sync_imap, watch_add_folder, watch_remove_folder, watch_status, seed_demo, stats, archive_stats) + secret storage + watch-status events
-src/                 # frontend (vanilla TS): search + filters + pagination + detail view (with media links), ask UI + embedding controls, statistics dashboard (CSS bar charts, no chart library), import & IMAP sync controls, folder watching panel
+crates/vault-core/   # storage (SQLite/FTS5, migrations), filtered/paged search queries, archive statistics (dashboard aggregates), ingest trait, mail parsing, mbox / WhatsApp / Telegram / Signal sources, media extraction into the content-addressed store, IMAP sync, LLM search pipeline, local embeddings + hybrid ranking, folder watching, CSV/JSON/MBOX export — no UI deps
+src-tauri/           # Tauri app shell: commands (search_messages, chat_context, llm_ask, llm_status, embed_messages, embed_status, import_mbox, import_chat_export with optional media extraction, sync_imap, watch_add_folder, watch_remove_folder, watch_status, seed_demo, stats, archive_stats, export_search, export_chat) + secret storage + watch-status events
+src/                 # frontend (vanilla TS): search + filters + pagination + detail view (with media links), ask UI + embedding controls, statistics dashboard (CSS bar charts, no chart library), import & IMAP sync controls, folder watching panel, export controls
 index.html           # single-page shell
 ```
 
@@ -55,7 +56,7 @@ npm install
 npm run tauri dev
 ```
 
-First run tip: click **Load demo** to seed the sample messages, then search for e.g. `vault`, click a hit to read it with its thread neighbors, or set the source/author/date filters to browse. Click **Update local embeddings** in the Ask section to build the local vector index (offline) — Ask then ranks results hybrid (FTS + local vectors). To import real data, point the import field at any `.mbox` file (e.g. exported from Thunderbird), use **Import chat export…** to pick a WhatsApp `Export chat` `.txt` file or a Telegram export's `result.json` (picking the export directory works too), or a Signal conversation `.json` — unzipped "Attach Media" WhatsApp exports also copy their files into the vault's media store unless **extract media** is unchecked — or fill in the **IMAP sync** section (see below).
+First run tip: click **Load demo** to seed the sample messages, then search for e.g. `vault`, click a hit to read it with its thread neighbors, or set the source/author/date filters to browse. Click **Update local embeddings** in the Ask section to build the local vector index (offline) — Ask then ranks results hybrid (FTS + local vectors). To import real data, point the import field at any `.mbox` file (e.g. exported from Thunderbird), use **Import chat export…** to pick a WhatsApp `Export chat` `.txt` file or a Telegram export's `result.json` (picking the export directory works too), or a Signal conversation `.json` — unzipped "Attach Media" WhatsApp exports also copy their files into the vault's media store unless **extract media** is unchecked — or fill in the **IMAP sync** section (see below). To take results out, run a search and press **Export results…** (or open a message and press **Export chat…**), pick a format and a destination — the export always covers every row of the current search, not just the page on screen.
 
 The database lives in your app data dir (e.g. `~/.local/share/com.acailic.mailchatvault/vault.db` on Linux); extracted chat media lives next to it under `media/`, each file named by the SHA-256 of its contents.
 
@@ -179,10 +180,20 @@ Any IMAP server with implicit TLS works the same way: host, port (993), username
 - Passwords are never written to the vault database (a test scans the DB bytes to enforce this) and never logged.
 - Leaving the password field empty reuses the stored password; to remove it entirely, delete the entry in your OS keyring manager.
 
+## Export
+
+The **Export results…** control writes the current search results — every row matching the active text + source/author/date filters, across all pages, in the order the UI lists them — to a file you choose. **Export chat…** (in the message detail panel) writes the whole chat thread of the open message, oldest → newest; a message with no thread exports as a single row. Formats:
+
+- **CSV** — RFC 4180 (`source,external_id,channel,chat_id,author,sent_at,body,raw_json`), UTF-8, fields quoted only when needed; cells beginning with `=`, `+`, `-` or `@` get an apostrophe prefix so spreadsheet apps cannot execute them as formulas.
+- **JSON Lines** — one complete message object per line (`.jsonl`); the exact shape the app stores. Export-only for now: no app importer accepts this file yet.
+- **MBOX** — classic `From `-separated mailbox rebuilt from the stored row plus its recorded headers (`Message-ID`, `From`, `To`, `Subject`, `Date`); carries email-channel rows only, chat rows are skipped and reported in the status line.
+
+Rows stream straight to the file, so exports of very large result sets don't hold the whole set in memory.
+
 ## Tests
 
 ```sh
-cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram ingest, media extraction (real small fixture files), filtered/paged search, chat context, archive statistics (incl. the 1M-message dashboard perf contract), 100k FTS perf fixture, IMAP sync (mock server), LLM search pipeline (mock LLM, no network), local embeddings (deterministic embedder, incremental job, cosine scan, hybrid ranking, 100k vector perf budgets), folder watching (real temp folders), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations)
+cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram ingest, media extraction (real small fixture files), filtered/paged search, chat context, archive statistics (incl. the 1M-message dashboard perf contract), 100k FTS perf fixture, IMAP sync (mock server), LLM search pipeline (mock LLM, no network), local embeddings (deterministic embedder, incremental job, cosine scan, hybrid ranking, 100k vector perf budgets), folder watching (real temp folders), export (CSV/JSON/MBOX round-trips incl. unicode + large sets), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations)
 npm test                 # frontend unit + UI-state snapshot tests (vitest)
 npm run check            # TypeScript type-check
 cargo test --workspace   # also compiles the Tauri app (needs the Linux libs above)
@@ -217,11 +228,14 @@ source chips, detail panel), and wiring tests that boot the real
 `index.html` markup against a mocked Tauri IPC bridge and drive it with DOM
 events (`src/main.test.ts`: search/empty-query guard, loading/empty/error
 states, filters, grouping, pagination, the stale-response guard, the detail
-view, and keyboard navigation).
+view, keyboard navigation, and the export controls with a mocked save
+dialog). Export e2e is not driven through the real OS save dialog for the
+same webview reason; the formats themselves are round-trip tested in
+`crates/vault-core/tests/export.rs`.
 
 ## Out of scope for now (separate tasks)
 
-XOAUTH2 (OAuth) login for Gmail, multi-account UI, more chat sources (Discord), multi-provider menus, settings UI, result export, push notifications. The media-extraction layer is source-generic: when further chat sources land, their exports plug into the same hash-named `media/` store and `raw_json` convention.
+XOAUTH2 (OAuth) login for Gmail, multi-account UI, more chat sources (Discord), multi-provider menus, settings UI, push notifications. The media-extraction layer is source-generic: when further chat sources land, their exports plug into the same hash-named `media/` store and `raw_json` convention.
 
 ## Installers & releases
 
