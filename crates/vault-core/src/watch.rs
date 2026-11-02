@@ -17,9 +17,10 @@
 //!   pipeline, so `(source, external_id)` uniqueness makes re-importing a
 //!   file — initial scan, settle pass, or modification — always safe.
 //! - **Never crashes the process**: every failure (unreadable file,
-//!   unparseable export, storage error, vanished folder) is recorded as a
-//!   [`WatchEvent`] visible in the UI; the watch loop never panics and
-//!   keeps running.
+//!   unparseable export, storage error, missing folder at startup) is
+//!   recorded as a [`WatchEvent`] visible in the UI; the watch loop never
+//!   panics and keeps running. A folder that vanishes mid-session is
+//!   silently disarmed until the next start (see the re-arm path below).
 //! - **Status**: [`WatchSnapshot`] (watched folders, pending files, recent
 //!   events) is published on every change for the UI to render.
 //!
@@ -576,7 +577,8 @@ fn run_loop(
     }
 }
 
-/// Add a folder (command handler): validate, persist, arm, initial scan.
+/// Add a folder (command handler): validate, arm, persist (undoing the arm
+/// if the persist fails), enqueue the initial scan.
 fn add_folder(
     watcher: &mut notify::RecommendedWatcher,
     storage: &Arc<Mutex<Storage>>,
