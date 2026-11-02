@@ -12,19 +12,20 @@
 //! - `embed_status` — embedding coverage for the UI (model, dim, pending).
 //! - `import_mbox` — manual `.mbox` import (the demo ingest source).
 //! - `import_chat_export` — WhatsApp `.txt` / Telegram `result.json` /
-//!   Signal `.json` import with format auto-detection (the frontend picks
-//!   the file via the dialog plugin).
+//!   Signal `.json` import with format auto-detection and optional media
+//!   extraction into the app data `media/` store (the frontend picks the
+//!   file via the dialog plugin).
 //! - `sync_imap` — incremental IMAP/Gmail sync (first live mail source).
 //! - `seed_demo` — insert the built-in sample messages (idempotent).
 //! - `stats` — archive counts per source (drives the source filter chips).
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::Utc;
 use serde::Serialize;
-use tauri::{Manager, State};
-use vault_core::chat_export::{detect_chat_format, ChatFormat};
+use tauri::{AppHandle, Manager, State};
+use vault_core::chat_export::{self, ChatImportOutcome};
 use vault_core::imap::{self, FolderSyncSummary, ImapConfig};
 use vault_core::ingest::{ingest, Collected, IngestSummary, Source};
 use vault_core::llm::{
@@ -32,11 +33,8 @@ use vault_core::llm::{
 };
 use vault_core::mbox::MboxSource;
 use vault_core::query::{ChatContext, SearchPage, SearchQuery};
-use vault_core::signal::SignalSource;
 use vault_core::storage::Storage;
-use vault_core::telegram::TelegramSource;
 use vault_core::vector::{self, EmbedJobSummary, EmbeddingStatus, HashEmbedder};
-use vault_core::whatsapp::WhatsappSource;
 use vault_core::{demo, message, Error, Result as CoreResult};
 
 mod secrets;
@@ -207,33 +205,33 @@ fn import_mbox(state: State<AppState>, path: String) -> Result<IngestSummary, St
 /// `sigtop export-messages -f json`, one file per conversation). The
 /// format is detected from the file contents. Re-importing skips
 /// already-stored messages.
+///
+/// With `extract_media` (default `true`), media files referenced by the
+/// export are copied into the app data `media/` store (hash-named,
+/// content-deduplicated) and linked from each message; messages already
+/// in the archive get their links backfilled, so re-importing an export
+/// with media enriches it.
 #[tauri::command]
-fn import_chat_export(state: State<AppState>, path: String) -> Result<IngestSummary, String> {
-    let picked = PathBuf::from(&path);
-    let file = if picked.is_dir() {
-        let result_json = picked.join("result.json");
-        if !result_json.is_file() {
-            return Err(format!("no result.json found in {}", picked.display()));
-        }
-        result_json
+fn import_chat_export(
+    app: AppHandle,
+    state: State<AppState>,
+    path: String,
+    extract_media: Option<bool>,
+) -> Result<ChatImportOutcome, String> {
+    let extract_media = extract_media.unwrap_or(true);
+    let data_dir = if extract_media {
+        Some(app.path().app_data_dir().map_err(|e| e.to_string())?)
     } else {
-        picked
-    };
-
-    let bytes = std::fs::read(&file).map_err(|e| e.to_string())?;
-    let source: Box<dyn Source> = match detect_chat_format(&bytes) {
-        Some(ChatFormat::Telegram) => Box::new(TelegramSource::new(&file)),
-        Some(ChatFormat::Signal) => Box::new(SignalSource::new(&file)),
-        Some(ChatFormat::WhatsApp) => Box::new(WhatsappSource::new(&file)),
-        None => {
-            return Err(format!(
-                "unrecognized chat export format: {} (expected a WhatsApp .txt export, a Telegram result.json, or a Signal conversation .json)",
-                file.display()
-            ))
-        }
+        None
     };
     let storage = lock(&state)?;
-    ingest(&storage, source.as_ref()).map_err(|e: Error| e.to_string())
+    chat_export::import(
+        &storage,
+        Path::new(&path),
+        extract_media,
+        data_dir.as_deref(),
+    )
+    .map_err(|e: Error| e.to_string())
 }
 
 /// Incrementally sync an IMAP account (Gmail via app password, or any

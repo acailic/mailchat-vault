@@ -12,7 +12,9 @@ import type {
   ChatContext,
   EmbedJobSummary,
   EmbeddingStatus,
+  ChatImportOutcome,
   IngestSummary,
+  MediaSummary,
   Message,
   SearchHit,
   SearchPage,
@@ -60,6 +62,7 @@ const statsLabel = document.querySelector<HTMLElement>("#stats")!;
 const mboxPathInput = document.querySelector<HTMLInputElement>("#mbox-path")!;
 const importButton = document.querySelector<HTMLButtonElement>("#import-btn")!;
 const chatImportButton = document.querySelector<HTMLButtonElement>("#chat-import-btn")!;
+const chatMediaToggle = document.querySelector<HTMLInputElement>("#chat-media")!;
 const seedButton = document.querySelector<HTMLButtonElement>("#seed-btn")!;
 const importStatus = document.querySelector<HTMLElement>("#import-status")!;
 const askInput = document.querySelector<HTMLInputElement>("#ask")!;
@@ -455,6 +458,20 @@ async function importMbox(): Promise<void> {
   }
 }
 
+/** "media: 2 stored, 1 deduped · 3 linked · 1 missing" with only the
+ * non-zero parts; empty when nothing happened. */
+function describeMedia(media: MediaSummary): string {
+  const parts: string[] = [];
+  const add = (n: number, label: string) => {
+    if (n > 0) parts.push(`${n} ${label}`);
+  };
+  add(media.stored, "stored");
+  add(media.deduped, "deduped");
+  add(media.linked, "linked");
+  add(media.missing, "missing");
+  return parts.length === 0 ? "" : ` Media: ${parts.join(", ")}.`;
+}
+
 async function importChatExport(): Promise<void> {
   chatImportButton.disabled = true;
   try {
@@ -471,12 +488,18 @@ async function importChatExport(): Promise<void> {
     if (typeof picked !== "string") {
       return; // cancelled
     }
-    importStatus.textContent = `Importing ${picked}…`;
-    const summary = await invoke<IngestSummary>("import_chat_export", { path: picked });
+    const extractMedia = chatMediaToggle.checked;
+    importStatus.textContent = `Importing ${picked}${extractMedia ? " (extracting media)" : ""}…`;
+    const outcome = await invoke<ChatImportOutcome>("import_chat_export", {
+      path: picked,
+      extractMedia: extractMedia,
+    });
+    const summary = outcome.summary;
     const failedPart = summary.failed > 0 ? `, ${summary.failed} failed to parse` : "";
     importStatus.textContent =
       `Imported ${summary.inserted} new, ${summary.skipped} already present` +
-      `${failedPart} (of ${summary.seen} in ${summary.source}).`;
+      `${failedPart} (of ${summary.seen} in ${summary.source}).` +
+      (outcome.media ? describeMedia(outcome.media) : "");
     await refreshStats();
     void refreshEmbedStatus();
   } catch (e) {

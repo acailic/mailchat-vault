@@ -30,6 +30,27 @@ export interface IngestSummary {
   failed: number;
 }
 
+/** How a chat import's media extraction pass went. */
+export interface MediaSummary {
+  /** Messages that referenced at least one media file. */
+  referenced: number;
+  /** Files newly written into the media store. */
+  stored: number;
+  /** Files already in the store by content hash. */
+  deduped: number;
+  /** Referenced files missing from the export (text-only exports). */
+  missing: number;
+  /** Messages whose media links were written or backfilled. */
+  linked: number;
+}
+
+/** Result of a chat export import: ingest summary + media pass. */
+export interface ChatImportOutcome {
+  summary: IngestSummary;
+  /** Null when media extraction was disabled. */
+  media: MediaSummary | null;
+}
+
 /** Search request: free text plus conjunctive facet filters. */
 export interface SearchQuery {
   text: string;

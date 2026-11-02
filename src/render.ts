@@ -3,14 +3,17 @@
 /// inject markup. The functions are pure builders — tested via happy-dom
 /// snapshots in render.test.ts.
 
-import { formatSentAt, snippet as truncateBody } from "./format";
+import { formatSentAt, humanSize, snippet as truncateBody } from "./format";
 import type { ChatContext, Message, SearchHit, SourceCount } from "./types";
 import {
   type HitGroup,
+  type MessageMedia,
   type PageModel,
   type Segment,
   type ThreadEntry,
+  attachmentOf,
   highlightSegments,
+  mediaOf,
   parseSnippet,
   splitTerms,
   threadEntries,
@@ -189,6 +192,60 @@ function metaTable(m: Message): HTMLElement {
   return table;
 }
 
+function mediaRow(entry: MessageMedia): HTMLElement {
+  const li = document.createElement("li");
+  li.className = "media-item";
+  const badge = document.createElement("span");
+  badge.className = "media-kind";
+  badge.textContent = entry.kind;
+  const name = document.createElement("span");
+  name.className = "media-name";
+  name.textContent = entry.name;
+  const meta = document.createElement("span");
+  meta.className = "meta";
+  // The stored path is the key back into the vault's media store.
+  meta.title = entry.path;
+  meta.textContent = `${humanSize(entry.size)} · ${entry.path}`;
+  li.append(badge, name, meta);
+  return li;
+}
+
+/** The media section of the detail card: extracted files, plus attachment
+ * placeholders that found no file in the export. */
+function mediaSection(m: Message): HTMLElement | null {
+  const media = mediaOf(m.raw_json);
+  const attachment = attachmentOf(m.raw_json);
+  const unresolved = attachment?.name && !media.some((e) => e.name === attachment.name)
+    ? attachment
+    : null;
+  if (media.length === 0 && !unresolved) return null;
+
+  const section = document.createElement("section");
+  section.className = "detail-media";
+  const heading = document.createElement("h3");
+  heading.textContent = "media";
+  const list = document.createElement("ul");
+  list.className = "media-list";
+  list.append(...media.map(mediaRow));
+  if (unresolved) {
+    const li = document.createElement("li");
+    li.className = "media-item unresolved";
+    const badge = document.createElement("span");
+    badge.className = "media-kind";
+    badge.textContent = unresolved.kind;
+    const name = document.createElement("span");
+    name.className = "media-name";
+    name.textContent = unresolved.name ?? "";
+    const note = document.createElement("span");
+    note.className = "meta";
+    note.textContent = "not in export";
+    li.append(badge, name, note);
+    list.append(li);
+  }
+  section.append(heading, list);
+  return section;
+}
+
 export interface DetailOptions {
   ctx: ChatContext;
   queryText: string;
@@ -224,6 +281,9 @@ export function renderDetail(el: HTMLElement, opts: DetailOptions): void {
   hint.className = "meta";
   hint.textContent = "↑/↓ move through the thread · Esc closes";
 
-  article.append(header, metaTable(ctx.message), thread, hint);
+  article.append(header, metaTable(ctx.message));
+  const media = mediaSection(ctx.message);
+  if (media) article.append(media);
+  article.append(thread, hint);
   el.replaceChildren(article);
 }

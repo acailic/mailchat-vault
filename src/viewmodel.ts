@@ -68,6 +68,55 @@ export function highlightSegments(text: string, terms: string[]): Segment[] {
   return segments;
 }
 
+/** One extracted media file linked from a message's raw_json. */
+export interface MessageMedia {
+  sha256: string;
+  /** Store-relative path, `media/<sha256>.<ext>`. */
+  path: string;
+  /** Original file name from the export. */
+  name: string;
+  /** `image`, `video`, `audio`, `sticker`, `document`, … */
+  kind: string;
+  /** File size in bytes. */
+  size: number;
+}
+
+/** An attachment placeholder recorded without an extracted file. */
+export interface MessageAttachment {
+  kind: string;
+  name?: string;
+}
+
+function parseRawJson(rawJson: string): Record<string, unknown> {
+  try {
+    const value: unknown = JSON.parse(rawJson);
+    return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** The media links of a message (invalid raw_json → empty list). */
+export function mediaOf(rawJson: string): MessageMedia[] {
+  const raw = parseRawJson(rawJson);
+  const media = raw.media;
+  if (!Array.isArray(media)) return [];
+  return media.filter(
+    (m): m is MessageMedia =>
+      !!m && typeof m === "object" && typeof (m as MessageMedia).path === "string",
+  );
+}
+
+/** The attachment placeholder of a message, if any (WhatsApp exports). */
+export function attachmentOf(rawJson: string): MessageAttachment | null {
+  const raw = parseRawJson(rawJson);
+  const attachment = raw.attachment;
+  if (!attachment || typeof attachment !== "object") return null;
+  const { kind, name } = attachment as Record<string, unknown>;
+  if (typeof kind !== "string") return null;
+  return typeof name === "string" ? { kind, name } : { kind };
+}
+
 /** One chat/thread group of consecutive search hits. */
 export interface HitGroup {
   /** `${source}∕${chat_id}` — unique group key. */

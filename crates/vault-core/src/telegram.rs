@@ -1,10 +1,12 @@
 //! Telegram chat export source: parses the `result.json` written by
 //! Telegram Desktop's "Export chat history".
 //!
-//! v0 archives text: media files are not extracted, but every original
-//! message object is kept verbatim in `raw_json`, so attachments
-//! (`photo`, `file`, …), reply references, and forwarded metadata stay
-//! recorded. Timestamps prefer `date_unixtime` (timezone-correct); the
+//! The export archives text: every original message object is kept
+//! verbatim in `raw_json`, so attachments (`photo`, `file`, …), reply
+//! references, and forwarded metadata stay recorded; when the export
+//! ships with its files, the media pass (see [`crate::media`]) copies
+//! them into the content-addressed store and adds a `media` array to
+//! `raw_json`. Timestamps prefer `date_unixtime` (timezone-correct); the
 //! naive local `date` string is a fallback, stored as UTC. Service
 //! entries (calls, joins, pins) carry no body and are skipped.
 
