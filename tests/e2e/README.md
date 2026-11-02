@@ -58,6 +58,7 @@ Useful knobs:
 | `08-date-range` | date-range filter UI around the near-midnight boundary; undated messages excluded while bounded | conditional — same |
 | `09-signal-import` | import a Signal conversation `.json` (invokes `import_chat_export` directly — the native file chooser cannot be automated) → stats label + signal chip, searchable hit with highlights, detail view with thread context, re-import dedup, renamed re-export dedups by conversation uuid, unrecognized file fails loudly and stores nothing | active (needs the filtered-search UI's source chips) |
 | `10-folder-watch` | folder watching: arm a folder (initial scan + skip of unrecognized files), background import of new/modified files, dedup on rewrite, direct DB confirmation, removal stops imports | active |
+| `11-stats-dashboard` | statistics dashboard: empty-archive summary, aggregates after demo seed + mbox import, auto-refresh on import, Refresh button, idempotent row (counters must not double-count), counter-vs-table consistency via direct DB check | active |
 
 ### Conditional specs
 
@@ -103,6 +104,9 @@ inside the repo.
   arrow-key/`/`/Esc keyboard extras all pass there too; `10-media-extract`
   was validated on this UI generation). `09-signal-import` needs the
   filtered-search UI's source chips, so it does not run on the classic UI.
+  The `11-stats-dashboard` spec belongs to the statistics dashboard UI
+  (added alongside it, after that validation) and postdates
+  the two-generation validation.
 - WebKitWebDriver quirks the specs deliberately work around: clicking
   `body` targets the page centre (a result row — opens the detail view), so
   focus is parked on the `h1` instead; `findElement` with a volatile

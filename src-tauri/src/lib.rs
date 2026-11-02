@@ -22,6 +22,8 @@
 //!   `watch-status` window events.
 //! - `seed_demo` — insert the built-in sample messages (idempotent).
 //! - `stats` — archive counts per source (drives the source filter chips).
+//! - `archive_stats` — dashboard aggregates: totals, date range, counts by
+//!   source/day, top chats and top authors.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -37,6 +39,7 @@ use vault_core::llm::{
 };
 use vault_core::mbox::MboxSource;
 use vault_core::query::{ChatContext, SearchPage, SearchQuery};
+use vault_core::stats::{ArchiveStats, DEFAULT_TOP};
 use vault_core::storage::Storage;
 use vault_core::vector::{self, EmbedJobSummary, EmbeddingStatus, HashEmbedder};
 use vault_core::watch::{FolderWatcher, WatchSnapshot};
@@ -346,6 +349,16 @@ fn stats(state: State<AppState>) -> Result<message::Stats, String> {
     lock(&state)?.stats().map_err(|e| e.to_string())
 }
 
+/// Dashboard aggregates in one round trip: total messages, the archive's
+/// date range, per-source and per-day counts, and the heaviest chats and
+/// authors (bounded by `top`, default 10, clamped to 100).
+#[tauri::command]
+fn archive_stats(state: State<AppState>, top: Option<u32>) -> Result<ArchiveStats, String> {
+    lock(&state)?
+        .archive_stats(top.unwrap_or(DEFAULT_TOP))
+        .map_err(|e| e.to_string())
+}
+
 /// The built-in demo messages as an ingest source.
 struct DemoSource;
 
@@ -411,7 +424,8 @@ pub fn run() {
             watch_remove_folder,
             watch_status,
             seed_demo,
-            stats
+            stats,
+            archive_stats
         ])
         .run(tauri::generate_context!())
         .expect("error while running mailchat vault");

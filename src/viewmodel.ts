@@ -1,7 +1,7 @@
 /// Pure view-model logic for the search UI. No DOM, no Tauri calls — every
 /// function here is unit- and snapshot-tested in viewmodel.test.ts.
 
-import type { ChatContext, SearchHit } from "./types";
+import type { ArchiveStats, ChatContext, DayCount, SearchHit } from "./types";
 
 /** Marker characters the backend wraps around FTS5-matched terms. */
 const SNIPPET_OPEN = "\x01";
@@ -208,4 +208,74 @@ export function neighborId(
   const at = entries.findIndex((e) => e.current);
   const target = entries[at + direction];
   return target ? target.message.id : null;
+}
+
+// ---------------------------------------------------------------------------
+// Statistics dashboard
+// ---------------------------------------------------------------------------
+
+/** One bar of the day histogram (already bucketed). */
+export interface DayBar {
+  /** Bucket label: a day ("2026-11-01"), month ("2026-11"), or year ("2026"). */
+  label: string;
+  count: number;
+}
+
+/** Sum `days` into consecutive buckets keyed by `keyOf`, order preserved. */
+function bucketSum(days: DayCount[], keyOf: (d: DayCount) => string): DayBar[] {
+  const bars: DayBar[] = [];
+  const index = new Map<string, DayBar>();
+  for (const d of days) {
+    const key = keyOf(d);
+    let bar = index.get(key);
+    if (!bar) {
+      bar = { label: key, count: 0 };
+      index.set(key, bar);
+      bars.push(bar);
+    }
+    bar.count += d.count;
+  }
+  return bars;
+}
+
+/**
+ * Downsample a per-day series to a chartable number of bars: days are used
+ * while they fit; beyond that consecutive days merge into month buckets,
+ * then into year buckets (the coarsest fallback, so even decade-long
+ * archives stay chartable). Buckets stay in ascending order and empty
+ * buckets never appear (the backend series omits empty days).
+ */
+export function dayBars(days: DayCount[], maxBars: number): DayBar[] {
+  if (days.length <= maxBars) {
+    return days.map((d) => ({ label: d.day, count: d.count }));
+  }
+  const months = bucketSum(days, (d) => d.day.slice(0, 7));
+  if (months.length <= maxBars) return months;
+  return bucketSum(days, (d) => d.day.slice(0, 4));
+}
+
+/** Bar height as a percentage of the tallest bar (1..100; 0 only for 0). */
+export function barHeightPct(count: number, max: number): number {
+  if (max <= 0 || count <= 0) return 0;
+  return Math.max(1, Math.round((count / max) * 100));
+}
+
+/** Thousands-grouped integer: 1234567 → "1,234,567". */
+export function formatCount(n: number): string {
+  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+/** One-line summary over the dashboard aggregates (shown above the chart). */
+export function dashboardSummary(stats: ArchiveStats): string {
+  if (stats.total === 0) return "empty archive";
+  const first = stats.first_sent_at?.slice(0, 10) ?? null;
+  const last = stats.last_sent_at?.slice(0, 10) ?? null;
+  const range =
+    first && last
+      ? `${first} → ${last}`
+      : (first ?? last ?? "no dates");
+  const sources = stats.by_source.length;
+  return (
+    `${formatCount(stats.total)} messages · ${sources} source${sources === 1 ? "" : "s"} · ${range}`
+  );
 }

@@ -26,11 +26,11 @@ fn migrations_apply_and_are_idempotent() {
     let db = dir.path().join("vault.db");
 
     let s = Storage::open(&db).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 5);
+    assert_eq!(s.schema_version().unwrap(), 6);
 
     // Reopening the same file applies nothing new and keeps the data.
     let s2 = Storage::open(&db).unwrap();
-    assert_eq!(s2.schema_version().unwrap(), 5);
+    assert_eq!(s2.schema_version().unwrap(), 6);
     s.insert_message(&msg("a", "x", "hello vault")).unwrap();
     assert_eq!(s2.stats().unwrap().total, 1);
 }

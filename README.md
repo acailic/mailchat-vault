@@ -10,27 +10,29 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice �
 - **SQLite storage with FTS5 full-text index** (bundled SQLite via `rusqlite`; no system SQLite needed).
   - **Canonical store** (schema v4): `source_instances`, `conversations`, `archive_messages` (ids, payload, and time provenance: resolved UTC instant, original timestamp text, confidence), `message_identities` (dedup aliases), `message_occurrences` (import/folder observations), `sync_checkpoints` (IMAP cursors), plus the `archive_fts` virtual table (external content, trigger-maintained). Every read and write targets these tables.
   - The legacy `messages` / `messages_fts` / `imap_sync_state` tables from earlier schema versions are preserved untouched as a pre-canonical snapshot; migration 4 copies every row (ids included) into the canonical tables, and nothing writes the legacy tables afterwards.
+  - Trigger-maintained counter tables (`stats_source`/`stats_day`/`stats_chat`/`stats_author`) power the statistics dashboard with O(groups) reads instead of GROUP BY scans.
   - Versioned migrations applied automatically on open.
 - **Idempotent ingest**: a `Source` trait yields messages; writes dedup on the canonical identity alias — legacy `(source, external_id)` keys map to one `message_identities` row each — so re-importing is always safe.
 - **Manual/demo source**: import an `.mbox` file (no IMAP needed) — subjects, authors, dates, and decoded text bodies are archived and searchable.
 - **Chat imports**: WhatsApp `.txt` exports, Telegram Desktop `result.json` exports, and Signal Desktop conversation `.json` exports (e.g. `sigtop export-messages -f json`) — texts, authors, and timestamps are archived and searchable; quoted replies are kept as metadata, and Signal attachments are recorded in `raw_json`. **Media extraction** for WhatsApp and Telegram: files referenced by the export (images, documents, voice notes) are copied into a content-addressed `media/` store in app data — hash-named (SHA-256), deduplicated by content — and linked from the message's `raw_json`, with a media section in the detail view. Extraction can be switched off with the **extract media** toggle; text-only exports import fine (missing files are just counted), and re-importing an export with its files backfills media links into already-stored messages. The format is auto-detected from the file contents, so re-importing the same export never duplicates messages.
 - **IMAP sync (Gmail & friends)**: incremental, UIDVALIDITY/UID-tracked sync from any IMAP server over host/port/user/password — Gmail via app password in this first round (XOAUTH2 later). Folders map to the message `channel` field; re-syncing never duplicates. Passwords are prompted for, kept in the OS keyring when available and in session memory otherwise — never in the database.
 - **Folder watching**: pick folders (typed path or the native picker) and every new or modified `.mbox` / WhatsApp `.txt` / Telegram `result.json` / Signal conversation `.json` export file under them is imported automatically in the background — watched folders persist across restarts, write bursts are debounced until a file settles, re-imports never duplicate (the same dedup contract as manual import), and skips/errors are shown in the UI without ever stopping the watcher (see below).
+- **Statistics dashboard**: archive aggregates in one view — total messages and date range, a per-day histogram (auto-downsampled to months/years when the archive spans too many days), and tables with inline bars for messages per source, top chats, and top authors. Served from trigger-maintained counter tables (schema migration 6), so the whole dashboard answers in **< 100 ms even on 1M messages** (asserted by a generated 1M-fixture test).
 - **Search tool UI** over the FTS5 index:
   - results with **match highlighting** (FTS5 snippets, rendered as `<mark>` runs), **grouped by chat/thread**;
   - **filters**: source chips (email/whatsapp/telegram/… — whatever the archive holds), author substring, and a from–to date range; an empty query with filters set browses newest-first;
   - **result count + pagination** (`1–50 of 1,234 · page 1/25`);
   - **message detail**: full body with highlighted query terms, full metadata, and clickable **thread neighbors** of the same chat;
   - **keyboard navigation**: `/` focus search, `↑`/`↓` move through results, `Enter` open detail, `↑`/`↓` walk the thread, `Esc` close.
-- **Performance contract**: queries answer in < 100 ms over 100k messages (asserted by a generated-fixture test; all queries are `LIMIT`-bounded and ride the FTS5 index plus the `sent_instant`/`(source_instance, chat_id)` indexes).
+- **Performance contract**: queries answer in < 100 ms over 100k messages (asserted by a generated-fixture test; all queries are `LIMIT`-bounded and ride the FTS5 index plus the `sent_instant`/`(source_instance, chat_id)` indexes); the statistics dashboard answers in < 100 ms over 1M messages.
 - **Ask UI (v1)**: natural-language questions translated to FTS5 + date filters via an LLM, with a short summary over the top results — strictly privacy-scoped and fully optional (see below). Results are ranked **hybrid** — FTS5 fused with an offline local-vector leg once embeddings are built (see below).
 
 ## Repository layout
 
 ```
-crates/vault-core/   # storage (SQLite/FTS5, migrations), filtered/paged search queries, ingest trait, mail parsing, mbox / WhatsApp / Telegram / Signal sources, media extraction into the content-addressed store, IMAP sync, LLM search pipeline, local embeddings + hybrid ranking, folder watching — no UI deps
-src-tauri/           # Tauri app shell: commands (search_messages, chat_context, llm_ask, llm_status, embed_messages, embed_status, import_mbox, import_chat_export with optional media extraction, sync_imap, watch_add_folder, watch_remove_folder, watch_status, seed_demo, stats) + secret storage + watch-status events
-src/                 # frontend (vanilla TS): search + filters + pagination + detail view (with media links), ask UI + embedding controls, import & IMAP sync controls, folder watching panel
+crates/vault-core/   # storage (SQLite/FTS5, migrations), filtered/paged search queries, archive statistics (dashboard aggregates), ingest trait, mail parsing, mbox / WhatsApp / Telegram / Signal sources, media extraction into the content-addressed store, IMAP sync, LLM search pipeline, local embeddings + hybrid ranking, folder watching — no UI deps
+src-tauri/           # Tauri app shell: commands (search_messages, chat_context, llm_ask, llm_status, embed_messages, embed_status, import_mbox, import_chat_export with optional media extraction, sync_imap, watch_add_folder, watch_remove_folder, watch_status, seed_demo, stats, archive_stats) + secret storage + watch-status events
+src/                 # frontend (vanilla TS): search + filters + pagination + detail view (with media links), ask UI + embedding controls, statistics dashboard (CSS bar charts, no chart library), import & IMAP sync controls, folder watching panel
 index.html           # single-page shell
 ```
 
@@ -180,7 +182,7 @@ Any IMAP server with implicit TLS works the same way: host, port (993), username
 ## Tests
 
 ```sh
-cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram ingest, media extraction (real small fixture files), filtered/paged search, chat context, 100k FTS perf fixture, IMAP sync (mock server), LLM search pipeline (mock LLM, no network), local embeddings (deterministic embedder, incremental job, cosine scan, hybrid ranking, 100k vector perf budgets), folder watching (real temp folders), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations)
+cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram ingest, media extraction (real small fixture files), filtered/paged search, chat context, archive statistics (incl. the 1M-message dashboard perf contract), 100k FTS perf fixture, IMAP sync (mock server), LLM search pipeline (mock LLM, no network), local embeddings (deterministic embedder, incremental job, cosine scan, hybrid ranking, 100k vector perf budgets), folder watching (real temp folders), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations)
 npm test                 # frontend unit + UI-state snapshot tests (vitest)
 npm run check            # TypeScript type-check
 cargo test --workspace   # also compiles the Tauri app (needs the Linux libs above)
@@ -219,7 +221,7 @@ view, and keyboard navigation).
 
 ## Out of scope for now (separate tasks)
 
-XOAUTH2 (OAuth) login for Gmail, multi-account UI, more chat sources (Discord), multi-provider menus, settings UI, result export, statistics dashboard, push notifications. The media-extraction layer is source-generic: when further chat sources land, their exports plug into the same hash-named `media/` store and `raw_json` convention.
+XOAUTH2 (OAuth) login for Gmail, multi-account UI, more chat sources (Discord), multi-provider menus, settings UI, result export, push notifications. The media-extraction layer is source-generic: when further chat sources land, their exports plug into the same hash-named `media/` store and `raw_json` convention.
 
 ## Installers & releases
 

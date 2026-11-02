@@ -4,12 +4,14 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { formatSentAt, snippet } from "./format";
 import { describePlan, privacyNote, type AskOutcome, type LlmStatus } from "./llmview";
 import {
+  renderDashboard,
   renderDetail,
   renderPagination,
   renderResults,
   renderSourceChips,
 } from "./render";
 import type {
+  ArchiveStats,
   ChatContext,
   EmbedJobSummary,
   EmbeddingStatus,
@@ -90,6 +92,9 @@ const watchAddButton = document.querySelector<HTMLButtonElement>("#watch-add-btn
 const watchStatus = document.querySelector<HTMLElement>("#watch-status")!;
 const watchFoldersList = document.querySelector<HTMLUListElement>("#watch-folders")!;
 const watchEventsList = document.querySelector<HTMLUListElement>("#watch-events")!;
+const dashboard = document.querySelector<HTMLElement>("#dashboard")!;
+const dashboardStatus = document.querySelector<HTMLElement>("#dashboard-status")!;
+const dashboardRefreshButton = document.querySelector<HTMLButtonElement>("#stats-refresh")!;
 
 // ---------------------------------------------------------------------------
 // State
@@ -289,6 +294,24 @@ async function refreshStats(): Promise<void> {
   }
 }
 
+// Sequential dashboard token, same stale-response guard as refreshStats.
+let dashboardSeq = 0;
+
+async function refreshDashboard(): Promise<void> {
+  const seq = ++dashboardSeq;
+  dashboardStatus.textContent = "";
+  try {
+    const stats = await invoke<ArchiveStats>("archive_stats", { top: 10 });
+    if (seq !== dashboardSeq) return; // a newer refresh superseded this response
+    renderDashboard(dashboard, { stats });
+  } catch (e) {
+    if (seq === dashboardSeq) {
+      dashboard.replaceChildren();
+      dashboardStatus.textContent = `Statistics unavailable: ${e}`;
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Search
 // ---------------------------------------------------------------------------
@@ -460,6 +483,7 @@ async function importMbox(): Promise<void> {
       `${failedPart} (of ${summary.seen} in ${summary.source}).`;
     await refreshStats();
     void refreshEmbedStatus();
+    void refreshDashboard();
   } catch (e) {
     importStatus.textContent = `Import failed: ${e}`;
   } finally {
@@ -511,6 +535,7 @@ async function importChatExport(): Promise<void> {
       (outcome.media ? describeMedia(outcome.media) : "");
     await refreshStats();
     void refreshEmbedStatus();
+    void refreshDashboard();
   } catch (e) {
     importStatus.textContent = `Import failed: ${e}`;
   } finally {
@@ -525,6 +550,7 @@ async function seedDemo(): Promise<void> {
     importStatus.textContent = `Demo messages: ${summary.inserted} new, ${summary.skipped} already present.`;
     await refreshStats();
     void refreshEmbedStatus();
+    void refreshDashboard();
   } catch (e) {
     importStatus.textContent = `Seeding failed: ${e}`;
   } finally {
@@ -572,6 +598,7 @@ async function syncImap(): Promise<void> {
     imapPassInput.value = "";
     await refreshStats();
     void refreshEmbedStatus();
+    void refreshDashboard();
   } catch (e) {
     imapStatus.textContent = `Sync failed: ${e}`;
   } finally {
@@ -693,10 +720,12 @@ watchPathInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") void watchTypedPath();
 });
 watchAddButton.addEventListener("click", () => void pickWatchFolder());
+dashboardRefreshButton.addEventListener("click", () => void refreshDashboard());
 
 setStatus("Type something to search, or set a filter to browse.");
 renderAll();
 void refreshStats();
+void refreshDashboard();
 void refreshLlmNote();
 void refreshEmbedStatus();
 void refreshWatchStatus();
