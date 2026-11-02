@@ -1,8 +1,7 @@
-use chrono::FixedOffset;
 use vault_core::ingest::{ingest, IngestSummary, Source};
 use vault_core::search::build_match_query;
 use vault_core::storage::Storage;
-use vault_core::telegram::{parse_telegram, parse_telegram_tz, TelegramSource, TELEGRAM_SOURCE};
+use vault_core::telegram::{parse_telegram, TelegramSource, TELEGRAM_SOURCE};
 
 // Realistic Telegram Desktop export: unix timestamps (UTC) alongside naive
 // local dates, string and array texts with entities, an attachment, a
@@ -72,11 +71,7 @@ const RESULT_JSON: &str = r#"{
 
 #[test]
 fn parses_fields_from_result_json() {
-    // Fixed CET-like zone so the naive `date` fallback expectations are
-    // deterministic regardless of the machine running the tests.
-    let tz = FixedOffset::east_opt(3600).unwrap();
-    let collected =
-        parse_telegram_tz(RESULT_JSON.as_bytes(), "fallback", &tz, "Europe/Belgrade").unwrap();
+    let collected = parse_telegram(RESULT_JSON.as_bytes(), "fallback").unwrap();
     // 5 real messages; phone_call is a service entry (skipped); one entry
     // lacks an id and one is not an object (both failed).
     assert_eq!(collected.messages.len(), 5);
@@ -121,13 +116,13 @@ fn parses_fields_from_result_json() {
     assert_eq!(raw["reply_to_message_id"], 101);
 
     // Without "from", the author falls back to from_id; without
-    // date_unixtime, the naive local date is interpreted in the explicit
-    // zone (+01:00 → 11:30:45Z, M1.3).
+    // date_unixtime, the naive `date` string is stored as UTC exactly as
+    // the export writes it (M1.3 provenance: assumed zone UTC).
     let anon = &collected.messages[4];
     assert_eq!(anon.author, "user333");
-    assert_eq!(anon.sent_at, "2023-11-01T11:30:45Z");
+    assert_eq!(anon.sent_at, "2023-11-01T12:30:45Z");
     assert_eq!(anon.original_timestamp, "2023-11-01T12:30:45");
-    assert_eq!(anon.timezone, "Europe/Belgrade");
+    assert_eq!(anon.timezone, "UTC");
     assert_eq!(anon.time_confidence, "legacy_assumed");
 }
 
