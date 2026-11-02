@@ -22,7 +22,7 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice �
   - results with **match highlighting** (FTS5 snippets, rendered as `<mark>` runs), **grouped by chat/thread**;
   - **filters**: source chips (email/whatsapp/telegram/… — whatever the archive holds), author substring, and a from–to date range; an empty query with filters set browses newest-first;
   - **result count + pagination** (`1–50 of 1,234 · page 1/25`);
-  - **export**: the current search results — every row under the active filters, all pages, not just the visible one — or the whole chat thread from the detail view, written to a file you pick (native save dialog) as **CSV** (RFC 4180), **JSON Lines** (one full message object per line, re-imports losslessly) or **MBOX** (email rows; non-email rows are skipped and reported);
+  - **export**: the current search results — every row under the active filters, all pages, not just the visible one — or the whole chat thread from the detail view, written to a file you pick (native save dialog) as **CSV** (RFC 4180), **JSON Lines** (one full message object per line; export-only for now — no importer accepts this file yet) or **MBOX** (email rows; non-email rows are skipped and reported);
   - **message detail**: full body with highlighted query terms, full metadata, and clickable **thread neighbors** of the same chat;
   - **keyboard navigation**: `/` focus search, `↑`/`↓` move through results, `Enter` open detail, `↑`/`↓` walk the thread, `Esc` close.
 - **Performance contract**: queries answer in < 100 ms over 100k messages (asserted by a generated-fixture test; all queries are `LIMIT`-bounded and ride the FTS5 index plus the `sent_instant`/`(source_instance, chat_id)` indexes); the statistics dashboard answers in < 100 ms over 1M messages.
@@ -185,7 +185,7 @@ Any IMAP server with implicit TLS works the same way: host, port (993), username
 The **Export results…** control writes the current search results — every row matching the active text + source/author/date filters, across all pages, in the order the UI lists them — to a file you choose. **Export chat…** (in the message detail panel) writes the whole chat thread of the open message, oldest → newest; a message with no thread exports as a single row. Formats:
 
 - **CSV** — RFC 4180 (`source,external_id,channel,chat_id,author,sent_at,body,raw_json`), UTF-8, fields quoted only when needed.
-- **JSON Lines** — one complete message object per line (`.jsonl`); the exact shape the app stores, so an export re-imports losslessly.
+- **JSON Lines** — one complete message object per line (`.jsonl`); the exact shape the app stores. Export-only for now: no app importer accepts this file yet.
 - **MBOX** — classic `From `-separated mailbox rebuilt from the stored row plus its recorded headers (`Message-ID`, `From`, `To`, `Subject`, `Date`); carries email-channel rows only, chat rows are skipped and reported in the status line.
 
 Rows stream straight to the file, so exports of very large result sets don't hold the whole set in memory.

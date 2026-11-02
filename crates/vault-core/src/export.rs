@@ -6,7 +6,9 @@
 //!   field quoted only when it contains a comma, quote, CR or LF; the
 //!   header names the columns.
 //! - **JSON Lines** — one full `Message` object per line (the exact serde
-//!   shape the app already speaks), so an export re-imports losslessly.
+//!   shape the app already speaks, so a programmatic
+//!   [`crate::storage::Storage::insert_message`] loop re-imports it
+//!   losslessly). Export-only today: no app importer accepts this file.
 //! - **MBOX** — the classic `From `-separated mailbox, written only for
 //!   email-channel rows (chat rows are counted in
 //!   [`ExportSummary::skipped`]): key headers are reconstructed from the
