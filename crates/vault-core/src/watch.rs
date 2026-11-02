@@ -635,9 +635,8 @@ fn remove_folder(
             removed_key = ks.clone();
         }
         snap.folders.retain(|f| f != &ks);
-        if let Ok(s) = lock_storage(storage) {
-            let _ = s.remove_watched_folder(&ks);
-        }
+        lock_storage(storage)
+            .and_then(|s| s.remove_watched_folder(&ks).map_err(|e| e.to_string()))?;
     }
     push_event(
         snap,

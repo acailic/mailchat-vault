@@ -143,9 +143,10 @@ imported in the background.
   scan of a folder, re-settling, and rewrites of a file all store each message
   exactly once.
 - **Never fatal**: unreadable files, unknown formats (reported as *skipped*),
-  vanished folders, and database hiccups are recorded in the events list;
-  the watcher keeps running. Skipped `.txt`/`.json` files that are not
-  recognized exports are reported, not imported.
+  and database hiccups are recorded in the events list; the watcher keeps
+  running. A folder that disappears mid-session is disarmed silently and
+  reported when missing at the next start. Skipped `.txt`/`.json` files
+  that are not recognized exports are reported, not imported.
 - **Persistent**: watched folders are stored in the vault database and
   re-armed on the next start (a folder that is missing at startup is
   reported; it re-arms on the next start once it is present again).
