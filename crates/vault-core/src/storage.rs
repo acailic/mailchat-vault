@@ -1130,8 +1130,8 @@ impl Storage {
         Ok(removed > 0)
     }
 
-    /// The watched folders, ordered oldest first (insertion order within
-    /// the same timestamp, then by path).
+    /// The watched folders, ordered oldest first (same-second ties broken
+    /// by path).
     pub fn watched_folders(&self) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
