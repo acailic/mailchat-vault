@@ -259,6 +259,14 @@ fn json_lines_round_trip_is_bit_identical_into_a_fresh_archive() {
             sent_at: m.sent_at.clone(),
             body: m.body.clone(),
             raw_json: m.raw_json.clone(),
+            // `Message` exposes only the M1.1 columns; the M1.3 provenance
+            // fields stay empty so the re-import applies the same legacy
+            // grouping as the original rows.
+            conversation_key: String::new(),
+            reply_refs: Vec::new(),
+            original_timestamp: String::new(),
+            timezone: String::new(),
+            time_confidence: String::new(),
         };
         target.insert_message(&new).unwrap();
     }

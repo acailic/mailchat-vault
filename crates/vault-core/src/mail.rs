@@ -30,7 +30,15 @@ const MAX_MIME_DEPTH: usize = 64;
 /// the decoded text body prefixed with the subject so both are full-text
 /// searchable; `raw_json` keeps the key headers plus `chat_id`-independent
 /// metadata. Returns `None` when the mail fails to parse at all.
-pub(crate) fn parse_raw_mail(raw: &[u8], source: &str, chat_id: &str) -> Option<NewMessage> {
+///
+/// M1.3 additions: `reply_refs` carries the reply-graph edges — every
+/// `<…>` id in `References` (root-most first, per RFC 5322 ordering) then
+/// the `In-Reply-To` id, deduplicated in order — and the time provenance
+/// fields record the verbatim `Date` header, its explicit numeric offset
+/// when present, and the confidence label (`explicit_offset` when the
+/// header resolved, `unresolved` when it did not parse, `missing` when
+/// absent).
+pub fn parse_raw_mail(raw: &[u8], source: &str, chat_id: &str) -> Option<NewMessage> {
     if mime_nesting_depth(raw) > MAX_MIME_DEPTH {
         return None;
     }
@@ -49,13 +57,62 @@ pub(crate) fn parse_raw_mail(raw: &[u8], source: &str, chat_id: &str) -> Option<
         .map(|v| v.trim().to_string())
         .unwrap_or_default();
 
-    let sent_at = mail
+    let date_header = mail
         .headers
         .get_first_value("Date")
-        .and_then(|v| mailparse::dateparse(&v).ok())
-        .and_then(|secs| Utc.timestamp_opt(secs, 0).single())
-        .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .map(|v| v.trim().to_string())
         .unwrap_or_default();
+    let (sent_at, timezone, time_confidence) = match (
+        date_header.is_empty(),
+        mailparse::dateparse(&date_header).ok(),
+    ) {
+        (true, _) => (String::new(), String::new(), "missing".to_string()),
+        (false, Some(secs)) => {
+            // mailparse is lenient: junk dates can parse to the epoch
+            // fallback (0). Treat that as "did not parse" — an instant
+            // pinned to 1970-01-01 would be a fabrication.
+            if secs == 0 {
+                (String::new(), String::new(), "unresolved".to_string())
+            } else {
+                let instant = Utc
+                    .timestamp_opt(secs, 0)
+                    .single()
+                    .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                    .unwrap_or_default();
+                if instant.is_empty() {
+                    (String::new(), String::new(), "unresolved".to_string())
+                } else {
+                    (
+                        instant,
+                        date_offset(&date_header).unwrap_or_default(),
+                        "explicit_offset".to_string(),
+                    )
+                }
+            }
+        }
+        // A Date header that will not parse is evidence without an
+        // instant: kept verbatim, unresolved.
+        (false, None) => (String::new(), String::new(), "unresolved".to_string()),
+    };
+
+    // Reply graph: References first (root-most id first), then the
+    // In-Reply-To parent, deduplicated preserving first position.
+    let references = mail
+        .headers
+        .get_first_value("References")
+        .map(|v| message_ids(&v))
+        .unwrap_or_default();
+    let in_reply_to = mail
+        .headers
+        .get_first_value("In-Reply-To")
+        .map(|v| message_ids(&v))
+        .unwrap_or_default();
+    let mut reply_refs = references;
+    for id in in_reply_to {
+        if !reply_refs.contains(&id) {
+            reply_refs.push(id);
+        }
+    }
 
     let subject = mail
         .headers
@@ -77,19 +134,68 @@ pub(crate) fn parse_raw_mail(raw: &[u8], source: &str, chat_id: &str) -> Option<
         format!("{subject}\n\n{text}")
     };
 
-    let raw_json = json!({
+    let mut raw_json = json!({
         "message_id": message_id,
         "subject": subject,
         "from": author,
         "to": mail.headers.get_first_value("To").unwrap_or_default(),
-        "date": mail.headers.get_first_value("Date").unwrap_or_default(),
-    })
-    .to_string();
+        "date": date_header,
+    });
+    if let Some(obj) = raw_json.as_object_mut() {
+        if let Some(irt) = mail.headers.get_first_value("In-Reply-To") {
+            obj.insert("in_reply_to".into(), json!(irt.trim()));
+        }
+        if let Some(refs) = mail.headers.get_first_value("References") {
+            obj.insert("references".into(), json!(refs.trim()));
+        }
+    }
 
     let mut msg = NewMessage::new(source, message_id, author, sent_at, body);
     msg.chat_id = chat_id.to_string();
-    msg.raw_json = raw_json;
+    msg.raw_json = raw_json.to_string();
+    msg.reply_refs = reply_refs;
+    msg.original_timestamp = date_header;
+    msg.timezone = timezone;
+    msg.time_confidence = time_confidence;
     Some(msg)
+}
+
+/// Extract every `<…>` message id from a header value, in order, angle
+/// brackets trimmed; junk between ids is ignored.
+fn message_ids(value: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut rest = value;
+    while let Some(open) = rest.find('<') {
+        let after = &rest[open + 1..];
+        match after.find('>') {
+            Some(close) => {
+                let id = &after[..close];
+                if !id.trim().is_empty() {
+                    ids.push(id.trim().to_string());
+                }
+                rest = &after[close + 1..];
+            }
+            None => break,
+        }
+    }
+    ids
+}
+
+/// The numeric UTC offset of an RFC 5322 `Date` header (`+0100`,
+/// `-0800`), normalized to `±HH:MM`; `None` when the header carries no
+/// numeric offset (obsolete zone names or no zone at all).
+fn date_offset(date_header: &str) -> Option<String> {
+    for token in date_header.split_whitespace() {
+        let bytes = token.as_bytes();
+        if bytes.len() == 5
+            && (bytes[0] == b'+' || bytes[0] == b'-')
+            && bytes[1..].iter().all(u8::is_ascii_digit)
+        {
+            let sign = if bytes[0] == b'+' { "+" } else { "-" };
+            return Some(format!("{sign}{}:{}", &token[1..3], &token[3..5]));
+        }
+    }
+    None
 }
 
 /// Amend a parsed message's `raw_json` extras with additional keys.

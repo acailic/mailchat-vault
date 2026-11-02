@@ -25,6 +25,32 @@ pub struct NewMessage {
     pub body: String,
     /// Structured extras as a JSON object string (`"{}"` when none).
     pub raw_json: String,
+    /// Stable, provider-scoped conversation key (M1.3), e.g.
+    /// `"telegram:chat:123456789"` or `"whatsapp:chat:sha256:…"`. Empty
+    /// when the source carries nothing stable (legacy `chat_id` grouping
+    /// applies). See [`crate::storage`] for how conversations resolve.
+    #[serde(default)]
+    pub conversation_key: String,
+    /// Email reply-graph edges: `In-Reply-To` plus every id in
+    /// `References`, root-most first, deduplicated. Empty for non-mail
+    /// sources. See [`crate::mail`].
+    #[serde(default)]
+    pub reply_refs: Vec<String>,
+    /// Verbatim source timestamp text (`""` = none recorded; callers that
+    /// leave it empty get `sent_at` copied, as in M1.1).
+    #[serde(default)]
+    pub original_timestamp: String,
+    /// The timezone the timestamp was interpreted in: an IANA name
+    /// (`"Europe/Berlin"`), an offset (`"+02:00"`), or `"UTC"` for
+    /// absolute stamps. `""` = not recorded (M1.1 rows).
+    #[serde(default)]
+    pub timezone: String,
+    /// Time-confidence label: one of `explicit_offset`, `user_confirmed`,
+    /// `legacy_assumed`, `unresolved`, `missing` (see the
+    /// `archive_messages.time_confidence` CHECK). `""` = derive from
+    /// `sent_at` the way M1.1 did.
+    #[serde(default)]
+    pub time_confidence: String,
 }
 
 impl NewMessage {
@@ -46,6 +72,11 @@ impl NewMessage {
             sent_at: sent_at.into(),
             body: body.into(),
             raw_json: "{}".to_string(),
+            conversation_key: String::new(),
+            reply_refs: Vec::new(),
+            original_timestamp: String::new(),
+            timezone: String::new(),
+            time_confidence: String::new(),
         }
     }
 }

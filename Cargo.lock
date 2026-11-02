@@ -4860,6 +4860,7 @@ name = "vault-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "iana-time-zone",
  "imap",
  "mailparse",
  "notify",

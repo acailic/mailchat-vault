@@ -83,9 +83,14 @@ fn parses_fields_from_result_json() {
     assert_eq!(first.chat_id, "Arhiva ekipa");
     assert_eq!(first.external_id, "123456789/100");
     assert_eq!(first.author, "Marko Horvat");
-    // date_unixtime is UTC and wins over the naive local date string
-    // (exporter timezone here is UTC+1).
+    // date_unixtime is absolute UTC and wins over the naive local date
+    // string (exporter timezone here is UTC+1); the M1.3 provenance
+    // records it as explicitly offset.
     assert_eq!(first.sent_at, "2023-11-01T10:00:00Z");
+    assert_eq!(first.original_timestamp, "1698832800");
+    assert_eq!(first.timezone, "UTC");
+    assert_eq!(first.time_confidence, "explicit_offset");
+    assert_eq!(first.conversation_key, "telegram:chat:123456789");
     assert!(first.body.contains("Arhiva je gotova"));
 
     // Array text concatenates plain parts and entity texts in order.
@@ -111,10 +116,14 @@ fn parses_fields_from_result_json() {
     assert_eq!(raw["reply_to_message_id"], 101);
 
     // Without "from", the author falls back to from_id; without
-    // date_unixtime, the naive date is stored as UTC.
+    // date_unixtime, the naive `date` string is stored as UTC exactly as
+    // the export writes it (M1.3 provenance: assumed zone UTC).
     let anon = &collected.messages[4];
     assert_eq!(anon.author, "user333");
     assert_eq!(anon.sent_at, "2023-11-01T12:30:45Z");
+    assert_eq!(anon.original_timestamp, "2023-11-01T12:30:45");
+    assert_eq!(anon.timezone, "UTC");
+    assert_eq!(anon.time_confidence, "legacy_assumed");
 }
 
 #[test]
