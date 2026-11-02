@@ -1,4 +1,4 @@
-//! M1.3 — stable conversation keys over legacy data (migration 5).
+//! M1.3 — stable conversation keys over legacy data (migration 6).
 //!
 //! A database exactly as the pre-M1.3 release left it (the frozen schema-2
 //! layout, seeded through raw SQL) upgrades in place: chats re-imported
@@ -196,7 +196,7 @@ fn telegram_renamed_imports_merge_and_same_name_chats_split() {
     }
 
     let s = Storage::open(&db).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 5);
+    assert_eq!(s.schema_version().unwrap(), 6);
 
     // The renamed chat is one conversation under its provider key, and
     // the same-name chats split into two.
@@ -733,6 +733,6 @@ fn migration_is_idempotent_on_reopen() {
     drop(s);
     // Reopening applies nothing new and changes nothing.
     let s2 = Storage::open(&db).unwrap();
-    assert_eq!(s2.schema_version().unwrap(), 5);
+    assert_eq!(s2.schema_version().unwrap(), 6);
     assert_eq!(conversations(&db), after_first);
 }
