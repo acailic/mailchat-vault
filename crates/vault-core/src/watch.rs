@@ -47,9 +47,9 @@ use crate::telegram::{is_telegram_export_reader, TelegramSource};
 use crate::whatsapp::{is_whatsapp_export, WhatsappSource};
 
 /// Largest prefix read for format sniffing: WhatsApp detection decides
-/// from the first lines, and Telegram detection streams the rest without
-/// buffering it, so an unrelated multi-gigabyte file never enters memory
-/// whole.
+/// from the first lines, and Telegram detection streams the rest through
+/// a small fixed-size buffer, so an unrelated multi-gigabyte file never
+/// enters memory whole.
 const DETECT_SNIFF_BYTES: u64 = 64 * 1024;
 
 /// File extensions that are import candidates when they appear or change.
@@ -673,8 +673,8 @@ fn import_file(
 ///
 /// Detection is bounded: only a [`DETECT_SNIFF_BYTES`] prefix is read for
 /// the WhatsApp line check, and Telegram detection streams the file
-/// without buffering it, so an unrelated huge file costs neither a full
-/// read nor a parse tree.
+/// through a small fixed-size buffer, so an unrelated huge file costs
+/// neither a full read nor a parse tree.
 fn import_source_for(path: &Path) -> Result<Option<Box<dyn Source>>, String> {
     let ext = path
         .extension()
@@ -704,7 +704,7 @@ fn import_source_for(path: &Path) -> Result<Option<Box<dyn Source>>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify::event::{CreateKind, RenameMode, RemoveKind};
+    use notify::event::{CreateKind, RemoveKind, RenameMode};
 
     #[test]
     fn extensions_filter_is_case_insensitive() {
@@ -785,8 +785,7 @@ mod tests {
 
         // Rename-into (To) is activity at the new path.
         handle_fs_event(
-            &Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To)))
-                .add_path(new.clone()),
+            &Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To))).add_path(new.clone()),
             &mut pending,
             settle,
         );
@@ -840,7 +839,10 @@ mod tests {
         let wa = dir.path().join("chat.txt");
         std::fs::write(
             &wa,
-            format!("[1.11.2026., 09:00:05] Marko: hi\n{}\n", "x".repeat(200_000)),
+            format!(
+                "[1.11.2026., 09:00:05] Marko: hi\n{}\n",
+                "x".repeat(200_000)
+            ),
         )
         .unwrap();
         let source = import_source_for(&wa).unwrap().unwrap();
@@ -858,7 +860,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         let tg = dir.path().join("result.json");
-        std::fs::write(&tg, format!("{{\"name\": \"x\", \"messages\": [{messages}]}}")).unwrap();
+        std::fs::write(
+            &tg,
+            format!("{{\"name\": \"x\", \"messages\": [{messages}]}}"),
+        )
+        .unwrap();
         let source = import_source_for(&tg).unwrap().unwrap();
         assert_eq!(source.name(), "telegram");
     }

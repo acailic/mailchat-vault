@@ -163,7 +163,7 @@ pub fn is_telegram_export_reader<R: std::io::Read>(reader: R) -> bool {
     serde_json::from_reader::<std::io::BufReader<R>, TelegramDetect>(std::io::BufReader::new(
         reader,
     ))
-        .is_ok()
+    .is_ok()
 }
 
 /// Timestamp: `date_unixtime` is UTC-correct and wins; the naive local
