@@ -27,6 +27,8 @@
 //!   incremental embedding job) and the FTS+vector hybrid ranking used by
 //!   the Ask pipeline.
 //! - [`query`]: paged/filtered search requests and chat-thread context.
+//! - [`stats`]: archive statistics for the dashboard (totals, date range,
+//!   counts by source/day/chat/author).
 
 pub mod chat_export;
 pub mod demo;
@@ -40,6 +42,7 @@ pub mod message;
 pub mod query;
 pub mod search;
 pub mod signal;
+pub mod stats;
 pub mod storage;
 pub mod telegram;
 pub mod util;

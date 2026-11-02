@@ -22,6 +22,36 @@ export interface Stats {
   by_source: SourceCount[];
 }
 
+export interface DayCount {
+  /** UTC day as "YYYY-MM-DD". */
+  day: string;
+  count: number;
+}
+
+export interface ChatCount {
+  source: string;
+  chat_id: string;
+  count: number;
+}
+
+export interface AuthorCount {
+  /** Empty for messages whose author is unknown. */
+  author: string;
+  count: number;
+}
+
+/** Dashboard aggregates: one `archive_stats` round trip. */
+export interface ArchiveStats {
+  total: number;
+  /** RFC 3339 UTC; null when nothing in the archive is dated. */
+  first_sent_at: string | null;
+  last_sent_at: string | null;
+  by_source: SourceCount[];
+  by_day: DayCount[];
+  top_chats: ChatCount[];
+  top_authors: AuthorCount[];
+}
+
 export interface IngestSummary {
   source: string;
   seen: number;

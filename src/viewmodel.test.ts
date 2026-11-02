@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { ChatContext, Message, SearchHit } from "./types";
+import type { ArchiveStats, ChatContext, Message, SearchHit } from "./types";
 import {
   attachmentOf,
+  barHeightPct,
+  dashboardSummary,
+  dayBars,
+  formatCount,
   groupHits,
   highlightSegments,
   mediaOf,
@@ -279,6 +283,127 @@ describe("mediaOf / attachmentOf", () => {
     const tg = JSON.stringify({ photo: "photos/p.jpg", text: "" });
     expect(mediaOf(tg)).toEqual([]);
     expect(attachmentOf(tg)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Statistics dashboard
+// ---------------------------------------------------------------------------
+
+function day(dayStr: string, count: number) {
+  return { day: dayStr, count };
+}
+
+describe("dayBars", () => {
+  it("keeps daily bars while they fit", () => {
+    const days = [day("2026-01-01", 3), day("2026-01-02", 4)];
+    expect(dayBars(days, 10)).toEqual([
+      { label: "2026-01-01", count: 3 },
+      { label: "2026-01-02", count: 4 },
+    ]);
+  });
+
+  it("merges into month buckets when days exceed the bar budget", () => {
+    const days = [
+      day("2026-01-01", 1),
+      day("2026-01-31", 2),
+      day("2026-02-01", 3),
+      day("2026-02-28", 4),
+    ];
+    expect(dayBars(days, 2)).toEqual([
+      { label: "2026-01", count: 3 },
+      { label: "2026-02", count: 7 },
+    ]);
+  });
+
+  it("falls back to year buckets when months still exceed the budget", () => {
+    const days: Array<{ day: string; count: number }> = [];
+    for (let m = 1; m <= 12; m++) {
+      for (let d = 1; d <= 28; d++) {
+        days.push(day(`2025-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`, 1));
+      }
+      days.push(day(`2026-${String(m).padStart(2, "0")}-15`, 2));
+    }
+    const bars = dayBars(days, 6);
+    expect(bars).toEqual([
+      { label: "2025", count: 336 },
+      { label: "2026", count: 24 },
+    ]);
+  });
+
+  it("preserves ascending order and never emits empty buckets", () => {
+    const days = [day("2024-12-30", 1), day("2024-12-31", 2), day("2025-01-01", 5)];
+    const bars = dayBars(days, 2);
+    expect(bars).toEqual([
+      { label: "2024-12", count: 3 },
+      { label: "2025-01", count: 5 },
+    ]);
+  });
+
+  it("falls through to years when even months overflow the budget", () => {
+    const days = [day("2024-12-31", 1), day("2026-01-01", 5)];
+    expect(dayBars(days, 1).map((b) => b.label)).toEqual(["2024", "2026"]);
+  });
+});
+
+describe("barHeightPct", () => {
+  it("scales counts against the maximum", () => {
+    expect(barHeightPct(50, 100)).toBe(50);
+    expect(barHeightPct(100, 100)).toBe(100);
+    expect(barHeightPct(0, 100)).toBe(0);
+  });
+
+  it("never renders an invisible bar for a nonzero count", () => {
+    expect(barHeightPct(1, 1_000_000)).toBe(1);
+  });
+
+  it("degrades to zero without a positive maximum", () => {
+    expect(barHeightPct(5, 0)).toBe(0);
+  });
+});
+
+describe("formatCount", () => {
+  it("groups thousands deterministically", () => {
+    expect(formatCount(0)).toBe("0");
+    expect(formatCount(999)).toBe("999");
+    expect(formatCount(1234567)).toBe("1,234,567");
+  });
+});
+
+const DASH: ArchiveStats = {
+  total: 1_234_567,
+  first_sent_at: "2018-01-08T08:00:00Z",
+  last_sent_at: "2026-11-01T23:59:59Z",
+  by_source: [
+    { source: "mbox", count: 700_000 },
+    { source: "whatsapp", count: 534_567 },
+  ],
+  by_day: [day("2018-01-08", 12), day("2026-11-01", 30)],
+  top_chats: [{ source: "whatsapp", chat_id: "family", count: 100_000 }],
+  top_authors: [{ author: "ana", count: 90_000 }],
+};
+
+describe("dashboardSummary", () => {
+  it("summarizes total, sources, and the date range", () => {
+    expect(dashboardSummary(DASH)).toBe(
+      "1,234,567 messages · 2 sources · 2018-01-08 → 2026-11-01",
+    );
+  });
+
+  it("an empty archive is a single word", () => {
+    expect(dashboardSummary({ ...DASH, total: 0 })).toBe("empty archive");
+  });
+
+  it("handles undated archives and singular sources", () => {
+    expect(
+      dashboardSummary({
+        ...DASH,
+        total: 5,
+        first_sent_at: null,
+        last_sent_at: null,
+        by_source: [{ source: "mbox", count: 5 }],
+      }),
+    ).toBe("5 messages · 1 source · no dates");
   });
 });
 
