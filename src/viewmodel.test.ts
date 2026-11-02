@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { ArchiveStats, ChatContext, Message, SearchHit } from "./types";
 import {
   attachmentOf,
-||||||| parent of d72107e (feat: statistics dashboard — archive aggregates + CSS-bar dashboard UI)
   barHeightPct,
   dashboardSummary,
   dayBars,
@@ -284,7 +283,10 @@ describe("mediaOf / attachmentOf", () => {
     const tg = JSON.stringify({ photo: "photos/p.jpg", text: "" });
     expect(mediaOf(tg)).toEqual([]);
     expect(attachmentOf(tg)).toBeNull();
-||||||| parent of d72107e (feat: statistics dashboard — archive aggregates + CSS-bar dashboard UI)
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Statistics dashboard
 // ---------------------------------------------------------------------------
 

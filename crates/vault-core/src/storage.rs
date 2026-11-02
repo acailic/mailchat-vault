@@ -345,9 +345,9 @@ const MIGRATIONS: &[(i64, &str)] = &[
         6,
         // Materialized counters for the statistics dashboard, maintained by
         // triggers on every write so reads stay O(number of groups) instead
-        // of GROUP BY scans over every message row — the dashboard answers
+        // of GROUP BY scans over every archive row — the dashboard answers
         // within its 100 ms budget on million-message archives (asserted by
-        // tests/stats_perf.rs). The `''` day (unknown sent_at) and `''`
+        // tests/stats_perf.rs). The `''` day (unknown sent_instant) and `''`
         // chat_id groups are stored too and filtered on read, so the
         // counters always sum to COUNT(*).
         r#"
@@ -373,57 +373,58 @@ const MIGRATIONS: &[(i64, &str)] = &[
         CREATE INDEX idx_stats_chat_n ON stats_chat (n DESC, source, chat_id);
         CREATE INDEX idx_stats_author_n ON stats_author (n DESC, author);
 
-        CREATE TRIGGER stats_ai AFTER INSERT ON messages BEGIN
-            INSERT INTO stats_source (source, n) VALUES (NEW.source, 1)
+        CREATE TRIGGER stats_ai AFTER INSERT ON archive_messages BEGIN
+            INSERT INTO stats_source (source, n) VALUES (NEW.source_instance_id, 1)
                 ON CONFLICT (source) DO UPDATE SET n = n + 1;
-            INSERT INTO stats_day (day, n) VALUES (substr(NEW.sent_at, 1, 10), 1)
+            INSERT INTO stats_day (day, n) VALUES (COALESCE(substr(NEW.sent_instant, 1, 10), ''), 1)
                 ON CONFLICT (day) DO UPDATE SET n = n + 1;
-            INSERT INTO stats_chat (source, chat_id, n) VALUES (NEW.source, NEW.chat_id, 1)
+            INSERT INTO stats_chat (source, chat_id, n) VALUES (NEW.source_instance_id, NEW.chat_id, 1)
                 ON CONFLICT (source, chat_id) DO UPDATE SET n = n + 1;
             INSERT INTO stats_author (author, n) VALUES (NEW.author, 1)
                 ON CONFLICT (author) DO UPDATE SET n = n + 1;
         END;
-        CREATE TRIGGER stats_ad AFTER DELETE ON messages BEGIN
-            INSERT INTO stats_source (source, n) VALUES (OLD.source, -1)
+        CREATE TRIGGER stats_ad AFTER DELETE ON archive_messages BEGIN
+            INSERT INTO stats_source (source, n) VALUES (OLD.source_instance_id, -1)
                 ON CONFLICT (source) DO UPDATE SET n = n - 1;
-            INSERT INTO stats_day (day, n) VALUES (substr(OLD.sent_at, 1, 10), -1)
+            INSERT INTO stats_day (day, n) VALUES (COALESCE(substr(OLD.sent_instant, 1, 10), ''), -1)
                 ON CONFLICT (day) DO UPDATE SET n = n - 1;
-            INSERT INTO stats_chat (source, chat_id, n) VALUES (OLD.source, OLD.chat_id, -1)
+            INSERT INTO stats_chat (source, chat_id, n) VALUES (OLD.source_instance_id, OLD.chat_id, -1)
                 ON CONFLICT (source, chat_id) DO UPDATE SET n = n - 1;
             INSERT INTO stats_author (author, n) VALUES (OLD.author, -1)
                 ON CONFLICT (author) DO UPDATE SET n = n - 1;
         END;
-        -- The app only ever inserts messages, but the counters track
+        -- The app only ever inserts archive rows, but the counters track
         -- UPDATEs too so the invariant (sums == COUNT(*)) holds under any
         -- write path. Fires only when a counter-relevant column changes.
-        CREATE TRIGGER stats_au AFTER UPDATE OF source, chat_id, author, sent_at ON messages BEGIN
-            INSERT INTO stats_source (source, n) VALUES (OLD.source, -1)
+        CREATE TRIGGER stats_au AFTER UPDATE OF source_instance_id, chat_id, author, sent_instant ON archive_messages BEGIN
+            INSERT INTO stats_source (source, n) VALUES (OLD.source_instance_id, -1)
                 ON CONFLICT (source) DO UPDATE SET n = n - 1;
-            INSERT INTO stats_day (day, n) VALUES (substr(OLD.sent_at, 1, 10), -1)
+            INSERT INTO stats_day (day, n) VALUES (COALESCE(substr(OLD.sent_instant, 1, 10), ''), -1)
                 ON CONFLICT (day) DO UPDATE SET n = n - 1;
-            INSERT INTO stats_chat (source, chat_id, n) VALUES (OLD.source, OLD.chat_id, -1)
+            INSERT INTO stats_chat (source, chat_id, n) VALUES (OLD.source_instance_id, OLD.chat_id, -1)
                 ON CONFLICT (source, chat_id) DO UPDATE SET n = n - 1;
             INSERT INTO stats_author (author, n) VALUES (OLD.author, -1)
                 ON CONFLICT (author) DO UPDATE SET n = n - 1;
-            INSERT INTO stats_source (source, n) VALUES (NEW.source, 1)
+            INSERT INTO stats_source (source, n) VALUES (NEW.source_instance_id, 1)
                 ON CONFLICT (source) DO UPDATE SET n = n + 1;
-            INSERT INTO stats_day (day, n) VALUES (substr(NEW.sent_at, 1, 10), 1)
+            INSERT INTO stats_day (day, n) VALUES (COALESCE(substr(NEW.sent_instant, 1, 10), ''), 1)
                 ON CONFLICT (day) DO UPDATE SET n = n + 1;
-            INSERT INTO stats_chat (source, chat_id, n) VALUES (NEW.source, NEW.chat_id, 1)
+            INSERT INTO stats_chat (source, chat_id, n) VALUES (NEW.source_instance_id, NEW.chat_id, 1)
                 ON CONFLICT (source, chat_id) DO UPDATE SET n = n + 1;
             INSERT INTO stats_author (author, n) VALUES (NEW.author, 1)
                 ON CONFLICT (author) DO UPDATE SET n = n + 1;
         END;
 
-        -- Backfill pre-existing archives (fresh databases are empty).
+        -- Backfill pre-existing archives from the canonical rows the
+        -- earlier migrations just populated (fresh databases are empty).
         INSERT INTO stats_source (source, n)
-            SELECT source, COUNT(*) FROM messages GROUP BY source;
+            SELECT source_instance_id, COUNT(*) FROM archive_messages GROUP BY source_instance_id;
         INSERT INTO stats_day (day, n)
-            SELECT substr(sent_at, 1, 10), COUNT(*) FROM messages GROUP BY 1;
+            SELECT COALESCE(substr(sent_instant, 1, 10), ''), COUNT(*) FROM archive_messages GROUP BY 1;
         INSERT INTO stats_chat (source, chat_id, n)
-            SELECT source, chat_id, COUNT(*) FROM messages GROUP BY 1, 2;
+            SELECT source_instance_id, chat_id, COUNT(*) FROM archive_messages GROUP BY 1, 2;
         INSERT INTO stats_author (author, n)
-            SELECT author, COUNT(*) FROM messages GROUP BY author;
+            SELECT author, COUNT(*) FROM archive_messages GROUP BY author;
         "#,
     ),
 ];
@@ -828,9 +829,12 @@ impl Storage {
     /// on million-message archives; the numbers are identical by
     /// construction because every write path maintains the counters.
     pub fn stats(&self) -> Result<Stats> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT source, n FROM stats_source WHERE n > 0 ORDER BY n DESC, source")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT COALESCE(si.legacy_namespace, si.id) AS label, s.n \
+             FROM stats_source AS s \
+             JOIN source_instances AS si ON si.id = s.source \
+             WHERE s.n > 0 ORDER BY s.n DESC, label",
+        )?;
         let by_source = stmt
             .query_map([], |row| {
                 Ok(SourceCount {
@@ -870,12 +874,12 @@ impl Storage {
         // filter `!= ''`) degrades to a full index scan. `> ''` skips the
         // empty-string prefix of unknown timestamps.
         let first_sent_at: Option<String> = self.conn.query_row(
-            "SELECT MIN(sent_at) FROM messages WHERE sent_at > ''",
+            "SELECT MIN(sent_instant) FROM archive_messages WHERE sent_instant > ''",
             [],
             |row| row.get(0),
         )?;
         let last_sent_at: Option<String> = self.conn.query_row(
-            "SELECT MAX(sent_at) FROM messages WHERE sent_at > ''",
+            "SELECT MAX(sent_instant) FROM archive_messages WHERE sent_instant > ''",
             [],
             |row| row.get(0),
         )?;
@@ -907,8 +911,11 @@ impl Storage {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         let mut chat_stmt = self.conn.prepare(
-            "SELECT source, chat_id, n FROM stats_chat WHERE chat_id != '' AND n > 0 \
-             ORDER BY n DESC, source, chat_id LIMIT ?1",
+            "SELECT COALESCE(si.legacy_namespace, si.id) AS label, c.chat_id, c.n \
+             FROM stats_chat AS c \
+             JOIN source_instances AS si ON si.id = c.source \
+             WHERE c.chat_id != '' AND c.n > 0 \
+             ORDER BY c.n DESC, label, c.chat_id LIMIT ?1",
         )?;
         let top_chats = chat_stmt
             .query_map([top], |row| {

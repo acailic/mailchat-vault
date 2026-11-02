@@ -224,10 +224,10 @@ fn same_day_counts_across_months_and_years_order_correctly() {
 
 /// The counter tables are maintained by triggers on EVERY write path, not
 /// just `insert_message`: raw INSERT, UPDATE, and DELETE against the
-/// messages table must keep the invariant that every counter sums to
-/// COUNT(*) and that the aggregates match a fresh GROUP BY. The product
-/// itself never updates or deletes messages, but the invariant must hold
-/// under any writer.
+/// canonical archive_messages table must keep the invariant that every
+/// counter sums to COUNT(*) and that the aggregates match a fresh GROUP
+/// BY. The product itself never updates or deletes archive rows, but the
+/// invariant must hold under any writer.
 #[test]
 fn counters_track_raw_inserts_updates_and_deletes() {
     let dir = tempfile::tempdir().unwrap();
@@ -242,20 +242,26 @@ fn counters_track_raw_inserts_updates_and_deletes() {
     {
         let raw = rusqlite::Connection::open(&db).unwrap();
         raw.execute(
-            "INSERT INTO messages (source, external_id, channel, chat_id, author, sent_at, body)
-             VALUES ('tg', 'raw-1', 'chat', 'beta', 'jelena', '2026-01-03T00:00:00Z', 'raw insert')",
+            "INSERT INTO source_instances (id, legacy_namespace, kind, label)
+             VALUES ('si-tg', 'tg', 'legacy', 'tg')",
+            [],
+        )
+        .unwrap();
+        raw.execute(
+            "INSERT INTO archive_messages (source_instance_id, external_id, channel, chat_id, author, sent_instant, original_timestamp, time_confidence, body)
+             VALUES ('si-tg', 'raw-1', 'chat', 'beta', 'jelena', '2026-01-03T00:00:00Z', '2026-01-03T00:00:00Z', 'legacy_assumed', 'raw insert')",
             [],
         )
         .unwrap();
         // Move a message to a different chat, author, and day.
         raw.execute(
-            "UPDATE messages SET chat_id = 'beta', author = 'ana', sent_at = '2026-01-04T00:00:00Z'
+            "UPDATE archive_messages SET chat_id = 'beta', author = 'ana', sent_instant = '2026-01-04T00:00:00Z'
              WHERE external_id = '2'",
             [],
         )
         .unwrap();
         // And delete one entirely.
-        raw.execute("DELETE FROM messages WHERE external_id = '3'", [])
+        raw.execute("DELETE FROM archive_messages WHERE external_id = '3'", [])
             .unwrap();
     }
 
@@ -307,7 +313,7 @@ fn counters_track_raw_inserts_updates_and_deletes() {
     // Cross-check against live GROUP BYs over the raw table.
     let raw = rusqlite::Connection::open(&db).unwrap();
     let live_total: i64 = raw
-        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM archive_messages", [], |r| r.get(0))
         .unwrap();
     let counter_total: i64 = raw
         .query_row("SELECT SUM(n) FROM stats_source", [], |r| r.get(0))
@@ -315,7 +321,7 @@ fn counters_track_raw_inserts_updates_and_deletes() {
     assert_eq!(live_total, counter_total);
     let live_day: i64 = raw
         .query_row(
-            "SELECT COUNT(*) FROM messages WHERE sent_at != ''",
+            "SELECT COUNT(*) FROM archive_messages WHERE sent_instant != ''",
             [],
             |r| r.get(0),
         )
@@ -328,7 +334,7 @@ fn counters_track_raw_inserts_updates_and_deletes() {
     assert_eq!(live_day, counter_day);
     let live_chat: i64 = raw
         .query_row(
-            "SELECT COUNT(*) FROM messages WHERE chat_id != ''",
+            "SELECT COUNT(*) FROM archive_messages WHERE chat_id != ''",
             [],
             |r| r.get(0),
         )
@@ -354,7 +360,7 @@ fn counters_shrink_back_to_zero_when_messages_are_deleted() {
     put(&s, "wa", "2", "ana", "2026-01-02T00:00:00Z", "alpha");
     {
         let raw = rusqlite::Connection::open(&db).unwrap();
-        raw.execute("DELETE FROM messages", []).unwrap();
+        raw.execute("DELETE FROM archive_messages", []).unwrap();
     }
     let dash = s.archive_stats(10).unwrap();
     assert_eq!(dash.total, 0);

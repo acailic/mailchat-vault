@@ -706,7 +706,10 @@ describe("chat export import", () => {
     tauri.handlers.set("import_chat_export", () => Promise.reject("bad export"));
     $("#chat-import-btn").click();
     await vi.waitFor(() => expect($("#import-status").textContent).toBe("Import failed: bad export"));
-||||||| parent of d72107e (feat: statistics dashboard — archive aggregates + CSS-bar dashboard UI)
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Statistics dashboard
 // ---------------------------------------------------------------------------
 
