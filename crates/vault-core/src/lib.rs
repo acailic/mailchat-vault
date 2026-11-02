@@ -18,6 +18,8 @@
 //! - [`media`]: content-addressed media store and the extraction pass that
 //!   links export files to messages.
 //! - [`imap`]: the incremental IMAP/Gmail source.
+//! - [`watch`]: automatic folder watching (background import of new or
+//!   modified export files from user-chosen folders).
 //! - [`search`]: free-text to FTS5 MATCH query building.
 //! - [`llm`]: LLM-assisted search — natural language to an FTS5 plan, then
 //!   a summary over the top results (privacy-scoped RAG).
@@ -42,6 +44,7 @@ pub mod storage;
 pub mod telegram;
 pub mod util;
 pub mod vector;
+pub mod watch;
 pub mod whatsapp;
 
 use thiserror::Error;

@@ -88,6 +88,14 @@
       .page-info { font-size: 13px; color: gray; }
       #import { margin-top: 24px; border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent); padding-top: 12px; }
       #keyboard-hint { margin-top: 8px; font-size: 12px; color: gray; }
+      .watch-list { list-style: none; margin: 6px 0 0; padding: 0; font-size: 13px; }
+      .watch-list li { padding: 3px 0; }
+      .watch-folder { display: flex; gap: 8px; align-items: center; }
+      .watch-folder .path { word-break: break-all; }
+      .watch-remove { font-size: 12px; padding: 2px 8px; }
+      .watch-event { color: gray; word-break: break-all; }
+      .watch-event.failed { color: crimson; }
+      .watch-event.imported { color: inherit; }
 
       /* Detail panel: fixed right column, overlay on narrow windows. */
       #detail {
@@ -224,6 +232,21 @@
         <button id="imap-sync-btn" type="button">Sync</button>
       </div>
       <div id="imap-status" class="meta" style="margin-top: 6px"></div>
+    </section>
+
+    <section>
+      <h2>Folder watching</h2>
+      <div class="row">
+        <input id="watch-path" type="text" placeholder="/path/to/folder with .mbox / chat exports" />
+        <button id="watch-btn" type="button">Watch</button>
+        <button id="watch-add-btn" type="button">Pick folder…</button>
+      </div>
+      <div id="watch-status" class="meta" style="margin-top: 6px; min-height: 1em"></div>
+      <ul id="watch-folders" class="watch-list"></ul>
+      <ul id="watch-events" class="watch-list"></ul>
+      <p id="watch-hint" class="meta" style="margin: 6px 0 0">
+        New or modified .mbox, WhatsApp .txt, and Telegram / Signal .json files in watched folders are imported automatically (debounced; re-imports never duplicate). Unrecognized files are skipped and reported above.
+      </p>
     </section>
 
     <aside id="detail" aria-label="Message detail"></aside>

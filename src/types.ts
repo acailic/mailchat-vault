@@ -51,6 +51,22 @@ export interface ChatImportOutcome {
   media: MediaSummary | null;
 }
 
+/** Mirrors `vault_core::watch::WatchEvent` (serde tagged, snake_case). */
+export type WatchEvent =
+  | { kind: "folder_added"; path: string }
+  | { kind: "folder_removed"; path: string }
+  | { kind: "imported"; path: string; summary: IngestSummary }
+  | { kind: "skipped"; path: string; reason: string }
+  | { kind: "failed"; path: string; error: string };
+
+/** Mirrors `vault_core::watch::WatchSnapshot` (serde field names). */
+export interface WatchSnapshot {
+  running: boolean;
+  folders: string[];
+  pending: number;
+  events: WatchEvent[];
+}
+
 /** Search request: free text plus conjunctive facet filters. */
 export interface SearchQuery {
   text: string;

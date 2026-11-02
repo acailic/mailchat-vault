@@ -137,13 +137,33 @@ pub fn parse_telegram(bytes: &[u8], chat_id_fallback: &str) -> Result<Collected>
     Ok(Collected { messages, failed })
 }
 
+/// Detection-only view of the export: it just has to carry a `messages`
+/// array. `IgnoredAny` elements are zero-sized, so deserializing skips
+/// message bodies without building a [`serde_json::Value`] tree — a huge
+/// file costs no memory proportional to its size.
+#[derive(Deserialize)]
+#[allow(dead_code)] // the field exists to make serde enforce array-ness
+struct TelegramDetect {
+    messages: Vec<serde::de::IgnoredAny>,
+}
+
 /// True when the bytes are a Telegram export: JSON carrying a `messages`
 /// array.
 pub fn is_telegram_export(bytes: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(bytes)
-        .ok()
-        .and_then(|v| v.get("messages").map(Value::is_array))
-        .unwrap_or(false)
+    serde_json::from_slice::<TelegramDetect>(bytes).is_ok()
+}
+
+/// Same check, streaming from a reader: the file is walked token by token
+/// and never buffered whole, so detection reads of arbitrarily large files
+/// stay bounded. The reader is wrapped in a [`std::io::BufReader`] so the
+/// scan is I/O-bound instead of issuing one read call per byte —
+/// unbuffered, a 20 MB file costs ~20M single-byte reads and stalls the
+/// watch loop for seconds.
+pub fn is_telegram_export_reader<R: std::io::Read>(reader: R) -> bool {
+    serde_json::from_reader::<std::io::BufReader<R>, TelegramDetect>(std::io::BufReader::new(
+        reader,
+    ))
+    .is_ok()
 }
 
 /// Timestamp: `date_unixtime` is UTC-correct and wins; the naive local

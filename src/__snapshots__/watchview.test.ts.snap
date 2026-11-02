@@ -1,0 +1,3 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`renderWatchEvents > renders newest first, capped at 20, with kind classes 1`] = `"<li class="watch-event imported">imported /x/a.mbox: 1 new</li><li class="watch-event skipped">skipped /x/n.txt (not an export)</li><li class="watch-event failed">failed /x/gone — io error</li><li class="watch-event folder_added">now watching /x</li>"`;

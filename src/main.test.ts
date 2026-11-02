@@ -10,7 +10,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Window } from "happy-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChatContext, Message, SearchHit, SearchPage, Stats } from "./types";
+import type { ChatContext, Message, SearchHit, SearchPage, Stats, WatchSnapshot } from "./types";
 
 // Timestamps must render timezone-independently here (same approach as
 // render.test.ts); formatSentAt itself is covered by format.test.ts.
@@ -36,9 +36,20 @@ vi.mock("@tauri-apps/api/core", () => ({
   },
 }));
 
-// The chat-export import opens the OS file picker; stub it per test.
+// The chat-export import and the folder-watching panel both open the OS
+// file/folder picker; stub it per test.
 const dialog = vi.hoisted(() => ({ open: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: dialog.open }));
+
+const tauriEvents = vi.hoisted(() => ({
+  listeners: new Map<string, (e: { payload: unknown }) => void>(),
+}));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: (name: string, handler: (e: { payload: unknown }) => void) => {
+    tauriEvents.listeners.set(name, handler);
+    return Promise.resolve(() => tauriEvents.listeners.delete(name));
+  },
+}));
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -189,6 +200,8 @@ beforeEach(() => {
   tauri.calls.length = 0;
   tauri.handlers.clear();
   tauri.handlers.set("stats", () => STATS);
+  tauriEvents.listeners.clear();
+  dialog.open.mockReset();
 });
 
 afterEach(() => {
@@ -796,5 +809,206 @@ describe("ask and local embeddings", () => {
     await flush();
     expect(tauri.calls.filter((c) => c.cmd === "llm_ask")).toHaveLength(0);
     expect($("#ask-status").textContent).toBe("Ask a question first.");
+  });
+});
+
+// Folder watching
+// ---------------------------------------------------------------------------
+
+const EMPTY_WATCH: WatchSnapshot = {
+  running: true,
+  folders: [],
+  pending: 0,
+  events: [],
+};
+
+const ARMED_WATCH: WatchSnapshot = {
+  running: true,
+  folders: ["/home/me/exports"],
+  pending: 1,
+  events: [
+    {
+      kind: "imported",
+      path: "/home/me/exports/mail.mbox",
+      summary: { source: "mbox", seen: 3, inserted: 2, skipped: 1, failed: 0 },
+    },
+    { kind: "folder_added", path: "/home/me/exports" },
+  ],
+};
+
+function watchCalls(): Array<{ cmd: string; args: unknown }> {
+  return tauri.calls.filter((c) => c.cmd.startsWith("watch_"));
+}
+
+function emitWatch(snapshot: WatchSnapshot): void {
+  const handler = tauriEvents.listeners.get("watch-status");
+  if (!handler) throw new Error("no watch-status listener registered");
+  handler({ payload: snapshot });
+}
+
+describe("folder watching", () => {
+  it("boots with the empty status and a registered watch-status listener", async () => {
+    tauri.handlers.set("watch_status", () => EMPTY_WATCH);
+    await boot();
+    await vi.waitFor(() =>
+      expect($("#watch-status").textContent).toContain("No folders watched yet"),
+    );
+    expect(tauriEvents.listeners.has("watch-status")).toBe(true);
+    expect(watchCalls()).toHaveLength(1); // only the initial watch_status
+  });
+
+  it("renders folders, pending count, and recent events from the snapshot", async () => {
+    tauri.handlers.set("watch_status", () => ARMED_WATCH);
+    await boot();
+    await vi.waitFor(() =>
+      expect($("#watch-status").textContent).toContain("Watching 1 folder"),
+    );
+    expect($("#watch-status").textContent).toContain("1 file settling");
+    const folders = [...win.document.querySelectorAll("#watch-folders .watch-folder .path")];
+    expect(folders.map((f) => f.textContent)).toEqual(["/home/me/exports"]);
+    const events = [...win.document.querySelectorAll("#watch-events .watch-event")];
+    expect(events.map((e) => e.textContent)).toEqual([
+      "imported /home/me/exports/mail.mbox: 2 new, 1 already present",
+      "now watching /home/me/exports",
+    ]);
+  });
+
+  it("Add folder… picks a directory, invokes watch_add_folder, renders the result, refreshes stats", async () => {
+    dialog.open.mockResolvedValue("/home/me/exports");
+    tauri.handlers.set("watch_status", () => EMPTY_WATCH);
+    tauri.handlers.set("watch_add_folder", () => ARMED_WATCH);
+    await boot();
+
+    const statsBefore = tauri.calls.filter((c) => c.cmd === "stats").length;
+    $("#watch-add-btn").click();
+    await vi.waitFor(() => expect(watchCalls().some((c) => c.cmd === "watch_add_folder")).toBe(true));
+
+    expect(dialog.open).toHaveBeenCalledWith(
+      expect.objectContaining({ directory: true, multiple: false }),
+    );
+    const add = watchCalls().find((c) => c.cmd === "watch_add_folder")!;
+    expect(add.args).toEqual({ path: "/home/me/exports" });
+    await vi.waitFor(() =>
+      expect($("#watch-status").textContent).toContain("Watching 1 folder"),
+    );
+    // A new folder may have imported files: stats are refreshed.
+    await vi.waitFor(() =>
+      expect(tauri.calls.filter((c) => c.cmd === "stats").length).toBeGreaterThan(statsBefore),
+    );
+  });
+
+  it("a cancelled folder pick invokes nothing", async () => {
+    dialog.open.mockResolvedValue(null);
+    tauri.handlers.set("watch_status", () => EMPTY_WATCH);
+    await boot();
+    $("#watch-add-btn").click();
+    await vi.waitFor(() => expect(dialog.open).toHaveBeenCalled());
+    await flush();
+    expect(watchCalls().some((c) => c.cmd === "watch_add_folder")).toBe(false);
+  });
+
+  it("Watch with a typed path invokes watch_add_folder and clears the input", async () => {
+    tauri.handlers.set("watch_status", () => EMPTY_WATCH);
+    tauri.handlers.set("watch_add_folder", () => ARMED_WATCH);
+    await boot();
+
+    input("#watch-path").value = "/home/me/exports";
+    pressKey(input("#watch-path"), "Enter");
+    await vi.waitFor(() =>
+      expect(watchCalls().some((c) => c.cmd === "watch_add_folder")).toBe(true),
+    );
+    const add = watchCalls().find((c) => c.cmd === "watch_add_folder")!;
+    expect(add.args).toEqual({ path: "/home/me/exports" });
+    await vi.waitFor(() => expect(input("#watch-path").value).toBe(""));
+    await vi.waitFor(() =>
+      expect($("#watch-status").textContent).toContain("Watching 1 folder"),
+    );
+  });
+
+  it("Watch with an empty typed path shows a hint and invokes nothing", async () => {
+    tauri.handlers.set("watch_status", () => EMPTY_WATCH);
+    await boot();
+    pressKey(input("#watch-path"), "Enter");
+    await vi.waitFor(() =>
+      expect($("#watch-status").textContent).toContain("Type a folder path first"),
+    );
+    expect(watchCalls().some((c) => c.cmd === "watch_add_folder")).toBe(false);
+  });
+
+  it("an add failure is shown as an error, not thrown", async () => {
+    dialog.open.mockResolvedValue("/nope");
+    tauri.handlers.set("watch_status", () => EMPTY_WATCH);
+    tauri.handlers.set("watch_add_folder", () => Promise.reject("not a folder"));
+    await boot();
+    $("#watch-add-btn").click();
+    await vi.waitFor(() =>
+      expect($("#watch-status").textContent).toContain("Could not watch folder: not a folder"),
+    );
+    expect($<HTMLButtonElement>("#watch-add-btn").disabled).toBe(false);
+  });
+
+  it("a failed typed-path add keeps the typed path for correction", async () => {
+    tauri.handlers.set("watch_status", () => EMPTY_WATCH);
+    tauri.handlers.set("watch_add_folder", () => Promise.reject("not a folder"));
+    await boot();
+
+    input("#watch-path").value = "/home/me/exportz";
+    pressKey(input("#watch-path"), "Enter");
+    await vi.waitFor(() =>
+      expect($("#watch-status").textContent).toContain("Could not watch folder"),
+    );
+    expect(input("#watch-path").value).toBe("/home/me/exportz");
+
+    tauri.handlers.set("watch_add_folder", () => ARMED_WATCH);
+    pressKey(input("#watch-path"), "Enter");
+    await vi.waitFor(() => expect(input("#watch-path").value).toBe(""));
+  });
+
+  it("watch-status events re-render and an imported newest event refreshes stats", async () => {
+    tauri.handlers.set("watch_status", () => EMPTY_WATCH);
+    await boot();
+    await vi.waitFor(() => expect($("#watch-status").textContent).toContain("No folders"));
+
+    const statsBefore = tauri.calls.filter((c) => c.cmd === "stats").length;
+    emitWatch(ARMED_WATCH);
+    await vi.waitFor(() =>
+      expect($("#watch-folders .watch-folder .path")!.textContent).toBe("/home/me/exports"),
+    );
+    // Newest event is "imported" → chips/stats refresh fires.
+    await vi.waitFor(() =>
+      expect(tauri.calls.filter((c) => c.cmd === "stats").length).toBe(statsBefore + 1),
+    );
+  });
+
+  it("watch-status events with no import do not refresh stats", async () => {
+    tauri.handlers.set("watch_status", () => EMPTY_WATCH);
+    await boot();
+    const statsBefore = tauri.calls.filter((c) => c.cmd === "stats").length;
+    // A pending-only update (folder armed, newest event is not an import).
+    emitWatch({
+      running: true,
+      folders: ["/home/me/exports"],
+      pending: 2,
+      events: [{ kind: "folder_added", path: "/home/me/exports" }],
+    });
+    await vi.waitFor(() => expect($("#watch-status").textContent).toContain("2 files settling"));
+    expect(tauri.calls.filter((c) => c.cmd === "stats").length).toBe(statsBefore);
+  });
+
+  it("Remove invokes watch_remove_folder with the folder path", async () => {
+    tauri.handlers.set("watch_status", () => ARMED_WATCH);
+    tauri.handlers.set("watch_remove_folder", () => EMPTY_WATCH);
+    await boot();
+    await vi.waitFor(() => expect($("#watch-folders .watch-folder")).toBeTruthy());
+
+    $("#watch-folders .watch-remove").click();
+    await vi.waitFor(() =>
+      expect(watchCalls().some((c) => c.cmd === "watch_remove_folder")).toBe(true),
+    );
+    const remove = watchCalls().find((c) => c.cmd === "watch_remove_folder")!;
+    expect(remove.args).toEqual({ path: "/home/me/exports" });
+    await vi.waitFor(() =>
+      expect($("#watch-status").textContent).toContain("No folders watched yet"),
+    );
   });
 });

@@ -125,7 +125,7 @@ function killTree(child) {
  * make the first newSession still be mid-flight when a client retry lands,
  * which WebKitWebDriver answers with "max active sessions"). */
 const RETRYABLE_SESSION_ERROR =
-  /session not created|maximum number of active sessions|UND_ERR_HEADERS_TIMEOUT|ECONNRESET|ECONNREFUSED/i;
+  /session not created|maximum number of active sessions|UND_ERR_HEADERS_TIMEOUT|UND_ERR_SOCKET|ECONNRESET|ECONNREFUSED/i;
 
 /**
  * Run `fn(browser, ctx)` against a fresh app instance.
