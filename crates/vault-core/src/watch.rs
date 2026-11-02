@@ -492,6 +492,7 @@ fn run_loop(
     loop {
         // Drain filesystem events until the next tick boundary.
         let deadline = Instant::now() + config.tick;
+        let settled_before = pending.len();
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             match fs_rx.recv_timeout(remaining) {
@@ -508,10 +509,17 @@ fn run_loop(
                         },
                         config.max_events,
                     );
+                    drop(snap);
+                    publish(&snapshot, &pending, &on_change);
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
             }
+        }
+        // A drain that armed or disarmed candidates changes the settling
+        // count the status line shows.
+        if pending.len() != settled_before {
+            publish(&snapshot, &pending, &on_change);
         }
 
         // Commands (add/remove folders, shutdown).
@@ -644,6 +652,9 @@ fn remove_folder(
             );
             return Err(e);
         }
+    }
+    for key in &keys {
+        let ks = key.to_string_lossy().into_owned();
         let _ = watcher.unwatch(key);
         pending.retain(|p, _| !p.starts_with(key));
         if snap.folders.contains(&ks) {
