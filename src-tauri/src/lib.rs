@@ -16,6 +16,10 @@
 //!   extraction into the app data `media/` store (the frontend picks the
 //!   file via the dialog plugin).
 //! - `sync_imap` — incremental IMAP/Gmail sync (first live mail source).
+//! - `watch_add_folder` / `watch_remove_folder` / `watch_status` —
+//!   automatic folder watching: new/modified export files in user-chosen
+//!   folders are imported in the background; the UI is kept current via
+//!   `watch-status` window events.
 //! - `seed_demo` — insert the built-in sample messages (idempotent).
 //! - `stats` — archive counts per source (drives the source filter chips).
 
@@ -24,7 +28,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::Utc;
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use vault_core::chat_export::{self, ChatImportOutcome};
 use vault_core::imap::{self, FolderSyncSummary, ImapConfig};
 use vault_core::ingest::{ingest, Collected, IngestSummary, Source};
@@ -35,17 +39,20 @@ use vault_core::mbox::MboxSource;
 use vault_core::query::{ChatContext, SearchPage, SearchQuery};
 use vault_core::storage::Storage;
 use vault_core::vector::{self, EmbedJobSummary, EmbeddingStatus, HashEmbedder};
+use vault_core::watch::{FolderWatcher, WatchSnapshot};
 use vault_core::{demo, message, Error, Result as CoreResult};
 
 mod secrets;
 
 /// Shared app state: one open storage handle guarded by a mutex, the
 /// optional LLM backend (`None` when no API key is configured), and the
-/// local embedder behind hybrid ranking (offline, stateless).
+/// local embedder behind hybrid ranking (offline, stateless), and the
+/// background folder watcher.
 struct AppState {
     storage: Arc<Mutex<Storage>>,
     llm: Option<AnthropicLlm>,
     embedder: HashEmbedder,
+    watcher: FolderWatcher,
 }
 
 /// Result of an IMAP sync: per-folder summaries plus where an entered
@@ -302,6 +309,37 @@ fn seed_demo(state: State<AppState>) -> Result<IngestSummary, String> {
     ingest(&storage, &DemoSource).map_err(|e: Error| e.to_string())
 }
 
+/// Arm a watched folder: existing and new/modified export files
+/// (`.mbox`, WhatsApp `.txt`, Telegram `.json`, Signal conversation
+/// `.json`) under it are imported in the background; re-imports never
+/// duplicate. Returns the fresh status.
+#[tauri::command]
+fn watch_add_folder(state: State<AppState>, path: String) -> Result<WatchSnapshot, String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("pick a folder to watch first".into());
+    }
+    state.watcher.add_folder(path)?;
+    Ok(state.watcher.snapshot())
+}
+
+/// Forget a watched folder (removing one that no longer exists is fine).
+#[tauri::command]
+fn watch_remove_folder(state: State<AppState>, path: String) -> Result<WatchSnapshot, String> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("path is required".into());
+    }
+    state.watcher.remove_folder(path)?;
+    Ok(state.watcher.snapshot())
+}
+
+/// Current watcher status: watched folders, pending files, recent events.
+#[tauri::command]
+fn watch_status(state: State<AppState>) -> WatchSnapshot {
+    state.watcher.snapshot()
+}
+
 /// Archive counts: total and per source.
 #[tauri::command]
 fn stats(state: State<AppState>) -> Result<message::Stats, String> {
@@ -338,10 +376,23 @@ pub fn run() {
                     None
                 }
             };
+            let storage = Arc::new(Mutex::new(storage));
+            // Folder watcher: imports new/modified export files from the
+            // user's chosen folders in the background and pushes every
+            // status change to the UI as a `watch-status` event.
+            let emit_handle = app.handle().clone();
+            let watcher = FolderWatcher::spawn(
+                Arc::clone(&storage),
+                vault_core::watch::WatchConfig::default(),
+                move |snapshot| {
+                    let _ = emit_handle.emit("watch-status", snapshot);
+                },
+            );
             app.manage(AppState {
-                storage: Arc::new(Mutex::new(storage)),
+                storage,
                 llm,
                 embedder: HashEmbedder::new(),
+                watcher,
             });
             app.manage(secrets::Secrets::new());
             Ok(())
@@ -356,6 +407,9 @@ pub fn run() {
             import_mbox,
             import_chat_export,
             sync_imap,
+            watch_add_folder,
+            watch_remove_folder,
+            watch_status,
             seed_demo,
             stats
         ])

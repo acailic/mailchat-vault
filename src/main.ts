@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { formatSentAt, snippet } from "./format";
 import { describePlan, privacyNote, type AskOutcome, type LlmStatus } from "./llmview";
@@ -19,8 +20,10 @@ import type {
   SearchHit,
   SearchPage,
   Stats,
+  WatchSnapshot,
 } from "./types";
 import { groupHits, moveIndex, neighborId, pageModel, splitTerms } from "./viewmodel";
+import { renderWatchEvents, renderWatchFolders, watchStatusText } from "./watchview";
 
 const PAGE_SIZE = 50;
 
@@ -81,6 +84,12 @@ const imapPassInput = document.querySelector<HTMLInputElement>("#imap-pass")!;
 const imapFoldersInput = document.querySelector<HTMLInputElement>("#imap-folders")!;
 const imapSyncButton = document.querySelector<HTMLButtonElement>("#imap-sync-btn")!;
 const imapStatus = document.querySelector<HTMLElement>("#imap-status")!;
+const watchPathInput = document.querySelector<HTMLInputElement>("#watch-path")!;
+const watchButton = document.querySelector<HTMLButtonElement>("#watch-btn")!;
+const watchAddButton = document.querySelector<HTMLButtonElement>("#watch-add-btn")!;
+const watchStatus = document.querySelector<HTMLElement>("#watch-status")!;
+const watchFoldersList = document.querySelector<HTMLUListElement>("#watch-folders")!;
+const watchEventsList = document.querySelector<HTMLUListElement>("#watch-events")!;
 
 // ---------------------------------------------------------------------------
 // State
@@ -571,6 +580,92 @@ async function syncImap(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Folder watching
+// ---------------------------------------------------------------------------
+
+function renderWatchStatus(snapshot: WatchSnapshot): void {
+  watchStatus.textContent = watchStatusText(snapshot);
+  renderWatchFolders(watchFoldersList, snapshot, {
+    onRemove: (path) => void removeWatchFolder(path),
+  });
+  renderWatchEvents(watchEventsList, snapshot.events);
+}
+
+async function refreshWatchStatus(): Promise<void> {
+  try {
+    renderWatchStatus(await invoke<WatchSnapshot>("watch_status"));
+  } catch {
+    // Leave whatever was rendered; the next watch-status event fixes it.
+  }
+}
+
+/** Returns whether the folder is now watched. */
+async function addWatchFolder(path: string): Promise<boolean> {
+  watchStatus.textContent = `Adding ${path}…`;
+  try {
+    renderWatchStatus(await invoke<WatchSnapshot>("watch_add_folder", { path }));
+    await refreshStats();
+    return true;
+  } catch (e) {
+    watchStatus.textContent = `Could not watch folder: ${e}`;
+    return false;
+  }
+}
+
+/** Watch the typed path (Enter or the Watch button). */
+async function watchTypedPath(): Promise<void> {
+  const path = watchPathInput.value.trim();
+  if (!path) {
+    watchStatus.textContent = "Type a folder path first, or use Pick folder…";
+    return;
+  }
+  watchButton.disabled = true;
+  try {
+    if (await addWatchFolder(path)) {
+      watchPathInput.value = "";
+    }
+  } finally {
+    watchButton.disabled = false;
+  }
+}
+
+/** Watch a folder picked with the native directory dialog. */
+async function pickWatchFolder(): Promise<void> {
+  watchAddButton.disabled = true;
+  try {
+    const picked = await open({
+      multiple: false,
+      directory: true,
+      title: "Choose a folder to watch",
+    });
+    if (typeof picked !== "string") {
+      return; // cancelled
+    }
+    await addWatchFolder(picked);
+  } finally {
+    watchAddButton.disabled = false;
+  }
+}
+
+async function removeWatchFolder(path: string): Promise<void> {
+  try {
+    renderWatchStatus(await invoke<WatchSnapshot>("watch_remove_folder", { path }));
+    await refreshStats();
+  } catch (e) {
+    watchStatus.textContent = `Could not remove folder: ${e}`;
+  }
+}
+
+// The backend pushes a fresh snapshot on every watcher change; a newest
+// "imported" event also refreshes the source chips/stats.
+void listen<WatchSnapshot>("watch-status", (event) => {
+  renderWatchStatus(event.payload);
+  if (event.payload.events[0]?.kind === "imported") {
+    void refreshStats();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 
@@ -593,9 +688,15 @@ chatImportButton.addEventListener("click", () => void importChatExport());
 seedButton.addEventListener("click", () => void seedDemo());
 imapSyncButton.addEventListener("click", () => void syncImap());
 embedButton.addEventListener("click", () => void runEmbedJob());
+watchButton.addEventListener("click", () => void watchTypedPath());
+watchPathInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") void watchTypedPath();
+});
+watchAddButton.addEventListener("click", () => void pickWatchFolder());
 
 setStatus("Type something to search, or set a filter to browse.");
 renderAll();
 void refreshStats();
 void refreshLlmNote();
 void refreshEmbedStatus();
+void refreshWatchStatus();

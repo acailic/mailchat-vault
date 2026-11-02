@@ -331,6 +331,15 @@ const MIGRATIONS: &[(i64, &str)] = &[
         CREATE INDEX idx_message_embeddings_model ON message_embeddings (model);
         "#,
     ),
+    (
+        5,
+        r#"
+        CREATE TABLE watched_folders (
+            path     TEXT PRIMARY KEY,
+            added_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        "#,
+    ),
 ];
 
 /// Handle to the vault database.
@@ -1100,6 +1109,35 @@ impl Storage {
             )?;
         }
         Ok(changed)
+    }
+
+    /// Remember a watched folder (idempotent on the canonical path).
+    /// See [`crate::watch`].
+    pub fn add_watched_folder(&self, path: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO watched_folders (path) VALUES (?1)
+             ON CONFLICT (path) DO NOTHING",
+            params![path],
+        )?;
+        Ok(())
+    }
+
+    /// Forget a watched folder. Returns whether a row was removed.
+    pub fn remove_watched_folder(&self, path: &str) -> Result<bool> {
+        let removed = self
+            .conn
+            .execute("DELETE FROM watched_folders WHERE path = ?1", params![path])?;
+        Ok(removed > 0)
+    }
+
+    /// The watched folders, ordered oldest first (same-second ties broken
+    /// by path).
+    pub fn watched_folders(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT path FROM watched_folders ORDER BY added_at, path")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }
 

@@ -172,10 +172,49 @@ pub fn parse_signal(bytes: &[u8], chat_id_fallback: &str) -> Result<Collected> {
     Ok(Collected { messages, failed })
 }
 
+/// Same check, streaming from a reader: element-wise so the file is never
+/// buffered whole and a huge export costs no memory proportional to its
+/// size. The reader is wrapped in a [`std::io::BufReader`] so the scan is
+/// I/O-bound instead of issuing one read call per byte. Detection stops at
+/// the first message-shaped entry (the visitor aborts the parse with a
+/// sentinel error), keeping it exact (no prefix heuristics) at bounded
+/// memory and an early exit.
+pub fn is_signal_export_reader<R: std::io::Read>(reader: R) -> bool {
+    // The visitor flags a match and aborts the parse (a sentinel error),
+    // so detection stops reading at the first message-shaped entry.
+    let found = std::cell::Cell::new(false);
+    struct Detect<'a>(&'a std::cell::Cell<bool>);
+    impl<'de, 'a> serde::de::Visitor<'de> for Detect<'a> {
+        type Value = ();
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a Signal conversation JSON export")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> std::result::Result<(), A::Error> {
+            while let Some(v) = seq.next_element::<serde_json::Value>()? {
+                if is_signal_message(&v) {
+                    self.0.set(true);
+                    return Err(serde::de::Error::custom("signal export detected"));
+                }
+            }
+            Ok(())
+        }
+    }
+    use serde::Deserializer as _;
+    serde_json::Deserializer::from_reader(std::io::BufReader::new(reader))
+        .deserialize_seq(Detect(&found))
+        .is_err()
+        && found.get()
+}
+
 /// True when the bytes are a Signal conversation export: a top-level JSON
 /// array holding at least one raw message object — `type` incoming or
-/// outgoing plus an epoch-millisecond timestamp. The array shape cannot
-/// collide with Telegram's object exports or WhatsApp's text.
+/// outgoing plus an epoch-millisecond timestamp. The array
+/// shape cannot collide with Telegram's object exports or WhatsApp's text.
 pub fn is_signal_export(bytes: &[u8]) -> bool {
     match serde_json::from_slice::<Value>(bytes) {
         Ok(Value::Array(items)) => !items.is_empty() && items.iter().any(is_signal_message),
