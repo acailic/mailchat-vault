@@ -1358,6 +1358,25 @@ describe("IMAP sync auth mode", () => {
     expect(args.password).toBe("");
   });
 
+  it("an OAuth sync with an empty host field still reaches the backend (it defaults to Gmail)", async () => {
+    await boot();
+    tauri.handlers.set("oauth_status", () => ({ configured: true, signed_in: true }));
+    input("#imap-host").value = "";
+    input("#imap-user").value = "you@gmail.com";
+    select("#imap-auth", "oauth");
+    await flush();
+
+    tauri.handlers.set("sync_imap", () => SYNC_OUTCOME);
+    await clickSync();
+
+    const args = imapCalls()[0].args as Record<string, unknown>;
+    expect(args.host).toBe("");
+    expect(args.auth).toBe("oauth");
+    await vi.waitFor(() =>
+      expect($("#imap-status").textContent).toContain("INBOX: 2 new"),
+    );
+  });
+
   it("switching back to password mode restores the password field and hides the button", async () => {
     await boot();
     tauri.handlers.set("oauth_status", () => ({ configured: true, signed_in: false }));

@@ -680,8 +680,11 @@ async function syncImap(): Promise<void> {
     .split(",")
     .map((f) => f.trim())
     .filter((f) => f.length > 0);
-  if (!host || !username) {
-    imapStatus.textContent = "Enter the IMAP host and your username first.";
+  if (!username || (auth === "password" && !host)) {
+    imapStatus.textContent =
+      auth === "password"
+        ? "Enter the IMAP host and your username first."
+        : "Enter your Gmail address first.";
     return;
   }
   imapSyncButton.disabled = true;
