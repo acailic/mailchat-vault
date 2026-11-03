@@ -941,7 +941,7 @@ describe("stats and chips", () => {
 // ---------------------------------------------------------------------------
 
 import type { AskOutcome } from "./llmview";
-import type { EmbeddingStatus, EmbedJobSummary } from "./types";
+import type { EmbeddingStatus } from "./types";
 
 const EMBED_STATUS: EmbeddingStatus = {
   model: "hash-ngram-v1",
@@ -978,34 +978,60 @@ describe("ask and local embeddings", () => {
     await vi.waitFor(() => expect($("#embed-status").textContent).toBe(""));
   });
 
-  it("Update local embeddings runs the incremental job and reports", async () => {
+  it("Update local embeddings submits a v2 background job and follows its events", async () => {
     tauri.handlers.set("embed_status", () => EMBED_STATUS);
     await boot();
-    const summary: EmbedJobSummary = {
-      model: "hash-ngram-v1",
-      dim: 512,
-      embedded: 4,
-      remaining: 0,
-      elapsed_ms: 12,
-    };
-    tauri.handlers.set("embed_messages", () => summary);
+    tauri.handlers.set(
+      "job_events_since",
+      () => ({ events: [], latest_seq: 0, oldest_kept: 1, trimmed: false, jobs: [] }),
+    );
+    tauri.handlers.set("job_submit", () => ({ id: 9 }));
     $("#embed-btn").click();
     await vi.waitFor(() =>
-      expect($("#embed-status").textContent).toBe(
-        "Embedded 4 new · 0 pending (12 ms, hash-ngram-v1)",
-      ),
+      expect(
+        tauri.calls.some(
+          (c) =>
+            c.cmd === "job_submit" &&
+            (c.args as { kind?: string } | undefined)?.kind === "embed_messages",
+        ),
+      ).toBe(true),
     );
-    const call = tauri.calls.find((c) => c.cmd === "embed_messages");
-    expect(call?.args).toEqual({});
+    // The button is busy while the job runs (no v1 result awaited).
+    expect($<HTMLButtonElement>("#embed-btn").disabled).toBe(true);
+    expect($("#embed-status").textContent).toContain("Embedding…");
+
+    // The jobs panel renders the job lifecycle from its events.
+    const emit = (payload: unknown) =>
+      tauriEvents.listeners.get("job-event")!({ payload });
+    emit({ seq: 1, at: "t", job: 9, type: "submitted", kind: "embed_messages" });
+    emit({ seq: 2, at: "t", job: 9, type: "started" });
+    emit({
+      seq: 3,
+      at: "t",
+      job: 9,
+      type: "progress",
+      done: 2,
+      total: 4,
+      message: "embedding",
+    });
+    expect($("#jobs-list").textContent).toContain("local embeddings — 2/4 (50%)");
+    emit({ seq: 4, at: "t", job: 9, type: "succeeded", result: { embedded: 4 } });
+    await vi.waitFor(() =>
+      expect($("#jobs-list").textContent).toContain("local embeddings — done (4 embedded)"),
+    );
+    // Finished: the button re-enables.
     expect($<HTMLButtonElement>("#embed-btn").disabled).toBe(false);
   });
 
-  it("an embedding job failure is reported inline", async () => {
+  it("an embedding job that fails to start is reported inline", async () => {
     tauri.handlers.set("embed_status", () => EMBED_STATUS);
     await boot();
-    tauri.handlers.set("embed_messages", () => Promise.reject("disk full"));
+    tauri.handlers.set("job_submit", () => Promise.reject("queue is full"));
     $("#embed-btn").click();
-    await vi.waitFor(() => expect($("#embed-status").textContent).toBe("Embedding failed: disk full"));
+    await vi.waitFor(() =>
+      expect($("#embed-status").textContent).toBe("Embedding job failed to start: queue is full"),
+    );
+    expect($<HTMLButtonElement>("#embed-btn").disabled).toBe(false);
   });
 
   it("Ask renders the ranking label, results, and the answer", async () => {

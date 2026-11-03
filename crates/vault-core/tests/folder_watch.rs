@@ -3,10 +3,10 @@
 //! the settle window, re-imports never duplicate (dedup contract), skips
 //! and errors are surfaced as events, and the watcher never dies.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use vault_core::storage::Storage;
+use vault_core::jobs::{DbPool, PoolConfig};
 use vault_core::watch::{FolderWatcher, WatchConfig, WatchEvent, WatchSnapshot};
 
 /// Fast enough for tests, slow enough to coalesce write bursts.
@@ -18,9 +18,15 @@ fn test_config() -> WatchConfig {
     }
 }
 
-fn spawn_watcher(storage: &Arc<Mutex<Storage>>) -> FolderWatcher {
+/// A pool over a fresh file DB in `tmp` (M2.1: the watcher works through
+/// the pool's bounded write queue, so tests exercise the real path).
+fn pool(tmp: &tempfile::TempDir) -> Arc<DbPool> {
+    DbPool::spawn(tmp.path().join("vault.db"), PoolConfig::default(), |_| {}).unwrap()
+}
+
+fn spawn_watcher(pool: &Arc<DbPool>) -> FolderWatcher {
     FolderWatcher::spawn(
-        Arc::clone(storage),
+        Arc::clone(pool),
         test_config(),
         |_snapshot: &WatchSnapshot| {},
     )
@@ -38,8 +44,8 @@ fn eventually(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
     cond()
 }
 
-fn total(storage: &Arc<Mutex<Storage>>) -> u64 {
-    storage.lock().unwrap().stats().unwrap().total
+fn total(pool: &Arc<DbPool>) -> u64 {
+    pool.with_read(|s| s.stats().unwrap().total)
 }
 
 fn latest_events(watcher: &FolderWatcher) -> Vec<WatchEvent> {
@@ -120,7 +126,7 @@ fn initial_scan_imports_existing_export_files() {
     std::fs::write(watched.join("notes.txt"), "shopping list\n").unwrap();
     std::fs::write(watched.join("logo.png"), b"not text").unwrap();
 
-    let storage = Arc::new(Mutex::new(Storage::open_in_memory().unwrap()));
+    let storage = pool(&tmp);
     let watcher = spawn_watcher(&storage);
     watcher.add_folder(&watched).unwrap();
 
@@ -143,6 +149,7 @@ fn initial_scan_imports_existing_export_files() {
         snap.events
     );
     watcher.shutdown();
+    storage.shutdown();
 }
 
 #[test]
@@ -151,7 +158,7 @@ fn new_and_modified_files_import_after_settle() {
     let watched = tmp.path().join("exports");
     std::fs::create_dir_all(&watched).unwrap();
 
-    let storage = Arc::new(Mutex::new(Storage::open_in_memory().unwrap()));
+    let storage = pool(&tmp);
     let watcher = spawn_watcher(&storage);
     watcher.add_folder(&watched).unwrap();
 
@@ -187,6 +194,7 @@ fn new_and_modified_files_import_after_settle() {
         .iter()
         .any(|e| matches!(e, WatchEvent::Imported { .. })));
     watcher.shutdown();
+    storage.shutdown();
 }
 
 #[test]
@@ -195,7 +203,7 @@ fn write_bursts_debounce_into_one_import_pass() {
     let watched = tmp.path().join("exports");
     std::fs::create_dir_all(&watched).unwrap();
 
-    let storage = Arc::new(Mutex::new(Storage::open_in_memory().unwrap()));
+    let storage = pool(&tmp);
     let watcher = spawn_watcher(&storage);
     watcher.add_folder(&watched).unwrap();
 
@@ -228,6 +236,7 @@ fn write_bursts_debounce_into_one_import_pass() {
     assert_eq!(imports_of_file, 1, "events: {:?}", latest_events(&watcher));
     assert_eq!(total(&storage), 1);
     watcher.shutdown();
+    storage.shutdown();
 }
 
 #[test]
@@ -236,7 +245,7 @@ fn removing_a_folder_stops_its_imports() {
     let watched = tmp.path().join("exports");
     std::fs::create_dir_all(&watched).unwrap();
 
-    let storage = Arc::new(Mutex::new(Storage::open_in_memory().unwrap()));
+    let storage = pool(&tmp);
     let watcher = spawn_watcher(&storage);
     watcher.add_folder(&watched).unwrap();
     std::fs::write(watched.join("a.mbox"), mbox_bytes(&[("d-1", "One")])).unwrap();
@@ -260,13 +269,9 @@ fn removing_a_folder_stops_its_imports() {
     std::thread::sleep(Duration::from_millis(800));
     assert_eq!(total(&storage), 1, "file imported after removal");
     // Storage no longer lists the folder either.
-    assert!(storage
-        .lock()
-        .unwrap()
-        .watched_folders()
-        .unwrap()
-        .is_empty());
+    assert!(storage.with_read(|s| s.watched_folders().unwrap().is_empty()));
     watcher.shutdown();
+    storage.shutdown();
 }
 
 #[test]
@@ -276,9 +281,7 @@ fn folders_persist_across_watcher_restarts() {
     std::fs::create_dir_all(&watched).unwrap();
     std::fs::write(watched.join("a.mbox"), mbox_bytes(&[("e-1", "One")])).unwrap();
 
-    let storage = Arc::new(Mutex::new(
-        Storage::open(tmp.path().join("vault.db")).unwrap(),
-    ));
+    let storage = pool(&tmp);
     let watcher = spawn_watcher(&storage);
     watcher.add_folder(&watched).unwrap();
     assert!(eventually(Duration::from_secs(10), || total(&storage) == 1));
@@ -303,12 +306,13 @@ fn folders_persist_across_watcher_restarts() {
     std::fs::write(watched.join("b.mbox"), mbox_bytes(&[("e-2", "Two")])).unwrap();
     assert!(eventually(Duration::from_secs(10), || total(&storage) == 2));
     watcher2.shutdown();
+    storage.shutdown();
 }
 
 #[test]
 fn add_folder_validates_paths() {
     let tmp = tempfile::tempdir().unwrap();
-    let storage = Arc::new(Mutex::new(Storage::open_in_memory().unwrap()));
+    let storage = pool(&tmp);
     let watcher = spawn_watcher(&storage);
 
     let missing = tmp.path().join("does-not-exist");
@@ -327,26 +331,23 @@ fn add_folder_validates_paths() {
     assert_eq!(watcher.snapshot().folders.len(), 1);
     assert!(watcher.snapshot().running);
     watcher.shutdown();
+    storage.shutdown();
 }
 
 #[test]
 fn vanished_folder_is_reported_and_watcher_survives() {
     let tmp = tempfile::tempdir().unwrap();
-    let storage = Arc::new(Mutex::new(Storage::open_in_memory().unwrap()));
+    let storage = pool(&tmp);
     let watcher = spawn_watcher(&storage);
 
     // Folder that disappears between restarts: recorded, not fatal, and
     // still removable afterwards.
     let gone = tmp.path().join("gone");
     std::fs::create_dir_all(&gone).unwrap();
-    {
-        let storage = Arc::clone(&storage);
-        storage
-            .lock()
-            .unwrap()
-            .add_watched_folder(gone.to_string_lossy().as_ref())
-            .unwrap();
-    }
+    let gone_key = gone.to_string_lossy().into_owned();
+    storage
+        .submit_write(move |s| s.add_watched_folder(&gone_key))
+        .unwrap();
     std::fs::remove_dir_all(&gone).unwrap();
     let watcher2 = spawn_watcher(&storage);
     assert!(
@@ -370,5 +371,7 @@ fn vanished_folder_is_reported_and_watcher_survives() {
     watcher2.add_folder(&fresh).unwrap();
     assert_eq!(watcher2.snapshot().folders.len(), 1);
     watcher2.shutdown();
+    storage.shutdown();
     watcher.shutdown();
+    storage.shutdown();
 }

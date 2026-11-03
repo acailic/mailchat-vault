@@ -25,6 +25,10 @@
 //!   (with media extraction) for picked files.
 //! - [`media`]: content-addressed media store and the extraction pass that
 //!   links export files to messages.
+//! - [`jobs`]: the M2.1 database pool — a writer worker thread over a
+//!   bounded write queue plus two read connections — and background
+//!   jobs with typed states/errors and a seq-stamped event log with
+//!   polling recovery.
 //! - [`watch`]: automatic folder watching (background import of new or
 //!   modified export files from user-chosen folders).
 //! - [`imap`]: the incremental IMAP/Gmail source (app password or OAuth2
@@ -51,6 +55,7 @@ pub mod discord;
 pub mod export;
 pub mod imap;
 pub mod ingest;
+pub mod jobs;
 pub mod llm;
 pub mod mail;
 pub mod mbox;
@@ -104,6 +109,8 @@ pub enum Error {
     InvalidQuery(String),
     #[error("embedding error: {0}")]
     Embedding(String),
+    #[error("jobs error: {0}")]
+    Jobs(String),
     #[error("invalid export: {0}")]
     InvalidExport(String),
     #[error("archive schema version {db} is newer than this build supports ({supported}); upgrade the app before opening it")]

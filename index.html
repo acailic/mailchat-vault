@@ -93,6 +93,13 @@
       #keyboard-hint { margin-top: 8px; font-size: 12px; color: gray; }
       .watch-list { list-style: none; margin: 6px 0 0; padding: 0; font-size: 13px; }
       .watch-list li { padding: 3px 0; }
+      .jobs-list { list-style: none; margin: 6px 0 0; padding: 0; font-size: 13px; }
+      .jobs-list li { padding: 3px 0; }
+      .job.running { color: inherit; }
+      .job.queued { color: gray; }
+      .job.succeeded { color: #2e7d32; }
+      .job.failed { color: crimson; }
+      .job.cancelled { color: gray; }
       .watch-folder { display: flex; gap: 8px; align-items: center; }
       .watch-folder .path { word-break: break-all; }
       .watch-remove { font-size: 12px; padding: 2px 8px; }
@@ -311,6 +318,14 @@
         <button id="seed-btn" type="button">Load demo</button>
       </div>
       <div id="import-status" class="meta" style="margin-top: 6px"></div>
+    </section>
+
+    <section id="jobs">
+      <h2>Background jobs</h2>
+      <div class="row">
+        <span id="jobs-status" class="meta" style="flex: 1"></span>
+      </div>
+      <ul id="jobs-list" class="jobs-list" title="v2 job protocol: live events plus cursor-based polling recovery"></ul>
     </section>
 
     <section>
