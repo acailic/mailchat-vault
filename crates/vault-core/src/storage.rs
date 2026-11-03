@@ -567,7 +567,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
             reason       TEXT NOT NULL,
             recorded_at  TEXT NOT NULL DEFAULT (datetime('now'))
         );
-        CREATE INDEX idx_import_issues_import ON import_issues (import_id, position);
+        CREATE UNIQUE INDEX idx_import_issues_import ON import_issues (import_id, position);
         "#,
     ),
 ];
@@ -787,7 +787,8 @@ impl Storage {
         for issue in issues {
             tx.execute(
                 "INSERT INTO import_issues (import_id, position, external_ref, reason)
-                 VALUES (?1, ?2, ?3, ?4)",
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (import_id, position) DO NOTHING",
                 params![import_id, issue.position, issue.external_ref, issue.reason],
             )?;
         }

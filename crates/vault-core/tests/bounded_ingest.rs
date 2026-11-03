@@ -939,16 +939,19 @@ fn driver_never_holds_more_than_one_batch() {
     assert_eq!(sink.storage.stats().unwrap().total, 1000);
 }
 
-/// Peak RSS stays within a fixed budget while a large generated export
-/// streams through the full parser + driver + storage path.
+/// Peak RSS stays within a fixed budget while large generated exports
+/// stream through the full parser + driver + storage path — Telegram
+/// (no occurrence counter) and WhatsApp (whose content-hash id
+/// disambiguation is the documented O(n) exception).
 ///
-/// Heavy (generates a ~140 MB export, runs the real file parsers): run
-/// explicitly with `cargo test -p vault-core --test bounded_ingest
+/// Heavy (generates two ~140 MB exports, runs the real file parsers):
+/// run explicitly with `cargo test -p vault-core --test bounded_ingest
 /// large_generated_input_stays_within_memory_budget -- --ignored`.
 #[test]
-#[ignore = "heavy: ~140 MB fixture, minutes-scale runtime"]
+#[ignore = "heavy: ~280 MB of fixtures, minutes-scale runtime"]
 fn large_generated_input_stays_within_memory_budget() {
     const BUDGET_MB: u64 = 96;
+    const COUNT: usize = 150_000;
     let dir = tmp();
     // ~140 MB of Telegram JSON: 150k messages with ~900-byte bodies.
     let path = dir.path().join("result.json");
@@ -956,7 +959,7 @@ fn large_generated_input_stays_within_memory_budget() {
         let mut f = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
         f.write_all(br#"{"name": "Big", "id": 7, "messages": ["#)
             .unwrap();
-        for i in 0..150_000 {
+        for i in 0..COUNT {
             if i > 0 {
                 f.write_all(b",").unwrap();
             }
@@ -970,31 +973,71 @@ fn large_generated_input_stays_within_memory_budget() {
         f.write_all(b"]}").unwrap();
         f.flush().unwrap();
     }
-    let size = std::fs::metadata(&path).unwrap().len();
-    assert!(size > 100_000_000, "fixture must be large ({size} bytes)");
+    let tg_size = std::fs::metadata(&path).unwrap().len();
+    assert!(
+        tg_size > 100_000_000,
+        "fixture must be large ({tg_size} bytes)"
+    );
+
+    // ~140 MB of WhatsApp text: 150k distinct one-line messages, so every
+    // message lands a distinct entry in the parser's occurrence counter —
+    // the memory this run must hold within budget.
+    let wa_path = dir.path().join("chat.txt");
+    {
+        let mut f = std::io::BufWriter::new(std::fs::File::create(&wa_path).unwrap());
+        for i in 0..COUNT {
+            writeln!(
+                f,
+                "[1.11.2023., 11:00:00] Marko: m{}-{}",
+                i,
+                "x".repeat(880)
+            )
+            .unwrap();
+        }
+        f.flush().unwrap();
+    }
+    let wa_size = std::fs::metadata(&wa_path).unwrap().len();
+    assert!(
+        wa_size > 100_000_000,
+        "fixture must be large ({wa_size} bytes)"
+    );
 
     let db = dir.path().join("vault.db");
-    let source = TelegramSource::new(&path);
     let storage = Storage::open(&db).unwrap();
     let mut sink = RecordingSink::new(storage);
     let peak_before = peak_rss_kb();
-    let run = BoundedRun::new("big");
-    let outcome = run
-        .run(&source, &mut sink, &|| false, &mut |_, _, _| {})
+    let tg = BoundedRun::new("big")
+        .run(
+            &TelegramSource::new(&path),
+            &mut sink,
+            &|| false,
+            &mut |_, _, _| {},
+        )
+        .unwrap();
+    let wa = BoundedRun::new("big-wa")
+        .run(
+            &WhatsappSource::new(&wa_path),
+            &mut sink,
+            &|| false,
+            &mut |_, _, _| {},
+        )
         .unwrap();
     let grew_kb = peak_rss_kb().saturating_sub(peak_before);
     println!(
-        "large-input RSS: input {:.1} MB, peak grew {} KB ({:.1} MB)",
-        size as f64 / 1_000_000.0,
+        "large-input RSS: input {:.1} + {:.1} MB, peak grew {} KB ({:.1} MB)",
+        tg_size as f64 / 1_000_000.0,
+        wa_size as f64 / 1_000_000.0,
         grew_kb,
         grew_kb as f64 / 1024.0
     );
-    assert_eq!(outcome.summary.inserted, 150_000);
+    assert_eq!(tg.summary.inserted, 150_000);
+    assert_eq!(wa.summary.inserted, 150_000);
     assert!(
         grew_kb < BUDGET_MB * 1024,
-        "peak RSS grew by {} KB (budget {BUDGET_MB} MB) on a {} MB input",
+        "peak RSS grew by {} KB (budget {BUDGET_MB} MB) on {:.1} + {:.1} MB inputs",
         grew_kb,
-        size / 1_000_000
+        tg_size as f64 / 1_000_000.0,
+        wa_size as f64 / 1_000_000.0
     );
 }
 

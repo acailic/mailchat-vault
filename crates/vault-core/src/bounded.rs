@@ -14,8 +14,11 @@
 //!
 //! A [`StreamSource`] yields one [`StreamItem`] at a time to a callback
 //! ([`StreamSource::stream`]); the parser keeps at most one item plus its
-//! own bounded bookkeeping (a line buffer, a JSON element, an occurrence
-//! counter) alive. Parsers may re-read their input in bounded passes
+//! own bookkeeping alive (a line buffer, a JSON element). The one
+//! exception is the content-hash id disambiguators' occurrence counter,
+//! which keeps one entry per *distinct* generated id and so grows
+//! linearly (but slowly — a few dozen bytes per message) with the
+//! archive. Parsers may re-read their input in bounded passes
 //! (WhatsApp needs the participant set before ids can be hashed; JSON
 //! exports read their header first) — passes stream too, so memory stays
 //! flat regardless of file size.
