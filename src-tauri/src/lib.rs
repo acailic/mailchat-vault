@@ -496,6 +496,10 @@ async fn import_chat_export(
 /// database effect (instance, cursors, inserts) round-trips through the
 /// pool's bounded write queue ([`PoolSync`]) — searches keep working
 /// during a sync, and no transaction ever spans a network read.
+///
+/// The flat argument list mirrors the sync form's fields, like every other
+/// Tauri command here.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn sync_imap(
     state: State<'_, AppState>,
