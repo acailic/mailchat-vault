@@ -26,6 +26,7 @@ export async function run(ctx) {
     // --- 1. fresh boot, empty archive ------------------------------------
     const stats = await ui.waitForApp(browser);
     assert.equal(stats, "empty archive", "fresh install stats label");
+    await ui.openView(browser, "activity");
 
     const summary = await ui.waitForText(browser, "#dashboard .meta", (text) =>
       text.includes("archive"),
@@ -45,6 +46,7 @@ export async function run(ctx) {
 
     // --- 2. seed demo → aggregates appear --------------------------------
     await ui.seedDemo(browser);
+    await ui.openView(browser, "activity");
     const seeded = await ui.waitForText(browser, "#dashboard .meta", (text) =>
       text.startsWith("6 messages"),
     );
@@ -96,6 +98,7 @@ export async function run(ctx) {
     // --- 3. import the mbox fixture → dashboard refreshes automatically --
     const importStatus = await ui.importMbox(browser, ui.archiveMbox);
     assert.matches(importStatus, /Imported 8 new/, "mbox import");
+    await ui.openView(browser, "activity");
     const imported = await ui.waitForText(browser, "#dashboard .meta", (text) =>
       text.startsWith("14 messages"),
     );
@@ -115,6 +118,7 @@ export async function run(ctx) {
 
     // --- 5. idempotent re-import: counters must not double-count ---------
     await ui.importMbox(browser, ui.archiveMbox);
+    await ui.openView(browser, "activity");
     const afterReimport = await ui.waitForText(browser, "#dashboard .meta", (text) =>
       text.startsWith("14 messages"),
     );

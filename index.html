@@ -4,416 +4,278 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mailchat Vault</title>
-    <style>
-      :root { color-scheme: light dark; }
-      * { box-sizing: border-box; }
-      body {
-        font: 15px/1.45 system-ui, sans-serif;
-        margin: 0;
-        padding: 16px;
-        max-width: 920px;
-      }
-      header { display: flex; align-items: baseline; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
-      h1 { font-size: 20px; margin: 0; }
-      h2 { font-size: 15px; margin: 0 0 8px; color: gray; }
-      #stats { color: gray; font-size: 13px; }
-      kbd {
-        font: 11px/1 ui-monospace, monospace;
-        border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
-        border-radius: 3px;
-        padding: 1px 4px;
-      }
-      section { margin-bottom: 16px; }
-      .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-      input[type="text"] { flex: 1; min-width: 12em; padding: 6px 8px; font: inherit; }
-      input[type="date"] { padding: 5px 6px; font: inherit; }
-      input[type="text"].short { flex: 0 1 14em; }
-      button { padding: 6px 12px; font: inherit; cursor: pointer; }
-      #filters { margin-top: 8px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-      .row .spacer, #filters .spacer { flex: 1; }
-      #source-chips { display: flex; gap: 6px; flex-wrap: wrap; }
-      .chip {
-        padding: 3px 10px;
-        font-size: 13px;
-        border-radius: 999px;
-        border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
-        background: transparent;
-        color: inherit;
-      }
-      .chip.on { background: color-mix(in srgb, Highlight 30%, transparent); border-color: Highlight; }
-      #status { margin-top: 6px; font-size: 13px; color: gray; min-height: 1em; }
-      #status.error { color: crimson; }
-      #results { list-style: none; margin: 0; padding: 0; }
-      .group { margin-bottom: 10px; }
-      .group h3 {
-        font-size: 12px;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        color: gray;
-        margin: 10px 0 2px;
-      }
-      .hit-item {
-        padding: 7px 8px;
-        border-radius: 6px;
-        cursor: pointer;
-        border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
-      }
-      .hit-item:hover { background: color-mix(in srgb, currentColor 6%, transparent); }
-      .hit-item.active {
-        background: color-mix(in srgb, Highlight 18%, transparent);
-        outline: 1px solid color-mix(in srgb, Highlight 60%, transparent);
-      }
-      .meta { color: gray; font-size: 13px; }
-      .body { margin-top: 2px; white-space: pre-wrap; word-break: break-word; }
-      h2 { font-size: 15px; margin: 0 0 8px; }
-      #llm-note {
-        margin-top: 6px; padding: 8px 10px; font-size: 13px;
-        border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
-        border-radius: 8px;
-      }
-      #answer {
-        margin-top: 8px; padding: 10px 12px; white-space: pre-wrap;
-        border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
-        border-radius: 8px;
-      }
-      #ask-notes { margin-top: 6px; font-size: 13px; color: darkorange; }
-      mark.hit {
-        background: color-mix(in srgb, gold 55%, transparent);
-        color: inherit;
-        border-radius: 2px;
-        padding: 0 1px;
-      }
-      #pagination { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
-      .page-info { font-size: 13px; color: gray; }
-      #export-controls { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
-      #export-controls select { font: inherit; padding: 4px 6px; }
-      #export-status { font-size: 13px; color: gray; }
-      #import { margin-top: 24px; border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent); padding-top: 12px; }
-      #keyboard-hint { margin-top: 8px; font-size: 12px; color: gray; }
-      .watch-list { list-style: none; margin: 6px 0 0; padding: 0; font-size: 13px; }
-      .watch-list li { padding: 3px 0; }
-      .jobs-list { list-style: none; margin: 6px 0 0; padding: 0; font-size: 13px; }
-      .jobs-list li { padding: 3px 0; }
-      .job.running { color: inherit; }
-      .job.queued { color: gray; }
-      .job.succeeded { color: #2e7d32; }
-      .job.failed { color: crimson; }
-      .job.cancelled { color: gray; }
-      .watch-folder { display: flex; gap: 8px; align-items: center; }
-      .watch-folder .path { word-break: break-all; }
-      .watch-remove { font-size: 12px; padding: 2px 8px; }
-      .watch-event { color: gray; word-break: break-all; }
-      .watch-event.failed { color: crimson; }
-      .watch-event.imported { color: inherit; }
-      select { padding: 6px 8px; font: inherit; }
-      #ask-provider { flex: 0 1 16em; min-width: 12em; }
-      #settings { margin-top: 24px; border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent); padding-top: 12px; }
-      #settings-note { margin-top: 6px; font-size: 13px; min-height: 1em; }
-      #settings-note.error { color: crimson; }
-      #env-info { margin-top: 4px; font-size: 12px; color: gray; }
-      .provider-row {
-        display: grid;
-        grid-template-columns: auto auto 1.1fr 1.4fr 1fr 1fr auto;
-        gap: 6px;
-        align-items: center;
-        margin-top: 8px;
-      }
-      .provider-row .kind-label { font-size: 12px; color: gray; white-space: nowrap; }
-      .provider-row input[type="text"] { min-width: 6em; }
-      .provider-row input[type="password"] { min-width: 8em; padding: 6px 8px; font: inherit; }
-      .provider-row .small-btn, #provider-rows ~ .row .small-btn { padding: 4px 8px; font-size: 12px; }
-      #settings .row { margin-top: 8px; }
-
-      /* Detail panel: fixed right column, overlay on narrow windows. */
-      #detail {
-        display: none;
-        position: fixed;
-        top: 0; right: 0; bottom: 0;
-        width: min(480px, 92vw);
-        padding: 16px;
-        overflow-y: auto;
-        background: Canvas;
-        border-left: 1px solid color-mix(in srgb, currentColor 20%, transparent);
-        box-shadow: -8px 0 24px color-mix(in srgb, black 20%, transparent);
-      }
-      #detail.open { display: block; }
-      .detail-card header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
-      .detail-card header .header-actions { display: flex; gap: 6px; }
-      .export-chat-btn { font-size: 13px; }
-      .detail-card h2 { font-size: 16px; margin: 0 0 8px; }
-      .close-btn { font-size: 13px; }
-      .meta-table {
-        display: grid;
-        grid-template-columns: auto 1fr;
-        gap: 2px 12px;
-        margin: 0 0 12px;
-        font-size: 13px;
-      }
-      .meta-table dt { color: gray; }
-      .meta-table dd { margin: 0; word-break: break-all; }
-      .thread { list-style: none; margin: 0; padding: 0; }
-      .thread-row { padding: 8px; border-radius: 6px; margin-bottom: 4px; background: color-mix(in srgb, currentColor 5%, transparent); }
-      .thread-row.current { outline: 1px solid Highlight; }
-      .thread-row.link { cursor: pointer; }
-      .thread-row.link:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
-      .detail-media h3 {
-        font-size: 12px;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        color: gray;
-        margin: 0 0 4px;
-      }
-      .media-list { list-style: none; margin: 0 0 12px; padding: 0; }
-      .media-item {
-        display: flex;
-        gap: 8px;
-        align-items: baseline;
-        flex-wrap: wrap;
-        padding: 5px 8px;
-        margin-bottom: 4px;
-        border-radius: 6px;
-        background: color-mix(in srgb, currentColor 5%, transparent);
-      }
-      .media-kind {
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        padding: 1px 6px;
-        border-radius: 999px;
-        border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
-      }
-      .media-name { word-break: break-all; }
-      .media-item .meta { word-break: break-all; }
-      .media-item.unresolved .media-name { text-decoration: line-through; }
-
-      /* Statistics dashboard: pure CSS bars + tables, no chart library. */
-      #dashboard { margin-top: 4px; }
-      .day-chart {
-        display: flex;
-        align-items: flex-end;
-        gap: 1px;
-        height: 72px;
-        margin: 10px 0 14px;
-        border-bottom: 1px solid color-mix(in srgb, currentColor 25%, transparent);
-      }
-      .day-bar {
-        flex: 1 1 0;
-        min-width: 1px;
-        background: color-mix(in srgb, Highlight 70%, transparent);
-        border-radius: 1px 1px 0 0;
-      }
-      .stat-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-        gap: 10px 24px;
-      }
-      .stat-table h3 {
-        font-size: 12px;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        color: gray;
-        margin: 0 0 4px;
-      }
-      .stat-table table { border-collapse: collapse; width: 100%; font-size: 13px; }
-      .stat-table td {
-        padding: 3px 4px;
-        border-bottom: 1px solid color-mix(in srgb, currentColor 10%, transparent);
-        vertical-align: top;
-      }
-      .stat-table td.label {
-        max-width: 15em;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      .stat-table td.num { text-align: right; white-space: nowrap; color: gray; }
-      .stat-table td.bar { width: 30%; }
-      .stat-table td.bar > div {
-        height: 6px;
-        border-radius: 3px;
-        min-width: 1px;
-        background: color-mix(in srgb, Highlight 55%, transparent);
-      }
-    </style>
+    <!-- Styles and the bundled Source Sans 3 font are imported from
+         src/main.ts so Vite bundles (and hashes) them into the app. -->
   </head>
   <body>
-    <header>
-      <h1>Mailchat Vault</h1>
-      <span id="stats">…</span>
-    </header>
+    <a class="skip-link" href="#main">Skip to content</a>
 
-    <section>
-      <div class="row">
-        <input id="search" type="text" placeholder="Search the archive (FTS5)…" autofocus />
-        <button id="search-btn" type="button">Search</button>
-      </div>
-      <div id="filters">
-        <div id="source-chips" title="Filter by source (none selected = all sources)"></div>
-        <input id="author" class="short" type="text" placeholder="author contains… (Enter)" />
-        <label class="meta">from <input id="from-date" type="date" /></label>
-        <label class="meta">to <input id="to-date" type="date" /></label>
-        <div class="spacer"></div>
-        <button id="clear-filters" type="button" title="Reset all filters">Clear</button>
-      </div>
-      <div id="status"></div>
-      <div id="results"></div>
-      <div id="pagination"></div>
-      <div id="export-controls">
-        <span class="meta">export:</span>
-        <select id="export-format" title="File format for exports">
-          <option value="csv" selected>CSV</option>
-          <option value="json">JSON Lines</option>
-          <option value="mbox">MBOX (email rows)</option>
-        </select>
-        <button id="export-btn" type="button" title="Export every row of the current search results (all pages), not just this page">Export results…</button>
-        <span id="export-status" class="meta"></span>
-      </div>
-      <p id="keyboard-hint">
-        <kbd>/</kbd> search · <kbd>↑</kbd><kbd>↓</kbd> move · <kbd>Enter</kbd> open ·
-        <kbd>Esc</kbd> close
-      </p>
-    </section>
+    <div id="app" data-view="workspace" data-layout="wide" data-nav="closed" data-reading="closed">
+      <nav id="nav" aria-label="Workspace">
+        <h1 id="app-title">Mailchat Vault</h1>
+        <p id="stats" role="status">…</p>
+        <ul id="nav-views">
+          <li>
+            <button type="button" class="nav-view-btn" data-view-target="workspace" aria-current="page">
+              All messages
+            </button>
+          </li>
+          <li>
+            <button type="button" class="nav-view-btn" data-view-target="sources">Add source</button>
+          </li>
+          <li>
+            <button type="button" class="nav-view-btn" data-view-target="activity">Activity</button>
+          </li>
+          <li>
+            <button type="button" class="nav-view-btn" data-view-target="settings">Settings</button>
+          </li>
+        </ul>
+        <section id="nav-sources" aria-label="Sources">
+          <h2>Sources</h2>
+          <div id="source-chips" title="Filter by source (none selected = all sources)"></div>
+        </section>
+        <p id="nav-foot">Local archive · search stays on this device.</p>
+      </nav>
 
-    <section>
-      <h2>Ask the archive (natural language)</h2>
-      <div class="row">
-        <select id="ask-provider" title="LLM provider for this ask (configured in Settings)">
-          <option value="local">Local full-text (no LLM)</option>
-        </select>
-        <input id="ask" type="text" placeholder="e.g. “what did Ana say about the vault in October?”" />
-        <button id="ask-btn" type="button">Ask</button>
-      </div>
-      <div class="row" style="margin-top: 6px">
-        <button id="embed-btn" type="button" title="Embed messages that don't have a local embedding yet (incremental, offline)">Update local embeddings</button>
-        <span id="embed-status" class="meta" style="min-height: 1em"></span>
-      </div>
-      <div id="llm-note" class="meta"></div>
-      <div id="ask-status" class="meta" style="margin-top: 6px; min-height: 1em"></div>
-      <div id="answer" hidden></div>
-      <div id="ask-notes" hidden></div>
-      <ul id="ask-results"></ul>
-    </section>
+      <div id="nav-scrim" aria-hidden="true"></div>
 
-    <section id="dashboard-section">
-      <h2>Statistics</h2>
-      <div class="row">
-        <div id="dashboard-status" class="meta" style="margin: 0"></div>
-        <div class="spacer"></div>
-        <button id="stats-refresh" type="button">Refresh</button>
-      </div>
-      <div id="dashboard"></div>
-    </section>
+      <div id="content">
+        <header id="topbar">
+          <button id="nav-toggle" type="button" aria-controls="nav" aria-expanded="false">
+            ☰ Menu
+          </button>
+          <span class="topbar-title" id="topbar-title">All messages</span>
+        </header>
 
-    <section id="import">
-      <div class="row">
-        <input id="mbox-path" type="text" placeholder="/path/to/archive.mbox" />
-        <button id="import-btn" type="button">Import .mbox</button>
-        <button id="chat-import-btn" type="button">Import chat export…</button>
-        <label class="meta" title="Copy media files from the export into the vault's media store (hash-named, deduplicated)">
-          <input id="chat-media" type="checkbox" checked /> extract media
-        </label>
-        <button id="seed-btn" type="button">Load demo</button>
-      </div>
-      <div id="import-status" class="meta" style="margin-top: 6px"></div>
-    </section>
+        <main id="main">
+          <!-- Workspace: results area + reading pane. -->
+          <section id="view-workspace" class="view" aria-label="Search and results">
+            <div id="results-col">
+              <section>
+                <h2 class="visually-hidden">Search</h2>
+                <div class="row">
+                  <label class="visually-hidden" for="search">Search messages</label>
+                  <input id="search" type="text" placeholder="Search messages…" autofocus />
+                  <button id="search-btn" class="primary" type="button">Search</button>
+                </div>
+                <div id="filters">
+                  <label class="meta">author
+                    <input id="author" class="short" type="text" placeholder="contains… (Enter)" />
+                  </label>
+                  <label class="meta">from <input id="from-date" type="date" /></label>
+                  <label class="meta">to <input id="to-date" type="date" /></label>
+                  <div class="spacer"></div>
+                  <button id="clear-filters" type="button" title="Reset all filters">Clear</button>
+                </div>
+                <div id="status" role="status" aria-live="polite"></div>
+                <div id="results"></div>
+                <div id="pagination" aria-label="Result pages"></div>
+                <div id="export-controls">
+                  <span class="meta">export:</span>
+                  <label class="visually-hidden" for="export-format">Export format</label>
+                  <select id="export-format" title="File format for exports">
+                    <option value="csv" selected>CSV</option>
+                    <option value="json">JSON Lines</option>
+                    <option value="mbox">MBOX (email rows)</option>
+                  </select>
+                  <button id="export-btn" type="button" title="Export every row of the current search results (all pages), not just this page">
+                    Export results…
+                  </button>
+                  <span id="export-status" class="meta" role="status"></span>
+                </div>
+                <p id="keyboard-hint">
+                  <kbd>Ctrl</kbd>+<kbd>K</kbd> or <kbd>/</kbd> search · <kbd>↑</kbd><kbd>↓</kbd> move ·
+                  <kbd>Enter</kbd> open · <kbd>Esc</kbd> close
+                </p>
+              </section>
 
-    <section id="jobs">
-      <h2>Background jobs</h2>
-      <div class="row">
-        <span id="jobs-status" class="meta" style="flex: 1"></span>
-      </div>
-      <ul id="jobs-list" class="jobs-list" title="v2 job protocol: live events plus cursor-based polling recovery"></ul>
-    </section>
+              <section id="ask-section" aria-label="Ask the archive">
+                <h2>Ask the archive (natural language)</h2>
+                <div class="row">
+                  <label class="visually-hidden" for="ask-provider">LLM provider for this ask</label>
+                  <select id="ask-provider" title="LLM provider for this ask (configured in Settings)">
+                    <option value="local">Local full-text (no LLM)</option>
+                  </select>
+                  <label class="visually-hidden" for="ask">Question</label>
+                  <input id="ask" type="text" placeholder='e.g. “what did Ana say about the vault in October?”' />
+                  <button id="ask-btn" type="button">Ask</button>
+                </div>
+                <div class="row" style="margin-top: 6px">
+                  <button id="embed-btn" type="button" title="Embed messages that don't have a local embedding yet (incremental, offline)">
+                    Update local embeddings
+                  </button>
+                  <span id="embed-status" class="meta" style="min-height: 1em" role="status"></span>
+                </div>
+                <div id="llm-note" class="meta" role="status"></div>
+                <div id="ask-status" class="meta" style="margin-top: 6px; min-height: 1em" role="status"></div>
+                <div id="answer" hidden></div>
+                <div id="ask-notes" hidden></div>
+                <ul id="ask-results"></ul>
+              </section>
+            </div>
 
-    <section>
-      <h2>IMAP sync</h2>
-      <div class="row">
-        <input id="imap-host" type="text" placeholder="imap.gmail.com" value="imap.gmail.com" />
-        <input id="imap-port" type="number" placeholder="993" value="993" style="max-width: 90px" />
-      </div>
-      <div class="row">
-        <select id="imap-auth" style="max-width: 15em" title="How to authenticate with the server">
-          <option value="password">App password</option>
-          <option value="oauth">Google sign-in (OAuth)</option>
-        </select>
-        <input id="imap-user" type="text" placeholder="you@gmail.com" />
-        <input id="imap-pass" type="password" placeholder="App password" autocomplete="off" />
-        <button id="imap-oauth-btn" type="button" hidden>Sign in with Google…</button>
-      </div>
-      <div id="imap-oauth-hint" class="meta" style="margin-top: 4px"></div>
-      <div class="row">
-        <input id="imap-folders" type="text" placeholder="INBOX (comma-separated folders)" />
-        <button id="imap-sync-btn" type="button">Sync</button>
-      </div>
-      <div class="row">
-        <label class="meta" title="Opt-in: round over every configured IMAP source through the background job system. Rounds never overlap; missed time (sleep/offline) never queues.">
-          <input id="auto-sync-toggle" type="checkbox" /> Auto-sync every
-          <select id="auto-sync-interval" style="max-width: 5em">
-            <option value="5">5</option>
-            <option value="15">15</option>
-            <option value="30">30</option>
-            <option value="60">60</option>
-          </select> min
-        </label>
-      </div>
-      <div id="auto-sync-status" class="meta" style="margin-top: 6px; min-height: 1em"></div>
-      <div id="imap-status" class="meta" style="margin-top: 6px"></div>
-    </section>
+            <!-- Reading pane: permanent third column when wide; replaces
+                 the results area on narrow layouts. -->
+            <aside id="reading" aria-label="Reading">
+              <header id="reading-toolbar">
+                <h2 class="visually-hidden">Reading</h2>
+                <button id="back-to-results" type="button">Back to results</button>
+              </header>
+              <div id="reading-empty">
+                Select a result to read it here, with its conversation
+                context and provenance.
+              </div>
+              <div id="detail"></div>
+            </aside>
+          </section>
 
-    <section>
-      <h2>Folder watching</h2>
-      <div class="row">
-        <input id="watch-path" type="text" placeholder="/path/to/folder with .mbox / chat exports" />
-        <button id="watch-btn" type="button">Watch</button>
-        <button id="watch-add-btn" type="button">Pick folder…</button>
-      </div>
-      <div id="watch-status" class="meta" style="margin-top: 6px; min-height: 1em"></div>
-      <ul id="watch-folders" class="watch-list"></ul>
-      <ul id="watch-events" class="watch-list"></ul>
-      <p id="watch-hint" class="meta" style="margin: 6px 0 0">
-        New or modified .mbox, WhatsApp .txt, and Telegram / Signal .json files in watched folders are imported automatically (debounced; re-imports never duplicate). Unrecognized files are skipped and reported above.
-    <section id="settings">
-      <h2>Settings</h2>
-      <div id="settings-note" class="meta"></div>
-      <div id="env-info" class="meta"></div>
-      <div id="provider-rows"></div>
-      <div class="row">
-        <label class="meta">Add provider
-          <select id="add-kind">
-            <option value="zai">z.ai GLM (default)</option>
-            <option value="anthropic">Anthropic</option>
-            <option value="custom">Custom endpoint</option>
-          </select>
-        </label>
-        <button id="add-provider-btn" type="button">Add provider</button>
-      </div>
-      <div class="row">
-        <label class="meta" title="Default provider for Ask; none = environment variables when set, else local-only">
-          <input type="radio" name="default-provider" value="" /> automatic (environment)
-        </label>
-        <label class="meta">Theme
-          <select id="theme">
-            <option value="system">System</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
-          </select>
-        </label>
-        <label class="meta" title="How many top results are sent for the summary">Results for summary
-          <input id="summarize-top" type="number" min="1" max="50" style="max-width: 70px" />
-        </label>
-        <div class="spacer"></div>
-        <button id="settings-save-btn" type="button">Save settings</button>
-      </div>
-      <p class="meta" style="font-size: 12px; margin-top: 8px">
-        Providers live in settings.json in the app data dir; API keys are stored in the OS keyring
-        (session memory when none is available) — never in the settings file or the database.
-      </p>
-    </section>
+          <!-- Sources: imports and account configuration live outside the
+               reading surface. -->
+          <section id="view-sources" class="view" aria-label="Add source">
+            <h2 class="view-heading">Add source</h2>
 
-    <aside id="detail" aria-label="Message detail"></aside>
+            <section aria-label="Import files">
+              <h2>Import files</h2>
+              <div class="row">
+                <label class="visually-hidden" for="mbox-path">Path to an .mbox file</label>
+                <input id="mbox-path" type="text" placeholder="/path/to/archive.mbox" />
+                <button id="import-btn" type="button">Import .mbox</button>
+                <button id="chat-import-btn" type="button">Import chat export…</button>
+                <label class="meta" title="Copy media files from the export into the vault's media store (hash-named, deduplicated)">
+                  <input id="chat-media" type="checkbox" checked /> extract media
+                </label>
+                <button id="seed-btn" type="button">Load demo</button>
+              </div>
+              <div id="import-status" class="meta" style="margin-top: 6px" role="status"></div>
+            </section>
+
+            <section aria-label="Connect email">
+              <h2>Connect email (IMAP)</h2>
+              <div class="row">
+                <label class="visually-hidden" for="imap-host">IMAP host</label>
+                <input id="imap-host" type="text" placeholder="imap.gmail.com" value="imap.gmail.com" />
+                <label class="visually-hidden" for="imap-port">IMAP port</label>
+                <input id="imap-port" type="number" placeholder="993" value="993" style="max-width: 90px" />
+              </div>
+              <div class="row">
+                <label class="visually-hidden" for="imap-auth">Authentication method</label>
+                <select id="imap-auth" style="max-width: 15em" title="How to authenticate with the server">
+                  <option value="password">App password</option>
+                  <option value="oauth">Google sign-in (OAuth)</option>
+                </select>
+                <label class="visually-hidden" for="imap-user">Username</label>
+                <input id="imap-user" type="text" placeholder="you@gmail.com" />
+                <label class="visually-hidden" for="imap-pass">Password</label>
+                <input id="imap-pass" type="password" placeholder="App password" autocomplete="off" />
+                <button id="imap-oauth-btn" type="button" hidden>Sign in with Google…</button>
+              </div>
+              <div id="imap-oauth-hint" class="meta" style="margin-top: 4px" role="status"></div>
+              <div class="row">
+                <label class="visually-hidden" for="imap-folders">Folders to sync</label>
+                <input id="imap-folders" type="text" placeholder="INBOX (comma-separated folders)" />
+                <button id="imap-sync-btn" type="button">Sync</button>
+              </div>
+              <div class="row">
+                <label class="meta" title="Opt-in: round over every configured IMAP source through the background job system. Rounds never overlap; missed time (sleep/offline) never queues.">
+                  <input id="auto-sync-toggle" type="checkbox" /> Auto-sync every
+                  <select id="auto-sync-interval" style="max-width: 5em" aria-label="Auto-sync interval in minutes">
+                    <option value="5">5</option>
+                    <option value="15">15</option>
+                    <option value="30">30</option>
+                    <option value="60">60</option>
+                  </select> min
+                </label>
+              </div>
+              <div id="auto-sync-status" class="meta" style="margin-top: 6px; min-height: 1em" role="status"></div>
+              <div id="imap-status" class="meta" style="margin-top: 6px" role="status"></div>
+            </section>
+
+            <section aria-label="Folder watching">
+              <h2>Folder watching</h2>
+              <div class="row">
+                <label class="visually-hidden" for="watch-path">Folder to watch</label>
+                <input id="watch-path" type="text" placeholder="/path/to/folder with .mbox / chat exports" />
+                <button id="watch-btn" type="button">Watch</button>
+                <button id="watch-add-btn" type="button">Pick folder…</button>
+              </div>
+              <div id="watch-status" class="meta" style="margin-top: 6px; min-height: 1em" role="status"></div>
+              <ul id="watch-folders" class="watch-list"></ul>
+              <ul id="watch-events" class="watch-list"></ul>
+              <p id="watch-hint" class="meta" style="margin: 6px 0 0">
+                New or modified .mbox, WhatsApp .txt, and Telegram / Signal .json files in watched
+                folders are imported automatically (debounced; re-imports never duplicate).
+                Unrecognized files are skipped and reported above.
+              </p>
+            </section>
+          </section>
+
+          <!-- Activity: background jobs and statistics. -->
+          <section id="view-activity" class="view" aria-label="Activity">
+            <h2 class="view-heading">Activity</h2>
+
+            <section id="jobs" aria-label="Background jobs">
+              <h2>Background jobs</h2>
+              <div class="row">
+                <span id="jobs-status" class="meta" style="flex: 1" role="status"></span>
+              </div>
+              <ul id="jobs-list" class="jobs-list" title="v2 job protocol: live events plus cursor-based polling recovery"></ul>
+            </section>
+
+            <section id="dashboard-section" aria-label="Statistics">
+              <h2>Statistics</h2>
+              <div class="row">
+                <div id="dashboard-status" class="meta" style="margin: 0" role="status"></div>
+                <div class="spacer"></div>
+                <button id="stats-refresh" type="button">Refresh</button>
+              </div>
+              <div id="dashboard"></div>
+            </section>
+          </section>
+
+          <!-- Settings: appearance, AI providers, storage notes. -->
+          <section id="view-settings" class="view" aria-label="Settings">
+            <h2 class="view-heading">Settings</h2>
+            <section id="settings">
+              <div id="settings-note" class="meta" role="status"></div>
+              <div id="env-info" class="meta"></div>
+              <div id="provider-rows"></div>
+              <div class="row">
+                <label class="meta">Add provider
+                  <select id="add-kind" aria-label="Provider kind">
+                    <option value="zai">z.ai GLM (default)</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="custom">Custom endpoint</option>
+                  </select>
+                </label>
+                <button id="add-provider-btn" type="button">Add provider</button>
+              </div>
+              <div class="row">
+                <label class="meta" title="Default provider for Ask; none = environment variables when set, else local-only">
+                  <input type="radio" name="default-provider" value="" /> automatic (environment)
+                </label>
+                <label class="meta">Theme
+                  <select id="theme">
+                    <option value="system">System</option>
+                    <option value="light">Light</option>
+                    <option value="dark">Dark</option>
+                  </select>
+                </label>
+                <label class="meta" title="How many top results are sent for the summary">Results for summary
+                  <input id="summarize-top" type="number" min="1" max="50" style="max-width: 70px" />
+                </label>
+                <div class="spacer"></div>
+                <button id="settings-save-btn" type="button">Save settings</button>
+              </div>
+              <p class="meta" style="font-size: 12px; margin-top: 8px">
+                Providers live in settings.json in the app data dir; API keys are stored in the OS keyring
+                (session memory when none is available) — never in the settings file or the database.
+                Text is set in the bundled Source Sans 3 (SIL OFL 1.1), falling back to your system font.
+              </p>
+            </section>
+          </section>
+        </main>
+      </div>
+    </div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

@@ -33,6 +33,7 @@ export async function run(ctx) {
     // --- 1. fresh boot: the jobs panel announces its empty state ---------
     const stats = await ui.waitForApp(browser);
     assert.equal(stats, "empty archive", "fresh install stats label");
+    await ui.openView(browser, "activity");
     await ui.waitForText(
       browser,
       "#jobs-status",
@@ -42,12 +43,14 @@ export async function run(ctx) {
 
     // --- 2. import a mbox, then run the embed job through the v2 panel ---
     await ui.importMbox(browser, ui.archiveMbox);
+    await ui.openView(browser, "workspace");
     const embedButton = await browser.$("#embed-btn");
     await embedButton.scrollIntoView({ block: "center" });
     await embedButton.click();
 
     // The job finishes fast (hash embedder, 8 messages); wait for the
-    // terminal event to reach the panel header.
+    // terminal event to reach the panel header (Activity view).
+    await ui.openView(browser, "activity");
     await ui.waitForText(browser, "#jobs-status", "No active jobs (1 finished).");
 
     // The panel lists the finished embed job with its result summary.
@@ -93,6 +96,7 @@ export async function run(ctx) {
     // --- 3. webview reload: boot recovery rebuilds the panel -------------
     await browser.refresh();
     await ui.waitForApp(browser);
+    await ui.openView(browser, "activity");
     await ui.waitForText(browser, "#jobs-status", "No active jobs (1 finished).");
     const reloaded = await jobLines(browser);
     assert.matches(

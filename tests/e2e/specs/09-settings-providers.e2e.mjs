@@ -55,6 +55,7 @@ export async function run(ctx) {
       }
 
       // --- fresh install: local-only menu, off note -------------------------
+      await ui.openView(browser, "workspace");
       const askProvider = await browser.$("#ask-provider");
       let options = await askProvider.$$("option");
       assert.equal(options.length, 1, "fresh install lists only local mode");
@@ -62,6 +63,7 @@ export async function run(ctx) {
       await ui.waitForText(browser, "#llm-note", "LLM assist is off");
 
       // --- configure a custom provider through Settings ---------------------
+      await ui.openView(browser, "settings");
       await setSelect(browser, "#add-kind", "custom");
       await browser.$("#add-provider-btn").click();
       const row = await browser.$('.provider-row[data-id="custom"]');
@@ -104,6 +106,7 @@ export async function run(ctx) {
       assert.ok(!raw.includes("api_key"), "no api_key field exists in the file format");
 
       // --- the Ask menu now offers the provider and preselects it -----------
+      await ui.openView(browser, "workspace");
       options = await askProvider.$$("option");
       assert.equal(options.length, 2, "local + the configured provider");
       assert.equal(await askProvider.getValue(), "custom", "default preselected");
@@ -158,6 +161,7 @@ export async function run(ctx) {
       );
 
       // --- pairing rules refuse a mis-paired provider before saving --------
+      await ui.openView(browser, "settings");
       await setSelect(browser, "#add-kind", "zai");
       await browser.$("#add-provider-btn").click();
       const zaiRow = await browser.$('.provider-row[data-id="zai"]');
@@ -185,6 +189,7 @@ export async function run(ctx) {
 
       // --- clearing the stored key disables the provider menu entry --------
       await browser.$('.provider-row[data-id="custom"] .clear-key-btn').click();
+      await ui.openView(browser, "workspace");
       const customOption = await askProvider.$('option[value="custom"]');
       await browser.waitUntil(
         async () => (await customOption.getText()).includes("no API key"),

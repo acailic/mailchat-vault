@@ -1,5 +1,12 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+// Application wiring: composes the explicit state (src/state.ts), IPC
+// (src/ipc.ts), and workspace shell (src/workspace.ts) modules with the
+// panel builders (render/viewmodel/settings/…). Every panel keeps its
+// last-request-wins guard so a late response can never overwrite newer UI
+// state (the stale-response contract covered by main.test.ts).
+
+import "./styles/tokens.css";
+import "./styles/app.css";
+
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { formatSentAt, snippet } from "./format";
 import { describePlan, privacyNoteFor, type AskOutcome, type LlmStatus } from "./llmview";
@@ -25,18 +32,18 @@ import {
   type SaveSettingsPayload,
   type SettingsView,
 } from "./settings";
+import {
+  SequenceGuard,
+  initialUiState,
+  type UiState,
+} from "./state";
+import { initWorkspace, type WorkspaceController } from "./workspace";
 import type {
-  ArchiveStats,
-  ChatContext,
-  EmbeddingStatus,
   ChatImportOutcome,
-  ExportSummary,  IngestSummary,
+  EmbeddingStatus,
+  ExportSummary,
   JobEvent,
-  JobEventsPage,
-  MediaSummary,
   Message,
-  SearchHit,
-  SearchPage,
   Stats,
   SyncScheduleView,
   WatchSnapshot,
@@ -52,42 +59,13 @@ import {
 } from "./jobsview";
 import { renderWatchEvents, renderWatchFolders, watchStatusText } from "./watchview";
 import { autoSyncStatusText, isIntervalChoice } from "./schedview";
+import * as ipc from "./ipc";
 
 const PAGE_SIZE = 50;
 
 // ---------------------------------------------------------------------------
 // Elements
 // ---------------------------------------------------------------------------
-
-interface FolderSyncSummary {
-  folder: string;
-  uidvalidity: number;
-  reset: boolean;
-  seen: number;
-  inserted: number;
-  skipped: number;
-  failed: number;
-  /** Why the folder failed to sync; null on success. */
-  error: string | null;
-}
-
-interface ImapSyncOutcome {
-  folders: FolderSyncSummary[];
-  /** null when a stored password was reused or the sync ran over OAuth2;
-   * "os_keyring" | "memory" when the entered password was just saved
-   * there. */
-  saved_to: "os_keyring" | "memory" | null;
-}
-
-interface OAuthLoginOutcome {
-  username: string;
-  saved_to: "os_keyring" | "memory";
-}
-
-interface OAuthStatus {
-  configured: boolean;
-  signed_in: boolean;
-}
 
 const searchInput = document.querySelector<HTMLInputElement>("#search")!;
 const searchButton = document.querySelector<HTMLButtonElement>("#search-btn")!;
@@ -154,38 +132,27 @@ const summarizeTopInput = document.querySelector<HTMLInputElement>("#summarize-t
 const settingsSaveButton = document.querySelector<HTMLButtonElement>("#settings-save-btn")!;
 
 // ---------------------------------------------------------------------------
-// State
+// State (explicit modules, not loose globals)
 // ---------------------------------------------------------------------------
 
-interface UiState {
-  text: string;
-  sources: string[];
-  author: string;
-  fromDate: string;
-  toDate: string;
-  offset: number;
-  total: number;
-  hits: SearchHit[];
-  activeIndex: number;
-  detail: ChatContext | null;
-}
+/** Search/results panel state (src/state.ts owns the shape). */
+const state: UiState = initialUiState();
 
-// The last `llm_status` response: powers the Ask provider menu and the
-// privacy note for the current selection.
+/** Workspace shell: view/layout/reading/nav state + DOM effects. */
+const workspace: WorkspaceController = initWorkspace();
+
+/** One last-request-wins guard per async panel: a late response from an
+ * earlier request must never overwrite newer state (stale-response
+ * contract; see main.test.ts). */
+const searchGuard = new SequenceGuard();
+const detailGuard = new SequenceGuard();
+const statsGuard = new SequenceGuard();
+const dashboardGuard = new SequenceGuard();
+const embedGuard = new SequenceGuard();
+
+/** The last `llm_status` response: powers the Ask provider menu and the
+ * privacy note for the current selection. */
 let llmStatus: LlmStatus | null = null;
-
-const state: UiState = {
-  text: "",
-  sources: [],
-  author: "",
-  fromDate: "",
-  toDate: "",
-  offset: 0,
-  total: 0,
-  hits: [],
-  activeIndex: -1,
-  detail: null,
-};
 
 // ---------------------------------------------------------------------------
 // Rendering glue
@@ -237,6 +204,9 @@ function renderAll(): void {
     detailPanel.classList.remove("open");
     detailPanel.replaceChildren();
   }
+  // The shell mirrors the reading state (drives the medium/compact swap
+  // and the wide empty placeholder).
+  workspace.store.setReadingOpen(state.detail !== null);
 }
 
 function refreshChips(stats: Stats): void {
@@ -247,6 +217,8 @@ function refreshChips(stats: Stats): void {
       state.sources = state.sources.includes(source)
         ? state.sources.filter((s) => s !== source)
         : [...state.sources, source];
+      // Source scoping is a search action: show the results it produced.
+      workspace.store.setView("workspace");
       refreshChips(stats);
       void runSearch(0);
     },
@@ -276,7 +248,7 @@ async function runAsk(): Promise<void> {
   askStatus.textContent = "Asking… (translate → search → summarize)";
   try {
     const provider = askProvider.value || null;
-    const outcome = await invoke<AskOutcome>("llm_ask", { question, limit: 50, provider });
+    const outcome = await ipc.llmAsk({ question, limit: 50, provider });
     askStatus.textContent = describePlan(outcome);
     renderAsk(outcome);
   } catch (e) {
@@ -330,7 +302,7 @@ function updateLlmNote(): void {
 async function refreshLlm(): Promise<void> {
   try {
     const hadStatus = llmStatus !== null;
-    llmStatus = await invoke<LlmStatus>("llm_status");
+    llmStatus = await ipc.llmStatus();
     buildProviderMenu(llmStatus, hadStatus);
   } catch {
     llmStatus = null;
@@ -350,19 +322,14 @@ function describeEmbedStatus(status: EmbeddingStatus): string {
   return `local embeddings: ${status.embedded}/${status.messages} · ${status.pending} pending (${model})`;
 }
 
-// Sequential embed-status token: a late response from an earlier refresh
-// (e.g. one fired before an embedding job finished) must not overwrite
-// newer status text — the job itself joins the sequence when it starts.
-let embedSeq = 0;
-
 async function refreshEmbedStatus(): Promise<void> {
-  const seq = ++embedSeq;
+  const token = embedGuard.next();
   try {
-    const status = await invoke<EmbeddingStatus>("embed_status");
-    if (seq !== embedSeq) return; // a newer refresh/job superseded this response
+    const status = await ipc.embedStatus();
+    if (!embedGuard.isCurrent(token)) return; // a newer refresh/job superseded this response
     embedStatus.textContent = describeEmbedStatus(status);
   } catch {
-    if (seq === embedSeq) embedStatus.textContent = "";
+    if (embedGuard.isCurrent(token)) embedStatus.textContent = "";
   }
 }
 
@@ -374,7 +341,7 @@ async function runEmbedJob(): Promise<void> {
   embedButton.disabled = true;
   embedStatus.textContent = "Embedding… (local, offline, background job)";
   try {
-    await invoke<{ id: number }>("job_submit", { kind: "embed_messages", params: {} });
+    await ipc.jobSubmit("embed_messages", {});
     // The panel takes it from here (started/progress/succeeded events).
   } catch (e) {
     embedStatus.textContent = `Embedding job failed to start: ${e}`;
@@ -538,7 +505,7 @@ async function saveSettings(): Promise<void> {
   settingsNote.classList.remove("error");
   settingsNote.textContent = "Saving…";
   try {
-    const view = await invoke<SettingsView>("settings_save", { payload });
+    const view = await ipc.settingsSave(payload);
     renderSettings(view);
     settingsNote.textContent = `Saved. ${keyStoreNote(view.key_store)}`.trim();
     await refreshLlm();
@@ -557,7 +524,7 @@ async function saveSettings(): Promise<void> {
 
 async function loadSettings(): Promise<void> {
   try {
-    const view = await invoke<SettingsView>("settings_get");
+    const view = await ipc.settingsGet();
     renderSettings(view);
   } catch (e) {
     settingsNote.classList.add("error");
@@ -567,7 +534,7 @@ async function loadSettings(): Promise<void> {
 
 async function clearProviderKey(id: string): Promise<void> {
   try {
-    const view = await invoke<SettingsView>("llm_key_clear", { id });
+    const view = await ipc.llmKeyClear(id);
     renderSettings(view);
     await refreshLlm();
   } catch (e) {
@@ -586,36 +553,29 @@ function addProviderRow(): void {
   providerRows.append(providerRow({ ...prefill, id }, false, false));
 }
 
-// Sequential stats token: a late response from an earlier refresh (e.g. one
-// fired before an import finished) must not overwrite newer chips/stats.
-let statsSeq = 0;
-
 async function refreshStats(): Promise<void> {
-  const seq = ++statsSeq;
+  const token = statsGuard.next();
   try {
-    const stats = await invoke<Stats>("stats");
-    if (seq !== statsSeq) return; // a newer refresh superseded this response
+    const stats = await ipc.stats();
+    if (!statsGuard.isCurrent(token)) return; // a newer refresh superseded this response
     const parts = stats.by_source.map((s) => `${s.source}: ${s.count}`).join(", ");
     statsLabel.textContent =
       stats.total === 0 ? "empty archive" : `${stats.total} messages (${parts})`;
     refreshChips(stats);
   } catch {
-    if (seq === statsSeq) statsLabel.textContent = "";
+    if (statsGuard.isCurrent(token)) statsLabel.textContent = "";
   }
 }
 
-// Sequential dashboard token, same stale-response guard as refreshStats.
-let dashboardSeq = 0;
-
 async function refreshDashboard(): Promise<void> {
-  const seq = ++dashboardSeq;
+  const token = dashboardGuard.next();
   dashboardStatus.textContent = "";
   try {
-    const stats = await invoke<ArchiveStats>("archive_stats", { top: 10 });
-    if (seq !== dashboardSeq) return; // a newer refresh superseded this response
+    const stats = await ipc.archiveStats(10);
+    if (!dashboardGuard.isCurrent(token)) return; // a newer refresh superseded this response
     renderDashboard(dashboard, { stats });
   } catch (e) {
-    if (seq === dashboardSeq) {
+    if (dashboardGuard.isCurrent(token)) {
       dashboard.replaceChildren();
       dashboardStatus.textContent = `Statistics unavailable: ${e}`;
     }
@@ -626,12 +586,8 @@ async function refreshDashboard(): Promise<void> {
 // Search
 // ---------------------------------------------------------------------------
 
-// Sequential search token: a late response from an earlier query must not
-// overwrite the results of the newest one.
-let searchSeq = 0;
-
 async function runSearch(offset = 0): Promise<void> {
-  const seq = ++searchSeq;
+  const token = searchGuard.next();
   const text = searchInput.value.trim();
   if (!text && !state.sources.length && !authorInput.value.trim() && !fromDateInput.value && !toDateInput.value) {
     state.hits = [];
@@ -649,18 +605,16 @@ async function runSearch(offset = 0): Promise<void> {
   const requestedOffset = Math.max(0, offset);
   setStatus("Searching…");
   try {
-    const page = await invoke<SearchPage>("search_messages", {
-      query: {
-        text: state.text,
-        sources: state.sources,
-        author: state.author,
-        from_date: state.fromDate,
-        to_date: state.toDate,
-        limit: PAGE_SIZE,
-        offset: requestedOffset,
-      },
+    const page = await ipc.searchMessages({
+      text: state.text,
+      sources: state.sources,
+      author: state.author,
+      from_date: state.fromDate,
+      to_date: state.toDate,
+      limit: PAGE_SIZE,
+      offset: requestedOffset,
     });
-    if (seq !== searchSeq) return; // a newer search superseded this response
+    if (!searchGuard.isCurrent(token)) return; // a newer search superseded this response
     state.hits = page.hits;
     state.total = page.total;
     state.offset = page.offset;
@@ -676,7 +630,7 @@ async function runSearch(offset = 0): Promise<void> {
     );
     renderAll();
   } catch (e) {
-    if (seq === searchSeq) setStatus(String(e), true);
+    if (searchGuard.isCurrent(token)) setStatus(String(e), true);
   }
 }
 
@@ -690,36 +644,38 @@ function clearFilters(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Detail view
+// Detail view (the reading pane)
 // ---------------------------------------------------------------------------
 
-// Sequential detail-load token: walking the thread fires concurrent
-// chat_context invocations; only the newest one may render.
-let detailSeq = 0;
-
 async function openDetail(id: number): Promise<void> {
-  const seq = ++detailSeq;
+  const token = detailGuard.next();
   try {
-    const ctx = await invoke<ChatContext | null>("chat_context", { id, radius: 8 });
-    if (seq !== detailSeq) return; // a newer load superseded this response
+    const ctx = await ipc.chatContext(id, 8);
+    if (!detailGuard.isCurrent(token)) return; // a newer load superseded this response
     if (ctx) {
       state.detail = ctx;
       renderAll();
+      workspace.readingOpened();
       detailPanel.querySelector<HTMLElement>(".detail-card")?.scrollIntoView({ block: "nearest" });
     }
   } catch (e) {
-    if (seq === detailSeq) setStatus(String(e), true);
+    if (detailGuard.isCurrent(token)) setStatus(String(e), true);
   }
 }
 
 function closeDetail(): void {
-  detailSeq++; // supersede any in-flight load so it cannot re-open the panel
+  detailGuard.invalidate(); // supersede any in-flight load so it cannot re-open the pane
   state.detail = null;
   renderAll();
+  workspace.readingClosed();
 }
 
+// Back-to-results (medium/compact): the results area is restored with its
+// query, filters, page, selection, and scroll intact.
+workspace.onBackToResults(() => closeDetail());
+
 // ---------------------------------------------------------------------------
-// Keyboard navigation
+// Keyboard navigation (search-shortcuts live in workspace.ts)
 // ---------------------------------------------------------------------------
 
 document.addEventListener("keydown", (event) => {
@@ -727,11 +683,25 @@ document.addEventListener("keydown", (event) => {
   const inEditable =
     target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable;
 
-  if (state.detail) {
-    if (event.key === "Escape") {
+  if (event.key === "Escape") {
+    // Escape returns/closes without erasing the query: first the compact
+    // navigation drawer, then the reading pane, then the selection.
+    if (workspace.isNavOpen()) {
+      workspace.closeNav();
+      event.preventDefault();
+    } else if (state.detail) {
       closeDetail();
       event.preventDefault();
-    } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+    } else if (state.activeIndex !== -1) {
+      state.activeIndex = -1;
+      renderAll();
+      event.preventDefault();
+    }
+    return;
+  }
+
+  if (state.detail) {
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       const dir = event.key === "ArrowUp" ? -1 : 1;
       const id = neighborId(state.detail, dir);
       if (id !== null) {
@@ -742,12 +712,6 @@ document.addEventListener("keydown", (event) => {
     return;
   }
 
-  if (event.key === "/" && !inEditable) {
-    searchInput.focus();
-    searchInput.select();
-    event.preventDefault();
-    return;
-  }
   if (inEditable) return;
 
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -762,12 +726,6 @@ document.addEventListener("keydown", (event) => {
   } else if (event.key === "Enter") {
     if (state.activeIndex >= 0 && state.hits[state.activeIndex]) {
       void openDetail(state.hits[state.activeIndex].message.id);
-      event.preventDefault();
-    }
-  } else if (event.key === "Escape") {
-    if (state.activeIndex !== -1) {
-      state.activeIndex = -1;
-      renderAll();
       event.preventDefault();
     }
   }
@@ -786,7 +744,7 @@ async function importMbox(): Promise<void> {
   importButton.disabled = true;
   importStatus.textContent = `Importing ${path}…`;
   try {
-    const summary = await invoke<IngestSummary>("import_mbox", { path });
+    const summary = await ipc.importMbox(path);
     const failedPart = summary.failed > 0 ? `, ${summary.failed} failed to parse` : "";
     importStatus.textContent =
       `Imported ${summary.inserted} new, ${summary.skipped} already present` +
@@ -803,7 +761,8 @@ async function importMbox(): Promise<void> {
 
 /** "media: 2 stored, 1 deduped · 3 linked · 1 missing" with only the
  * non-zero parts; empty when nothing happened. */
-function describeMedia(media: MediaSummary): string {
+function describeMedia(media: ChatImportOutcome["media"]): string {
+  if (!media) return "";
   const parts: string[] = [];
   const add = (n: number, label: string) => {
     if (n > 0) parts.push(`${n} ${label}`);
@@ -833,16 +792,13 @@ async function importChatExport(): Promise<void> {
     }
     const extractMedia = chatMediaToggle.checked;
     importStatus.textContent = `Importing ${picked}${extractMedia ? " (extracting media)" : ""}…`;
-    const outcome = await invoke<ChatImportOutcome>("import_chat_export", {
-      path: picked,
-      extractMedia: extractMedia,
-    });
+    const outcome = await ipc.importChatExport(picked, extractMedia);
     const summary = outcome.summary;
     const failedPart = summary.failed > 0 ? `, ${summary.failed} failed to parse` : "";
     importStatus.textContent =
       `Imported ${summary.inserted} new, ${summary.skipped} already present` +
       `${failedPart} (of ${summary.seen} in ${summary.source}).` +
-      (outcome.media ? describeMedia(outcome.media) : "");
+      describeMedia(outcome.media);
     await refreshStats();
     void refreshEmbedStatus();
     void refreshDashboard();
@@ -856,7 +812,7 @@ async function importChatExport(): Promise<void> {
 async function seedDemo(): Promise<void> {
   seedButton.disabled = true;
   try {
-    const summary = await invoke<IngestSummary>("seed_demo");
+    const summary = await ipc.seedDemo();
     importStatus.textContent = `Demo messages: ${summary.inserted} new, ${summary.skipped} already present.`;
     await refreshStats();
     void refreshEmbedStatus();
@@ -872,10 +828,7 @@ async function seedDemo(): Promise<void> {
 // IMAP sync (app password or Google sign-in)
 // ---------------------------------------------------------------------------
 
-/** Which credentials a sync uses, mirroring the backend's auth modes. */
-type ImapAuthMode = "password" | "oauth";
-
-function imapAuthMode(): ImapAuthMode {
+function imapAuthMode(): ipc.ImapAuthMode {
   return imapAuthSelect.value === "oauth" ? "oauth" : "password";
 }
 
@@ -898,7 +851,7 @@ async function refreshOauthHint(): Promise<void> {
     return;
   }
   try {
-    const status = await invoke<OAuthStatus>("oauth_status", {
+    const status = await ipc.oauthStatus({
       host: imapHostInput.value.trim(),
       username,
     });
@@ -927,10 +880,7 @@ async function oauthLogin(): Promise<void> {
   imapStatus.textContent =
     "Sign-in started — complete it in the browser window that just opened…";
   try {
-    const outcome = await invoke<OAuthLoginOutcome>("oauth_gmail_login", {
-      host,
-      username,
-    });
+    const outcome = await ipc.oauthGmailLogin({ host, username });
     const store =
       outcome.saved_to === "memory"
         ? " Refresh token kept in memory only for this session (no OS keyring available)."
@@ -944,7 +894,7 @@ async function oauthLogin(): Promise<void> {
   }
 }
 
-function renderImapSyncOutcome(outcome: ImapSyncOutcome): void {
+function renderImapSyncOutcome(outcome: ipc.ImapSyncOutcome): void {
   const lines = outcome.folders.map(
     (f) =>
       `${f.folder}: ${f.inserted} new, ${f.skipped} already present` +
@@ -983,7 +933,7 @@ async function syncImap(): Promise<void> {
   imapSyncButton.disabled = true;
   imapStatus.textContent = `Syncing ${username} over IMAP… (first sync of a large mailbox can take a while)`;
   try {
-    const outcome = await invoke<ImapSyncOutcome>("sync_imap", {
+    const outcome = await ipc.syncImap({
       host,
       port: Number.isNaN(port) ? null : port,
       username,
@@ -1025,10 +975,7 @@ async function setAutoSchedule(
   intervalMinutes: number | null,
 ): Promise<void> {
   try {
-    const view = await invoke<SyncScheduleView>("sync_schedule_set", {
-      enabled,
-      intervalMinutes,
-    });
+    const view = await ipc.syncScheduleSet(enabled, intervalMinutes);
     renderAutoSync(view);
   } catch (e) {
     autoSyncStatus.textContent = `Auto-sync change failed: ${e}`;
@@ -1052,7 +999,7 @@ function onAutoSyncIntervalChange(): void {
 
 async function refreshAutoSync(): Promise<void> {
   try {
-    renderAutoSync(await invoke<SyncScheduleView>("sync_schedule_get"));
+    renderAutoSync(await ipc.syncScheduleGet());
   } catch {
     // Leave whatever was rendered; the next scheduler-status event fixes it.
   }
@@ -1060,8 +1007,8 @@ async function refreshAutoSync(): Promise<void> {
 
 // The backend pushes a fresh view on every scheduler transition; a
 // finished scheduled round also refreshes the source stats like any job.
-void listen<SyncScheduleView>("scheduler-status", (event) => {
-  renderAutoSync(event.payload);
+void ipc.onEvent<SyncScheduleView>("scheduler-status", (payload) => {
+  renderAutoSync(payload);
 });
 
 // ---------------------------------------------------------------------------
@@ -1078,7 +1025,7 @@ function renderWatchStatus(snapshot: WatchSnapshot): void {
 
 async function refreshWatchStatus(): Promise<void> {
   try {
-    renderWatchStatus(await invoke<WatchSnapshot>("watch_status"));
+    renderWatchStatus(await ipc.watchStatus());
   } catch {
     // Leave whatever was rendered; the next watch-status event fixes it.
   }
@@ -1088,7 +1035,7 @@ async function refreshWatchStatus(): Promise<void> {
 async function addWatchFolder(path: string): Promise<boolean> {
   watchStatus.textContent = `Adding ${path}…`;
   try {
-    renderWatchStatus(await invoke<WatchSnapshot>("watch_add_folder", { path }));
+    renderWatchStatus(await ipc.watchAddFolder(path));
     await refreshStats();
     return true;
   } catch (e) {
@@ -1134,7 +1081,7 @@ async function pickWatchFolder(): Promise<void> {
 
 async function removeWatchFolder(path: string): Promise<void> {
   try {
-    renderWatchStatus(await invoke<WatchSnapshot>("watch_remove_folder", { path }));
+    renderWatchStatus(await ipc.watchRemoveFolder(path));
     await refreshStats();
   } catch (e) {
     watchStatus.textContent = `Could not remove folder: ${e}`;
@@ -1143,9 +1090,9 @@ async function removeWatchFolder(path: string): Promise<void> {
 
 // The backend pushes a fresh snapshot on every watcher change; a newest
 // "imported" event also refreshes the source chips/stats.
-void listen<WatchSnapshot>("watch-status", (event) => {
-  renderWatchStatus(event.payload);
-  if (event.payload.events[0]?.kind === "imported") {
+void ipc.onEvent<WatchSnapshot>("watch-status", (payload) => {
+  renderWatchStatus(payload);
+  if (payload.events[0]?.kind === "imported") {
     void refreshStats();
   }
 });
@@ -1172,7 +1119,7 @@ function renderJobs(): void {
  * events and a fresh records snapshot. */
 async function syncJobs(): Promise<void> {
   try {
-    const page = await invoke<JobEventsPage>("job_events_since", { seq: jobs.cursor });
+    const page = await ipc.jobEventsSince(jobs.cursor);
     applyJobsPage(jobs, page);
     renderJobs();
   } catch {
@@ -1194,9 +1141,9 @@ function refreshAfterJobEvent(event: JobEvent): void {
   }
 }
 
-void listen<JobEvent>("job-event", (event) => {
-  applyJobEvent(jobs, event.payload);
-  refreshAfterJobEvent(event.payload);
+void ipc.onEvent<JobEvent>("job-event", (payload) => {
+  applyJobEvent(jobs, payload);
+  refreshAfterJobEvent(payload);
   renderJobs();
   if (jobs.needsPoll) {
     void syncJobs(); // seq gap: recover the missed events by polling
@@ -1249,7 +1196,7 @@ async function exportResults(): Promise<void> {
   exportButton.disabled = true;
   exportStatus.textContent = "Exporting…";
   try {
-    const summary = await invoke<ExportSummary>("export_search", {
+    const summary = await ipc.exportSearch({
       query: {
         text: state.text,
         sources: state.sources,
@@ -1270,7 +1217,7 @@ async function exportResults(): Promise<void> {
   }
 }
 
-/** Export the whole chat thread of the message open in the detail view. */
+/** Export the whole chat thread of the message open in the reading pane. */
 async function exportChat(): Promise<void> {
   const detail = state.detail;
   if (!detail) return;
@@ -1280,7 +1227,7 @@ async function exportChat(): Promise<void> {
   if (path === null) return; // cancelled
   exportStatus.textContent = "Exporting chat…";
   try {
-    const summary = await invoke<ExportSummary | null>("export_chat", {
+    const summary = await ipc.exportChat({
       id: detail.message.id,
       format,
       path,
