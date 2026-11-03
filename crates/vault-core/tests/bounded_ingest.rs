@@ -607,7 +607,11 @@ fn completed_rerun_does_not_duplicate_issue_records() {
         first_outcome.summary.failed > 0,
         "fixture must contain parse failures"
     );
-    assert!(first.storage.import_issues("rerun", 0, 1000).unwrap().len() > 0);
+    assert!(!first
+        .storage
+        .import_issues("rerun", 0, 1000)
+        .unwrap()
+        .is_empty());
 
     // Snapshot the issue rows, then hand the storage to the rerun.
     let before = first.storage.import_issues("rerun", 0, 1000).unwrap();
