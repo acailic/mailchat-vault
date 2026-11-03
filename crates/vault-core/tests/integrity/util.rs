@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 use vault_core::message::{Message, NewMessage};
 use vault_core::storage::Storage;
-
 /// A temp dir on the fastest available scratch filesystem. File-based
 /// integrity tests create and re-open many databases; on machines whose
 /// root filesystem fsyncs slowly that dominates the runtime, so prefer
@@ -200,4 +199,114 @@ pub fn wal_path(db: &Path) -> PathBuf {
 
 pub fn file_len(path: &Path) -> u64 {
     fs::metadata(path).expect("metadata").len()
+}
+
+/// The frozen v1 schema, verbatim as migration 1 created it (see the v1
+/// history of `storage::MIGRATIONS`). Used to build a database exactly as
+/// the v1 release would have left it - exercising the real "previous
+/// schema version" upgrade path, not a synthetic one.
+pub const V1_SCHEMA_SQL: &str = r#"
+    CREATE TABLE messages (
+        id           INTEGER PRIMARY KEY,
+        source       TEXT    NOT NULL,
+        external_id  TEXT    NOT NULL,
+        channel      TEXT    NOT NULL DEFAULT '',
+        chat_id      TEXT    NOT NULL DEFAULT '',
+        author       TEXT    NOT NULL DEFAULT '',
+        sent_at      TEXT    NOT NULL DEFAULT '',
+        body         TEXT    NOT NULL DEFAULT '',
+        raw_json     TEXT    NOT NULL DEFAULT '{}',
+        created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (source, external_id)
+    );
+    CREATE INDEX idx_messages_sent_at ON messages (sent_at);
+    CREATE INDEX idx_messages_source_chat ON messages (source, chat_id);
+
+    CREATE VIRTUAL TABLE messages_fts USING fts5 (
+        body,
+        author,
+        content = 'messages',
+        content_rowid = 'id'
+    );
+    CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages BEGIN
+        INSERT INTO messages_fts (rowid, body, author)
+            VALUES (new.id, new.body, new.author);
+    END;
+    CREATE TRIGGER messages_fts_ad AFTER DELETE ON messages BEGIN
+        INSERT INTO messages_fts (messages_fts, rowid, body, author)
+            VALUES ('delete', old.id, old.body, old.author);
+    END;
+    CREATE TRIGGER messages_fts_au AFTER UPDATE ON messages BEGIN
+        INSERT INTO messages_fts (messages_fts, rowid, body, author)
+            VALUES ('delete', old.id, old.body, old.author);
+        INSERT INTO messages_fts (rowid, body, author)
+            VALUES (new.id, new.body, new.author);
+    END;
+"#;
+
+/// Create the `schema_migrations` bookkeeping table a real database
+/// always carries.
+pub fn migrations_table(conn: &Connection) {
+    conn.execute_batch(
+        "CREATE TABLE schema_migrations (
+            version    INTEGER PRIMARY KEY,
+            applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );",
+    )
+    .unwrap();
+}
+
+/// Build a database exactly as the v1 release left it: full v1 schema,
+/// version 1 recorded, and `rows` messages of real archived data.
+pub fn version1_db_with_data(path: &Path, rows: usize) {
+    let conn = Connection::open(path).unwrap();
+    migrations_table(&conn);
+    conn.execute_batch(V1_SCHEMA_SQL).unwrap();
+    conn.execute("INSERT INTO schema_migrations (version) VALUES (1)", [])
+        .unwrap();
+    for i in 0..rows {
+        conn.execute(
+            "INSERT INTO messages (source, external_id, author, sent_at, body)
+             VALUES ('mbox', ?1, 'ana', '2026-01-01T00:00:00Z', ?2)",
+            rusqlite::params![
+                format!("old-{i}"),
+                format!("vintage body {i} of the v1 era")
+            ],
+        )
+        .unwrap();
+    }
+}
+
+/// Build a database exactly as the v2 release left it: the v1 schema plus
+/// `imap_sync_state` (migration 2), versions 1-2 recorded, `rows`
+/// messages, and an IMAP cursor - the richest realistic legacy archive the
+/// safe-migration path can be exercised against.
+pub fn version2_db_with_data(path: &Path, rows: usize) {
+    version1_db_with_data(path, rows);
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE imap_sync_state (
+            source      TEXT    NOT NULL,
+            folder      TEXT    NOT NULL,
+            uidvalidity INTEGER NOT NULL,
+            last_uid    INTEGER NOT NULL DEFAULT 0,
+            updated_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (source, folder)
+        );
+        INSERT INTO imap_sync_state (source, folder, uidvalidity, last_uid)
+            VALUES ('imap/gmail', 'INBOX', 7, 42);
+        INSERT INTO schema_migrations (version) VALUES (2);",
+    )
+    .unwrap();
+}
+
+/// A fast, non-cryptographic content hash of a file - used to assert a
+/// failed migration left the original byte-identical.
+pub fn hash_file(path: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    fs::read(path)
+        .expect("read file for hash")
+        .hash(&mut hasher);
+    hasher.finish()
 }

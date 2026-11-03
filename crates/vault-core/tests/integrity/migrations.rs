@@ -1,15 +1,16 @@
 //! Schema migrations over databases from previous schema versions: fresh
 //! applies, reopens apply nothing new, a pre-migration ("version 0")
 //! database upgrades in place, a half-applied or blocked migration is either
-//! detected with a clear error or rolled back completely (each migration
-//! runs in its own transaction), and a database from a *newer* version still
-//! opens instead of crashing.
+//! detected with a clear error or rolled back completely (all pending
+//! migrations commit in one single transaction, M1.4), and a database from
+//! a *newer* version is refused (the deeper safe-migration coverage lives
+//! in `safe_migration.rs`).
 
 use rusqlite::Connection;
 use vault_core::message::InsertOutcome;
 use vault_core::storage::Storage;
 
-use crate::util::{msg, raw};
+use crate::util::{migrations_table, msg, raw, version1_db_with_data};
 
 /// The schema version this build knows; bump expectation when a migration
 /// is added (the assertions below are version-agnostic where possible).
@@ -31,13 +32,7 @@ fn migrations_rows(db: &std::path::Path) -> Vec<i64> {
 /// version has been applied yet.
 fn version0_db(path: &std::path::Path) {
     let conn = Connection::open(path).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS schema_migrations (
-            version    INTEGER PRIMARY KEY,
-            applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );",
-    )
-    .unwrap();
+    migrations_table(&conn);
 }
 
 #[test]
@@ -92,75 +87,8 @@ fn version0_database_upgrades_in_place() {
     );
 }
 
-/// The frozen v1 schema, verbatim as migration 1 created it (see the v1
-/// history of `storage::MIGRATIONS`). Used to build a database exactly as
-/// the v1 release would have left it - exercising the real "previous
-/// schema version" upgrade path, not a synthetic one.
-const V1_SCHEMA_SQL: &str = r#"
-    CREATE TABLE messages (
-        id           INTEGER PRIMARY KEY,
-        source       TEXT    NOT NULL,
-        external_id  TEXT    NOT NULL,
-        channel      TEXT    NOT NULL DEFAULT '',
-        chat_id      TEXT    NOT NULL DEFAULT '',
-        author       TEXT    NOT NULL DEFAULT '',
-        sent_at      TEXT    NOT NULL DEFAULT '',
-        body         TEXT    NOT NULL DEFAULT '',
-        raw_json     TEXT    NOT NULL DEFAULT '{}',
-        created_at   TEXT    NOT NULL DEFAULT (datetime('now')),
-        UNIQUE (source, external_id)
-    );
-    CREATE INDEX idx_messages_sent_at ON messages (sent_at);
-    CREATE INDEX idx_messages_source_chat ON messages (source, chat_id);
-
-    CREATE VIRTUAL TABLE messages_fts USING fts5 (
-        body,
-        author,
-        content = 'messages',
-        content_rowid = 'id'
-    );
-    CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages BEGIN
-        INSERT INTO messages_fts (rowid, body, author)
-        VALUES (new.id, new.body, new.author);
-    END;
-    CREATE TRIGGER messages_fts_ad AFTER DELETE ON messages BEGIN
-        INSERT INTO messages_fts (messages_fts, rowid, body, author)
-        VALUES ('delete', old.id, old.body, old.author);
-    END;
-    CREATE TRIGGER messages_fts_au AFTER UPDATE ON messages BEGIN
-        INSERT INTO messages_fts (messages_fts, rowid, body, author)
-        VALUES ('delete', old.id, old.body, old.author);
-        INSERT INTO messages_fts (rowid, body, author)
-        VALUES (new.id, new.body, new.author);
-    END;
-"#;
-
-/// Build a database exactly as the v1 release left it: full v1 schema,
-/// version 1 recorded, and `rows` messages of real archived data.
-fn version1_db_with_data(path: &std::path::Path, rows: usize) {
-    let conn = Connection::open(path).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE schema_migrations (
-            version    INTEGER PRIMARY KEY,
-            applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );",
-    )
-    .unwrap();
-    conn.execute_batch(V1_SCHEMA_SQL).unwrap();
-    conn.execute("INSERT INTO schema_migrations (version) VALUES (1)", [])
-        .unwrap();
-    for i in 0..rows {
-        conn.execute(
-            "INSERT INTO messages (source, external_id, author, sent_at, body)
-             VALUES ('mbox', ?1, 'ana', '2026-01-01T00:00:00Z', ?2)",
-            rusqlite::params![
-                format!("old-{i}"),
-                format!("vintage body {i} of the v1 era")
-            ],
-        )
-        .unwrap();
-    }
-}
+/// The frozen v1 schema and the v1/v2 fixture builders now live in
+/// `util.rs`, shared with the safe-migration suite (`safe_migration.rs`).
 
 #[test]
 fn v1_database_with_data_upgrades_in_place_to_current() {
@@ -377,29 +305,34 @@ fn failed_migration_rolls_back_completely() {
 }
 
 #[test]
-fn newer_schema_version_still_opens() {
-    // Forward compatibility: a database written by a *newer* build (version
-    // beyond anything this binary knows) must not crash or try to
-    // re-apply old migrations; it opens and reports its version.
+fn newer_schema_version_is_refused() {
+    // M1.4 newer-schema refusal: a database written by a *newer* build
+    // (a version beyond anything this binary knows) must be refused
+    // with a clear error instead of being silently opened by an older
+    // tool that could mis-read or half-write it. Forward compatibility
+    // is no longer claimed - upgrade the app first. The refusal happens
+    // before any pragma or migration, so the file is left exactly as it
+    // was; the byte-level proof lives in safe_migration.rs.
     let dir = crate::util::scratch_dir();
     let db = dir.path().join("future.db");
     {
         let conn = Connection::open(&db).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE schema_migrations (
-                version    INTEGER PRIMARY KEY,
-                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-            );
-            INSERT INTO schema_migrations (version) VALUES (99);",
-        )
-        .unwrap();
+        migrations_table(&conn);
+        conn.execute("INSERT INTO schema_migrations (version) VALUES (99)", [])
+            .unwrap();
     }
 
-    let s = Storage::open(&db).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 99);
+    let err = Storage::open(&db).expect_err("newer schema must be refused");
+    assert!(
+        matches!(err, vault_core::Error::SchemaTooNew { db: 99, .. }),
+        "expected SchemaTooNew, got: {err}"
+    );
     assert_eq!(
         migrations_rows(&db),
         vec![99],
-        "no old migration re-applied"
+        "refusal must not modify the database"
     );
+    // The refusal is stable: retrying changes nothing.
+    assert!(Storage::open(&db).is_err());
+    assert_eq!(migrations_rows(&db), vec![99]);
 }
