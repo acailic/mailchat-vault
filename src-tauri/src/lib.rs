@@ -798,7 +798,7 @@ pub fn run() {
             // Settings come from the file first; the environment keeps
             // working as a read-only fallback provider exactly as before
             // the Settings UI existed.
-            let secrets = secrets::Secrets::new();
+            let secrets = Arc::new(secrets::Secrets::new());
             let settings_path = data_dir.join(settings::SETTINGS_FILE);
             let settings = Settings::load(&settings_path);
             if let Err(e) = &settings {
@@ -828,7 +828,7 @@ pub fn run() {
                 embedder: HashEmbedder::new(),
                 watcher,
             });
-            app.manage(Arc::new(secrets::Secrets::new()));
+            app.manage(Arc::clone(&secrets));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
