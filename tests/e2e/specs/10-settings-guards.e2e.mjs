@@ -9,124 +9,8 @@
 // error while the app stays functional (second app session over the same
 // data dir).
 
-import { spawn } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import net from "node:net";
-import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { remote } from "webdriverio";
-
-const repoRoot = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "..",
-);
-
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.unref();
-    server.on("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const { port } = server.address();
-      server.close(() => resolve(port));
-    });
-  });
-}
-
-function waitForPort(port, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  return new Promise((resolve, reject) => {
-    const attempt = () => {
-      const socket = net.connect(port, "127.0.0.1");
-      socket.once("connect", () => {
-        socket.destroy();
-        resolve();
-      });
-      socket.once("error", () => {
-        socket.destroy();
-        if (Date.now() > deadline) {
-          reject(new Error(`tauri-driver did not listen on ${port}`));
-        } else {
-          setTimeout(attempt, 150);
-        }
-      });
-    };
-    attempt();
-  });
-}
-
-/** A second app session over an EXISTING data dir (harness sessions are
- * always fresh; the load-path scenario must restart the app against the
- * previously written settings.json). */
-async function withExistingDataDir(dataDir, fn) {
-  const port = await freePort();
-  const nativePort = await freePort();
-  const nativeDriver = [
-    "/usr/libexec/webkit2gtk-4.1/WebKitWebDriver",
-    "/usr/bin/WebKitWebDriver",
-  ].find((p) => existsSync(p)) || "WebKitWebDriver";
-  const tauriDriver = existsSync(path.join(process.env.HOME ?? "", ".cargo/bin/tauri-driver"))
-    ? path.join(process.env.HOME, ".cargo/bin/tauri-driver")
-    : "tauri-driver";
-  const driver = spawn(
-    tauriDriver,
-    ["--port", String(port), "--native-port", String(nativePort), "--native-driver", nativeDriver],
-    {
-      env: {
-        ...process.env,
-        XDG_DATA_HOME: dataDir,
-        WEBKIT_DISABLE_COMPOSITING_MODE: "1",
-        NO_AT_BRIDGE: "1",
-        ZAI_API_KEY: "",
-        GLM_API_KEY: "",
-        ANTHROPIC_API_KEY: "",
-        ANTHROPIC_BASE_URL: "",
-      },
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
-  let log = "";
-  driver.stdout.on("data", (c) => { log += c; });
-  driver.stderr.on("data", (c) => { log += c; });
-  let browser = null;
-  try {
-    await waitForPort(port, 20_000);
-    browser = await remote({
-      hostname: "127.0.0.1",
-      port,
-      capabilities: {
-        "tauri:options": {
-          application:
-            process.env.MAILCHAT_E2E_BINARY ??
-            path.join(repoRoot, "target", "debug", "mailchat-vault"),
-        },
-      },
-      logLevel: "error",
-      waitforInterval: 200,
-      waitforTimeout: 10_000,
-      connectionRetryTimeout: 120_000,
-      connectionRetryCount: 1,
-    });
-    return await fn(browser);
-  } catch (error) {
-    error.driverLog = log.slice(-2000);
-    throw error;
-  } finally {
-    if (browser) {
-      await browser.deleteSession().catch(() => {});
-    }
-    try {
-      process.kill(-driver.pid, "SIGKILL");
-    } catch {
-      /* already gone */
-    }
-  }
-}
 
 /** Set a <select> and fire change (WebKit session lacks select helpers). */
 async function setSelect(browser, selector, value) {
@@ -317,7 +201,12 @@ export async function run(ctx) {
     };
     await writeFile(settingsPath, JSON.stringify(invalid, null, 2) + "\n");
 
-    await withExistingDataDir(firstDataDir, async (browser) => {
+    await withSession(
+      {
+        dataDir: firstDataDir,
+        env: { ZAI_API_KEY: "", GLM_API_KEY: "", ANTHROPIC_API_KEY: "", ANTHROPIC_BASE_URL: "" },
+      },
+      async (browser) => {
       await ui.waitForApp(browser);
 
       // The refusal is VISIBLE in the Settings screen.

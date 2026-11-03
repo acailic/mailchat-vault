@@ -32,7 +32,11 @@
 //! - [`watch`]: automatic folder watching (background import of new or
 //!   modified export files from user-chosen folders).
 //! - [`imap`]: the incremental IMAP/Gmail source (app password or OAuth2
-//!   XOAUTH2 login).
+//!   XOAUTH2 login), with atomic batch commits and a durable failed-item
+//!   ledger (M2.3).
+//! - [`imap_coordinator`]: the M2.3 IMAP coordinator — sync rounds over
+//!   every configured IMAP source (per-source exclusion, credential
+//!   resolution, per-source outcomes) on the M2.1 pool.
 //! - [`oauth`]: the Google OAuth2 login flow behind IMAP XOAUTH2 — PKCE
 //!   loopback-redirect authorization, token exchange/refresh, SASL string.
 //! - [`search`]: free-text to FTS5 MATCH query building.
@@ -54,6 +58,7 @@ pub mod demo;
 pub mod discord;
 pub mod export;
 pub mod imap;
+pub mod imap_coordinator;
 pub mod ingest;
 pub mod jobs;
 pub mod llm;

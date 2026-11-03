@@ -22,6 +22,25 @@
 //! The IMAP folder name maps to the message's `channel` field, so archived
 //! messages are grouped per folder.
 //!
+//! # Atomic batches and failed-item accounting (M2.3)
+//!
+//! The write unit is one **fetch batch**: its messages, its failed-item
+//! ledger updates, and the checkpoint advance commit in a single
+//! transaction (`UID FETCH` → parse → one commit), so an interruption
+//! mid-folder leaves the checkpoint exactly at the boundary of what is
+//! durably stored — there is no window where stored mail and the cursor
+//! disagree. An item the round accounts but cannot store is recorded in
+//! the durable failed-item ledger (`sync_failed_items`) with a fixed
+//! reason — an unparseable mail, or a uid the server searched but never
+//! delivered (typically expunged between `SEARCH` and `FETCH`) — and the
+//! cursor advances past it: the ledger, not silence, remembers it. Every
+//! later round re-fetches the ledgered uids below its fetch range and
+//! clears the rows that resolve. A `UIDVALIDITY` reset adopts the new
+//! validity in the same atomic commit that clears the folder's ledger
+//! rows from abandoned validities (the reset rescan re-derives them).
+//! See [`crate::storage::commit_imap_batch`] and
+//! [`crate::storage::list_failed_items`] (the visible ledger).
+//!
 //! # Credentials
 //!
 //! [`ImapConfig`] carries the auth mode ([`ImapAuth`]): an app/account
@@ -50,14 +69,14 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
-use imap::Session;
+pub use imap::Session;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::mail::{amend_raw_json, parse_raw_mail_canonical};
 use crate::message::NewMessage;
 use crate::storage::{
-    ConnectorIdentity, MailInsertOutcome, NewSourceInstance, Occurrence, Storage,
+    BatchFailure, ConnectorIdentity, MailBatchItem, NewSourceInstance, Occurrence, Storage,
 };
 use crate::Result;
 
@@ -246,6 +265,10 @@ pub struct FolderSyncSummary {
     pub skipped: u64,
     /// Messages that could not be parsed (not stored).
     pub failed: u64,
+    /// Previously-failed items this round finally stored (their
+    /// failed-item ledger rows cleared; see the module docs on the
+    /// durable failed-item accounting).
+    pub resolved_failures: u64,
     /// Newly archived rows that are a **conflicting revision**: another
     /// revision of the same `Message-ID` was already archived under this
     /// account (both stay searchable; see [`crate::storage`]).
@@ -254,6 +277,14 @@ pub struct FolderSyncSummary {
     /// are still synced and reported.
     pub error: Option<String>,
 }
+
+/// Fixed ledger reason for an item whose bytes arrived but could not be
+/// parsed into a message (M2.3; reasons are constants, never content).
+pub const REASON_UNPARSEABLE: &str = "unparseable mail";
+/// Fixed ledger reason for an item the server searched but never
+/// delivered — a `UID FETCH` that completed without data for the uid
+/// (typically expunged between the search and the fetch).
+pub const REASON_MISSING_FETCH: &str = "server returned no data for the uid";
 
 /// The SASL XOAUTH2 mechanism for [`imap::Client::authenticate`]: the
 /// client base64-encodes [`oauth::xoauth2_sasl`]'s string and sends it as
@@ -350,7 +381,8 @@ pub fn ensure_source_instance(storage: &Storage, config: &ImapConfig) -> Result<
     })
 }
 
-/// The storage surface an IMAP sync needs (M2.1).
+/// The storage surface an IMAP sync needs (M2.1; the commit shape is
+/// M2.3).
 ///
 /// A sync is *not* pure database work: it interleaves network fetches
 /// with storage writes. Implementations decide where each half runs:
@@ -361,6 +393,12 @@ pub fn ensure_source_instance(storage: &Storage, config: &ImapConfig) -> Result<
 /// the sync thread itself talks to the server between calls. Nothing in
 /// this trait performs I/O beyond the database, so a transaction it opens
 /// can never span a network round trip either.
+///
+/// The unit of write is the **batch commit** (M2.3): one fetched batch's
+/// messages, its failed-item ledger updates, and the checkpoint advance
+/// land together in one transaction ([`SyncStorage::commit_batch`]), so
+/// an interruption mid-folder leaves the cursor exactly in agreement
+/// with what is durably stored.
 pub trait SyncStorage {
     /// Resolve (or register) the durable source instance for `config`.
     fn ensure_instance(&self, config: &ImapConfig) -> Result<String>;
@@ -374,24 +412,23 @@ pub trait SyncStorage {
         instance: &str,
         folder: &str,
     ) -> Result<Option<crate::message::ImapSyncState>>;
-    /// Persist the folder cursor (idempotent on the last-write wins rule).
-    fn set_checkpoint(
+    /// Atomically commit one fetched batch: messages, failed-item ledger
+    /// rows, ledger resolutions, and the checkpoint advance in one
+    /// transaction (see [`Storage::commit_imap_batch`]).
+    #[allow(clippy::too_many_arguments)]
+    fn commit_batch(
         &self,
         instance: &str,
         folder: &str,
         uidvalidity: u32,
         last_uid: u32,
-    ) -> Result<()>;
-    /// Store one fetched mail (dedup + occurrence + revision contract as
-    /// [`Storage::insert_mail_message`]).
-    fn insert_mail(
-        &self,
-        instance: &str,
-        message: &NewMessage,
-        subject: &str,
-        identity: &ConnectorIdentity<'_>,
-        occurrence: &Occurrence<'_>,
-    ) -> Result<MailInsertOutcome>;
+        mails: &[crate::storage::MailBatchItem<'_>],
+        failures: &[crate::storage::BatchFailure<'_>],
+        resolved: &[u32],
+    ) -> Result<crate::storage::MailBatchOutcome>;
+    /// The folder's failed uids under one validity — the retry set the
+    /// next round re-fetches (see [`Storage::imap_failed_uids`]).
+    fn failed_uids(&self, instance: &str, folder: &str, uidvalidity: u32) -> Result<Vec<u32>>;
 }
 
 impl SyncStorage for Storage {
@@ -411,24 +448,28 @@ impl SyncStorage for Storage {
     ) -> Result<Option<crate::message::ImapSyncState>> {
         self.get_imap_checkpoint(instance, folder)
     }
-    fn set_checkpoint(
+    fn commit_batch(
         &self,
         instance: &str,
         folder: &str,
         uidvalidity: u32,
         last_uid: u32,
-    ) -> Result<()> {
-        self.set_imap_checkpoint(instance, folder, uidvalidity, last_uid)
+        mails: &[crate::storage::MailBatchItem<'_>],
+        failures: &[crate::storage::BatchFailure<'_>],
+        resolved: &[u32],
+    ) -> Result<crate::storage::MailBatchOutcome> {
+        self.commit_imap_batch(
+            instance,
+            folder,
+            uidvalidity,
+            last_uid,
+            mails,
+            failures,
+            resolved,
+        )
     }
-    fn insert_mail(
-        &self,
-        instance: &str,
-        message: &NewMessage,
-        subject: &str,
-        identity: &ConnectorIdentity<'_>,
-        occurrence: &Occurrence<'_>,
-    ) -> Result<MailInsertOutcome> {
-        self.insert_mail_message(instance, message, subject, identity, occurrence)
+    fn failed_uids(&self, instance: &str, folder: &str, uidvalidity: u32) -> Result<Vec<u32>> {
+        self.imap_failed_uids(instance, folder, uidvalidity)
     }
 }
 
@@ -490,6 +531,14 @@ pub fn sync_with<S: SyncStorage>(
 /// Incrementally sync one folder. See the [module documentation](self)
 /// for the UIDVALIDITY/UID cursor model and the connector identity scope.
 ///
+/// The write unit is the **atomic batch commit** (M2.3): one `UID FETCH`
+/// batch's messages, failed-item ledger updates, and the checkpoint
+/// advance land in one transaction, so an interruption mid-folder leaves
+/// the checkpoint exactly at the boundary of what is durably stored.
+/// Items the round cannot store are ledgered durably with a fixed reason
+/// (see [`REASON_UNPARSEABLE`] / [`REASON_MISSING_FETCH`]) and retried by
+/// every later round until they resolve.
+///
 /// The outcome is always a summary: when syncing fails partway, the counts
 /// already accumulated stay in it, alongside [`FolderSyncSummary::error`].
 pub fn sync_folder<T: Read + Write, S: SyncStorage>(
@@ -498,6 +547,96 @@ pub fn sync_folder<T: Read + Write, S: SyncStorage>(
     instance_id: &str,
     folder: &str,
 ) -> FolderSyncSummary {
+    /// One fetch response turn: parsed mails (with their uids) and
+    /// ledgered failures for the uids the turn accounted. Parsed values
+    /// are owned here; the batch items borrowing them are built once the
+    /// turn's fetch response is fully consumed (see [`build_items`]).
+    #[derive(Default)]
+    struct FetchedTurn {
+        mails: Vec<(u32, crate::mail::ParsedRawMail)>,
+        failures: Vec<BatchFailure<'static>>,
+    }
+
+    /// Consume one FETCH response into a [`FetchedTurn`]: every entry is
+    /// parsed or ledgered (`unparseable`), and body-less entries ledger
+    /// as `missing` (entries without even a uid stay uncountable — there
+    /// is no ledger key).
+    fn consume_fetches<'f, I>(
+        fetches: I,
+        instance_id: &str,
+        folder: &str,
+        uidvalidity: u32,
+    ) -> FetchedTurn
+    where
+        I: Iterator<Item = &'f imap::types::Fetch>,
+    {
+        let mut turn = FetchedTurn::default();
+        for fetch in fetches {
+            let (uid, raw) = match (fetch.uid, fetch.body()) {
+                (Some(uid), Some(raw)) => (uid, raw),
+                (Some(uid), None) => {
+                    turn.failures.push(BatchFailure {
+                        uid,
+                        reason: REASON_MISSING_FETCH,
+                    });
+                    continue;
+                }
+                _ => continue,
+            };
+            match parse_raw_mail_canonical(raw, instance_id, "") {
+                Some(mut parsed) => {
+                    apply_folder_fields(&mut parsed.message, folder, uid, uidvalidity);
+                    turn.mails.push((uid, parsed));
+                }
+                None => turn.failures.push(BatchFailure {
+                    uid,
+                    reason: REASON_UNPARSEABLE,
+                }),
+            }
+        }
+        turn
+    }
+
+    /// Ledger the requested uids the FETCH completed without.
+    fn missing_failures(requested: &[u32], returned: &HashSet<u32>) -> Vec<BatchFailure<'static>> {
+        requested
+            .iter()
+            .filter(|uid| !returned.contains(*uid))
+            .map(|uid| BatchFailure {
+                uid: *uid,
+                reason: REASON_MISSING_FETCH,
+            })
+            .collect()
+    }
+
+    /// Borrow one turn's owned parses as batch items (the uid strings
+    /// live in `ids`, parallel to `turn.mails`).
+    fn build_items<'a>(
+        turn: &'a FetchedTurn,
+        ids: &'a [String],
+        folder: &'a str,
+        uidvalidity: u32,
+    ) -> Vec<MailBatchItem<'a>> {
+        turn.mails
+            .iter()
+            .enumerate()
+            .map(|(i, (_, parsed))| MailBatchItem {
+                message: &parsed.message,
+                subject: &parsed.subject,
+                identity: ConnectorIdentity {
+                    namespace: "imap",
+                    external_key: &parsed.identity.external_key,
+                    revision_hash: &parsed.identity.revision_hash,
+                },
+                occurrence: Occurrence {
+                    scope: folder,
+                    provider_item_id: &ids[i],
+                    uidvalidity: Some(uidvalidity),
+                },
+            })
+            .collect()
+    }
+
     fn run<T: Read + Write, S: SyncStorage>(
         session: &mut Session<T>,
         storage: &S,
@@ -512,6 +651,11 @@ pub fn sync_folder<T: Read + Write, S: SyncStorage>(
         summary.uidvalidity = uidvalidity;
 
         let saved = storage.checkpoint(instance_id, folder)?;
+        // The retry set for *this* validity only (a reset validity sees an
+        // empty set — old-validity rows belong to an abandoned UID
+        // namespace); uids at or above `start_uid` are handled by this
+        // round's own fetches below.
+        let retry_before = storage.failed_uids(instance_id, folder, uidvalidity)?;
         let (start_uid, reset) = match &saved {
             Some(state) if state.uidvalidity == uidvalidity => {
                 (state.last_uid.saturating_add(1), false)
@@ -548,62 +692,105 @@ pub fn sync_folder<T: Read + Write, S: SyncStorage>(
                 .collect::<Vec<_>>()
                 .join(",");
             let fetches = session.uid_fetch(set, "RFC822")?;
-            let mut batch_max_uid = 0;
-            for fetch in fetches.iter() {
-                let (uid, raw) = match (fetch.uid, fetch.body()) {
-                    (Some(uid), Some(raw)) => (uid, raw),
-                    _ => {
-                        summary.failed += 1;
-                        continue;
-                    }
-                };
-                summary.seen += 1;
-                match parse_raw_mail_canonical(raw, instance_id, "") {
-                    Some(mut parsed) => {
-                        apply_folder_fields(&mut parsed.message, folder, uid, uidvalidity);
-                        let outcome = storage.insert_mail(
-                            instance_id,
-                            &parsed.message,
-                            &parsed.subject,
-                            &ConnectorIdentity {
-                                namespace: "imap",
-                                external_key: &parsed.identity.external_key,
-                                revision_hash: &parsed.identity.revision_hash,
-                            },
-                            &Occurrence {
-                                scope: folder,
-                                provider_item_id: &uid.to_string(),
-                                uidvalidity: Some(uidvalidity),
-                            },
-                        )?;
-                        match outcome {
-                            MailInsertOutcome::Inserted {
-                                conflicting_revision,
-                                ..
-                            } => {
-                                summary.inserted += 1;
-                                if conflicting_revision {
-                                    summary.conflicting_revisions += 1;
-                                }
-                            }
-                            MailInsertOutcome::Duplicate { .. } => summary.skipped += 1,
-                        }
-                    }
-                    None => summary.failed += 1,
-                }
-                batch_max_uid = batch_max_uid.max(uid);
-            }
-            // Persist the cursor after every batch so an interrupted sync
-            // resumes where it stopped instead of refetching the folder.
-            if batch_max_uid > last_uid {
-                last_uid = batch_max_uid;
-                storage.set_checkpoint(instance_id, folder, uidvalidity, last_uid)?;
-            }
+            let batch_uids: Vec<u32> = batch.to_vec();
+            let turn = consume_fetches(fetches.iter(), instance_id, folder, uidvalidity);
+            // Every uid the response accounted (parsed or already
+            // ledgered); only the truly absent are missing fetches.
+            let returned: HashSet<u32> = turn
+                .mails
+                .iter()
+                .map(|(uid, _)| *uid)
+                .chain(turn.failures.iter().map(|f| f.uid))
+                .collect();
+            let mut failures = turn.failures.clone();
+            failures.extend(missing_failures(&batch_uids, &returned));
+            // The batch's highest *requested* uid: after a complete FETCH
+            // response every requested uid is accounted (stored, deduped,
+            // or ledgered), so the cursor may advance past ledgered items —
+            // the ledger, not silence, remembers them.
+            let new_last_uid = batch_uids.iter().copied().max().unwrap_or(0).max(last_uid);
+            let ids: Vec<String> = turn.mails.iter().map(|(uid, _)| uid.to_string()).collect();
+            let items = build_items(&turn, &ids, folder, uidvalidity);
+            let outcome = storage.commit_batch(
+                instance_id,
+                folder,
+                uidvalidity,
+                new_last_uid,
+                &items,
+                &failures,
+                &[],
+            )?;
+            // Counted from the committed outcome: an aborted batch counts
+            // nothing (it stored nothing), keeping
+            // `seen == inserted + skipped + failed` exact.
+            summary.seen += outcome.inserted + outcome.skipped + outcome.failed;
+            summary.failed += outcome.failed;
+            summary.inserted += outcome.inserted;
+            summary.skipped += outcome.skipped;
+            summary.conflicting_revisions += outcome.conflicting_revisions;
+            last_uid = new_last_uid;
         }
 
-        // Record the cursor even for empty/unchanged folders (the UIDVALIDITY
-        // may have appeared or reset).
-        storage.set_checkpoint(instance_id, folder, uidvalidity, last_uid)?;
+        // Retry pass (M2.3): failures from earlier rounds below this
+        // round's fetch range get one fresh fetch per round until they
+        // resolve. Chunked like the main pass (bounded command lines,
+        // bounded held parses), one atomic commit per chunk with the
+        // (unchanged) cursor.
+        let retry: Vec<u32> = retry_before
+            .into_iter()
+            .filter(|uid| *uid < start_uid)
+            .collect();
+        for retry_chunk in retry.chunks(FETCH_BATCH) {
+            let set = retry_chunk
+                .iter()
+                .map(|uid| uid.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            let fetches = session.uid_fetch(set, "RFC822")?;
+            let turn = consume_fetches(fetches.iter(), instance_id, folder, uidvalidity);
+            // Every uid the response accounted (parsed or already
+            // ledgered); only the truly absent are missing fetches.
+            let returned: HashSet<u32> = turn
+                .mails
+                .iter()
+                .map(|(uid, _)| *uid)
+                .chain(turn.failures.iter().map(|f| f.uid))
+                .collect();
+            let mut failures = turn.failures.clone();
+            failures.extend(missing_failures(retry_chunk, &returned));
+            let resolved: Vec<u32> = turn.mails.iter().map(|(uid, _)| *uid).collect();
+            let ids: Vec<String> = turn.mails.iter().map(|(uid, _)| uid.to_string()).collect();
+            let items = build_items(&turn, &ids, folder, uidvalidity);
+            let outcome = storage.commit_batch(
+                instance_id,
+                folder,
+                uidvalidity,
+                last_uid,
+                &items,
+                &failures,
+                &resolved,
+            )?;
+            summary.seen += outcome.inserted + outcome.skipped + outcome.failed;
+            summary.inserted += outcome.inserted;
+            summary.skipped += outcome.skipped;
+            summary.failed += outcome.failed;
+            summary.resolved_failures += resolved.len() as u64;
+            summary.conflicting_revisions += outcome.conflicting_revisions;
+        }
+
+        // Adopt the cursor even for empty/unchanged folders when the
+        // validity or position moved (a first scan of an empty folder, a
+        // reset adoption) — adopting a new validity also clears the
+        // folder's ledger rows from abandoned validities (see
+        // [`Storage::commit_imap_batch`]).
+        if saved
+            != Some(crate::message::ImapSyncState {
+                uidvalidity,
+                last_uid,
+            })
+        {
+            storage.commit_batch(instance_id, folder, uidvalidity, last_uid, &[], &[], &[])?;
+        }
         Ok(())
     }
 
@@ -615,6 +802,7 @@ pub fn sync_folder<T: Read + Write, S: SyncStorage>(
         inserted: 0,
         skipped: 0,
         failed: 0,
+        resolved_failures: 0,
         conflicting_revisions: 0,
         error: None,
     };

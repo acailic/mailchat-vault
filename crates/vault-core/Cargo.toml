@@ -31,3 +31,4 @@ proptest = "1.7"
 tempfile = "3"
 imap = { workspace = true }
 sha2 = { workspace = true }
+rusqlite = { workspace = true }
