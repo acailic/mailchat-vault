@@ -2092,6 +2092,19 @@ describe("workspace shell", () => {
     expect(activeRow.dataset.index).toBe("0");
   });
 
+  it("arrows and Enter on a focused select do not hijack result navigation", async () => {
+    await bootSearched();
+    pressKey(win.document, "ArrowDown"); // select row 0 in the results list
+    expect($<HTMLElement>("#results .hit-item.active").dataset.index).toBe("0");
+    const select = $("#export-format");
+    select.focus();
+    pressKey(select, "ArrowDown");
+    expect($<HTMLElement>("#results .hit-item.active").dataset.index).toBe("0");
+    const callsBefore = ctxCalls().length;
+    pressKey(select, "Enter");
+    expect(ctxCalls().length).toBe(callsBefore);
+  });
+
   it("in wide layout opening a message does not steal focus", async () => {
     await boot();
     setViewportWidth(1280);

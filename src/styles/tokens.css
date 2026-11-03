@@ -8,8 +8,7 @@
  * the prefers-color-scheme media query supplies the "system" setting when
  * no explicit theme is set. Final values were chosen to meet WCAG 2.2 AA
  * contrast for their pairings (text on canvas/panel, accent-fg on accent,
- * status colors on panel — verified in tests/e2e/specs/16-workspace-
- * layout.e2e.mjs and docs/release.md notes).
+ * status colors on panel).
  * ------------------------------------------------------------------------- */
 
 /* Bundled Source Sans 3 (SIL OFL 1.1 — see src/assets/fonts/OFL.txt).

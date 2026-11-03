@@ -703,6 +703,8 @@ document.addEventListener("keydown", (event) => {
     return;
   }
 
+  if (target instanceof Element && target.closest("button, select, a")) return;
+
   if (state.detail) {
     if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       const dir = event.key === "ArrowUp" ? -1 : 1;
