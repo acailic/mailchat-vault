@@ -271,6 +271,48 @@ fn a_source_without_credentials_is_reported_not_errored() {
     pool.shutdown();
 }
 
+/// A resolver that *errors* — stored credentials that exist but cannot
+/// be used (a failed Google token refresh, the review round's fix) — is
+/// reported as `Failed` carrying the error, never conflated with having
+/// nothing stored (`NoCredentials`), and the source is not synced.
+#[test]
+fn a_failing_resolver_is_failed_not_no_credentials() {
+    let server = MockImap::start();
+    server.set_mailbox("INBOX", MockMailbox::new(7, mails(2, "refreshe")));
+
+    let tmp = tempfile::tempdir().unwrap();
+    let pool = pool(&tmp);
+    register_source(&pool, &config_for(USER, server.addr.port()));
+
+    // The keyring HAS a refresh token, but refreshing it fails (the
+    // resolver returns the stored-credential error, not `Ok(None)`).
+    let round = sync_round_with(
+        &pool,
+        |_| Err("google token refresh failed: network down".into()),
+        || false,
+        mock_connect,
+    );
+    assert_eq!(round.outcomes.len(), 1);
+    let SourceSyncStatus::Failed { error } = &round.outcomes[0].status else {
+        panic!(
+            "a failing resolver is Failed, got {:?}",
+            round.outcomes[0].status
+        );
+    };
+    assert_eq!(error, "google token refresh failed: network down");
+
+    // Failed is not NoCredentials: the resolver was asked (it errored),
+    // no mail synced, and a later round with working credentials syncs.
+    assert_eq!(total(&pool), 0, "no sync when the resolver errors");
+    let round = run_round(&pool);
+    assert!(matches!(
+        round.outcomes[0].status,
+        SourceSyncStatus::Synced { .. }
+    ));
+    assert_eq!(total(&pool), 2);
+    pool.shutdown();
+}
+
 // ---------------------------------------------------------------------------
 // Interruption mid-fetch: atomic batches leave no disagreement
 // ---------------------------------------------------------------------------
