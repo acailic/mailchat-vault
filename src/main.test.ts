@@ -2080,6 +2080,33 @@ describe("workspace shell", () => {
     expect(ctxCalls().at(-1)?.args).toEqual({ id: Number(threadRow.dataset.id), radius: 8 });
   });
 
+  it("arrow thread navigation keeps focus on the current thread row", async () => {
+    await bootSearched();
+    setViewportWidth(1280);
+    const all = [...CTX.before, CTX.message, ...CTX.after];
+    const ctxFor = (id: number): ChatContext => {
+      const at = all.findIndex((m) => m.id === id);
+      return { before: all.slice(0, at), message: all[at], after: all.slice(at + 1) };
+    };
+    tauri.handlers.set("chat_context", (args: unknown) =>
+      ctxFor((args as { id: number }).id),
+    );
+    input("#search").value = "vault";
+    pressKey(input("#search"), "Enter");
+    await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
+    ($("#results .hit-item") as HTMLElement).click();
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
+    const threadRow = $<HTMLElement>("#detail .thread-row:not(.current)");
+    threadRow.focus();
+    pressKey(threadRow, "ArrowDown");
+    await vi.waitFor(() =>
+      expect($("#detail .thread-row.current")?.getAttribute("data-id")).toBe("12"),
+    );
+    const current = $<HTMLElement>("#detail .thread-row.current");
+    expect(win.document.activeElement).toBe(current);
+    expect(current.getAttribute("tabindex")).toBe("-1");
+  });
+
   it("ArrowDown from a focused row keeps focus on the new active row", async () => {
     await bootSearched();
     const row = $("#results .hit-item") as HTMLElement;
