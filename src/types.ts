@@ -216,3 +216,71 @@ export interface JobEventsPage {
   trimmed: boolean;
   jobs: JobRecord[];
 }
+
+// ---------------------------------------------------------------------------
+// M2.3: IMAP sources, exclusion, and the failed-item ledger
+// (mirrors `vault_core::storage` / `vault_core::imap_coordinator`)
+// ---------------------------------------------------------------------------
+
+/** A durable source instance (never credentials). */
+export interface SourceInstance {
+  id: string;
+  kind: string;
+  label: string;
+  /** `null` for legacy-named instances no connector has claimed. */
+  connector_key: string | null;
+  config_json: string;
+  state: "connected" | "disconnected" | string;
+  /** Per-source exclusion: coordinator rounds skip excluded sources. */
+  excluded: boolean;
+  last_attempt_at: string | null;
+  last_success_at: string | null;
+  created_at: string;
+}
+
+/** One row of the failed-item ledger: what fell, where, why, how often retried. */
+export interface FailedItem {
+  source_instance_id: string;
+  folder: string;
+  uid: number;
+  uidvalidity: number;
+  /** Fixed human-readable cause; never message content. */
+  reason: string;
+  attempts: number;
+  first_failed_at: string;
+  last_failed_at: string;
+}
+
+/** Per-folder outcome of one IMAP sync (mirrors `vault_core::imap::FolderSyncSummary`). */
+export interface FolderSyncSummary {
+  folder: string;
+  uidvalidity: number;
+  reset: boolean;
+  seen: number;
+  inserted: number;
+  skipped: number;
+  failed: number;
+  /** Previously-failed items this round finally stored (ledger cleared). */
+  resolved_failures: number;
+  conflicting_revisions: number;
+  error: string | null;
+}
+
+/** What happened to one source in a coordinator round (tagged by `status`). */
+export type SourceSyncStatus =
+  | { status: "synced"; folders: FolderSyncSummary[] }
+  | { status: "no_credentials" }
+  | { status: "failed"; error: string };
+
+/** One source's outcome in a coordinator round. */
+export interface SourceSyncOutcome {
+  instance_id: string;
+  label: string;
+  status: SourceSyncStatus;
+}
+
+/** A whole `imap_sync_all` round: per-source outcomes plus excluded labels. */
+export interface RoundSummary {
+  outcomes: SourceSyncOutcome[];
+  excluded: string[];
+}
