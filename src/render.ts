@@ -90,7 +90,15 @@ export function renderResults(list: HTMLElement, opts: ResultsOptions): void {
       meta.className = "meta";
       meta.textContent = `${m.author || "unknown"} · ${formatSentAt(m.sent_at)} · ${m.channel}`;
       item.append(meta, hitBody(hit, terms));
-      item.addEventListener("click", () => onOpen(index, m.id));
+      const open = () => onOpen(index, m.id);
+      item.addEventListener("click", open);
+      item.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          event.stopPropagation();
+          open();
+        }
+      });
       list.append(item);
     }
     children.push(section);
@@ -177,7 +185,15 @@ function threadRow(
     row.setAttribute("role", "button");
     row.setAttribute("tabindex", "0");
     row.title = "Open this message";
-    row.addEventListener("click", () => onOpen(m.id));
+    const open = () => onOpen(m.id);
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        event.stopPropagation();
+        open();
+      }
+    });
   }
   return row;
 }

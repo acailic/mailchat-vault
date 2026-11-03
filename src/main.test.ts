@@ -2059,6 +2059,39 @@ describe("workspace shell", () => {
     expect(active?.getAttribute("aria-current")).toBe("true");
   });
 
+  it("Enter on a focused result row opens that row's message", async () => {
+    await bootSearched();
+    const rows = win.document.querySelectorAll("#results .hit-item") as unknown as HTMLElement[];
+    const row = rows[2];
+    row.focus();
+    pressKey(row, "Enter");
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
+    expect(ctxCalls().at(-1)?.args).toEqual({ id: Number(row.dataset.id), radius: 8 });
+  });
+
+  it("Space on a focused thread row opens that message", async () => {
+    await bootSearched();
+    setViewportWidth(1280);
+    await openDetailViaResult();
+    const threadRow = $<HTMLElement>("#detail .thread-row:not(.current)");
+    threadRow.focus();
+    pressKey(threadRow, " ");
+    await vi.waitFor(() => expect(ctxCalls().length).toBeGreaterThan(1));
+    expect(ctxCalls().at(-1)?.args).toEqual({ id: Number(threadRow.dataset.id), radius: 8 });
+  });
+
+  it("ArrowDown from a focused row keeps focus on the new active row", async () => {
+    await bootSearched();
+    const row = $("#results .hit-item") as HTMLElement;
+    row.focus();
+    pressKey(win.document, "ArrowDown");
+    const active = win.document.activeElement as unknown as HTMLElement | null;
+    expect(active?.classList.contains("hit-item")).toBe(true);
+    expect(active?.getAttribute("aria-current")).toBe("true");
+    const activeRow = $<HTMLElement>("#results .hit-item.active");
+    expect(activeRow.dataset.index).toBe("0");
+  });
+
   it("in wide layout opening a message does not steal focus", async () => {
     await boot();
     setViewportWidth(1280);

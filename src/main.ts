@@ -719,12 +719,13 @@ document.addEventListener("keydown", (event) => {
 
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     if (state.hits.length === 0) return;
+    const rowFocused = resultsList.contains(document.activeElement);
     const delta = event.key === "ArrowDown" ? 1 : -1;
     state.activeIndex = moveIndex(state.activeIndex, state.hits.length, delta);
     renderAll();
-    resultsList
-      .querySelector(`.hit-item.active`)
-      ?.scrollIntoView({ block: "nearest" });
+    const activeRow = resultsList.querySelector<HTMLElement>(".hit-item.active");
+    activeRow?.scrollIntoView({ block: "nearest" });
+    if (rowFocused) activeRow?.focus();
     event.preventDefault();
   } else if (event.key === "Enter") {
     if (state.activeIndex >= 0 && state.hits[state.activeIndex]) {
