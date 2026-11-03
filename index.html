@@ -320,9 +320,15 @@
         <input id="imap-port" type="number" placeholder="993" value="993" style="max-width: 90px" />
       </div>
       <div class="row">
+        <select id="imap-auth" style="max-width: 15em" title="How to authenticate with the server">
+          <option value="password">App password</option>
+          <option value="oauth">Google sign-in (OAuth)</option>
+        </select>
         <input id="imap-user" type="text" placeholder="you@gmail.com" />
         <input id="imap-pass" type="password" placeholder="App password" autocomplete="off" />
+        <button id="imap-oauth-btn" type="button" hidden>Sign in with Google…</button>
       </div>
+      <div id="imap-oauth-hint" class="meta" style="margin-top: 4px"></div>
       <div class="row">
         <input id="imap-folders" type="text" placeholder="INBOX (comma-separated folders)" />
         <button id="imap-sync-btn" type="button">Sync</button>

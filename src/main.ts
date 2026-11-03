@@ -62,9 +62,20 @@ interface FolderSyncSummary {
 
 interface ImapSyncOutcome {
   folders: FolderSyncSummary[];
-  /** null when a stored password was reused; "os_keyring" | "memory" when
-   * the entered password was just saved there. */
+  /** null when a stored password was reused or the sync ran over OAuth2;
+   * "os_keyring" | "memory" when the entered password was just saved
+   * there. */
   saved_to: "os_keyring" | "memory" | null;
+}
+
+interface OAuthLoginOutcome {
+  username: string;
+  saved_to: "os_keyring" | "memory";
+}
+
+interface OAuthStatus {
+  configured: boolean;
+  signed_in: boolean;
 }
 
 const searchInput = document.querySelector<HTMLInputElement>("#search")!;
@@ -98,6 +109,9 @@ const imapHostInput = document.querySelector<HTMLInputElement>("#imap-host")!;
 const imapPortInput = document.querySelector<HTMLInputElement>("#imap-port")!;
 const imapUserInput = document.querySelector<HTMLInputElement>("#imap-user")!;
 const imapPassInput = document.querySelector<HTMLInputElement>("#imap-pass")!;
+const imapAuthSelect = document.querySelector<HTMLSelectElement>("#imap-auth")!;
+const imapOauthButton = document.querySelector<HTMLButtonElement>("#imap-oauth-btn")!;
+const imapOauthHint = document.querySelector<HTMLElement>("#imap-oauth-hint")!;
 const imapFoldersInput = document.querySelector<HTMLInputElement>("#imap-folders")!;
 const imapSyncButton = document.querySelector<HTMLButtonElement>("#imap-sync-btn")!;
 const imapStatus = document.querySelector<HTMLElement>("#imap-status")!;
@@ -838,17 +852,116 @@ async function seedDemo(): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// IMAP sync (app password or Google sign-in)
+// ---------------------------------------------------------------------------
+
+/** Which credentials a sync uses, mirroring the backend's auth modes. */
+type ImapAuthMode = "password" | "oauth";
+
+function imapAuthMode(): ImapAuthMode {
+  return imapAuthSelect.value === "oauth" ? "oauth" : "password";
+}
+
+/** Show only the inputs the selected auth mode needs, and refresh the
+ * sign-in hint (Google sign-in only). */
+function applyImapAuthMode(): void {
+  const oauth = imapAuthMode() === "oauth";
+  imapPassInput.hidden = oauth;
+  imapOauthButton.hidden = !oauth;
+  imapOauthHint.textContent = "";
+  if (oauth) {
+    void refreshOauthHint();
+  }
+}
+
+async function refreshOauthHint(): Promise<void> {
+  const username = imapUserInput.value.trim();
+  if (!username) {
+    imapOauthHint.textContent = "Enter your Gmail address, then sign in.";
+    return;
+  }
+  try {
+    const status = await invoke<OAuthStatus>("oauth_status", {
+      host: imapHostInput.value.trim(),
+      username,
+    });
+    if (!status.configured) {
+      imapOauthHint.textContent =
+        "Gmail sign-in is not configured — set MAILCHAT_GMAIL_CLIENT_ID and MAILCHAT_GMAIL_CLIENT_SECRET (see README → IMAP sync).";
+    } else if (status.signed_in) {
+      imapOauthHint.textContent = `Signed in as ${username} — Sync uses Google sign-in; no password needed.`;
+    } else {
+      imapOauthHint.textContent =
+        "Not signed in yet — click “Sign in with Google…” (the browser opens; consent once).";
+    }
+  } catch {
+    imapOauthHint.textContent = "";
+  }
+}
+
+async function oauthLogin(): Promise<void> {
+  const host = imapHostInput.value.trim();
+  const username = imapUserInput.value.trim();
+  if (!username) {
+    imapStatus.textContent = "Enter your Gmail address first.";
+    return;
+  }
+  imapOauthButton.disabled = true;
+  imapStatus.textContent =
+    "Sign-in started — complete it in the browser window that just opened…";
+  try {
+    const outcome = await invoke<OAuthLoginOutcome>("oauth_gmail_login", {
+      host,
+      username,
+    });
+    const store =
+      outcome.saved_to === "memory"
+        ? " Refresh token kept in memory only for this session (no OS keyring available)."
+        : " Refresh token stored in the OS keyring.";
+    imapStatus.textContent = `Signed in as ${outcome.username}.${store}`;
+    await refreshOauthHint();
+  } catch (e) {
+    imapStatus.textContent = `Sign-in failed: ${e}`;
+  } finally {
+    imapOauthButton.disabled = false;
+  }
+}
+
+function renderImapSyncOutcome(outcome: ImapSyncOutcome): void {
+  const lines = outcome.folders.map(
+    (f) =>
+      `${f.folder}: ${f.inserted} new, ${f.skipped} already present` +
+      (f.failed > 0 ? `, ${f.failed} failed to parse` : "") +
+      (f.reset ? " (full rescan)" : "") +
+      (f.error ? ` — failed: ${f.error}` : ""),
+  );
+  const note =
+    outcome.saved_to === "memory"
+      ? " Password kept in memory only for this session (no OS keyring available)."
+      : outcome.saved_to === "os_keyring"
+        ? " Password stored in the OS keyring."
+        : "";
+  imapStatus.textContent = lines.join(" · ") + note;
+}
+
 async function syncImap(): Promise<void> {
   const host = imapHostInput.value.trim();
   const username = imapUserInput.value.trim();
   const port = Number.parseInt(imapPortInput.value, 10);
-  const password = imapPassInput.value;
+  const auth = imapAuthMode();
+  // The password field is irrelevant (and hidden) in OAuth mode; never
+  // send a stale value along.
+  const password = auth === "password" ? imapPassInput.value : "";
   const folders = imapFoldersInput.value
     .split(",")
     .map((f) => f.trim())
     .filter((f) => f.length > 0);
-  if (!host || !username) {
-    imapStatus.textContent = "Enter the IMAP host and your username first.";
+  if (!username || (auth === "password" && !host)) {
+    imapStatus.textContent =
+      auth === "password"
+        ? "Enter the IMAP host and your username first."
+        : "Enter your Gmail address first.";
     return;
   }
   imapSyncButton.disabled = true;
@@ -860,21 +973,9 @@ async function syncImap(): Promise<void> {
       username,
       password,
       folders: folders.length > 0 ? folders : null,
+      auth,
     });
-    const lines = outcome.folders.map(
-      (f) =>
-        `${f.folder}: ${f.inserted} new, ${f.skipped} already present` +
-        (f.failed > 0 ? `, ${f.failed} failed to parse` : "") +
-        (f.reset ? " (full rescan)" : "") +
-        (f.error ? ` — failed: ${f.error}` : ""),
-    );
-    const note =
-      outcome.saved_to === "memory"
-        ? " Password kept in memory only for this session (no OS keyring available)."
-        : outcome.saved_to === "os_keyring"
-          ? " Password stored in the OS keyring."
-          : "";
-    imapStatus.textContent = lines.join(" · ") + note;
+    renderImapSyncOutcome(outcome);
     imapPassInput.value = "";
     await refreshStats();
     void refreshEmbedStatus();
@@ -1082,6 +1183,11 @@ clearFiltersButton.addEventListener("click", clearFilters);
 importButton.addEventListener("click", () => void importMbox());
 chatImportButton.addEventListener("click", () => void importChatExport());
 seedButton.addEventListener("click", () => void seedDemo());
+imapAuthSelect.addEventListener("change", applyImapAuthMode);
+imapUserInput.addEventListener("change", () => {
+  if (imapAuthMode() === "oauth") void refreshOauthHint();
+});
+imapOauthButton.addEventListener("click", () => void oauthLogin());
 imapSyncButton.addEventListener("click", () => void syncImap());
 embedButton.addEventListener("click", () => void runEmbedJob());
 watchButton.addEventListener("click", () => void watchTypedPath());

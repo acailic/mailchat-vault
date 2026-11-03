@@ -7,7 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+base64 = "0.22"
 chrono = { workspace = true }
+getrandom = "0.3"
 iana-time-zone = "0.1"
 imap = { workspace = true }
 mailparse = { workspace = true }
