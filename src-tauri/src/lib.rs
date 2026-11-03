@@ -821,7 +821,7 @@ impl JobSpec {
                 Ok(JobSpec::ImapSync {
                     host: string_field("host")?.trim().to_lowercase(),
                     port: port as u16,
-                    username: string_field("username")?,
+                    username: string_field("username")?.trim().to_string(),
                     // Parity with the v1 sync command: an empty (or
                     // absent) password means "resolve from the stored
                     // secret" — resolved in `job_submit` before the job
@@ -842,6 +842,25 @@ impl JobSpec {
     }
 }
 
+/// Two-way password parity with the v1 sync command: an entered password
+/// is remembered (keyring) and used for the run; an empty one resolves
+/// the stored secret, erroring when none is stored.
+fn resolve_imap_password(
+    secrets: &secrets::Secrets,
+    host: &str,
+    username: &str,
+    password: &str,
+) -> Result<String, String> {
+    if password.is_empty() {
+        secrets
+            .load(host, username)
+            .ok_or_else(|| "no password stored for this account — enter one".to_string())
+    } else {
+        secrets.save(host, username, password);
+        Ok(password.to_string())
+    }
+}
+
 /// Submit a background job (the v2 protocol). Returns immediately with a
 /// [`JobHandle`]; follow the job through `job-event` window events and
 /// recover missed ones with `job_events_since`.
@@ -857,9 +876,9 @@ fn job_submit(
     let pool = Arc::clone(&state.pool);
     let embedder = state.embedder;
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    // Parity with the v1 sync command: an empty password means "reuse the
-    // stored one" — resolve it here (on the command thread) so the job
-    // body carries a ready config.
+    // Parity with the v1 sync command: an entered password is kept in the
+    // keyring; an empty one resolves the stored secret. Resolved here (on
+    // the command thread) so the job body carries a ready config.
     let spec = match spec {
         JobSpec::ImapSync {
             host,
@@ -867,15 +886,14 @@ fn job_submit(
             username,
             password,
             folders,
-        } if password.is_empty() => {
-            let stored = secrets
-                .load(&host, &username)
-                .ok_or_else(|| "no password stored for this account — enter one".to_string())?;
+        } => {
+            let password =
+                resolve_imap_password(&secrets, &host, &username, &password)?;
             JobSpec::ImapSync {
                 host,
                 port,
                 username,
-                password: stored,
+                password,
                 folders,
             }
         }
@@ -1277,7 +1295,7 @@ mod tests {
                 "imap_sync",
                 &params(json!({
                     "host": "IMAP.Gmail.COM",
-                    "username": "a@b.c",
+                    "username": "  a@b.c  ",
                     "password": "pw",
                 }))
             )
@@ -1338,6 +1356,28 @@ mod tests {
         let err = JobSpec::parse("make_coffee", &params(json!({}))).unwrap_err();
         assert!(err.contains("unknown job kind"), "{err}");
         assert!(err.contains("imap_sync"), "{err}");
+    }
+
+    #[test]
+    fn job_submit_imap_password_resolution_is_two_way() {
+        let secrets = secrets::Secrets::new();
+        let host = "imap.password-test.invalid";
+        let username = "TwoWay@Test.invalid";
+        // Entered: used for the run and remembered in the keyring.
+        assert_eq!(
+            resolve_imap_password(&secrets, host, username, "entered-pw").unwrap(),
+            "entered-pw"
+        );
+        // A later empty submit resolves the stored credential — no re-entry.
+        assert_eq!(
+            resolve_imap_password(&secrets, host, username, "").unwrap(),
+            "entered-pw"
+        );
+        // An account with nothing stored still requires entry.
+        assert_eq!(
+            resolve_imap_password(&secrets, host, "None@Test.invalid", "").unwrap_err(),
+            "no password stored for this account — enter one"
+        );
     }
 
     #[test]
