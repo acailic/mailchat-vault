@@ -283,7 +283,7 @@ fn settings_get(state: State<AppState>) -> Result<SettingsView, String> {
 #[tauri::command]
 fn settings_save(
     state: State<'_, AppState>,
-    secrets: State<'_, secrets::Secrets>,
+    secrets: State<'_, Arc<secrets::Secrets>>,
     payload: SaveSettingsPayload,
 ) -> Result<SettingsView, String> {
     let mut settings = Settings {
@@ -355,7 +355,7 @@ fn settings_save(
 #[tauri::command]
 fn llm_key_clear(
     state: State<'_, AppState>,
-    secrets: State<'_, secrets::Secrets>,
+    secrets: State<'_, Arc<secrets::Secrets>>,
     id: String,
 ) -> Result<SettingsView, String> {
     let id = id.trim();
