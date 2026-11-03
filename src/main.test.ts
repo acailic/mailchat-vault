@@ -573,6 +573,60 @@ describe("filters", () => {
     });
   });
 
+  it("removing a colliding-label source chip clears every instance it expanded to", async () => {
+    tauri.handlers.set("sources_list", () => [
+      {
+        id: "inst-mbox",
+        kind: "legacy",
+        label: "mbox",
+        connector_key: "mbox",
+        config_json: "{}",
+        state: "connected",
+        excluded: false,
+        last_attempt_at: null,
+        last_success_at: null,
+        created_at: "2026-01-01 00:00:00",
+      },
+      {
+        id: "inst-mbox2",
+        kind: "imap",
+        label: "mbox",
+        connector_key: "imap",
+        config_json: "{}",
+        state: "connected",
+        excluded: false,
+        last_attempt_at: null,
+        last_success_at: null,
+        created_at: "2026-01-01 00:00:00",
+      },
+      {
+        id: "inst-demo",
+        kind: "legacy",
+        label: "demo",
+        connector_key: "demo",
+        config_json: "{}",
+        state: "connected",
+        excluded: false,
+        last_attempt_at: null,
+        last_success_at: null,
+        created_at: "2026-01-01 00:00:00",
+      },
+    ]);
+    await boot();
+    await vi.waitFor(() => expect(win.document.querySelectorAll(".chip").length).toBe(2));
+    searchRespondsWith(() => pageOf(HITS.slice(0, 1), 6));
+    ($('[data-source="mbox"]') as HTMLElement).click();
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    expect(searchCalls()[0].args).toMatchObject({
+      request: { source_ids: ["inst-mbox", "inst-mbox2"] },
+    });
+    ($("#active-filter-chips .filter-chip") as HTMLElement).click();
+    await flush();
+    expect(searchCalls()).toHaveLength(1);
+    expect(win.document.querySelectorAll("#active-filter-chips .filter-chip").length).toBe(0);
+    expect($("#status").textContent).toBe("Type something to search, or set a filter to browse.");
+  });
+
   it("the author filter sends the trimmed substring on Enter", async () => {
     await boot();
     searchRespondsWith(() => pageOf(HITS.slice(1, 2), 1));

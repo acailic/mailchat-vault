@@ -717,7 +717,18 @@ function writeFilters(f: SearchFilters): void {
 
 /** Remove one applied filter chip and re-run (resets to page one). */
 function removeFilterChip(chip: FilterChip): void {
-  writeFilters(withoutChip(state.filters, chip));
+  let next = state.filters;
+  if (chip.kind === "source") {
+    // One label can stand for several instances (v1 semantics: the filter
+    // matches every instance carrying the label) — remove them all.
+    const ids = sourceInstances.filter((s) => s.label === chip.label).map((s) => s.id);
+    for (const id of ids.length > 0 ? ids : [chip.value]) {
+      next = withoutChip(next, { ...chip, value: id });
+    }
+  } else {
+    next = withoutChip(next, chip);
+  }
+  writeFilters(next);
   void runSearch(0);
 }
 
@@ -732,6 +743,7 @@ async function runSearch(offset = 0): Promise<void> {
   }
   const filters = readFilters(text);
   if (!text && !hasActiveFilters(filters)) {
+    state.filters = filters;
     state.hits = [];
     state.total = 0;
     state.offset = 0;
