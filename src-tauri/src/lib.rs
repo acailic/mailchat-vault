@@ -1040,6 +1040,9 @@ fn run_job_spec(
                 &cancelled,
                 &mut progress,
             )?;
+            if outcome.cancelled {
+                return Err(JobError::Cancelled);
+            }
             Ok(serde_json::to_value(&ChatImportOutcome::from(outcome)).unwrap_or(Value::Null))
         }
         JobSpec::EmbedMessages => run_embed_job(ctx, embedder),
@@ -1109,8 +1112,13 @@ fn run_bounded(
     let cancelled = || ctx.is_cancelled();
     let progress = |done: u64, total: u64, message: &str| ctx.progress(done, total, message);
     let mut progress = progress;
-    run.run(source, &mut sink, &cancelled, &mut progress)
-        .map_err(JobError::from)
+    let outcome = run
+        .run(source, &mut sink, &cancelled, &mut progress)
+        .map_err(JobError::from)?;
+    if outcome.cancelled {
+        return Err(JobError::Cancelled);
+    }
+    Ok(outcome)
 }
 
 /// The incremental embedding job with per-batch progress: pending list
@@ -1328,11 +1336,12 @@ impl StreamSource for DemoSource {
 
     fn stream(
         &self,
-        skip: u64,
+        mut skip: u64,
         emit: &mut dyn FnMut(StreamItem) -> CoreResult<Flow>,
     ) -> CoreResult<()> {
         for msg in demo::messages() {
             if skip > 0 {
+                skip -= 1;
                 continue;
             }
             if emit(StreamItem::Message(msg))? == Flow::Stop {

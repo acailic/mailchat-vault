@@ -409,7 +409,7 @@ impl<'a> BoundedRun<'a> {
             }
             // Flush when either limit is hit (>=, so a single oversized
             // item still commits alone rather than looping).
-            if run.batch.len() >= self.limits.max_messages_per_batch
+            if run.batch.len() + run.issues.len() >= self.limits.max_messages_per_batch
                 || run.batch_text_bytes >= self.limits.max_batch_text_bytes
             {
                 run.commit_batch(false)?;

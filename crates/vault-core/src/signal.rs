@@ -145,9 +145,10 @@ impl StreamSource for SignalSource {
 
 /// Scan a Signal export (streamed) for the first entry carrying a
 /// `conversationId` — the same resolution the whole-file parser does
-/// with the full array in hand. Stops reading at the first hit; an
-/// export without any id is read to the end (an id-less export keys on
-/// the file stem, and only a full scan can prove absence).
+/// with the full array in hand. The walk reads the array to the end but
+/// keeps only the first id found (memory stays bounded); an export
+/// without any id keys on the file stem (only a full scan can prove
+/// absence).
 fn find_conversation_id<R: std::io::Read>(reader: R) -> Result<String> {
     struct Find<'a>(&'a std::cell::Cell<Option<String>>);
     impl<'de, 'a: 'de> serde::de::Visitor<'de> for Find<'a> {
