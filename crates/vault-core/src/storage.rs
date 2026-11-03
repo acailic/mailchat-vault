@@ -63,7 +63,8 @@ use crate::{Error, Result};
 ///
 /// Versions 1–2 are the frozen legacy schema; version 3 adds local
 /// embeddings over the legacy table; version 4 adds the canonical store and
-/// copies the legacy rows into it. Never edit an applied migration — append
+/// copies the legacy rows into it; version 11 seeds the periodic sync
+/// schedule. Never edit an applied migration — append
 /// a new version instead.
 const MIGRATIONS: &[(i64, &str)] = &[
     (
@@ -568,6 +569,28 @@ const MIGRATIONS: &[(i64, &str)] = &[
             recorded_at  TEXT NOT NULL DEFAULT (datetime('now'))
         );
         CREATE UNIQUE INDEX idx_import_issues_import ON import_issues (import_id, position);
+        "#,
+    ),
+    (
+        11,
+        // The periodic sync scheduler's persisted state (M2.4). A
+        // singleton row: `enabled` is the user's opt-in (off until they
+        // turn it on), `interval_ms` the period between scheduled
+        // coordinator rounds in milliseconds (kept inside the
+        // scheduler's interval bounds by its setters; the row is seeded
+        // with the defaults so reads never branch). Runtime state — the
+        // single deadline and the active round's job id — is
+        // process-local by design: a fresh start re-arms one interval
+        // out and never inherits stale deadlines (missed time cannot
+        // queue missed rounds).
+        r#"
+        CREATE TABLE sync_schedule (
+            id           INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled      INTEGER NOT NULL DEFAULT 0,
+            interval_ms  INTEGER NOT NULL DEFAULT 900000,
+            updated_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO sync_schedule (id) VALUES (1);
         "#,
     ),
 ];
@@ -1934,6 +1957,44 @@ impl Storage {
             params![id, excluded as i64],
         )?;
         Ok(())
+    }
+
+    /// The periodic sync schedule (M2.4): whether scheduled coordinator
+    /// rounds run and at what interval. Off until the user opts in;
+    /// the row is seeded with defaults by migration 11, so this always
+    /// answers (defaults if the row is somehow missing).
+    pub fn sync_schedule(&self) -> Result<crate::scheduler::SyncSchedule> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT enabled, interval_ms FROM sync_schedule WHERE id = 1",
+                [],
+                |row| {
+                    Ok(crate::scheduler::SyncSchedule {
+                        enabled: row.get::<_, i64>(0)? != 0,
+                        interval_ms: row.get::<_, u64>(1)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row.unwrap_or_default())
+    }
+
+    /// Persist the periodic sync schedule (M2.4). Stores what it is
+    /// given — the scheduler loop (the single writer) clamps to its
+    /// configured interval bounds before calling this, and normalizes
+    /// on load; runtime state (deadlines, the active round) is never
+    /// persisted: a fresh start re-arms one interval out.
+    pub fn set_sync_schedule(
+        &self,
+        schedule: crate::scheduler::SyncSchedule,
+    ) -> Result<crate::scheduler::SyncSchedule> {
+        self.conn.execute(
+            "UPDATE sync_schedule SET enabled = ?1, interval_ms = ?2, updated_at = datetime('now')
+             WHERE id = 1",
+            params![schedule.enabled as i64, schedule.interval_ms],
+        )?;
+        Ok(schedule)
     }
 
     /// The failed-item ledger: every item a sync observed but could not

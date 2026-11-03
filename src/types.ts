@@ -284,3 +284,17 @@ export interface RoundSummary {
   outcomes: SourceSyncOutcome[];
   excluded: string[];
 }
+
+/** The periodic-sync schedule + live scheduler status (M2.4), mirrors
+ * the Tauri `SyncScheduleView`. */
+export interface SyncScheduleView {
+  enabled: boolean;
+  /** Whole minutes between scheduled rounds (default 15). */
+  interval_minutes: number;
+  /** The scheduled round currently queued or running, else null. */
+  active_job: number | null;
+  /** Approximate seconds until the next round (rounded up), else null. */
+  next_due_in_secs: number | null;
+  /** Scheduled rounds submitted since the app started. */
+  rounds_submitted: number;
+}

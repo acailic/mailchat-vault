@@ -93,6 +93,7 @@ use vault_core::llm::{
 use vault_core::mbox::MboxSource;
 use vault_core::oauth::{self, OAuthConfig};
 use vault_core::query::{ChatContext, SearchPage, SearchQuery};
+use vault_core::scheduler::{SyncSchedule as CoreSyncSchedule, SyncScheduler};
 use vault_core::settings::{self, Options, Settings, SETTINGS_VERSION};
 use vault_core::stats::{ArchiveStats, DEFAULT_TOP};
 use vault_core::storage::{FailedItem, SourceInstance};
@@ -114,7 +115,8 @@ const EMBED_JOB_BATCH: u64 = 500;
 /// Shared app state: the database pool (M2.1: writer worker + two read
 /// connections), the LLM provider registry (settings profiles + keyring
 /// keys + env fallback), the local offline embedder behind hybrid ranking
-/// (stateless), and the background folder watcher.
+/// (stateless), the background folder watcher, and the opt-in periodic
+/// sync scheduler (M2.4).
 struct AppState {
     pool: Arc<DbPool>,
     registry: Arc<Mutex<LlmRegistry>>,
@@ -122,6 +124,7 @@ struct AppState {
     settings_path: PathBuf,
     embedder: HashEmbedder,
     watcher: FolderWatcher,
+    scheduler: Arc<SyncScheduler>,
 }
 
 /// Result of an IMAP sync: per-folder summaries plus where an entered
@@ -1066,28 +1069,35 @@ fn run_job_spec(
             let summaries = imap::sync_with(&config, &sink)?;
             Ok(serde_json::to_value(&summaries).unwrap_or(Value::Null))
         }
-        JobSpec::ImapSyncAll => {
-            // One coordinator round over every configured IMAP source
-            // (M2.3): excluded sources are skipped, credentials resolve
-            // per source from the keyring (password, then Google
-            // sign-in), a source without credentials is reported rather
-            // than errored, and each folder's batches commit atomically
-            // with their checkpoint + failed-item ledger updates.
-            let oauth = OAuthConfig::from_env().ok().flatten();
-            let secrets = Arc::clone(secrets);
-            ctx.progress(0, 1, "syncing sources");
-            let round: RoundSummary = imap_coordinator::sync_round(
-                pool,
-                |instance| match StoredImapConfig::of(instance) {
-                    Some(stored) => resolve_imap_auth(&secrets, oauth.as_ref(), &stored),
-                    None => Ok(None),
-                },
-                || ctx.is_cancelled(),
-            );
-            ctx.progress(1, 1, "sources synced");
-            Ok(serde_json::to_value(&round).unwrap_or(Value::Null))
-        }
+        JobSpec::ImapSyncAll => run_sync_all_round(ctx, pool, secrets),
     }
+}
+
+/// One coordinator round over every configured IMAP source (M2.3) —
+/// the body of the manual `imap_sync_all` job *and* of every scheduled
+/// round the M2.4 scheduler submits: excluded sources are skipped,
+/// credentials resolve per source from the keyring (password, then
+/// Google sign-in), a source without credentials is reported rather
+/// than errored, and each folder's batches commit atomically with their
+/// checkpoint + failed-item ledger updates.
+fn run_sync_all_round(
+    ctx: &JobContext,
+    pool: &DbPool,
+    secrets: &Arc<secrets::Secrets>,
+) -> std::result::Result<Value, JobError> {
+    let oauth = OAuthConfig::from_env().ok().flatten();
+    let secrets = Arc::clone(secrets);
+    ctx.progress(0, 1, "syncing sources");
+    let round: RoundSummary = imap_coordinator::sync_round(
+        pool,
+        |instance| match StoredImapConfig::of(instance) {
+            Some(stored) => resolve_imap_auth(&secrets, oauth.as_ref(), &stored),
+            None => Ok(None),
+        },
+        || ctx.is_cancelled(),
+    );
+    ctx.progress(1, 1, "sources synced");
+    Ok(serde_json::to_value(&round).unwrap_or(Value::Null))
 }
 
 /// Drive one bounded streaming import as a job: parsing happens on this
@@ -1211,6 +1221,79 @@ fn source_failures(
     state.pool.with_read(|s| {
         s.list_failed_items(source_id.as_deref())
             .map_err(|e| e.to_string())
+    })
+}
+
+/// The periodic-sync schedule for the UI (M2.4): the persisted choice
+/// plus the live scheduler status in one round trip.
+#[derive(Debug, Clone, Serialize)]
+struct SyncScheduleView {
+    enabled: bool,
+    /// The configured interval, in whole minutes.
+    interval_minutes: u64,
+    /// The scheduled round currently queued or running.
+    active_job: Option<u64>,
+    /// Approximate seconds until the next scheduled round (rounded up;
+    /// refreshed on status transitions, not every second).
+    next_due_in_secs: Option<u64>,
+    /// Scheduled rounds submitted since the app started.
+    rounds_submitted: u64,
+}
+
+impl SyncScheduleView {
+    fn of(status: &vault_core::scheduler::SyncSchedulerStatus) -> Self {
+        Self {
+            enabled: status.enabled,
+            interval_minutes: status.interval_ms / 60_000,
+            active_job: status.active_job,
+            next_due_in_secs: status.next_due_in_secs,
+            rounds_submitted: status.rounds_submitted,
+        }
+    }
+}
+
+/// The opt-in periodic sync schedule and its live status (M2.4).
+#[tauri::command]
+fn sync_schedule_get(state: State<AppState>) -> SyncScheduleView {
+    SyncScheduleView::of(&state.scheduler.status())
+}
+
+/// Opt in to / opt out of periodic sync, or change the interval (M2.4).
+/// `enabled` and `interval_minutes` are each optional; what is passed is
+/// applied, the rest keeps its current value. The interval is clamped to
+/// whole minutes within 1..=1440; enabling arms one full interval out
+/// (never an immediate round), and disabling cancels an active round.
+#[tauri::command]
+fn sync_schedule_set(
+    state: State<AppState>,
+    enabled: Option<bool>,
+    interval_minutes: Option<u64>,
+) -> Result<SyncScheduleView, String> {
+    let schedule = resolve_schedule_params(&state.scheduler.status(), enabled, interval_minutes)?;
+    let status = state.scheduler.set(schedule)?;
+    Ok(SyncScheduleView::of(&status))
+}
+
+/// Merge a `sync_schedule_set` request into the current schedule,
+/// validating the interval (whole minutes, 1..=1440). Pure — unit
+/// tested below.
+fn resolve_schedule_params(
+    current: &vault_core::scheduler::SyncSchedulerStatus,
+    enabled: Option<bool>,
+    interval_minutes: Option<u64>,
+) -> Result<CoreSyncSchedule, String> {
+    let interval_minutes = match interval_minutes {
+        Some(minutes) => {
+            if !(1..=1440).contains(&minutes) {
+                return Err(format!("interval_minutes must be 1..=1440, got {minutes}"));
+            }
+            minutes
+        }
+        None => (current.interval_ms / 60_000).max(1),
+    };
+    Ok(CoreSyncSchedule {
+        enabled: enabled.unwrap_or(current.enabled),
+        interval_ms: interval_minutes * 60_000,
     })
 }
 
@@ -1396,12 +1479,30 @@ pub fn run() {
                     let _ = emit_handle.emit("watch-status", snapshot);
                 },
             );
+            // Periodic sync scheduler (M2.4): opt-in coordinator rounds,
+            // submitted through the same job system as the manual round.
+            // Its rounds resolve credentials exactly like the manual
+            // `imap_sync_all` job; every status change reaches the UI as
+            // a `scheduler-status` event.
+            let emit_handle = app.handle().clone();
+            let scheduler = Arc::new(SyncScheduler::spawn(
+                Arc::clone(&pool),
+                vault_core::scheduler::SchedulerConfig::default(),
+                {
+                    let secrets = Arc::clone(&secrets);
+                    Arc::new(move |ctx: &JobContext| run_sync_all_round(ctx, ctx.pool(), &secrets))
+                },
+                move |status| {
+                    let _ = emit_handle.emit("scheduler-status", status);
+                },
+            ));
             app.manage(AppState {
                 pool,
                 registry: Arc::new(Mutex::new(registry)),
                 settings_path,
                 embedder: HashEmbedder::new(),
                 watcher,
+                scheduler,
             });
             app.manage(Arc::clone(&secrets));
             Ok(())
@@ -1422,6 +1523,8 @@ pub fn run() {
             sources_list,
             source_set_excluded,
             source_failures,
+            sync_schedule_get,
+            sync_schedule_set,
             watch_add_folder,
             watch_remove_folder,
             watch_status,
@@ -1448,6 +1551,67 @@ mod tests {
 
     fn params(map: Value) -> Value {
         map
+    }
+
+    #[test]
+    fn schedule_params_merge_and_validate() {
+        let current = vault_core::scheduler::SyncSchedulerStatus {
+            running: true,
+            enabled: false,
+            interval_ms: 15 * 60 * 1000,
+            active_job: None,
+            next_due_in_secs: None,
+            rounds_submitted: 0,
+        };
+        // Enable keeps the current interval.
+        assert_eq!(
+            resolve_schedule_params(&current, Some(true), None).unwrap(),
+            CoreSyncSchedule {
+                enabled: true,
+                interval_ms: 900_000
+            }
+        );
+        // Interval-only keeps the current enabled state (still off here).
+        assert_eq!(
+            resolve_schedule_params(&current, None, Some(30)).unwrap(),
+            CoreSyncSchedule {
+                enabled: false,
+                interval_ms: 1_800_000
+            }
+        );
+        // Both at once.
+        assert_eq!(
+            resolve_schedule_params(&current, Some(true), Some(1440)).unwrap(),
+            CoreSyncSchedule {
+                enabled: true,
+                interval_ms: 86_400_000
+            }
+        );
+        // Range errors name the field; 0 and 1441 are both refused.
+        assert!(resolve_schedule_params(&current, None, Some(0))
+            .unwrap_err()
+            .contains("interval_minutes must be 1..=1440"));
+        assert!(resolve_schedule_params(&current, None, Some(1441))
+            .unwrap_err()
+            .contains("interval_minutes must be 1..=1440"));
+    }
+
+    #[test]
+    fn schedule_view_maps_minutes_and_status() {
+        let status = vault_core::scheduler::SyncSchedulerStatus {
+            running: true,
+            enabled: true,
+            interval_ms: 1_800_000,
+            active_job: Some(7),
+            next_due_in_secs: Some(1800),
+            rounds_submitted: 3,
+        };
+        let view = SyncScheduleView::of(&status);
+        assert!(view.enabled);
+        assert_eq!(view.interval_minutes, 30);
+        assert_eq!(view.active_job, Some(7));
+        assert_eq!(view.next_due_in_secs, Some(1800));
+        assert_eq!(view.rounds_submitted, 3);
     }
 
     #[test]

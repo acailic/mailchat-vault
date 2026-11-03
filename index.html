@@ -348,6 +348,18 @@
         <input id="imap-folders" type="text" placeholder="INBOX (comma-separated folders)" />
         <button id="imap-sync-btn" type="button">Sync</button>
       </div>
+      <div class="row">
+        <label class="meta" title="Opt-in: round over every configured IMAP source through the background job system. Rounds never overlap; missed time (sleep/offline) never queues.">
+          <input id="auto-sync-toggle" type="checkbox" /> Auto-sync every
+          <select id="auto-sync-interval" style="max-width: 5em">
+            <option value="5">5</option>
+            <option value="15">15</option>
+            <option value="30">30</option>
+            <option value="60">60</option>
+          </select> min
+        </label>
+      </div>
+      <div id="auto-sync-status" class="meta" style="margin-top: 6px; min-height: 1em"></div>
       <div id="imap-status" class="meta" style="margin-top: 6px"></div>
     </section>
 
