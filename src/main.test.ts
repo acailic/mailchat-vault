@@ -524,6 +524,55 @@ describe("filters", () => {
     expect(win.document.querySelectorAll("#results .hit-item").length).toBe(0);
   });
 
+  it("a shared display label selects every instance carrying that label", async () => {
+    tauri.handlers.set("sources_list", () => [
+      {
+        id: "inst-mbox",
+        kind: "legacy",
+        label: "mbox",
+        connector_key: "mbox",
+        config_json: "{}",
+        state: "connected",
+        excluded: false,
+        last_attempt_at: null,
+        last_success_at: null,
+        created_at: "2026-01-01 00:00:00",
+      },
+      {
+        id: "inst-mbox2",
+        kind: "imap",
+        label: "mbox",
+        connector_key: "imap",
+        config_json: "{}",
+        state: "connected",
+        excluded: false,
+        last_attempt_at: null,
+        last_success_at: null,
+        created_at: "2026-01-01 00:00:00",
+      },
+      {
+        id: "inst-demo",
+        kind: "legacy",
+        label: "demo",
+        connector_key: "demo",
+        config_json: "{}",
+        state: "connected",
+        excluded: false,
+        last_attempt_at: null,
+        last_success_at: null,
+        created_at: "2026-01-01 00:00:00",
+      },
+    ]);
+    await boot();
+    await vi.waitFor(() => expect(win.document.querySelectorAll(".chip").length).toBe(2));
+    searchRespondsWith(() => pageOf(HITS.slice(0, 1), 6));
+    ($('[data-source="mbox"]') as HTMLElement).click();
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    expect(searchCalls()[0].args).toMatchObject({
+      request: { text: "", source_ids: ["inst-mbox", "inst-mbox2"] },
+    });
+  });
+
   it("the author filter sends the trimmed substring on Enter", async () => {
     await boot();
     searchRespondsWith(() => pageOf(HITS.slice(1, 2), 1));
@@ -897,6 +946,30 @@ describe("selection export and copy actions", () => {
     await vi.waitFor(() => expect($("#selection-status").textContent).toBe("Exported 2 messages."));
     const call = tauri.calls.find((c) => c.cmd === "export_messages_v2");
     expect(call?.args).toEqual({ ids: [3, 1], format: "text", path: "/tmp/selection.txt" });
+  });
+
+  it("exporting a selection built across pages exports every checked id", async () => {
+    await bootSearched();
+    // Page 1 of a 51-result archive, then the Next page (offset 50).
+    queueResponses([pageOf(HITS, 51), pageOf([summary(51, "mbox", null, "ana")], 51, 50)]);
+    await runQuery("vault");
+    const boxesOn = () =>
+      [...win.document.querySelectorAll("#results input.row-select")] as unknown as HTMLInputElement[];
+    boxesOn()[0].checked = true;
+    fireChange(boxesOn()[0]);
+    pageButtons()[1].click();
+    await vi.waitFor(() =>
+      expect(win.document.querySelector("#results .hit-item")?.getAttribute("data-id")).toBe("51"),
+    );
+    boxesOn()[0].checked = true;
+    fireChange(boxesOn()[0]);
+    await vi.waitFor(() => expect($("#export-selection-btn").textContent).toBe("Export selected (2)…"));
+    dialog.savedPath = "/tmp/selection.txt";
+    tauri.handlers.set("export_messages_v2", () => ({ format: "text", written: 2, missing: 0 }));
+    ($("#export-selection-btn") as HTMLElement).click();
+    await vi.waitFor(() => expect($("#selection-status").textContent).toBe("Exported 2 messages."));
+    const call = tauri.calls.find((c) => c.cmd === "export_messages_v2");
+    expect(call?.args).toEqual({ ids: [51, 1], format: "text", path: "/tmp/selection.txt" });
   });
 
   it("an export with vanished ids reports the skipped count honestly", async () => {
