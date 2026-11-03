@@ -104,6 +104,10 @@ pub enum Error {
     SchemaTooNew { db: i64, supported: i64 },
     #[error("unsafe to migrate: {0}")]
     UnsafeMigration(String),
+    #[error("post-migration validation failed: {0}")]
+    MigrationValidationFailed(String),
+    #[error("a previous migration of this archive failed its validation ({reason}); the original was restored and is recoverable from the snapshot at {snapshot}; resolve the cause or restore the snapshot manually before opening again")]
+    MigrationFailed { reason: String, snapshot: String },
     #[error("not enough free space to snapshot the archive before migration: need {needed} bytes, only {available} available")]
     InsufficientSpace { needed: u64, available: u64 },
     #[error("migration failure injected at {0}")]

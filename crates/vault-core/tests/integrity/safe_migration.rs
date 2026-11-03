@@ -8,13 +8,17 @@
 //! original archive — the database file stays byte-identical (when a
 //! snapshot was taken it is restored from it), the snapshot copy stays
 //! readable, and the next open retries the conversion on the intact
-//! original until it succeeds.
+//! original. A failed post-conversion *validation*, however, is recorded
+//! durably: the next open refuses with that recorded failure instead of
+//! re-running the same deterministic failure forever.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags};
-use vault_core::safe_migration::{snapshot_path, MigrationFailPoint, OpenOptions};
+use vault_core::safe_migration::{
+    failed_marker_path, snapshot_path, MigrationFailPoint, OpenOptions,
+};
 use vault_core::storage::Storage;
 use vault_core::Error;
 
@@ -291,6 +295,72 @@ fn failure_after_the_migration_restores_the_original_from_the_snapshot() {
     assert_eq!(hash_file(&db), before, "original restored byte-for-byte");
     assert_live_db_is_original(&db);
     assert_reopen_completes_migration(&db);
+}
+
+// ----------------------------------------------------------------------
+// Pre-drifted legacy index → durable refusal
+// ----------------------------------------------------------------------
+
+/// A legacy archive whose frozen `messages_fts` had *already* lost
+/// docsize entries before this build ever opened it (e.g. written by an
+/// older, buggy build): validation catches the drift, the original is
+/// restored, and the failure is recorded durably so every later open
+/// refuses with a clear error instead of looping convert-fail-restore
+/// forever.
+#[test]
+fn pre_drifted_legacy_index_records_a_durable_refusal() {
+    let (_dir, db) = v2_fixture();
+    let snapshot = snapshot_path(&db, 2);
+    {
+        let conn = raw(&db);
+        conn.execute(
+            "DELETE FROM messages_fts_docsize WHERE rowid <= 3",
+            [],
+        )
+        .unwrap();
+    }
+    let before = hash_file(&db);
+
+    // First open: the conversion commits, validation catches the drift,
+    // the original is restored from the snapshot.
+    let err = Storage::open(&db).expect_err("pre-drifted legacy index must fail validation");
+    assert!(
+        matches!(err, Error::MigrationValidationFailed(_)),
+        "expected a validation failure, got: {err}"
+    );
+    assert_eq!(hash_file(&db), before, "original restored byte-for-byte");
+    assert_live_db_is_original(&db);
+    assert_snapshot_readable(&snapshot);
+    assert!(
+        failed_marker_path(&db).exists(),
+        "failure must be recorded durably"
+    );
+
+    // Later opens refuse immediately with the recorded failure — never
+    // another convert-fail-restore cycle (the error is the marker's, not
+    // a fresh validation error).
+    for _ in 0..2 {
+        let err = Storage::open(&db).expect_err("the durable marker must refuse the reopen");
+        assert!(
+            matches!(err, Error::MigrationFailed { .. }),
+            "expected the recorded failure, got: {err}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("messages_fts"),
+            "error names the recorded reason: {message}"
+        );
+        assert!(
+            message.contains(snapshot.to_string_lossy().as_ref()),
+            "error points at the recoverable snapshot: {message}"
+        );
+    }
+
+    assert_live_db_is_original(&db);
+    assert!(
+        failed_marker_path(&db).exists(),
+        "the marker survives refused reopens"
+    );
 }
 
 // ----------------------------------------------------------------------

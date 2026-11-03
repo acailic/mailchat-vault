@@ -25,7 +25,11 @@
 //! 6. **Rollback/reopen** — any failure after the snapshot exists closes
 //!    the database and restores the original file from the snapshot copy
 //!    (which is kept), so the next open retries the conversion on the
-//!    intact original. A validated conversion deletes the snapshot.
+//!    intact original. A validated conversion deletes the snapshot. When
+//!    the *post-conversion validation* itself failed, a durable marker is
+//!    also recorded (see [`failed_marker_path`]) so the archive is refused
+//!    on every later open instead of re-running the same failing
+//!    conversion forever.
 //!
 //! Failures can be injected at every stage
 //! ([`MigrationFailPoint`]/[`OpenOptions`]) and the suite in
@@ -34,7 +38,7 @@
 //! original archive.
 
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
@@ -110,6 +114,59 @@ pub fn snapshot_path(db: &Path, from_version: i64) -> PathBuf {
 pub fn remove_snapshot(snapshot: &Path) {
     let _ = fs::remove_file(snapshot);
     let _ = fs::remove_file(sidecar_path(snapshot, "-wal"));
+}
+
+/// `<db>.migration-failed` — the durable sidecar record of a failed
+/// post-migration validation, written *after* the original was restored
+/// from its snapshot. Fail-closed must terminate: every later
+/// [`crate::storage::Storage::open`] reads this marker and refuses with a
+/// clear error (the validation failure and the snapshot location) instead
+/// of silently re-attempting the same deterministic failure forever. It
+/// is a sidecar file, never a row in the archive: recording the failure
+/// must not modify the restored original. Recovery is manual by design —
+/// fix or replace the archive (e.g. from the kept snapshot), then delete
+/// the marker.
+pub fn failed_marker_path(db: &Path) -> PathBuf {
+    append_file_name(db, ".migration-failed")
+}
+
+/// Write the failure marker atomically (temp file, fsync, rename), so a
+/// crash mid-write can never leave a half marker.
+pub(crate) fn write_failed_marker(db: &Path, reason: &str, snapshot: &Path) -> Result<()> {
+    let marker = failed_marker_path(db);
+    let tmp = append_file_name(&marker, ".tmp");
+    let mut file = File::create(&tmp).map_err(Error::Io)?;
+    write!(
+        file,
+        "reason: {reason}\nsnapshot: {}\n",
+        snapshot.display()
+    )
+    .map_err(Error::Io)?;
+    file.sync_all().map_err(Error::Io)?;
+    fs::rename(&tmp, &marker).map_err(Error::Io)?;
+    Ok(())
+}
+
+/// Read the failure marker: `Some((reason, snapshot_path))` when a
+/// previous conversion failed its validation, `None` when there is none.
+/// Lenient parsing: the reason falls back to the whole file content, the
+/// snapshot pointer to empty, so even a truncated marker still refuses.
+pub(crate) fn read_failed_marker(db: &Path) -> Result<Option<(String, String)>> {
+    let content = match fs::read_to_string(failed_marker_path(db)) {
+        Ok(content) => content,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let mut reason = content.trim().to_string();
+    let mut snapshot = String::new();
+    for line in content.lines() {
+        if let Some(r) = line.strip_prefix("reason: ") {
+            reason = r.to_string();
+        } else if let Some(s) = line.strip_prefix("snapshot: ") {
+            snapshot = s.to_string();
+        }
+    }
+    Ok(Some((reason, snapshot)))
 }
 
 /// Take the pre-migration snapshot of `db` (currently at `from_version`),

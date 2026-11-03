@@ -549,6 +549,13 @@ impl Storage {
     /// [`Storage::open`]).
     pub fn open_with(path: impl AsRef<Path>, opts: &OpenOptions) -> Result<Self> {
         let path: &Path = path.as_ref();
+        // A durable failure marker means a previous conversion failed its
+        // post-migration validation here: fail-closed must terminate, so
+        // refuse immediately with that recorded reason instead of
+        // re-attempting the same deterministic failure forever.
+        if let Some((reason, snapshot)) = safe_migration::read_failed_marker(path)? {
+            return Err(Error::MigrationFailed { reason, snapshot });
+        }
         let existed = path.try_exists().map_err(Error::Io)?;
         let conn = Connection::open(path)?;
         // Version probe before anything can touch the file: a newer
@@ -600,12 +607,23 @@ impl Storage {
         match converted {
             Ok(()) => Ok(Self { conn }),
             Err(e) => {
+                // A failed post-conversion validation is deterministic —
+                // the conversion committed but the converted database is
+                // provably bad — so it is recorded durably and every
+                // later open refuses instead of re-running it.
+                let validation_failed = matches!(e, Error::MigrationValidationFailed(_));
                 if let Some((db, snap)) = db_path.zip(snapshot) {
                     // Close the connection before touching its file, then
                     // put the pre-migration original back. The snapshot
                     // itself is kept as the reopen path.
                     drop(conn);
-                    if let Err(restore) = safe_migration::restore_from_snapshot(db, snap) {
+                    let restored = safe_migration::restore_from_snapshot(db, snap);
+                    // Record the durable marker whether or not the restore
+                    // itself succeeded.
+                    if validation_failed {
+                        let _ = safe_migration::write_failed_marker(db, &e.to_string(), snap);
+                    }
+                    if let Err(restore) = restored {
                         return Err(Error::UnsafeMigration(format!(
                             "{e}; restoring the pre-migration original also failed ({restore}) \
                              — the snapshot copy is kept at {}",
@@ -2616,7 +2634,8 @@ fn migrate(conn: &Connection, opts: &OpenOptions) -> Result<()> {
     // agreement with its content table. A failure here triggers the
     // snapshot rollback like any other migration failure.
     safe_migration::inject(opts, MigrationFailPoint::AfterMigration)?;
-    safe_migration::validate_post_migration(conn)?;
+    safe_migration::validate_post_migration(conn)
+        .map_err(|e| Error::MigrationValidationFailed(e.to_string()))?;
     Ok(())
 }
 
