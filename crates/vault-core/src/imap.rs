@@ -350,19 +350,103 @@ pub fn ensure_source_instance(storage: &Storage, config: &ImapConfig) -> Result<
     })
 }
 
+/// The storage surface an IMAP sync needs (M2.1).
+///
+/// A sync is *not* pure database work: it interleaves network fetches
+/// with storage writes. Implementations decide where each half runs:
+/// [`Storage`] executes everything on its own connection (tests, single-
+/// connection callers), while the pool adapter
+/// ([`crate::jobs::PoolSync`]) marshals every storage call through the
+/// bounded write queue so network waits never occupy the write lane —
+/// the sync thread itself talks to the server between calls. Nothing in
+/// this trait performs I/O beyond the database, so a transaction it opens
+/// can never span a network round trip either.
+pub trait SyncStorage {
+    /// Resolve (or register) the durable source instance for `config`.
+    fn ensure_instance(&self, config: &ImapConfig) -> Result<String>;
+    /// Stamp a sync attempt on the instance (starting state).
+    fn record_attempt(&self, instance: &str) -> Result<()>;
+    /// Stamp a successful sync on the instance (connected state).
+    fn record_success(&self, instance: &str) -> Result<()>;
+    /// The folder's stored cursor, if any.
+    fn checkpoint(
+        &self,
+        instance: &str,
+        folder: &str,
+    ) -> Result<Option<crate::message::ImapSyncState>>;
+    /// Persist the folder cursor (idempotent on the last-write wins rule).
+    fn set_checkpoint(
+        &self,
+        instance: &str,
+        folder: &str,
+        uidvalidity: u32,
+        last_uid: u32,
+    ) -> Result<()>;
+    /// Store one fetched mail (dedup + occurrence + revision contract as
+    /// [`Storage::insert_mail_message`]).
+    fn insert_mail(
+        &self,
+        instance: &str,
+        message: &NewMessage,
+        subject: &str,
+        identity: &ConnectorIdentity<'_>,
+        occurrence: &Occurrence<'_>,
+    ) -> Result<MailInsertOutcome>;
+}
+
+impl SyncStorage for Storage {
+    fn ensure_instance(&self, config: &ImapConfig) -> Result<String> {
+        ensure_source_instance(self, config)
+    }
+    fn record_attempt(&self, instance: &str) -> Result<()> {
+        self.record_source_attempt(instance)
+    }
+    fn record_success(&self, instance: &str) -> Result<()> {
+        self.record_source_success(instance)
+    }
+    fn checkpoint(
+        &self,
+        instance: &str,
+        folder: &str,
+    ) -> Result<Option<crate::message::ImapSyncState>> {
+        self.get_imap_checkpoint(instance, folder)
+    }
+    fn set_checkpoint(
+        &self,
+        instance: &str,
+        folder: &str,
+        uidvalidity: u32,
+        last_uid: u32,
+    ) -> Result<()> {
+        self.set_imap_checkpoint(instance, folder, uidvalidity, last_uid)
+    }
+    fn insert_mail(
+        &self,
+        instance: &str,
+        message: &NewMessage,
+        subject: &str,
+        identity: &ConnectorIdentity<'_>,
+        occurrence: &Occurrence<'_>,
+    ) -> Result<MailInsertOutcome> {
+        self.insert_mail_message(instance, message, subject, identity, occurrence)
+    }
+}
+
 /// Sync every configured folder over an already-authenticated session.
 ///
 /// Generic over the stream so the production TLS path ([`sync`]) and the
-/// test path (plain TCP against a mock server) share one implementation.
+/// test path (plain TCP against a mock server) share one implementation,
+/// and over the storage sink ([`SyncStorage`]) so a sync can run against
+/// one connection or through the pool's write queue without changes.
 /// A failing folder never aborts the others: each folder reports its own
 /// outcome, with [`FolderSyncSummary::error`] set on failure.
 ///
 /// `instance_id` is the durable source instance (see
 /// [`ensure_source_instance`]); identities, occurrences, and cursors are
 /// scoped to it.
-pub fn sync_session<T: Read + Write>(
+pub fn sync_session<T: Read + Write, S: SyncStorage>(
     session: &mut Session<T>,
-    storage: &Storage,
+    storage: &S,
     instance_id: &str,
     folders: &[String],
 ) -> Vec<FolderSyncSummary> {
@@ -376,15 +460,30 @@ pub fn sync_session<T: Read + Write>(
 /// durable source instance is registered first (idempotently), each
 /// attempt/success is stamped on it, and the run reports per-folder
 /// summaries.
+///
+/// Storage access runs on the caller's connection ([`SyncStorage` for
+/// `Storage`]); use [`sync_with`] to run the same flow against a pool
+/// adapter instead.
 pub fn sync(config: &ImapConfig, storage: &Storage) -> Result<Vec<FolderSyncSummary>> {
-    let instance = ensure_source_instance(storage, config)?;
-    storage.record_source_attempt(&instance)?;
+    sync_with(config, storage)
+}
+
+/// [`sync`] over any [`SyncStorage`] sink — e.g. the pool adapter
+/// ([`crate::jobs::PoolSync`]), which marshals each storage call through
+/// the bounded write queue so the network waits between calls never
+/// occupy the write lane.
+pub fn sync_with<S: SyncStorage>(
+    config: &ImapConfig,
+    storage: &S,
+) -> Result<Vec<FolderSyncSummary>> {
+    let instance = storage.ensure_instance(config)?;
+    storage.record_attempt(&instance)?;
     let mut session = connect(config)?;
     let folders = config.effective_folders();
     let summaries = sync_session(&mut session, storage, &instance, &folders);
     // Best-effort logout; a failed logout must not mask a sync error.
     let _ = session.logout();
-    storage.record_source_success(&instance)?;
+    storage.record_success(&instance)?;
     Ok(summaries)
 }
 
@@ -393,15 +492,15 @@ pub fn sync(config: &ImapConfig, storage: &Storage) -> Result<Vec<FolderSyncSumm
 ///
 /// The outcome is always a summary: when syncing fails partway, the counts
 /// already accumulated stay in it, alongside [`FolderSyncSummary::error`].
-pub fn sync_folder<T: Read + Write>(
+pub fn sync_folder<T: Read + Write, S: SyncStorage>(
     session: &mut Session<T>,
-    storage: &Storage,
+    storage: &S,
     instance_id: &str,
     folder: &str,
 ) -> FolderSyncSummary {
-    fn run<T: Read + Write>(
+    fn run<T: Read + Write, S: SyncStorage>(
         session: &mut Session<T>,
-        storage: &Storage,
+        storage: &S,
         instance_id: &str,
         folder: &str,
         summary: &mut FolderSyncSummary,
@@ -412,7 +511,7 @@ pub fn sync_folder<T: Read + Write>(
         let uidvalidity = mailbox.uid_validity.unwrap_or(0);
         summary.uidvalidity = uidvalidity;
 
-        let saved = storage.get_imap_checkpoint(instance_id, folder)?;
+        let saved = storage.checkpoint(instance_id, folder)?;
         let (start_uid, reset) = match &saved {
             Some(state) if state.uidvalidity == uidvalidity => {
                 (state.last_uid.saturating_add(1), false)
@@ -462,7 +561,7 @@ pub fn sync_folder<T: Read + Write>(
                 match parse_raw_mail_canonical(raw, instance_id, "") {
                     Some(mut parsed) => {
                         apply_folder_fields(&mut parsed.message, folder, uid, uidvalidity);
-                        let outcome = storage.insert_mail_message(
+                        let outcome = storage.insert_mail(
                             instance_id,
                             &parsed.message,
                             &parsed.subject,
@@ -498,13 +597,13 @@ pub fn sync_folder<T: Read + Write>(
             // resumes where it stopped instead of refetching the folder.
             if batch_max_uid > last_uid {
                 last_uid = batch_max_uid;
-                storage.set_imap_checkpoint(instance_id, folder, uidvalidity, last_uid)?;
+                storage.set_checkpoint(instance_id, folder, uidvalidity, last_uid)?;
             }
         }
 
         // Record the cursor even for empty/unchanged folders (the UIDVALIDITY
         // may have appeared or reset).
-        storage.set_imap_checkpoint(instance_id, folder, uidvalidity, last_uid)?;
+        storage.set_checkpoint(instance_id, folder, uidvalidity, last_uid)?;
         Ok(())
     }
 

@@ -521,8 +521,10 @@ const RUST_MIGRATIONS: &[(i64, RustMigration)] = &[(7, backfill_conversation_key
 
 /// Handle to the vault database.
 ///
-/// `rusqlite`'s `Connection` is `Send` but not `Sync`; wrap it in a `Mutex`
-/// when sharing across threads (the Tauri app does exactly that).
+/// `rusqlite`'s `Connection` is `Send` but not `Sync`; share one handle
+/// across threads behind a `Mutex`, or — what the app does since M2.1 —
+/// open several connections over one file through [`crate::jobs::DbPool`]
+/// (a dedicated writer thread plus read connections, WAL mode).
 #[derive(Debug)]
 pub struct Storage {
     conn: Connection,
@@ -643,6 +645,13 @@ impl Storage {
         conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Every connection initializes itself (M2.1: one writer + read
+        // connections share the file), so each one also learns to wait
+        // out the other side's brief locks instead of failing fast with
+        // SQLITE_BUSY — WAL readers and the writer rarely contend, but a
+        // checkpoint overlapped with a write would otherwise surface as
+        // an immediate error on one of them.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         register_fold_function(conn)?;
         register_canonical_functions(conn)?;
         migrate(conn, opts)
