@@ -5,9 +5,14 @@
 //!
 //! Layout:
 //! - [`message`]: the message model (`NewMessage` in, `Message` out).
-//! - [`storage`]: SQLite database with FTS5 full-text index, migrations,
+//! - [`storage`]: SQLite database with FTS5 full-text index, migrations
+//!   (routed through [`safe_migration`]'s snapshot/rollback path),
 //!   idempotent inserts, stable conversation keys (M1.3), search, IMAP
 //!   sync cursors.
+//! - [`safe_migration`]: the M1.4 safe-migration path — pre-migration
+//!   snapshot with capacity preflight, single-transaction conversion,
+//!   post-conversion index validation, rollback/reopen from the
+//!   snapshot, and refusal of newer-schema databases.
 //! - [`ingest`]: the [`ingest::Source`] abstraction and idempotent ingest.
 //! - [`mail`]: shared RFC 5322 raw-mail parsing (used by mbox and IMAP),
 //!   including the In-Reply-To/References reply graph.
@@ -49,6 +54,7 @@ pub mod mbox;
 pub mod media;
 pub mod message;
 pub mod query;
+pub mod safe_migration;
 pub mod search;
 pub mod settings;
 pub mod signal;
@@ -94,4 +100,16 @@ pub enum Error {
     Embedding(String),
     #[error("invalid export: {0}")]
     InvalidExport(String),
+    #[error("archive schema version {db} is newer than this build supports ({supported}); upgrade the app before opening it")]
+    SchemaTooNew { db: i64, supported: i64 },
+    #[error("unsafe to migrate: {0}")]
+    UnsafeMigration(String),
+    #[error("post-migration validation failed: {0}")]
+    MigrationValidationFailed(String),
+    #[error("a previous migration of this archive failed its validation ({reason}); the original was restored and is recoverable from the snapshot at {snapshot}; resolve the cause or restore the snapshot manually before opening again")]
+    MigrationFailed { reason: String, snapshot: String },
+    #[error("not enough free space to snapshot the archive before migration: need {needed} bytes, only {available} available")]
+    InsufficientSpace { needed: u64, available: u64 },
+    #[error("migration failure injected at {0}")]
+    MigrationFault(&'static str),
 }
