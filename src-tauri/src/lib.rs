@@ -887,8 +887,7 @@ fn job_submit(
             password,
             folders,
         } => {
-            let password =
-                resolve_imap_password(&secrets, &host, &username, &password)?;
+            let password = resolve_imap_password(&secrets, &host, &username, &password)?;
             JobSpec::ImapSync {
                 host,
                 port,
