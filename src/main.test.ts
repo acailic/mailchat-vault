@@ -2117,6 +2117,27 @@ describe("workspace shell", () => {
     expect($("#detail").classList.contains("open")).toBe(false);
   });
 
+  it("closing the reading pane in wide layout restores focus to the active row", async () => {
+    await boot();
+    setViewportWidth(1280);
+    searchRespondsWith(() => pageOf(HITS, 3));
+    tauri.handlers.set("chat_context", () => CTX);
+    input("#search").value = "vault";
+    pressKey(input("#search"), "Enter");
+    await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
+    const row = $("#results .hit-item") as HTMLElement;
+    row.focus();
+    row.click();
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
+    const closeBtn = $<HTMLElement>(".close-btn");
+    closeBtn.focus();
+    closeBtn.click();
+    expect($("#detail").classList.contains("open")).toBe(false);
+    const active = win.document.activeElement as unknown as HTMLElement | null;
+    expect(active?.classList.contains("hit-item")).toBe(true);
+    expect(active?.getAttribute("aria-current")).toBe("true");
+  });
+
   it("Ctrl/Cmd+K focuses the search box from anywhere", async () => {
     await boot();
     $("h1").focus();

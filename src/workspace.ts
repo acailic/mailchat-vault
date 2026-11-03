@@ -152,7 +152,8 @@ export function initWorkspace(): WorkspaceController {
       }
     },
     readingClosed() {
-      if (store.get().layout !== "wide") {
+      const active = document.activeElement;
+      if (!active || active === document.body) {
         const activeRow = document.querySelector<HTMLElement>(
           '#results .hit-item[aria-current="true"]',
         );
