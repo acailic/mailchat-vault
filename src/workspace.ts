@@ -153,7 +153,13 @@ export function initWorkspace(): WorkspaceController {
     },
     readingClosed() {
       if (store.get().layout !== "wide") {
-        const restore = readingTrigger ?? document.querySelector<HTMLElement>("#results");
+        const activeRow = document.querySelector<HTMLElement>(
+          '#results .hit-item[aria-current="true"]',
+        );
+        const restore =
+          readingTrigger && readingTrigger.isConnected
+            ? readingTrigger
+            : (activeRow ?? document.querySelector<HTMLElement>("#results"));
         restore?.focus?.();
       }
       readingTrigger = null;

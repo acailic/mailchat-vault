@@ -181,7 +181,6 @@ body {
 #view-workspace {
   flex: 1;
   min-height: 0;
-  display: grid;
   grid-template-columns: minmax(var(--results-min), 5fr) minmax(var(--reading-min), 6fr);
 }
 
