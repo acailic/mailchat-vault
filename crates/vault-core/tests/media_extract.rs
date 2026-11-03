@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use vault_core::chat_export::{import, ChatImportOutcome};
+use vault_core::chat_export::{import_bounded, ChatImportOutcome};
 use vault_core::search::build_match_query;
 use vault_core::storage::Storage;
 
@@ -62,11 +62,11 @@ impl Sandbox {
         fs::copy(fixture(fixture_name), &target).unwrap();
     }
 
-    fn import_with_media(&self, storage: &Storage) -> ChatImportOutcome {
+    fn import_with_media(&self, storage: &mut Storage) -> ChatImportOutcome {
         self.import(storage, true)
     }
 
-    fn import(&self, storage: &Storage, extract_media: bool) -> ChatImportOutcome {
+    fn import(&self, storage: &mut Storage, extract_media: bool) -> ChatImportOutcome {
         self.import_picked(storage, &self.export_dir(), extract_media)
     }
 
@@ -74,11 +74,20 @@ impl Sandbox {
     /// dialog returns; the export root is its directory).
     fn import_picked(
         &self,
-        storage: &Storage,
+        storage: &mut Storage,
         picked: &Path,
         extract_media: bool,
     ) -> ChatImportOutcome {
-        import(storage, picked, extract_media, Some(&self.data_dir())).unwrap()
+        import_bounded(
+            storage,
+            picked,
+            extract_media,
+            Some(&self.data_dir()),
+            &|| false,
+            &mut |_, _, _| {},
+        )
+        .map(ChatImportOutcome::from)
+        .unwrap()
     }
 }
 
@@ -133,9 +142,9 @@ fn raw_json_of(storage: &Storage, wanted_id: &str) -> String {
 fn telegram_media_is_extracted_hash_named_and_linked() {
     let sb = Sandbox::new("tg-extract");
     write_telegram_export(&sb);
-    let storage = Storage::open_in_memory().unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
 
-    let outcome = sb.import_with_media(&storage);
+    let outcome = sb.import_with_media(&mut storage);
     assert_eq!(outcome.summary.inserted, 4);
     assert_eq!(outcome.summary.failed, 0);
     let media = outcome.media.expect("media pass ran");
@@ -210,9 +219,9 @@ fn video_thumbnail_keeps_image_kind_and_file_takes_the_hint() {
 ]}"#,
     )
     .unwrap();
-    let storage = Storage::open_in_memory().unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
 
-    let outcome = sb.import_with_media(&storage);
+    let outcome = sb.import_with_media(&mut storage);
     let media = outcome.media.unwrap();
     assert_eq!(media.stored, 2);
     assert_eq!(media.deduped, 0);
@@ -236,15 +245,15 @@ fn video_thumbnail_keeps_image_kind_and_file_takes_the_hint() {
 fn telegram_reimport_dedups_files_and_rows() {
     let sb = Sandbox::new("tg-reimport");
     write_telegram_export(&sb);
-    let storage = Storage::open_in_memory().unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
 
-    sb.import_with_media(&storage);
+    sb.import_with_media(&mut storage);
     let before: Vec<String> = vec![
         raw_json_of(&storage, "123456789/102"),
         raw_json_of(&storage, "123456789/103"),
     ];
 
-    let outcome = sb.import_with_media(&storage);
+    let outcome = sb.import_with_media(&mut storage);
     assert_eq!(outcome.summary.inserted, 0);
     assert_eq!(outcome.summary.skipped, 4);
     let media = outcome.media.unwrap();
@@ -277,9 +286,9 @@ fn identical_content_in_two_messages_is_deduped_by_hash() {
 ]}"#,
     )
     .unwrap();
-    let storage = Storage::open_in_memory().unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
 
-    let outcome = sb.import_with_media(&storage);
+    let outcome = sb.import_with_media(&mut storage);
     let media = outcome.media.unwrap();
     assert_eq!(media.stored, 1);
     assert_eq!(media.deduped, 1);
@@ -310,8 +319,8 @@ fn identical_content_referenced_as_jpg_then_jpeg_is_stored_once() {
 ]}"#,
     )
     .unwrap();
-    let storage = Storage::open_in_memory().unwrap();
-    let first = sb.import_with_media(&storage);
+    let mut storage = Storage::open_in_memory().unwrap();
+    let first = sb.import_with_media(&mut storage);
     assert_eq!(first.media.unwrap().stored, 1);
 
     // A later export re-encodes the same photo as `c.jpeg`, imported into
@@ -326,7 +335,15 @@ fn identical_content_referenced_as_jpg_then_jpeg_is_stored_once() {
 ]}"#,
     )
     .unwrap();
-    let second = import(&storage, &later, true, Some(&sb.data_dir())).unwrap();
+    let second = import_bounded(
+        &mut storage,
+        &later,
+        true,
+        Some(&sb.data_dir()),
+        &|| false,
+        &mut |_, _, _| {},
+    )
+    .unwrap();
     let media = second.media.unwrap();
     assert_eq!(media.stored, 0, "no second copy is written");
     assert_eq!(
@@ -357,9 +374,9 @@ fn text_only_export_counts_missing_and_imports_anyway() {
 ]}"#,
     )
     .unwrap();
-    let storage = Storage::open_in_memory().unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
 
-    let outcome = sb.import_with_media(&storage);
+    let outcome = sb.import_with_media(&mut storage);
     assert_eq!(outcome.summary.inserted, 1);
     let media = outcome.media.unwrap();
     assert_eq!(media.referenced, 1);
@@ -376,10 +393,10 @@ fn text_only_export_counts_missing_and_imports_anyway() {
 fn reimport_with_media_backfills_an_existing_archive() {
     let sb = Sandbox::new("tg-backfill");
     write_telegram_export(&sb);
-    let storage = Storage::open_in_memory().unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
 
     // First import with extraction off: text-only rows, no links.
-    let outcome = sb.import(&storage, false);
+    let outcome = sb.import(&mut storage, false);
     assert_eq!(outcome.summary.inserted, 4);
     assert!(outcome.media.is_none());
     assert!(!sb.store_dir().exists());
@@ -390,7 +407,7 @@ fn reimport_with_media_backfills_an_existing_archive() {
     // Same export, extraction on: all rows are duplicates but the three
     // media messages gain their links — the separate pass over the
     // existing archive.
-    let outcome = sb.import_with_media(&storage);
+    let outcome = sb.import_with_media(&mut storage);
     assert_eq!(outcome.summary.inserted, 0);
     assert_eq!(outcome.summary.skipped, 4);
     let media = outcome.media.unwrap();
@@ -403,7 +420,7 @@ fn reimport_with_media_backfills_an_existing_archive() {
     assert_eq!(linked["photo"], "photos/photo_102@01-11-2023_11-02-00.jpg");
 
     // A third run changes nothing.
-    let outcome = sb.import_with_media(&storage);
+    let outcome = sb.import_with_media(&mut storage);
     assert_eq!(outcome.media.unwrap().linked, 0);
     assert_eq!(fs::read_dir(sb.store_dir()).unwrap().count(), 3);
 }
@@ -423,9 +440,9 @@ fn path_escapes_are_rejected_as_missing() {
 ]}"#,
     )
     .unwrap();
-    let storage = Storage::open_in_memory().unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
 
-    let outcome = sb.import_with_media(&storage);
+    let outcome = sb.import_with_media(&mut storage);
     assert_eq!(outcome.summary.inserted, 3);
     let media = outcome.media.unwrap();
     assert_eq!(media.missing, 3);
@@ -453,9 +470,9 @@ fn whatsapp_attachments_are_matched_by_name() {
     // group media in subfolders).
     sb.put("IMG-20261101-WA0001.jpg", "photo.jpg");
     sb.put("media_docs/plan.pdf", "plan.pdf");
-    let storage = Storage::open_in_memory().unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
 
-    let outcome = sb.import_picked(&storage, &chat, true);
+    let outcome = sb.import_picked(&mut storage, &chat, true);
     assert_eq!(outcome.summary.inserted, 5);
     let media = outcome.media.unwrap();
     // The two named attachments; "image omitted" has no name (not a
@@ -488,7 +505,7 @@ fn whatsapp_attachments_are_matched_by_name() {
     }
 
     // Re-import: dedup everywhere, nothing relinked.
-    let outcome = sb.import_picked(&storage, &chat, true);
+    let outcome = sb.import_picked(&mut storage, &chat, true);
     assert_eq!(outcome.summary.skipped, 5);
     let media = outcome.media.unwrap();
     assert_eq!(media.deduped, 2);
@@ -511,9 +528,9 @@ fn whatsapp_stem_match_never_shadowed_by_foreign_extension() {
     sb.put("media_docs/plan.pdf.bak", "plan.pdf");
     // …while the documented re-encode flavor still matches by stem.
     sb.put("IMG-1.jpeg", "photo.jpg");
-    let storage = Storage::open_in_memory().unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
 
-    let outcome = sb.import_picked(&storage, &chat, true);
+    let outcome = sb.import_picked(&mut storage, &chat, true);
     let media = outcome.media.unwrap();
     assert_eq!(media.referenced, 2);
     assert_eq!(
@@ -538,9 +555,9 @@ fn whatsapp_export_without_files_reports_missing_named_attachments() {
          [1.11.2026., 09:01:00] Ana: IMG-20261101-WA0001.jpg (file attached)\n",
     )
     .unwrap();
-    let storage = Storage::open_in_memory().unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
 
-    let outcome = sb.import_picked(&storage, &sb.export_dir().join("chat.txt"), true);
+    let outcome = sb.import_picked(&mut storage, &sb.export_dir().join("chat.txt"), true);
     assert_eq!(outcome.summary.inserted, 2);
     let media = outcome.media.unwrap();
     assert_eq!(media.referenced, 1);
@@ -553,9 +570,9 @@ fn whatsapp_export_without_files_reports_missing_named_attachments() {
 fn picking_the_export_directory_imports_result_json_with_media() {
     let sb = Sandbox::new("tg-pick-dir");
     write_telegram_export(&sb);
-    let storage = Storage::open_in_memory().unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
     // import() takes the directory path itself, like the file dialog does.
-    let outcome = sb.import_with_media(&storage);
+    let outcome = sb.import_with_media(&mut storage);
     assert_eq!(outcome.summary.source, "telegram");
     assert_eq!(outcome.media.unwrap().stored, 3);
 }
@@ -563,9 +580,17 @@ fn picking_the_export_directory_imports_result_json_with_media() {
 #[test]
 fn directory_without_result_json_and_unknown_files_error() {
     let sb = Sandbox::new("errors");
-    let storage = Storage::open_in_memory().unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
 
-    let err = import(&storage, &sb.export_dir(), true, Some(&sb.data_dir())).unwrap_err();
+    let err = import_bounded(
+        &mut storage,
+        &sb.export_dir(),
+        true,
+        Some(&sb.data_dir()),
+        &|| false,
+        &mut |_, _, _| {},
+    )
+    .unwrap_err();
     assert!(
         err.to_string().contains(
             "expected a directory containing a Telegram result.json or a Discord Data Package"
@@ -575,7 +600,15 @@ fn directory_without_result_json_and_unknown_files_error() {
 
     let junk = sb.root.join("junk.txt");
     fs::write(&junk, "not an export at all").unwrap();
-    let err = import(&storage, &junk, true, Some(&sb.data_dir())).unwrap_err();
+    let err = import_bounded(
+        &mut storage,
+        &junk,
+        true,
+        Some(&sb.data_dir()),
+        &|| false,
+        &mut |_, _, _| {},
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("unrecognized"), "{err}");
 }
 
@@ -589,8 +622,8 @@ fn media_files_never_match_the_export_text_or_json_by_accident() {
         "[1.11.2026., 09:00:00] Marko: chat.txt (file attached)\n",
     )
     .unwrap();
-    let storage = Storage::open_in_memory().unwrap();
-    let outcome = sb.import_picked(&storage, &sb.export_dir().join("chat.txt"), true);
+    let mut storage = Storage::open_in_memory().unwrap();
+    let outcome = sb.import_picked(&mut storage, &sb.export_dir().join("chat.txt"), true);
     // The export names its own .txt; the file exists, is stored — this is
     // a legitimate (if odd) reference, so it links, proving name matching
     // works against real files.

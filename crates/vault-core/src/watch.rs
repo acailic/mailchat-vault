@@ -45,8 +45,9 @@ use notify::event::{DataChange, ModifyKind, RenameMode};
 use notify::{recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
 use serde::Serialize;
 
-use crate::ingest::{ingest, IngestSummary, Source};
-use crate::jobs::DbPool;
+use crate::bounded::{import_id_for, BoundedRun, StreamSource};
+use crate::ingest::IngestSummary;
+use crate::jobs::{DbPool, PoolSink};
 use crate::mbox::MboxSource;
 use crate::signal::{is_signal_export_reader, SignalSource};
 use crate::storage::Storage;
@@ -669,8 +670,12 @@ fn remove_folder(
     Ok(())
 }
 
-/// Import one settled file through the normal source pipeline (dedup
-/// contract applies). All failures become events, never panics.
+/// Import one settled file through the bounded streaming pipeline (M2.2):
+/// the file is parsed on this watcher thread one item at a time, batches
+/// commit atomically through the pool's write queue with checkpoint
+/// advancement, and an interrupted import (app closed mid-file) resumes
+/// from its committed position on the next sighting of the same file.
+/// All failures become events, never panics.
 fn import_file(
     pool: &Arc<DbPool>,
     snapshot: &Arc<Mutex<WatchSnapshot>>,
@@ -681,14 +686,18 @@ fn import_file(
     let display = path.display().to_string();
     let event = match import_source_for(path) {
         Ok(Some(source)) => {
-            match pool_write(pool, move |s| ingest(s, source.as_ref())) {
-                Ok(summary) => WatchEvent::Imported {
+            let import_id = import_id_for("watch", path);
+            let run = BoundedRun::new(import_id);
+            let mut sink = PoolSink(pool);
+            let mut no_progress = |_: u64, _: u64, _: &str| {};
+            match run.run(source.as_ref(), &mut sink, &|| false, &mut no_progress) {
+                Ok(outcome) => WatchEvent::Imported {
                     path: display,
-                    summary,
+                    summary: outcome.summary,
                 },
                 Err(e) => WatchEvent::Failed {
                     path: display,
-                    error: e,
+                    error: e.to_string(),
                 },
             }
         }
@@ -718,7 +727,7 @@ fn import_file(
 /// the WhatsApp line check, and Telegram and Signal detection stream the
 /// file through a small fixed-size buffer, so an unrelated huge file costs
 /// neither a full read nor a parse tree.
-fn import_source_for(path: &Path) -> Result<Option<Box<dyn Source + Send>>, String> {
+fn import_source_for(path: &Path) -> Result<Option<Box<dyn StreamSource + Send>>, String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
