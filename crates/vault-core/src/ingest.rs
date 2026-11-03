@@ -1,5 +1,11 @@
-//! Ingest abstraction: a [`Source`] yields [`NewMessage`]s which are stored
-//! idempotently.
+//! Ingest abstraction shared by the sources: a [`Source`] yields
+//! [`NewMessage`]s which are stored idempotently.
+//!
+//! Since M2.2 this whole-archive shape is a **test convenience**:
+//! production paths stream through [`crate::bounded::StreamSource`] and
+//! the batch-commit driver ([`crate::bounded::BoundedRun`]), which never
+//! holds more than one bounded batch in memory. The collect helpers stay
+//! because parser tests want the whole (small) fixture as one value.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -9,11 +15,8 @@ use crate::message::{InsertOutcome, NewMessage};
 use crate::storage::Storage;
 use crate::Result;
 
-/// A source of archived messages.
-///
-/// Implementations read from anywhere (an `.mbox` file, an IMAP mailbox, a
-/// chat export) and return complete messages; storage handles dedup so a
-/// source may safely be re-collected.
+/// A source of archived messages (whole-archive collection — see the
+/// [module docs](self) for when to use the bounded streaming path).
 pub trait Source {
     /// Stable source name used as the dedup namespace (e.g. `"mbox"`).
     fn name(&self) -> &str;

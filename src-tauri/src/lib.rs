@@ -78,13 +78,14 @@ use chrono::Utc;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
+use vault_core::bounded::{import_id_for, BoundedRun, Flow, StreamItem, StreamSource};
 use vault_core::chat_export::{self, ChatImportOutcome};
 use vault_core::export::{self, ExportFormat, ExportSummary};
 use vault_core::imap::{self, FolderSyncSummary, ImapAuth, ImapConfig};
 use vault_core::imap_coordinator::{self, RoundSummary, StoredImapConfig};
-use vault_core::ingest::{ingest, Collected, IngestSummary, Source};
+use vault_core::ingest::IngestSummary;
 use vault_core::jobs::{
-    DbPool, JobContext, JobError, JobEventsPage, JobId, JobRecord, PoolConfig, PoolSync,
+    DbPool, JobContext, JobError, JobEventsPage, JobId, JobRecord, PoolConfig, PoolSink, PoolSync,
 };
 use vault_core::llm::{
     self, AnthropicLlm, AskOutcome, LlmConfig, LlmStatus, PlanSource, PlannedQuery, QueryPlan,
@@ -436,13 +437,21 @@ fn embed_status(state: State<AppState>) -> Result<EmbeddingStatus, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Import every message of an `.mbox` file (idempotent; re-importing skips
-/// already-stored messages).
+/// Import every message of an `.mbox` file (idempotent; re-importing
+/// skips already-stored messages). M2.2: the import streams — the file is
+/// parsed one message at a time on this blocking task, and batches commit
+/// atomically through the pool's write queue with checkpoint advancement,
+/// so arbitrarily large files import under a bounded memory budget.
 #[tauri::command]
 async fn import_mbox(state: State<'_, AppState>, path: String) -> Result<IngestSummary, String> {
     let pool = Arc::clone(&state.pool);
     tauri::async_runtime::spawn_blocking(move || {
-        pool.submit_write(move |s| ingest(s, &MboxSource::new(path)))
+        let source = MboxSource::new(&path);
+        let run = BoundedRun::new(import_id_for("mbox-import", Path::new(&path)));
+        let mut sink = PoolSink(&pool);
+        let mut no_progress = |_: u64, _: u64, _: &str| {};
+        run.run(&source, &mut sink, &|| false, &mut no_progress)
+            .map(|outcome| outcome.summary)
             .map_err(|e: Error| e.to_string())
     })
     .await
@@ -462,6 +471,11 @@ async fn import_mbox(state: State<'_, AppState>, path: String) -> Result<IngestS
 /// content-deduplicated) and linked from each message; messages already
 /// in the archive get their links backfilled, so re-importing an export
 /// with media enriches it.
+///
+/// M2.2: the import streams — detection reads bounded views, the parser
+/// never holds the archive, and batches commit atomically through the
+/// pool's write queue with checkpoint advancement (an interrupted import
+/// resumes from its committed position when re-invoked on the same file).
 #[tauri::command]
 async fn import_chat_export(
     app: AppHandle,
@@ -477,9 +491,17 @@ async fn import_chat_export(
     };
     let pool = Arc::clone(&state.pool);
     tauri::async_runtime::spawn_blocking(move || {
-        pool.submit_write(move |s| {
-            chat_export::import(s, Path::new(&path), extract_media, data_dir.as_deref())
-        })
+        let mut sink = PoolSink(&pool);
+        let mut no_progress = |_: u64, _: u64, _: &str| {};
+        chat_export::import_bounded(
+            &mut sink,
+            Path::new(&path),
+            extract_media,
+            data_dir.as_deref(),
+            &|| false,
+            &mut no_progress,
+        )
+        .map(ChatImportOutcome::from)
         .map_err(|e: Error| e.to_string())
     })
     .await
@@ -706,12 +728,17 @@ async fn oauth_status(
     .map_err(|e: String| format!("status check failed: {e}"))
 }
 
-/// Insert the built-in demo messages so a fresh install has searchable data.
+/// Insert the built-in demo messages so a fresh install has searchable
+/// data (streamed through the bounded pipeline like every other import).
 #[tauri::command]
 async fn seed_demo(state: State<'_, AppState>) -> Result<IngestSummary, String> {
     let pool = Arc::clone(&state.pool);
     tauri::async_runtime::spawn_blocking(move || {
-        pool.submit_write(move |s| ingest(s, &DemoSource))
+        let run = BoundedRun::new("demo-seed");
+        let mut sink = PoolSink(&pool);
+        let mut no_progress = |_: u64, _: u64, _: &str| {};
+        run.run(&DemoSource, &mut sink, &|| false, &mut no_progress)
+            .map(|outcome| outcome.summary)
             .map_err(|e: Error| e.to_string())
     })
     .await
@@ -973,18 +1000,18 @@ fn run_job_spec(
             if ctx.is_cancelled() {
                 return Err(JobError::Cancelled);
             }
-            let summary = ctx.write(|s| ingest(s, &DemoSource))?;
-            Ok(serde_json::to_value(&summary).unwrap_or(Value::Null))
+            let source = DemoSource;
+            let outcome = run_bounded(ctx, pool, "demo-seed", &source, None, "demo")?;
+            Ok(serde_json::to_value(&outcome.summary).unwrap_or(Value::Null))
         }
         JobSpec::ImportMbox { path } => {
             if ctx.is_cancelled() {
                 return Err(JobError::Cancelled);
             }
             let source = MboxSource::new(path);
-            ctx.progress(0, 1, path);
-            let summary = ctx.write(move |s| ingest(s, &source))?;
-            ctx.progress(1, 1, path);
-            Ok(serde_json::to_value(&summary).unwrap_or(Value::Null))
+            let import_id = import_id_for("mbox-import", Path::new(path));
+            let outcome = run_bounded(ctx, pool, import_id, &source, None, path)?;
+            Ok(serde_json::to_value(&outcome.summary).unwrap_or(Value::Null))
         }
         JobSpec::ImportChatExport {
             path,
@@ -1000,12 +1027,20 @@ fn run_job_spec(
                 None
             };
             let moved_path = path.clone();
-            ctx.progress(0, 1, path);
-            let outcome = ctx.write(move |s| {
-                chat_export::import(s, Path::new(&moved_path), extract, media_dir.as_deref())
-            })?;
-            ctx.progress(1, 1, path);
-            Ok(serde_json::to_value(&outcome).unwrap_or(Value::Null))
+            let mut sink = PoolSink(pool);
+            let cancelled = || ctx.is_cancelled();
+            let progress =
+                |done: u64, total: u64, message: &str| ctx.progress(done, total, message);
+            let mut progress = progress;
+            let outcome = chat_export::import_bounded(
+                &mut sink,
+                Path::new(&moved_path),
+                extract,
+                media_dir.as_deref(),
+                &cancelled,
+                &mut progress,
+            )?;
+            Ok(serde_json::to_value(&ChatImportOutcome::from(outcome)).unwrap_or(Value::Null))
         }
         JobSpec::EmbedMessages => run_embed_job(ctx, embedder),
         JobSpec::ImapSync {
@@ -1050,6 +1085,32 @@ fn run_job_spec(
             Ok(serde_json::to_value(&round).unwrap_or(Value::Null))
         }
     }
+}
+
+/// Drive one bounded streaming import as a job: parsing happens on this
+/// (the runner) thread, each batch commits through the pool's write
+/// queue, cancellation is checked per item (the current atomic batch is
+/// finished, the partial one discarded — committed data and counts stay
+/// exact), and progress reports committed items after every batch.
+fn run_bounded(
+    ctx: &JobContext,
+    pool: &DbPool,
+    import_id: impl Into<String>,
+    source: &dyn StreamSource,
+    media: Option<(vault_core::bounded::MediaKind, &Path, &Path)>,
+    _label: &str,
+) -> std::result::Result<vault_core::bounded::BoundedOutcome, JobError> {
+    let run = BoundedRun {
+        import_id: import_id.into(),
+        limits: Default::default(),
+        media,
+    };
+    let mut sink = PoolSink(pool);
+    let cancelled = || ctx.is_cancelled();
+    let progress = |done: u64, total: u64, message: &str| ctx.progress(done, total, message);
+    let mut progress = progress;
+    run.run(source, &mut sink, &cancelled, &mut progress)
+        .map_err(JobError::from)
 }
 
 /// The incremental embedding job with per-batch progress: pending list
@@ -1255,19 +1316,30 @@ fn archive_stats(state: State<AppState>, top: Option<u32>) -> Result<ArchiveStat
         .map_err(|e| e.to_string())
 }
 
-/// The built-in demo messages as an ingest source.
+/// The built-in demo messages as an ingest source: the tiny
+/// whole-archive helper stays for tests; the job path streams (the demo
+/// set is six messages, so both paths are equally bounded in practice).
 struct DemoSource;
 
-impl Source for DemoSource {
+impl StreamSource for DemoSource {
     fn name(&self) -> &str {
         demo::DEMO_SOURCE
     }
 
-    fn collect(&self) -> CoreResult<Collected> {
-        Ok(Collected {
-            messages: demo::messages(),
-            failed: 0,
-        })
+    fn stream(
+        &self,
+        skip: u64,
+        emit: &mut dyn FnMut(StreamItem) -> CoreResult<Flow>,
+    ) -> CoreResult<()> {
+        for msg in demo::messages() {
+            if skip > 0 {
+                continue;
+            }
+            if emit(StreamItem::Message(msg))? == Flow::Stop {
+                return Ok(());
+            }
+        }
+        Ok(())
     }
 }
 

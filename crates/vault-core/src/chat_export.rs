@@ -6,17 +6,24 @@
 //! backfill — so the Tauri shell stays thin and the flow is testable
 //! without the app.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::discord::{is_discord_export, is_discord_export_dir, DiscordSource, DISCORD_SOURCE};
+use crate::bounded::{
+    import_id_for, BoundedOutcome, BoundedRun, IngestSink, MediaKind, StreamSource,
+};
+use crate::discord::{
+    is_discord_export, is_discord_export_dir, is_discord_export_reader, DiscordSource,
+    DISCORD_SOURCE,
+};
 use crate::ingest::{ingest_collected, IngestSummary};
 use crate::media::{self, MediaSummary};
-use crate::signal::{is_signal_export, SignalSource, SIGNAL_SOURCE};
+use crate::signal::{is_signal_export, is_signal_export_reader, SignalSource, SIGNAL_SOURCE};
 use crate::storage::Storage;
-use crate::telegram::{is_telegram_export, TelegramSource};
-use crate::whatsapp::{is_whatsapp_export, WhatsappSource};
+use crate::telegram::{is_telegram_export, is_telegram_export_reader, TelegramSource};
+use crate::whatsapp::{is_whatsapp_export, is_whatsapp_export_reader, WhatsappSource};
 use crate::{Error, Result};
 
 /// Recognized chat export formats.
@@ -51,6 +58,32 @@ pub fn detect_chat_format(bytes: &[u8]) -> Option<ChatFormat> {
         return Some(ChatFormat::WhatsApp);
     }
     None
+}
+
+/// [`detect_chat_format`] streamed from the picked file: detection reads
+/// the format probes' bounded views (the JSON walkers skip `messages`
+/// element by element; WhatsApp only looks at the first 30 lines), so an
+/// arbitrarily large export is detected without loading it (M2.2).
+pub fn detect_chat_format_reader(path: &Path) -> Result<Option<ChatFormat>> {
+    let file = fs::File::open(path)?;
+    let mut file = std::io::BufReader::new(file);
+    use std::io::Seek as _;
+    if is_discord_export_reader(&mut file) {
+        return Ok(Some(ChatFormat::Discord));
+    }
+    file.rewind()?;
+    if is_telegram_export_reader(&mut file) {
+        return Ok(Some(ChatFormat::Telegram));
+    }
+    file.rewind()?;
+    if is_signal_export_reader(&mut file) {
+        return Ok(Some(ChatFormat::Signal));
+    }
+    file.rewind()?;
+    if is_whatsapp_export_reader(&mut file) {
+        return Ok(Some(ChatFormat::WhatsApp));
+    }
+    Ok(None)
 }
 
 /// Outcome of a chat export import: the ingest summary plus (when media
@@ -166,6 +199,15 @@ pub fn import(
     })
 }
 
+impl From<BoundedOutcome> for ChatImportOutcome {
+    fn from(outcome: BoundedOutcome) -> Self {
+        Self {
+            summary: outcome.summary,
+            media: outcome.media,
+        }
+    }
+}
+
 /// Resolve the picked path to the export file: `result.json` inside a
 /// picked directory, the picked directory itself when it is a Discord
 /// Data Package, or the picked file itself.
@@ -184,6 +226,75 @@ fn resolve_export_file(picked: &Path) -> Result<PathBuf> {
         )));
     }
     Ok(picked.to_path_buf())
+}
+
+/// Resolve a picked path to its format and its **streaming** source (the
+/// bounded counterpart of `import`'s detection step). A directory pick is
+/// a Discord Data Package by this point (`resolve_export_file` returns
+/// the dir itself only in that case).
+pub fn resolve_stream_source(
+    picked: &Path,
+) -> Result<(ChatFormat, PathBuf, Box<dyn StreamSource + Send>)> {
+    let file = resolve_export_file(picked)?;
+    if file.is_dir() {
+        let source = DiscordSource::new(file.clone());
+        return Ok((ChatFormat::Discord, file, Box::new(source)));
+    }
+    let format = detect_chat_format_reader(&file)?.ok_or_else(|| {
+        Error::ChatImport(format!(
+            "unrecognized chat export format: {} (expected a WhatsApp .txt export, a Telegram result.json, a Signal conversation .json, or a Discord messages.json)",
+            file.display()
+        ))
+    })?;
+    let source: Box<dyn StreamSource + Send> = match format {
+        ChatFormat::Telegram => Box::new(TelegramSource::new(&file)),
+        ChatFormat::Signal => Box::new(SignalSource::new(&file)),
+        ChatFormat::WhatsApp => Box::new(WhatsappSource::new(&file)),
+        ChatFormat::Discord => Box::new(DiscordSource::new(&file)),
+    };
+    Ok((format, file, source))
+}
+
+/// The bounded production import (M2.2): same formats, same detection,
+/// same media behavior as [`import`], but streamed — the parser never
+/// holds the archive, batches commit atomically with checkpoint
+/// advancement, cancellation preserves committed data and correct
+/// counts, and an interrupted run resumes from its checkpoint on the
+/// next call with the same input (see [`crate::bounded`]).
+///
+/// Media extraction runs per batch on the caller's thread (file copies
+/// stay outside every storage lock); Signal and Discord record
+/// attachments in `raw_json` only, as in [`import`].
+pub fn import_bounded(
+    sink: &mut dyn IngestSink,
+    picked: &Path,
+    extract_media: bool,
+    data_dir: Option<&Path>,
+    is_cancelled: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(u64, u64, &str),
+) -> Result<BoundedOutcome> {
+    let (format, file, source) = resolve_stream_source(picked)?;
+    let mut run = BoundedRun::new(import_id_for("chat-import", &file));
+    let export_root = file
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    if extract_media {
+        if let Some(data_dir) = data_dir {
+            match format {
+                ChatFormat::Telegram => {
+                    run.media = Some((MediaKind::Telegram, export_root.as_path(), data_dir))
+                }
+                ChatFormat::WhatsApp => {
+                    run.media = Some((MediaKind::WhatsApp, export_root.as_path(), data_dir))
+                }
+                // Signal and Discord attachments stay recorded in `raw_json`
+                // only — media extraction is not implemented for them yet.
+                ChatFormat::Signal | ChatFormat::Discord => {}
+            }
+        }
+    }
+    run.run(source.as_ref(), sink, is_cancelled, progress)
 }
 
 #[cfg(test)]

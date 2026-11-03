@@ -20,16 +20,17 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io;
+use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer as _};
 use serde_json::Value;
 
+use crate::bounded::{EntryOutcome, Flow, StreamItem, StreamSource};
 use crate::ingest::{Collected, Source};
 use crate::message::NewMessage;
-use crate::Result;
+use crate::{Error, Result};
 
 /// Source name and dedup namespace for Discord imports.
 pub const DISCORD_SOURCE: &str = "discord";
@@ -69,6 +70,104 @@ impl Source for DiscordSource {
             return parse_discord_channel(&bytes, &index, &fallback);
         }
         import_directory(&self.path)
+    }
+}
+
+/// The bounded streaming path (M2.2): channel files are processed one at
+/// a time (sorted, as the directory import is), and each file is read in
+/// two streamed passes — its header (`channel`/`guild`, with the
+/// `messages` array skipped through zero-sized `IgnoredAny`s) and then
+/// its `messages` array, one element alive at a time. Peak memory is one
+/// message entry plus one channel's header, whatever the package's size.
+impl StreamSource for DiscordSource {
+    fn name(&self) -> &str {
+        DISCORD_SOURCE
+    }
+
+    fn stream(&self, skip: u64, emit: &mut dyn FnMut(StreamItem) -> Result<Flow>) -> Result<()> {
+        let mut failure = None;
+        {
+            let mut state = crate::bounded::ConsumerState {
+                skip,
+                emit,
+                stopped: false,
+                failure: &mut failure,
+            };
+            if self.path.is_file() {
+                let index = index_map(self.path.parent().unwrap_or(Path::new("")));
+                let fallback = file_stem_hint(&self.path);
+                stream_channel_file(&self.path, &index, &fallback, &mut state)?;
+            } else {
+                let files = channel_files(&self.path)?;
+                if files.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "no Discord channel .json files found under {} \
+                             (expected the package's messages/ directory or its parent)",
+                            self.path.display()
+                        ),
+                    )
+                    .into());
+                }
+                let index = index_map(&self.path);
+                for file in &files {
+                    let fallback = file_stem_hint(file);
+                    stream_channel_file(file, &index, &fallback, &mut state)?;
+                    if state.stopped || state.failure.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        Ok(())
+    }
+}
+
+/// Stream one channel file: header pass (identity + the empty-export
+/// refusal), then the `messages` array element by element. Read and
+/// structural errors name the file, exactly as the directory collect
+/// path does.
+fn stream_channel_file(
+    file: &Path,
+    index: &HashMap<String, String>,
+    chat_id_fallback: &str,
+    state: &mut crate::bounded::ConsumerState<'_>,
+) -> Result<()> {
+    let header: DiscordHeader = serde_json::from_reader(BufReader::new(
+        fs::File::open(file).map_err(|e| read_failed(file, e))?,
+    ))
+    .map_err(|e| channel_file_failed(file, e.into()))?;
+    // The same refusal as the whole-file parser: an object with none of
+    // the three Discord members is not a channel file (a stray
+    // `notes.json` in the directory).
+    if header.messages.is_empty() && header.channel.is_none() && header.guild.is_none() {
+        return Err(Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{}: not a Discord channel export: no messages, channel, or guild member",
+                file.display()
+            ),
+        )));
+    }
+    let ctx = ChannelContext::from_header(&header, index, chat_id_fallback);
+    let result = {
+        let visitor = MessagesVisitor { ctx: &ctx, state };
+        let mut de = serde_json::Deserializer::from_reader(BufReader::new(
+            fs::File::open(file).map_err(|e| read_failed(file, e))?,
+        ));
+        de.deserialize_map(visitor)
+    };
+    if let Some(e) = state.failure.take() {
+        return Err(e);
+    }
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) if state.stopped && crate::bounded::ConsumerState::is_stop_sentinel(&e) => Ok(()),
+        Err(e) => Err(Error::Io(channel_file_failed(file, e.into()))),
     }
 }
 
@@ -204,76 +303,216 @@ pub fn parse_discord_channel(
         )
         .into());
     }
-    let (channel_id, channel_name) = export
-        .channel
-        .as_ref()
-        .map(|c| {
-            (
-                c.get("id").and_then(id_to_string).unwrap_or_default(),
-                field_str(c, "name").unwrap_or_default(),
-            )
-        })
-        .unwrap_or_default();
-    let guild_name = export
-        .guild
-        .as_ref()
-        .and_then(|g| field_str(g, "name"))
-        .unwrap_or_default();
-
-    // Dedup follows the stable channel id (fallback: the file stem);
-    // display grouping prefers names, then the package index, then ids.
-    let dedup_channel = if channel_id.is_empty() {
-        chat_id_fallback.to_string()
-    } else {
-        channel_id.clone()
-    };
-    let chat_id = if !guild_name.is_empty() && !channel_name.is_empty() {
-        format!("{guild_name}/{channel_name}")
-    } else if !channel_name.is_empty() {
-        channel_name
-    } else if let Some(path) = index.get(&channel_id) {
-        path.clone()
-    } else {
-        dedup_channel.clone()
-    };
+    let ctx = ChannelContext::from_parts(
+        export.channel.as_ref(),
+        export.guild.as_ref(),
+        index,
+        chat_id_fallback,
+    );
 
     let mut messages = Vec::new();
     let mut failed: u64 = 0;
     for entry in &export.messages {
-        let Some(obj) = entry.as_object() else {
-            failed += 1;
-            continue;
-        };
-        // System entries (joins, pins, calls) carry no body: skipped. An
-        // entry with no type at all is malformed (real exports always
-        // type them) and counts as failed.
-        match obj.get("type").and_then(Value::as_str) {
-            Some(t) if CONTENT_TYPES.contains(&t) => {}
-            Some(_) => continue,
-            None => {
-                failed += 1;
-                continue;
-            }
+        match discord_entry(entry, &ctx) {
+            EntryOutcome::Message(msg) => messages.push(msg),
+            EntryOutcome::Failed { .. } => failed += 1,
+            EntryOutcome::Skip => {}
         }
-        let Some(id) = obj.get("id").and_then(id_to_string) else {
-            failed += 1;
-            continue;
-        };
-
-        let author = author_name(obj);
-        let sent_at = discord_sent_at(obj);
-        let body = obj.get("content").and_then(Value::as_str).unwrap_or("");
-        let external_id = format!("{}/{}", dedup_channel, id);
-
-        let mut msg = NewMessage::new(DISCORD_SOURCE, external_id, author, sent_at, body);
-        msg.channel = "chat".to_string();
-        msg.chat_id = chat_id.clone();
-        // The whole original object: reactions, attachments, embeds,
-        // edited timestamps, mentions — all stay recorded in raw_json.
-        msg.raw_json = entry.to_string();
-        messages.push(msg);
     }
     Ok(Collected { messages, failed })
+}
+
+/// The header view of the streaming pass: `channel` and `guild` are read
+/// (small objects), `messages` is enforced to be an array (and its
+/// emptiness is checkable through the zero-sized `IgnoredAny` elements'
+/// count) but skipped element by element.
+#[derive(Debug, Deserialize)]
+struct DiscordHeader {
+    #[serde(default)]
+    channel: Option<Value>,
+    #[serde(default)]
+    guild: Option<Value>,
+    messages: Vec<serde::de::IgnoredAny>,
+}
+
+/// Per-channel identity shared by every entry of one channel file: the
+/// dedup namespace (stable channel id, fallback file stem) and the
+/// display grouping (names, then the package index, then the id).
+struct ChannelContext {
+    dedup_channel: String,
+    chat_id: String,
+}
+
+impl ChannelContext {
+    fn from_header(
+        header: &DiscordHeader,
+        index: &HashMap<String, String>,
+        chat_id_fallback: &str,
+    ) -> Self {
+        Self::from_parts(
+            header.channel.as_ref(),
+            header.guild.as_ref(),
+            index,
+            chat_id_fallback,
+        )
+    }
+
+    fn from_parts(
+        channel: Option<&Value>,
+        guild: Option<&Value>,
+        index: &HashMap<String, String>,
+        chat_id_fallback: &str,
+    ) -> Self {
+        let (channel_id, channel_name) = channel
+            .map(|c| {
+                (
+                    c.get("id").and_then(id_to_string).unwrap_or_default(),
+                    field_str(c, "name").unwrap_or_default(),
+                )
+            })
+            .unwrap_or_default();
+        let guild_name = guild.and_then(|g| field_str(g, "name")).unwrap_or_default();
+
+        // Dedup follows the stable channel id (fallback: the file stem);
+        // display grouping prefers names, then the package index, then ids.
+        let dedup_channel = if channel_id.is_empty() {
+            chat_id_fallback.to_string()
+        } else {
+            channel_id.clone()
+        };
+        let chat_id = if !guild_name.is_empty() && !channel_name.is_empty() {
+            format!("{guild_name}/{channel_name}")
+        } else if !channel_name.is_empty() {
+            channel_name
+        } else if let Some(path) = index.get(&channel_id) {
+            path.clone()
+        } else {
+            dedup_channel.clone()
+        };
+        Self {
+            dedup_channel,
+            chat_id,
+        }
+    }
+}
+
+/// Convert one `messages` array entry through the shared mapping (used by
+/// both the whole-file parser and the streaming pass, so their behavior
+/// cannot drift apart).
+fn discord_entry(entry: &Value, ctx: &ChannelContext) -> EntryOutcome {
+    let Some(obj) = entry.as_object() else {
+        return EntryOutcome::Failed {
+            external_ref: String::new(),
+            reason: "entry is not a JSON object".to_string(),
+        };
+    };
+    // System entries (joins, pins, calls) carry no body: skipped. An
+    // entry with no type at all is malformed (real exports always type
+    // them) and counts as failed.
+    match obj.get("type").and_then(Value::as_str) {
+        Some(t) if CONTENT_TYPES.contains(&t) => {}
+        Some(_) => return EntryOutcome::Skip,
+        None => {
+            return EntryOutcome::Failed {
+                external_ref: obj.get("id").and_then(id_to_string).unwrap_or_default(),
+                reason: "message entry has no type".to_string(),
+            }
+        }
+    }
+    let Some(id) = obj.get("id").and_then(id_to_string) else {
+        return EntryOutcome::Failed {
+            external_ref: String::new(),
+            reason: "message entry has no id".to_string(),
+        };
+    };
+
+    let author = author_name(obj);
+    let sent_at = discord_sent_at(obj);
+    let body = obj.get("content").and_then(Value::as_str).unwrap_or("");
+    let external_id = format!("{}/{}", ctx.dedup_channel, id);
+
+    let mut msg = NewMessage::new(DISCORD_SOURCE, external_id, author, sent_at, body);
+    msg.channel = "chat".to_string();
+    msg.chat_id = ctx.chat_id.clone();
+    // The whole original object: reactions, attachments, embeds,
+    // edited timestamps, mentions — all stay recorded in raw_json.
+    msg.raw_json = entry.to_string();
+    EntryOutcome::Message(msg)
+}
+
+/// serde visitor of the streaming pass: walks the channel object,
+/// streaming the `messages` array element by element; every other member
+/// is skipped. Stops reading as soon as the consumer stops or fails (the
+/// deserializer is used directly, without an end-of-input check).
+struct MessagesVisitor<'a, 'c> {
+    ctx: &'a ChannelContext,
+    state: &'a mut crate::bounded::ConsumerState<'c>,
+}
+
+impl<'de, 'a, 'c> serde::de::Visitor<'de> for MessagesVisitor<'a, 'c> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a Discord channel export object")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<(), A::Error> {
+        while let Some(key) = map.next_key::<String>()? {
+            if key == "messages" {
+                map.next_value_seed(MessagesSeed {
+                    ctx: self.ctx,
+                    state: self.state,
+                })?;
+                // Messages streamed; trailing members are irrelevant.
+                return Ok(());
+            } else {
+                map.next_value::<serde::de::IgnoredAny>()?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Seed that streams the `messages` array: each element is parsed into a
+/// `Value` on its own (one entry alive at a time) and offered to the
+/// consumer.
+struct MessagesSeed<'a, 'c> {
+    ctx: &'a ChannelContext,
+    state: &'a mut crate::bounded::ConsumerState<'c>,
+}
+
+impl<'de, 'a, 'c> serde::de::DeserializeSeed<'de> for MessagesSeed<'a, 'c> {
+    type Value = ();
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> std::result::Result<(), D::Error> {
+        deserializer.deserialize_seq(self)
+    }
+}
+
+impl<'de, 'a, 'c> serde::de::Visitor<'de> for MessagesSeed<'a, 'c> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a messages array")
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(
+        self,
+        mut seq: A,
+    ) -> std::result::Result<(), A::Error> {
+        while let Some(entry) = seq.next_element::<Value>()? {
+            if !self.state.offer(discord_entry(&entry, self.ctx)) {
+                return Err(crate::bounded::ConsumerState::stop());
+            }
+        }
+        Ok(())
+    }
 }
 
 /// True when the bytes are a Discord channel file: JSON carrying a
@@ -281,6 +520,66 @@ pub fn parse_discord_channel(
 /// distinguishes it from a Telegram `result.json`, which also has a
 /// top-level `messages` array.
 pub fn is_discord_export(bytes: &[u8]) -> bool {
+    is_discord_export_shape(bytes)
+}
+
+/// [`is_discord_export`] streamed from a reader: only the top-level
+/// members are examined (the `messages` array is skipped element by
+/// element through zero-sized `IgnoredAny`s), so detection of an
+/// arbitrarily large channel file stays bounded.
+pub fn is_discord_export_reader<R: std::io::Read>(reader: R) -> bool {
+    struct Detect {
+        has_messages_array: bool,
+        has_channel_or_guild: bool,
+    }
+    impl<'de> serde::de::Visitor<'de> for Detect {
+        type Value = bool;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a Discord channel export object")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> std::result::Result<bool, A::Error> {
+            let mut d = Detect {
+                has_messages_array: false,
+                has_channel_or_guild: false,
+            };
+            while let Some(key) = map.next_key::<String>()? {
+                match key.as_str() {
+                    "messages" => {
+                        // An array member at all — even empty — is the
+                        // Telegram/Discord distinguishing shape.
+                        let messages: Vec<serde::de::IgnoredAny> = map.next_value()?;
+                        d.has_messages_array = true;
+                        let _ = messages.len();
+                    }
+                    "channel" | "guild" => {
+                        let v: Value = map.next_value()?;
+                        if v.is_object() {
+                            d.has_channel_or_guild = true;
+                        }
+                    }
+                    _ => {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                    }
+                }
+            }
+            Ok(d.has_messages_array && d.has_channel_or_guild)
+        }
+    }
+    serde_json::Deserializer::from_reader(BufReader::new(reader))
+        .deserialize_map(Detect {
+            has_messages_array: false,
+            has_channel_or_guild: false,
+        })
+        .unwrap_or(false)
+}
+
+/// The object-shape half of [`is_discord_export`] (bytes variant).
+fn is_discord_export_shape(bytes: &[u8]) -> bool {
     let Ok(v) = serde_json::from_slice::<Value>(bytes) else {
         return false;
     };

@@ -6,8 +6,10 @@
 //! `From ` lines as `>From ` (the escaped form does not split a message).
 
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
+use crate::bounded::{EntryOutcome, Flow, StreamItem, StreamSource};
 use crate::ingest::{Collected, Source};
 use crate::mail::parse_raw_mail;
 use crate::Result;
@@ -43,6 +45,31 @@ impl Source for MboxSource {
     }
 }
 
+/// The bounded streaming path (M2.2): the file is walked line by line,
+/// one message's bytes alive at a time — a `From ` separator line flushes
+/// the pending message to the consumer. Peak memory is one message,
+/// whatever the file's size. (A single oversized message is a capacity
+/// question the parser surfaces as-is, never truncation.)
+impl StreamSource for MboxSource {
+    fn name(&self) -> &str {
+        MBOX_SOURCE
+    }
+
+    fn stream(&self, skip: u64, emit: &mut dyn FnMut(StreamItem) -> Result<Flow>) -> Result<()> {
+        let chat_id = self
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        stream_mbox(
+            BufReader::new(fs::File::open(&self.path)?),
+            &chat_id,
+            skip,
+            emit,
+        )
+    }
+}
+
 /// Parse raw `.mbox` file contents into messages.
 ///
 /// `chat_id` groups the messages (typically the file name stem). Message
@@ -52,49 +79,101 @@ impl Source for MboxSource {
 pub fn parse_mbox(bytes: &[u8], chat_id: &str) -> Result<Collected> {
     let mut messages = Vec::new();
     let mut failed: u64 = 0;
-    for raw in split_mbox(bytes) {
-        // Drop the leading "From sender date" separator line before parsing.
-        let raw = match raw.iter().position(|&b| b == b'\n') {
-            Some(nl) => &raw[nl + 1..],
-            None => continue, // separator line with no content
-        };
-        if raw.is_empty() {
-            continue;
+    stream_mbox(std::io::Cursor::new(bytes), chat_id, 0, &mut |item| {
+        match item {
+            StreamItem::Message(msg) => messages.push(msg),
+            StreamItem::Failed { .. } => failed += 1,
         }
-        match parse_raw_mail(raw, MBOX_SOURCE, chat_id) {
-            Some(msg) => messages.push(msg),
-            None => failed += 1,
-        }
-    }
+        Ok(Flow::Continue)
+    })?;
     Ok(Collected { messages, failed })
 }
 
-/// Split on lines starting with `From `, except escaped `>From ` lines.
-fn split_mbox(bytes: &[u8]) -> Vec<&[u8]> {
-    let mut parts = Vec::new();
-    let mut start = None;
-    let mut i = 0;
-    while i < bytes.len() {
-        // Find the next line start and check what the line begins with.
-        if starts_with_from_line(&bytes[i..]) && (i == 0 || bytes[i - 1] == b'\n') {
-            if let Some(prev) = start.replace(i) {
-                parts.push(&bytes[prev..i]);
+/// The shared streaming engine behind the whole-file parser and the
+/// streaming source: `From ` separator lines split the stream into
+/// messages (escaped `>From ` lines do not), one message buffered at a
+/// time. Parts before the first separator are dropped, and a separator
+/// line with no content is skipped silently — exactly the whole-file
+/// splitter's semantics, item for item.
+pub fn stream_mbox<R: BufRead>(
+    reader: R,
+    chat_id: &str,
+    skip: u64,
+    emit: &mut dyn FnMut(StreamItem) -> Result<Flow>,
+) -> Result<()> {
+    let mut skip = skip;
+    let mut reader = BufReader::new(reader);
+    let mut part: Vec<u8> = Vec::new();
+    let mut started = false;
+    let mut failure: Option<crate::Error> = None;
+    let mut stopped = false;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line)?;
+        if read == 0 {
+            break;
+        }
+        let at_line_start = part.is_empty() || *part.last().unwrap() == b'\n';
+        if at_line_start && line.starts_with(b"From ") {
+            if started && !offer_part(&part, chat_id, &mut skip, emit, &mut failure, &mut stopped) {
+                break;
             }
+            started = true;
+            part = std::mem::take(&mut line);
+            continue;
         }
-        // Advance to the next line.
-        match bytes[i..].iter().position(|&b| b == b'\n') {
-            Some(nl) => i += nl + 1,
-            None => break,
+        if started {
+            part.extend_from_slice(&line);
         }
+        // Bytes before the first separator line are dropped (the
+        // whole-file splitter never emitted them either).
     }
-    if let Some(prev) = start {
-        parts.push(&bytes[prev..]);
+    if started && failure.is_none() && !stopped {
+        offer_part(&part, chat_id, &mut skip, emit, &mut failure, &mut stopped);
     }
-    parts
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    Ok(())
 }
 
-fn starts_with_from_line(line: &[u8]) -> bool {
-    line.starts_with(b"From ")
+/// Parse one buffered part and offer it to the consumer; `false` = stop
+/// reading (the stop/failure slots record why).
+fn offer_part(
+    part: &[u8],
+    chat_id: &str,
+    skip: &mut u64,
+    emit: &mut dyn FnMut(StreamItem) -> Result<Flow>,
+    failure: &mut Option<crate::Error>,
+    stopped: &mut bool,
+) -> bool {
+    // Drop the leading "From sender date" separator line before parsing.
+    let raw = match part.iter().position(|&b| b == b'\n') {
+        Some(nl) => &part[nl + 1..],
+        None => return true, // separator line with no content: skipped
+    };
+    if raw.is_empty() {
+        return true;
+    }
+    let outcome = match parse_raw_mail(raw, MBOX_SOURCE, chat_id) {
+        Some(msg) => EntryOutcome::Message(msg),
+        None => EntryOutcome::Failed {
+            external_ref: String::new(),
+            reason: "mail part failed to parse".to_string(),
+        },
+    };
+    match crate::bounded::emit_entry(outcome, skip, emit) {
+        Ok(Flow::Continue) => true,
+        Ok(Flow::Stop) => {
+            *stopped = true;
+            false
+        }
+        Err(e) => {
+            *failure = Some(e);
+            false
+        }
+    }
 }
 
 #[cfg(test)]

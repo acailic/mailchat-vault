@@ -30,11 +30,14 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::BufReader;
 use std::path::PathBuf;
 
 use chrono::{TimeZone, Utc};
+use serde::Deserializer as _;
 use serde_json::Value;
 
+use crate::bounded::{EntryOutcome, Flow, StreamItem, StreamSource};
 use crate::ingest::{Collected, Source};
 use crate::message::NewMessage;
 use crate::util::fnv1a_fields;
@@ -89,6 +92,98 @@ impl Source for SignalSource {
     }
 }
 
+/// The bounded streaming path (M2.2): pass 1 scans the top-level array
+/// only for the first `conversationId` (entries are parsed one at a time;
+/// an id-less export is read to the end, exactly like the whole-file
+/// parser), pass 2 converts entry by entry. Peak memory is one entry
+/// plus the occurrence counter, whatever the export's size.
+impl StreamSource for SignalSource {
+    fn name(&self) -> &str {
+        SIGNAL_SOURCE
+    }
+
+    fn stream(&self, skip: u64, emit: &mut dyn FnMut(StreamItem) -> Result<Flow>) -> Result<()> {
+        let chat_id_fallback = self
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let conversation_id = find_conversation_id(BufReader::new(fs::File::open(&self.path)?))?;
+        let ids = SignalIds::resolve(&conversation_id, &chat_id_fallback);
+        let mut failure = None;
+        let (stopped, result) = {
+            let mut state = crate::bounded::ConsumerState {
+                skip,
+                emit,
+                stopped: false,
+                failure: &mut failure,
+            };
+            let mut occurrence: HashMap<u64, u32> = HashMap::new();
+            let result = {
+                let visitor = EntriesVisitor {
+                    ids: &ids,
+                    occurrence: &mut occurrence,
+                    state: &mut state,
+                };
+                let mut de = serde_json::Deserializer::from_reader(BufReader::new(fs::File::open(
+                    &self.path,
+                )?));
+                de.deserialize_seq(visitor)
+            };
+            (state.stopped, result)
+        };
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        match result {
+            Ok(()) => Ok(()),
+            Err(e) if stopped && crate::bounded::ConsumerState::is_stop_sentinel(&e) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
+/// Scan a Signal export (streamed) for the first entry carrying a
+/// `conversationId` — the same resolution the whole-file parser does
+/// with the full array in hand. Stops reading at the first hit; an
+/// export without any id is read to the end (an id-less export keys on
+/// the file stem, and only a full scan can prove absence).
+fn find_conversation_id<R: std::io::Read>(reader: R) -> Result<String> {
+    struct Find<'a>(&'a std::cell::Cell<Option<String>>);
+    impl<'de, 'a: 'de> serde::de::Visitor<'de> for Find<'a> {
+        type Value = ();
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a Signal conversation JSON export")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> std::result::Result<(), A::Error> {
+            while let Some(v) = seq.next_element::<Value>()? {
+                // The first entry carrying a conversationId wins; the walk
+                // keeps scanning so serde_json's end-of-sequence check is
+                // satisfied (memory stays bounded either way).
+                if let Some(id) = v
+                    .as_object()
+                    .and_then(|o| string_field(o, "conversationId"))
+                {
+                    // First id wins: `take` reads-and-clears without
+                    // needing `Copy`; keep whichever value was first.
+                    let previous = self.0.take();
+                    self.0.set(previous.or(Some(id)));
+                }
+            }
+            Ok(())
+        }
+    }
+    let found = std::cell::Cell::new(None);
+    let mut de = serde_json::Deserializer::from_reader(BufReader::new(reader));
+    de.deserialize_seq(Find(&found))?;
+    Ok(found.into_inner().unwrap_or_default())
+}
+
 /// Parse a Signal conversation JSON export into messages.
 ///
 /// `chat_id_fallback` groups the messages when the export carries no
@@ -107,84 +202,156 @@ pub fn parse_signal(bytes: &[u8], chat_id_fallback: &str) -> Result<Collected> {
         .filter_map(Value::as_object)
         .find_map(|o| string_field(o, "conversationId"))
         .unwrap_or_default();
-    let chat_id = if !chat_id_fallback.is_empty() {
-        chat_id_fallback.to_string()
-    } else if !conversation_id.is_empty() {
-        conversation_id.clone()
-    } else {
-        SIGNAL_SOURCE.to_string()
-    };
-    let dedup_chat = if conversation_id.is_empty() {
-        chat_id.clone()
-    } else {
-        conversation_id.clone()
-    };
-    // The provider-guaranteed conversation uuid keys the conversation
-    // (M1.3); exports without one stay on the legacy file-stem grouping.
-    let conversation_key = if conversation_id.is_empty() {
-        String::new()
-    } else {
-        format!("signal:chat:{conversation_id}")
-    };
+    let ids = SignalIds::resolve(&conversation_id, chat_id_fallback);
 
     let mut messages = Vec::new();
     let mut failed: u64 = 0;
     let mut occurrence: HashMap<u64, u32> = HashMap::new();
-
     for entry in &entries {
-        let Some(obj) = entry.as_object() else {
-            failed += 1;
-            continue;
-        };
-        match obj.get("type").and_then(Value::as_str) {
-            Some(t) if MESSAGE_TYPES.contains(&t) => {}
-            Some(_) => continue, // service event: no body to archive
-            None => {
-                failed += 1; // real exports always carry a type
-                continue;
-            }
+        match signal_entry(entry, &ids, &mut occurrence) {
+            EntryOutcome::Message(msg) => messages.push(msg),
+            EntryOutcome::Failed { .. } => failed += 1,
+            EntryOutcome::Skip => {}
         }
-
-        let author = signal_author(obj);
-        let (sent_at, original_timestamp) = signal_sent_at(obj);
-        let body = obj
-            .get("body")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-
-        let external_id = match string_field(obj, "id") {
-            Some(id) => format!("{}/{}", dedup_chat, id),
-            None => {
-                // Content-hash dedup id (no stable id in the oldest
-                // exports); the occurrence counter keeps identical
-                // back-to-back messages distinct while re-imports stay
-                // idempotent.
-                let base = fnv1a_fields(&[&dedup_chat, &author, &sent_at, &body]);
-                let seen = occurrence.entry(base).or_insert(0);
-                let external_id = format!("generated-{:016x}-{}", base, seen);
-                *seen += 1;
-                external_id
-            }
-        };
-
-        let mut msg = NewMessage::new(SIGNAL_SOURCE, external_id, author, sent_at, body);
-        msg.channel = "chat".to_string();
-        msg.chat_id = chat_id.clone();
-        msg.conversation_key = conversation_key.clone();
-        // Signal timestamps are absolute epoch milliseconds: UTC-exact
-        // by construction, recorded as explicitly offset.
-        if !original_timestamp.is_empty() {
-            msg.original_timestamp = original_timestamp;
-            msg.timezone = "UTC".to_string();
-            msg.time_confidence = "explicit_offset".to_string();
-        }
-        // The whole original object: attachments, quote, reactions,
-        // group membership, edit history — all stay recorded verbatim.
-        msg.raw_json = entry.to_string();
-        messages.push(msg);
     }
     Ok(Collected { messages, failed })
+}
+
+/// The identity fields every entry of one export shares: display
+/// grouping, dedup namespace, and the M1.3 conversation key.
+struct SignalIds {
+    chat_id: String,
+    dedup_chat: String,
+    conversation_key: String,
+}
+
+impl SignalIds {
+    fn resolve(conversation_id: &str, chat_id_fallback: &str) -> Self {
+        let chat_id = if !chat_id_fallback.is_empty() {
+            chat_id_fallback.to_string()
+        } else if !conversation_id.is_empty() {
+            conversation_id.to_string()
+        } else {
+            SIGNAL_SOURCE.to_string()
+        };
+        let dedup_chat = if conversation_id.is_empty() {
+            chat_id.clone()
+        } else {
+            conversation_id.to_string()
+        };
+        // The provider-guaranteed conversation uuid keys the conversation
+        // (M1.3); exports without one stay on the legacy file-stem grouping.
+        let conversation_key = if conversation_id.is_empty() {
+            String::new()
+        } else {
+            format!("signal:chat:{conversation_id}")
+        };
+        Self {
+            chat_id,
+            dedup_chat,
+            conversation_key,
+        }
+    }
+}
+
+/// Convert one export entry through the shared mapping (used by both the
+/// whole-file parser and the streaming pass, so their behavior cannot
+/// drift apart). `occurrence` is the export-wide counter that keeps
+/// identical id-less entries distinct; it advances identically in both
+/// paths, which is what makes streaming `skip` land on the same items.
+fn signal_entry(
+    entry: &Value,
+    ids: &SignalIds,
+    occurrence: &mut HashMap<u64, u32>,
+) -> EntryOutcome {
+    let Some(obj) = entry.as_object() else {
+        return EntryOutcome::Failed {
+            external_ref: String::new(),
+            reason: "entry is not a JSON object".to_string(),
+        };
+    };
+    match obj.get("type").and_then(Value::as_str) {
+        Some(t) if MESSAGE_TYPES.contains(&t) => {}
+        Some(_) => return EntryOutcome::Skip, // service event: no body
+        None => {
+            return EntryOutcome::Failed {
+                external_ref: obj
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                reason: "entry has no type".to_string(),
+            }
+        }
+    }
+
+    let author = signal_author(obj);
+    let (sent_at, original_timestamp) = signal_sent_at(obj);
+    let body = obj
+        .get("body")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+
+    let external_id = match string_field(obj, "id") {
+        Some(id) => format!("{}/{}", ids.dedup_chat, id),
+        None => {
+            // Content-hash dedup id (no stable id in the oldest
+            // exports); the occurrence counter keeps identical
+            // back-to-back messages distinct while re-imports stay
+            // idempotent.
+            let base = fnv1a_fields(&[&ids.dedup_chat, &author, &sent_at, &body]);
+            let seen = occurrence.entry(base).or_insert(0);
+            let external_id = format!("generated-{:016x}-{}", base, seen);
+            *seen += 1;
+            external_id
+        }
+    };
+
+    let mut msg = NewMessage::new(SIGNAL_SOURCE, external_id, author, sent_at, body);
+    msg.channel = "chat".to_string();
+    msg.chat_id = ids.chat_id.clone();
+    msg.conversation_key = ids.conversation_key.clone();
+    // Signal timestamps are absolute epoch milliseconds: UTC-exact
+    // by construction, recorded as explicitly offset.
+    if !original_timestamp.is_empty() {
+        msg.original_timestamp = original_timestamp;
+        msg.timezone = "UTC".to_string();
+        msg.time_confidence = "explicit_offset".to_string();
+    }
+    // The whole original object: attachments, quote, reactions,
+    // group membership, edit history — all stay recorded verbatim.
+    msg.raw_json = entry.to_string();
+    EntryOutcome::Message(msg)
+}
+
+/// serde visitor of the streaming pass: the top-level array, one entry
+/// at a time, each offered to the consumer.
+struct EntriesVisitor<'a, 'c> {
+    ids: &'a SignalIds,
+    occurrence: &'a mut HashMap<u64, u32>,
+    state: &'a mut crate::bounded::ConsumerState<'c>,
+}
+
+impl<'de, 'a, 'c> serde::de::Visitor<'de> for EntriesVisitor<'a, 'c> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a Signal conversation JSON export")
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(
+        self,
+        mut seq: A,
+    ) -> std::result::Result<(), A::Error> {
+        while let Some(entry) = seq.next_element::<Value>()? {
+            let outcome = signal_entry(&entry, self.ids, self.occurrence);
+            if !self.state.offer(outcome) {
+                return Err(crate::bounded::ConsumerState::stop());
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Same check, streaming from a reader: element-wise so the file is never
