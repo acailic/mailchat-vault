@@ -587,6 +587,52 @@ fn issue_records_match_whole_archive_without_import() {
     );
 }
 
+/// A completed import re-run against the same archive keeps its issue
+/// records intact: the messages dedup (the standing idempotence contract)
+/// and the unique `(import_id, position)` upsert keeps the issue table
+/// byte-identical — no duplicated rows, no inflated counts.
+#[test]
+fn completed_rerun_does_not_duplicate_issue_records() {
+    let dir = tmp();
+    let path = write_file(&dir, "result.json", &telegram_bytes(50));
+    let source = TelegramSource::new(&path);
+    let storage = Storage::open_in_memory().unwrap();
+
+    // First run completes (fixture failures land as durable issue rows).
+    let mut first = RecordingSink::new(storage);
+    let first_outcome = BoundedRun::new("rerun")
+        .run(&source, &mut first, &|| false, &mut |_, _, _| {})
+        .unwrap();
+    assert!(
+        first_outcome.summary.failed > 0,
+        "fixture must contain parse failures"
+    );
+    assert!(first.storage.import_issues("rerun", 0, 1000).unwrap().len() > 0);
+
+    // Snapshot the issue rows, then hand the storage to the rerun.
+    let before = first.storage.import_issues("rerun", 0, 1000).unwrap();
+
+    // Second run of the same file under the same import id: fresh stream,
+    // same failures re-emitted, upsert keeps the table identical.
+    let mut second = RecordingSink::new(first.into_storage());
+    let second_outcome = BoundedRun::new("rerun")
+        .run(&source, &mut second, &|| false, &mut |_, _, _| {})
+        .unwrap();
+    assert_eq!(
+        second_outcome.summary.inserted, 0,
+        "re-import inserts nothing (messages already stored)"
+    );
+    let after = second.storage.import_issues("rerun", 0, 1000).unwrap();
+    let count = second.storage.import_issue_count("rerun").unwrap();
+    let expected_failed = first_outcome.summary.failed;
+    assert_eq!(
+        count, expected_failed,
+        "issue count stays exactly the failed-item count across the rerun"
+    );
+    // Table is byte-identical: same rows, same order, same reasons.
+    assert_eq!(before, after, "issue rows survive the rerun unchanged");
+}
+
 // ---------------------------------------------------------------------------
 // Cancellation: committed data and counts survive
 // ---------------------------------------------------------------------------

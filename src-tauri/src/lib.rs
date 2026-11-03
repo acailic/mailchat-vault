@@ -1043,7 +1043,7 @@ fn run_job_spec(
             if outcome.cancelled {
                 return Err(JobError::Cancelled);
             }
-            Ok(serde_json::to_value(&ChatImportOutcome::from(outcome)).unwrap_or(Value::Null))
+            Ok(serde_json::to_value(ChatImportOutcome::from(outcome)).unwrap_or(Value::Null))
         }
         JobSpec::EmbedMessages => run_embed_job(ctx, embedder),
         JobSpec::ImapSync {
