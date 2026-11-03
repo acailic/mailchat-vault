@@ -737,9 +737,7 @@ fn measure_concurrent_ingest(
     // A vanished record (registry eviction) or a cancelled job also ends
     // the loop without a readable result; neither may stand in for a count.
     let Some(ingest_messages) = result_value else {
-        return Err(
-            "concurrent-ingest job ended without a readable 'inserted' result".to_string(),
-        );
+        return Err("concurrent-ingest job ended without a readable 'inserted' result".to_string());
     };
     let ingest_secs = started.elapsed().as_secs_f64();
 
