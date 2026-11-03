@@ -1931,3 +1931,274 @@ describe("auto-sync", () => {
     expect(input("#auto-sync-interval").value).toBe("60");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Workspace shell (M3.1): layout states, navigation, reading pane
+// ---------------------------------------------------------------------------
+
+describe("workspace shell", () => {
+  function app(): HTMLElement {
+    return $("#app");
+  }
+
+  function setViewportWidth(width: number): void {
+    win.innerWidth = width;
+    win.dispatchEvent(new win.Event("resize"));
+  }
+
+  function openDetailViaResult(): Promise<void> {
+    searchRespondsWith(() => pageOf(HITS, 3));
+    tauri.handlers.set("chat_context", () => CTX);
+    return (async () => {
+      input("#search").value = "vault";
+      pressKey(input("#search"), "Enter");
+      await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
+      ($("#results .hit-item") as HTMLElement).click();
+      await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
+    })();
+  }
+
+  it("ships the semantic landmarks, labels, and live regions", async () => {
+    await boot();
+    expect(win.document.querySelector('nav#nav[aria-label="Workspace"]')).toBeTruthy();
+    expect(win.document.querySelector("main#main")).toBeTruthy();
+    expect(win.document.querySelector('aside#reading[aria-label="Reading"]')).toBeTruthy();
+    expect(win.document.querySelector("#status")?.getAttribute("role")).toBe("status");
+    expect(win.document.querySelector("#stats")?.getAttribute("role")).toBe("status");
+    // The search box is labelled (visually-hidden label).
+    expect(win.document.querySelector('label[for="search"]')).toBeTruthy();
+    // The reading pane's back action is a real, labelled button.
+    const back = $("#back-to-results") as HTMLButtonElement;
+    expect(back.textContent).toContain("Back to results");
+  });
+
+  it("navigation switches views with aria-current, results stay mounted", async () => {
+    await boot();
+    await openDetailViaResult();
+    const settingsBtn = $(".nav-view-btn[data-view-target='settings']");
+    settingsBtn.click();
+    expect(app().dataset.view).toBe("settings");
+    expect(settingsBtn.getAttribute("aria-current")).toBe("page");
+    // Leaving and returning preserves the open reading pane and results.
+    $(".nav-view-btn[data-view-target='workspace']").click();
+    expect(app().dataset.view).toBe("workspace");
+    expect($("#detail").classList.contains("open")).toBe(true);
+    expect(app().dataset.reading).toBe("open");
+  });
+
+  it("selecting a source chip from another view returns to the workspace", async () => {
+    await boot();
+    $(".nav-view-btn[data-view-target='settings']").click();
+    expect(app().dataset.view).toBe("settings");
+    searchRespondsWith(() => pageOf(HITS, 3));
+    $('[data-source="mbox"]').click();
+    await flush();
+    expect(app().dataset.view).toBe("workspace");
+    expect(tauri.calls.some((c) => c.cmd === "search_messages")).toBe(true);
+  });
+
+  it("resize drives the layout state through wide/medium/compact", async () => {
+    await boot();
+    setViewportWidth(1280);
+    expect(app().dataset.layout).toBe("wide");
+    setViewportWidth(900);
+    expect(app().dataset.layout).toBe("medium");
+    setViewportWidth(640);
+    expect(app().dataset.layout).toBe("compact");
+    // 200% zoom on a 1280px window is the compact state, not a clipped wide.
+    setViewportWidth(640);
+    expect(app().dataset.layout).toBe("compact");
+  });
+
+  it("compact: the navigation drawer opens, announces, and Escape closes it first", async () => {
+    await boot();
+    setViewportWidth(640);
+    const toggle = $("#nav-toggle") as HTMLButtonElement;
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    toggle.click();
+    expect(app().dataset.nav).toBe("open");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    pressKey(win.document, "Escape");
+    expect(app().dataset.nav).toBe("closed");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("Escape closes the drawer before the reading pane", async () => {
+    await boot();
+    setViewportWidth(640);
+    await openDetailViaResult();
+    $("#nav-toggle").click();
+    expect(app().dataset.nav).toBe("open");
+    pressKey(win.document, "Escape");
+    expect(app().dataset.nav).toBe("closed");
+    expect($("#detail").classList.contains("open")).toBe(true); // reading survives
+    pressKey(win.document, "Escape");
+    expect($("#detail").classList.contains("open")).toBe(false);
+  });
+
+  it("opening a message focuses its heading in swapped layouts, Back restores the clicked row", async () => {
+    await boot();
+    setViewportWidth(900); // medium: reading replaces the results area
+    searchRespondsWith(() => pageOf(HITS, 3));
+    tauri.handlers.set("chat_context", () => CTX);
+    input("#search").value = "vault";
+    pressKey(input("#search"), "Enter");
+    await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
+    const row = $("#results .hit-item") as HTMLElement;
+    row.focus();
+    row.click();
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
+    const heading = $("#detail .detail-card h2");
+    expect(win.document.activeElement).toBe(heading);
+    $("#back-to-results").click();
+    expect($("#detail").classList.contains("open")).toBe(false);
+    expect(app().dataset.reading).toBe("closed");
+    // The initiating result row receives focus again.
+    const active = win.document.activeElement as unknown as HTMLElement | null;
+    expect(active?.classList.contains("hit-item")).toBe(true);
+    expect(active?.getAttribute("aria-current")).toBe("true");
+  });
+
+  it("Enter on a focused result row opens that row's message", async () => {
+    await bootSearched();
+    const rows = win.document.querySelectorAll("#results .hit-item") as unknown as HTMLElement[];
+    const row = rows[2];
+    expect(row.getAttribute("role")).toBe("button");
+    row.focus();
+    pressKey(row, "Enter");
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
+    expect(ctxCalls().at(-1)?.args).toEqual({ id: Number(row.dataset.id), radius: 8 });
+  });
+
+  it("opening a message in wide layout keeps focus on the current thread row", async () => {
+    await boot();
+    setViewportWidth(1280);
+    searchRespondsWith(() => pageOf(HITS, 3));
+    tauri.handlers.set("chat_context", () => CTX);
+    input("#search").value = "vault";
+    pressKey(input("#search"), "Enter");
+    await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
+    const row = $("#results .hit-item") as HTMLElement;
+    row.focus();
+    row.click();
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
+    expect(win.document.activeElement).toBe($<HTMLElement>("#detail .thread-row.current"));
+  });
+
+  it("Space on a focused thread row opens that message", async () => {
+    await bootSearched();
+    setViewportWidth(1280);
+    await openDetailViaResult();
+    const threadRow = $<HTMLElement>("#detail .thread-row:not(.current)");
+    threadRow.focus();
+    pressKey(threadRow, " ");
+    await vi.waitFor(() => expect(ctxCalls().length).toBeGreaterThan(1));
+    expect(ctxCalls().at(-1)?.args).toEqual({ id: Number(threadRow.dataset.id), radius: 8 });
+  });
+
+  it("arrow thread navigation keeps focus on the current thread row", async () => {
+    await bootSearched();
+    setViewportWidth(1280);
+    const all = [...CTX.before, CTX.message, ...CTX.after];
+    const ctxFor = (id: number): ChatContext => {
+      const at = all.findIndex((m) => m.id === id);
+      return { before: all.slice(0, at), message: all[at], after: all.slice(at + 1) };
+    };
+    tauri.handlers.set("chat_context", (args: unknown) =>
+      ctxFor((args as { id: number }).id),
+    );
+    input("#search").value = "vault";
+    pressKey(input("#search"), "Enter");
+    await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
+    ($("#results .hit-item") as HTMLElement).click();
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
+    const threadRow = $<HTMLElement>("#detail .thread-row:not(.current)");
+    threadRow.focus();
+    pressKey(threadRow, "ArrowDown");
+    await vi.waitFor(() =>
+      expect($("#detail .thread-row.current")?.getAttribute("data-id")).toBe("12"),
+    );
+    const current = $<HTMLElement>("#detail .thread-row.current");
+    expect(win.document.activeElement).toBe(current);
+    expect(current.getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("ArrowDown from a focused row keeps focus on the new active row", async () => {
+    await bootSearched();
+    const row = $("#results .hit-item") as HTMLElement;
+    row.focus();
+    pressKey(win.document, "ArrowDown");
+    const active = win.document.activeElement as unknown as HTMLElement | null;
+    expect(active?.classList.contains("hit-item")).toBe(true);
+    expect(active?.getAttribute("aria-current")).toBe("true");
+    const activeRow = $<HTMLElement>("#results .hit-item.active");
+    expect(activeRow.dataset.index).toBe("0");
+  });
+
+  it("arrows and Enter on a focused select do not hijack result navigation", async () => {
+    await bootSearched();
+    pressKey(win.document, "ArrowDown"); // select row 0 in the results list
+    expect($<HTMLElement>("#results .hit-item.active").dataset.index).toBe("0");
+    const select = $("#export-format");
+    select.focus();
+    pressKey(select, "ArrowDown");
+    expect($<HTMLElement>("#results .hit-item.active").dataset.index).toBe("0");
+    const callsBefore = ctxCalls().length;
+    pressKey(select, "Enter");
+    expect(ctxCalls().length).toBe(callsBefore);
+  });
+
+  it("in wide layout opening a message does not steal focus", async () => {
+    await boot();
+    setViewportWidth(1280);
+    $("h1").focus();
+    await openDetailViaResult();
+    expect(win.document.activeElement?.tagName).toBe("H1");
+    expect(app().dataset.reading).toBe("open");
+    // Back is a no-op visually in wide, but still closes nothing.
+    $("#back-to-results").click();
+    expect($("#detail").classList.contains("open")).toBe(false);
+  });
+
+  it("closing the reading pane in wide layout restores focus to the active row", async () => {
+    await boot();
+    setViewportWidth(1280);
+    searchRespondsWith(() => pageOf(HITS, 3));
+    tauri.handlers.set("chat_context", () => CTX);
+    input("#search").value = "vault";
+    pressKey(input("#search"), "Enter");
+    await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
+    const row = $("#results .hit-item") as HTMLElement;
+    row.focus();
+    row.click();
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
+    const closeBtn = $<HTMLElement>(".close-btn");
+    closeBtn.focus();
+    closeBtn.click();
+    expect($("#detail").classList.contains("open")).toBe(false);
+    const active = win.document.activeElement as unknown as HTMLElement | null;
+    expect(active?.classList.contains("hit-item")).toBe(true);
+    expect(active?.getAttribute("aria-current")).toBe("true");
+  });
+
+  it("Ctrl/Cmd+K focuses the search box from anywhere", async () => {
+    await boot();
+    $("h1").focus();
+    win.document.dispatchEvent(
+      new win.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true }),
+    );
+    expect(win.document.activeElement?.id).toBe("search");
+    win.document.dispatchEvent(
+      new win.KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true, cancelable: true }),
+    );
+    expect(win.document.activeElement?.id).toBe("search");
+  });
+
+  it("'/' is ignored while typing in a field", async () => {
+    await boot();
+    const author = input("#author");
+    author.focus();
+    pressKey(author, "/");
+    expect(win.document.activeElement).toBe(author);
+  });
+});

@@ -94,17 +94,19 @@ describe("results list", () => {
   });
 
   it("opens a hit on click", () => {
-    let opened = -1;
+    const opened: Array<[number, number]> = [];
     const hits = [hit(message(7, "mbox", "t", "b"), null)];
     const list = document.createElement("ul");
     renderResults(list, {
       groups: groupHits(hits),
       activeIndex: -1,
       terms: [],
-      onOpen: (id) => (opened = id),
+      onOpen: (index, id) => opened.push([index, id]),
     });
     (list.querySelector(".hit-item") as HTMLElement).click();
-    expect(opened).toBe(7);
+    // The row passes its flat index with the id: main.ts sets activeIndex
+    // from it so Back/close can restore focus to the initiating row.
+    expect(opened).toEqual([[0, 7]]);
   });
 
   it("renders an empty state with no groups or rows", () => {

@@ -68,6 +68,7 @@ Useful knobs:
 | `13-job-engine-parity` | v2 job engine + IMAP parity driven through the live IPC bridge (`window.__TAURI_INTERNALS__`): two-way keyring password (entered→saved and reused via empty resubmit; empty-with-nothing-stored → documented error, proving v2 parse accepts empty), padded username → ONE durable source instance (DB assert), v2 imap_sync job → typed job record/result, idempotent re-embed (0 new, remaining 0), flat JobEvent wire (`event.type` top-level), `job_events_since(cursor)` returns exactly the gap, 65th in-flight submit → typed queue-full, cancelled-while-queued and running-embed-cancel both end `cancelled` | active |
 | `14-imap-coordinator` | IMAP coordinator round as a real v2 job through the live IPC bridge: typed `RoundSummary` result reaches the job record, per-source exclusion partitioning (`sources_list` labels, `source_set_excluded` + re-include), `source_failures` accounting, no-credentials rounds report cleanly, jobs-panel label for the new job kind (the sync paths themselves are covered by vault-core's mock-server suites — no TLS-trustable IMAP server in the container) | active |
 | `15-sync-scheduler` | M2.4 periodic-sync scheduler surface: fresh install is opt-in-off at 15 minutes, the IMAP-section auto-sync toggle arms through the real IPC with the countdown rendered ("next round in ~N min"), interval validation (0 refused, 1..=1440 accepted) with a clear error, opt-in persists in the vault `sync_schedule` row (direct DB reads, guarded per suite contract), restart re-arms one full interval out with no immediate round, disabling persists and re-renders the off state via the `scheduler-status` event | active |
+| `16-workspace-layout` | M3.1 workspace layout: semantic landmarks/labels/live regions and named buttons; wide (≥1100px) navigation+results+reading side by side with the reading placeholder; medium (800–1099px) reading swap with Back-to-results preserving query/rows; compact (<800px) navigation drawer with aria-expanded and Escape close; 640px (1280 at 200% zoom) stays compact with no horizontal clipping; activity histogram role=img/aria-label; wide/medium/compact/zoom **screenshot fixtures** written to `fixtures/screenshots/` (synthetic demo data) | active |
 
 ### Conditional specs
 
@@ -82,6 +83,18 @@ fixture) and by direct DB assertions in `02-import-mbox`.
 All paths run headless under `xvfb-run` — none needs a real desktop beyond
 an X display. The CI job (`.github/workflows/ci.yml`, `e2e` job) runs the
 full suite on every push/PR.
+
+## Workspace views
+
+Since the M3.1 workspace layout, controls live in navigation destinations:
+search/results/reading in **workspace**, imports/IMAP/folder-watching in
+**sources**, jobs/statistics in **activity**, and the provider/theme form in
+**settings**. `ui.openView(browser, view)` clicks the real nav buttons and
+waits for the view to mount; `ui.importMbox`/`ui.seedDemo` open `sources`
+first and `ui.search` returns to `workspace`, so specs composed of those
+helpers need no extra navigation. `ui.setViewport(browser, w, h)` resizes
+the window and waits for the `data-layout` state (wide/medium/compact) to
+settle.
 
 ## Layout
 
