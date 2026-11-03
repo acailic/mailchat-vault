@@ -10,7 +10,16 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Window } from "happy-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ArchiveStats, ChatContext, Message, SearchHit, SearchPage, Stats, WatchSnapshot } from "./types";
+import type {
+  ArchiveStats,
+  ChatContext,
+  Message,
+  SearchHit,
+  SearchPage,
+  Stats,
+  SyncScheduleView,
+  WatchSnapshot,
+} from "./types";
 
 // Timestamps must render timezone-independently here (same approach as
 // render.test.ts); formatSentAt itself is covered by format.test.ts.
@@ -1840,5 +1849,85 @@ describe("settings screen", () => {
     input("#theme").value = "dark";
     fireChange(input("#theme"));
     expect(document.documentElement.style.colorScheme).toBe("dark");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Auto-sync (the opt-in periodic scheduler, M2.4)
+// ---------------------------------------------------------------------------
+
+const SCHEDULE_OFF: SyncScheduleView = {
+  enabled: false,
+  interval_minutes: 15,
+  active_job: null,
+  next_due_in_secs: null,
+  rounds_submitted: 0,
+};
+
+describe("auto-sync", () => {
+  it("boots with the schedule off and renders the off state", async () => {
+    tauri.handlers.set("sync_schedule_get", () => SCHEDULE_OFF);
+    await boot();
+    await vi.waitFor(() =>
+      expect(tauri.calls.some((c) => c.cmd === "sync_schedule_get")).toBe(true),
+    );
+    expect(input("#auto-sync-toggle").checked).toBe(false);
+    expect($<HTMLSelectElement>("#auto-sync-interval").value).toBe("15");
+    expect($("#auto-sync-status").textContent).toContain("Auto-sync off");
+  });
+
+  it("checking the toggle enables the schedule with the chosen interval", async () => {
+    tauri.handlers.set("sync_schedule_get", () => SCHEDULE_OFF);
+    tauri.handlers.set("sync_schedule_set", (args) => {
+      expect(args).toEqual({ enabled: true, intervalMinutes: 30 });
+      return {
+        enabled: true,
+        interval_minutes: 30,
+        active_job: null,
+        next_due_in_secs: 1800,
+        rounds_submitted: 0,
+      };
+    });
+    await boot();
+    input("#auto-sync-interval").value = "30";
+    fireChange(input("#auto-sync-interval"));
+    input("#auto-sync-toggle").checked = true;
+    fireChange(input("#auto-sync-toggle"));
+    await vi.waitFor(() =>
+      expect(tauri.calls.some((c) => c.cmd === "sync_schedule_set")).toBe(true),
+    );
+    expect($("#auto-sync-status").textContent).toContain("Auto-sync on");
+    expect($("#auto-sync-status").textContent).toContain("~30 min");
+  });
+
+  it("scheduler-status events re-render the panel (active round)", async () => {
+    tauri.handlers.set("sync_schedule_get", () => SCHEDULE_OFF);
+    await boot();
+    const listener = tauriEvents.listeners.get("scheduler-status");
+    expect(listener).toBeTruthy();
+    listener!({ payload: { ...SCHEDULE_OFF, enabled: true, active_job: 7 } });
+    expect(input("#auto-sync-toggle").checked).toBe(true);
+    expect($("#auto-sync-status").textContent).toContain("job 7");
+  });
+
+  it("a failed change surfaces the error instead of guessing state", async () => {
+    tauri.handlers.set("sync_schedule_get", () => SCHEDULE_OFF);
+    tauri.handlers.set("sync_schedule_set", () => Promise.reject("vault busy"));
+    await boot();
+    input("#auto-sync-toggle").checked = true;
+    fireChange(input("#auto-sync-toggle"));
+    await vi.waitFor(() =>
+      expect($("#auto-sync-status").textContent).toContain("Auto-sync change failed"),
+    );
+  });
+
+  it("changing the interval while off remembers the choice without a command", async () => {
+    tauri.handlers.set("sync_schedule_get", () => SCHEDULE_OFF);
+    await boot();
+    input("#auto-sync-interval").value = "60";
+    fireChange(input("#auto-sync-interval"));
+    await flush();
+    expect(tauri.calls.some((c) => c.cmd === "sync_schedule_set")).toBe(false);
+    expect(input("#auto-sync-interval").value).toBe("60");
   });
 });
