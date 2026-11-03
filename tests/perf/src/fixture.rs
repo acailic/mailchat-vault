@@ -283,6 +283,83 @@ fn sent_at(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Concurrent-ingest stream (M2.4 harness)
+// ---------------------------------------------------------------------------
+
+/// Source name of the concurrent-ingest phase; its rows are removed
+/// after the measurement so a reused fixture stays pristine.
+pub const BENCH_INGEST_SOURCE: &str = "bench-concurrent";
+
+/// A bounded-import stream of chat-shaped messages for the
+/// concurrent-ingest measurement: driven through the product's own
+/// `BoundedRun` + `PoolSink` path (batched commits through the pool's
+/// write lane), exactly like a production chat-export import.
+pub struct IngestSource {
+    count: u64,
+    seed: u64,
+}
+
+impl IngestSource {
+    pub fn new(count: u64, seed: u64) -> Self {
+        Self { count, seed }
+    }
+}
+
+impl vault_core::bounded::StreamSource for IngestSource {
+    fn name(&self) -> &str {
+        BENCH_INGEST_SOURCE
+    }
+
+    fn stream(
+        &self,
+        skip: u64,
+        emit: &mut dyn FnMut(
+            vault_core::bounded::StreamItem,
+        ) -> vault_core::Result<vault_core::bounded::Flow>,
+    ) -> vault_core::Result<()> {
+        let mut rng = Rng::new(self.seed);
+        let vocab = Vocab::new();
+        for i in 0..self.count {
+            if i < skip {
+                continue;
+            }
+            // Chat-shaped bodies (3–40 words from the same Zipf
+            // vocabulary the fixture uses) with a unique external id;
+            // sent_at rides the current day so ingest-order and
+            // recency do not matter for the measurement.
+            let words = 3 + rng.below(38) as usize;
+            let body: Vec<String> = (0..words).map(|_| vocab.sample_word(&mut rng)).collect();
+            let msg = NewMessage {
+                source: BENCH_INGEST_SOURCE.into(),
+                external_id: format!("bench-{i:09}"),
+                channel: "chat".into(),
+                chat_id: format!("bench-chat-{:05}", i / 250),
+                author: format!("bench-author-{:03}", rng.below(192)),
+                sent_at: format!(
+                    "2026-11-{:02}T{:02}:{:02}:00Z",
+                    1 + rng.below(28) as u32,
+                    rng.below(24) as u32,
+                    rng.below(60) as u32
+                ),
+                body: body.join(" "),
+                raw_json: "{}".into(),
+                conversation_key: String::new(),
+                reply_refs: Vec::new(),
+                original_timestamp: String::new(),
+                timezone: String::new(),
+                time_confidence: String::new(),
+            };
+            if emit(vault_core::bounded::StreamItem::Message(msg))?
+                == vault_core::bounded::Flow::Stop
+            {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Outcome of a fixture generation pass.
 pub struct FixtureReport {
     pub requested: u64,

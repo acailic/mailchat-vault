@@ -38,6 +38,7 @@ import type {
   SearchHit,
   SearchPage,
   Stats,
+  SyncScheduleView,
   WatchSnapshot,
 } from "./types";
 import { groupHits, moveIndex, neighborId, pageModel, splitTerms } from "./viewmodel";
@@ -50,6 +51,7 @@ import {
   renderJobsList,
 } from "./jobsview";
 import { renderWatchEvents, renderWatchFolders, watchStatusText } from "./watchview";
+import { autoSyncStatusText, isIntervalChoice } from "./schedview";
 
 const PAGE_SIZE = 50;
 
@@ -124,6 +126,9 @@ const imapOauthHint = document.querySelector<HTMLElement>("#imap-oauth-hint")!;
 const imapFoldersInput = document.querySelector<HTMLInputElement>("#imap-folders")!;
 const imapSyncButton = document.querySelector<HTMLButtonElement>("#imap-sync-btn")!;
 const imapStatus = document.querySelector<HTMLElement>("#imap-status")!;
+const autoSyncToggle = document.querySelector<HTMLInputElement>("#auto-sync-toggle")!;
+const autoSyncInterval = document.querySelector<HTMLSelectElement>("#auto-sync-interval")!;
+const autoSyncStatus = document.querySelector<HTMLElement>("#auto-sync-status")!;
 const watchPathInput = document.querySelector<HTMLInputElement>("#watch-path")!;
 const watchButton = document.querySelector<HTMLButtonElement>("#watch-btn")!;
 const watchAddButton = document.querySelector<HTMLButtonElement>("#watch-add-btn")!;
@@ -999,6 +1004,67 @@ async function syncImap(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Auto-sync: the opt-in periodic scheduler (M2.4)
+// ---------------------------------------------------------------------------
+
+function renderAutoSync(view: SyncScheduleView): void {
+  autoSyncToggle.checked = view.enabled;
+  // A configured interval outside the offered choices (set by an older
+  // build or directly in the vault) still displays; the select just
+  // keeps its current selection.
+  if (isIntervalChoice(view.interval_minutes)) {
+    autoSyncInterval.value = String(view.interval_minutes);
+  }
+  autoSyncStatus.textContent = autoSyncStatusText(view);
+}
+
+/** Apply a schedule change: the toggle wins for on/off; the interval
+ * select rides along whenever it is part of the change. */
+async function setAutoSchedule(
+  enabled: boolean | null,
+  intervalMinutes: number | null,
+): Promise<void> {
+  try {
+    const view = await invoke<SyncScheduleView>("sync_schedule_set", {
+      enabled,
+      intervalMinutes,
+    });
+    renderAutoSync(view);
+  } catch (e) {
+    autoSyncStatus.textContent = `Auto-sync change failed: ${e}`;
+  }
+}
+
+function onAutoSyncToggle(): void {
+  const enabled = autoSyncToggle.checked;
+  const minutes = Number.parseInt(autoSyncInterval.value, 10);
+  void setAutoSchedule(enabled, Number.isNaN(minutes) ? null : minutes);
+}
+
+function onAutoSyncIntervalChange(): void {
+  // Changing the interval while off just remembers the choice; while
+  // on, it re-arms the schedule at the new interval.
+  if (!autoSyncToggle.checked) return;
+  const minutes = Number.parseInt(autoSyncInterval.value, 10);
+  if (Number.isNaN(minutes)) return;
+  void setAutoSchedule(null, minutes);
+}
+
+async function refreshAutoSync(): Promise<void> {
+  try {
+    renderAutoSync(await invoke<SyncScheduleView>("sync_schedule_get"));
+  } catch {
+    // Leave whatever was rendered; the next scheduler-status event fixes it.
+  }
+}
+
+// The backend pushes a fresh view on every scheduler transition; a
+// finished scheduled round also refreshes the source stats like any job.
+void listen<SyncScheduleView>("scheduler-status", (event) => {
+  renderAutoSync(event.payload);
+});
+
+// ---------------------------------------------------------------------------
 // Folder watching
 // ---------------------------------------------------------------------------
 
@@ -1257,6 +1323,8 @@ imapUserInput.addEventListener("change", () => {
 });
 imapOauthButton.addEventListener("click", () => void oauthLogin());
 imapSyncButton.addEventListener("click", () => void syncImap());
+autoSyncToggle.addEventListener("change", onAutoSyncToggle);
+autoSyncInterval.addEventListener("change", onAutoSyncIntervalChange);
 embedButton.addEventListener("click", () => void runEmbedJob());
 watchButton.addEventListener("click", () => void watchTypedPath());
 watchPathInput.addEventListener("keydown", (event) => {
@@ -1286,4 +1354,5 @@ void refreshDashboard();
 void refreshLlm();
 void refreshEmbedStatus();
 void refreshWatchStatus();
+void refreshAutoSync();
 void loadSettings();
