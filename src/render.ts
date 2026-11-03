@@ -85,6 +85,7 @@ export function renderResults(list: HTMLElement, opts: ResultsOptions): void {
       item.dataset.index = String(index);
       item.dataset.id = String(m.id);
       item.setAttribute("tabindex", "0");
+      item.setAttribute("role", "button");
       if (index === activeIndex) item.setAttribute("aria-current", "true");
       const meta = document.createElement("div");
       meta.className = "meta";

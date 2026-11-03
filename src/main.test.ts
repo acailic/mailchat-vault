@@ -2063,10 +2063,26 @@ describe("workspace shell", () => {
     await bootSearched();
     const rows = win.document.querySelectorAll("#results .hit-item") as unknown as HTMLElement[];
     const row = rows[2];
+    expect(row.getAttribute("role")).toBe("button");
     row.focus();
     pressKey(row, "Enter");
     await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
     expect(ctxCalls().at(-1)?.args).toEqual({ id: Number(row.dataset.id), radius: 8 });
+  });
+
+  it("opening a message in wide layout keeps focus on the current thread row", async () => {
+    await boot();
+    setViewportWidth(1280);
+    searchRespondsWith(() => pageOf(HITS, 3));
+    tauri.handlers.set("chat_context", () => CTX);
+    input("#search").value = "vault";
+    pressKey(input("#search"), "Enter");
+    await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
+    const row = $("#results .hit-item") as HTMLElement;
+    row.focus();
+    row.click();
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
+    expect(win.document.activeElement).toBe($<HTMLElement>("#detail .thread-row.current"));
   });
 
   it("Space on a focused thread row opens that message", async () => {

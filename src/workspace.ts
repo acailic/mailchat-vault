@@ -149,6 +149,12 @@ export function initWorkspace(): WorkspaceController {
           heading.tabIndex = -1;
           heading.focus();
         }
+      } else if (!active || active === document.body) {
+        const current = document.querySelector<HTMLElement>("#detail .thread-row.current");
+        if (current) {
+          current.tabIndex = -1;
+          current.focus();
+        }
       }
     },
     readingClosed() {

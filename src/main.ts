@@ -710,13 +710,7 @@ document.addEventListener("keydown", (event) => {
       const dir = event.key === "ArrowUp" ? -1 : 1;
       const id = neighborId(state.detail, dir);
       if (id !== null) {
-        void openDetail(id).then(() => {
-          const current = detailPanel.querySelector<HTMLElement>(".thread-row.current");
-          if (current) {
-            current.tabIndex = -1;
-            current.focus();
-          }
-        });
+        void openDetail(id);
       }
       event.preventDefault();
     }
