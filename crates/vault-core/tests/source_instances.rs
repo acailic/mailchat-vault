@@ -26,7 +26,7 @@ fn config(host: &str, username: &str) -> vimap::ImapConfig {
         host: host.to_string(),
         port: 993,
         username: username.to_string(),
-        password: PASSWORD.to_string(),
+        auth: vimap::ImapAuth::Password(PASSWORD.to_string()),
         folders: Vec::new(),
     }
 }
@@ -145,7 +145,7 @@ fn credential_reconfiguration_preserves_source_identity() {
     let before =
         vimap::ensure_source_instance(&storage, &config("imap.a.test", "ana@a.test")).unwrap();
     let mut reconfigured = config("imap.a.test", "ana@a.test");
-    reconfigured.password = "a-brand-new-app-password".to_string();
+    reconfigured.auth = vimap::ImapAuth::Password("a-brand-new-app-password".to_string());
     let after = vimap::ensure_source_instance(&storage, &reconfigured).unwrap();
     assert_eq!(before, after);
     assert!(!storage.list_source_instances().unwrap()[0]

@@ -31,6 +31,7 @@ mod credentials_no_persist;
 mod error_collection;
 mod folder_channel;
 mod incremental;
+mod oauth_sync;
 mod partial_resume;
 mod uidvalidity_reset;
 
@@ -60,7 +61,7 @@ pub(crate) fn config_for(user: &str) -> vimap::ImapConfig {
         host: MOCK_HOST.to_string(),
         port: 993,
         username: user.to_string(),
-        password: PASSWORD.to_string(),
+        auth: vimap::ImapAuth::Password(PASSWORD.to_string()),
         folders: Vec::new(),
     }
 }

@@ -15,7 +15,7 @@
 //! (comma-separated, default `INBOX`). The archive is written to a
 //! throwaway temp directory — nothing touches your real vault.
 
-use vault_core::imap::{self, ImapConfig};
+use vault_core::imap::{self, ImapAuth, ImapConfig};
 use vault_core::storage::Storage;
 
 #[test]
@@ -42,7 +42,7 @@ fn syncs_a_real_account_into_a_temp_archive() {
         host,
         port,
         username: user,
-        password: pass,
+        auth: ImapAuth::Password(pass),
         folders,
     };
 
