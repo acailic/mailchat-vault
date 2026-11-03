@@ -1,0 +1,9 @@
+# GitGuardian configuration: ignore known-fake test fixture secrets.
+# Every literal below is a placeholder used by offline tests; none is a
+# real credential (see crates/vault-core/tests/oauth_flow.rs and
+# tests/e2e/specs/*-imap-oauth*.e2e.mjs).
+paths:
+  ignore:
+    - "tests/**"
+    - "**/tests/**"
+    - "crates/vault-core/tests/**"

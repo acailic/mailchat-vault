@@ -23,11 +23,17 @@
 //!   Signal `.json` / Discord Data Package import with format
 //!   auto-detection and optional media extraction into the app data
 //!   `media/` store (the frontend picks the file via the dialog plugin).
-//! - `sync_imap` — incremental IMAP/Gmail sync (first live mail source).
+//! - `sync_imap` — incremental IMAP/Gmail sync (first live mail source):
+//!   app password, or Google sign-in (OAuth2 → XOAUTH2) when `auth` says
+//!   so.
 //! - `watch_add_folder` / `watch_remove_folder` / `watch_status` —
 //!   automatic folder watching: new/modified export files in user-chosen
 //!   folders are imported in the background; the UI is kept current via
 //!   `watch-status` window events.
+//! - `oauth_gmail_login` — run the Gmail Google sign-in (browser OAuth2
+//!   flow with PKCE) and store the refresh token in the OS keyring.
+//! - `oauth_status` — Gmail sign-in availability for the UI (configured?
+//!   signed in?), never any secret.
 //! - `seed_demo` — insert the built-in sample messages (idempotent).
 //! - `stats` — archive counts per source (drives the source filter chips).
 //! - `archive_stats` — dashboard aggregates: totals, date range, counts by
@@ -47,12 +53,13 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use vault_core::chat_export::{self, ChatImportOutcome};
 use vault_core::export::{self, ExportFormat, ExportSummary};
-use vault_core::imap::{self, FolderSyncSummary, ImapConfig};
+use vault_core::imap::{self, FolderSyncSummary, ImapAuth, ImapConfig};
 use vault_core::ingest::{ingest, Collected, IngestSummary, Source};
 use vault_core::llm::{
     self, AnthropicLlm, AskOutcome, LlmConfig, LlmStatus, PlanSource, PlannedQuery, QueryPlan,
 };
 use vault_core::mbox::MboxSource;
+use vault_core::oauth::{self, OAuthConfig};
 use vault_core::query::{ChatContext, SearchPage, SearchQuery};
 use vault_core::settings::{self, Options, Settings, SETTINGS_VERSION};
 use vault_core::stats::{ArchiveStats, DEFAULT_TOP};
@@ -84,9 +91,28 @@ struct AppState {
 #[derive(Debug, Serialize)]
 struct ImapSyncOutcome {
     folders: Vec<FolderSyncSummary>,
-    /// `None` when a previously stored password was reused; `Some(store)`
-    /// when the user just entered one and it was saved to `store`.
+    /// `None` when a previously stored password was reused or the sync
+    /// ran over OAuth2; `Some(store)` when the user just entered a
+    /// password and it was saved to `store`.
     saved_to: Option<secrets::SecretStore>,
+}
+
+/// Result of a completed Gmail Google sign-in.
+#[derive(Debug, Serialize)]
+struct OAuthLoginOutcome {
+    /// The account that signed in (normalized to lowercase).
+    username: String,
+    /// Where the refresh token was kept.
+    saved_to: secrets::SecretStore,
+}
+
+/// Gmail sign-in availability for the UI; never includes a secret.
+#[derive(Debug, Serialize)]
+struct OAuthStatus {
+    /// Whether the OAuth client credentials are configured (env vars).
+    configured: bool,
+    /// Whether a refresh token is stored for the account.
+    signed_in: bool,
 }
 
 fn lock<'a>(state: &'a State<'_, AppState>) -> Result<MutexGuard<'a, Storage>, String> {
@@ -257,7 +283,7 @@ fn settings_get(state: State<AppState>) -> Result<SettingsView, String> {
 #[tauri::command]
 fn settings_save(
     state: State<'_, AppState>,
-    secrets: State<'_, secrets::Secrets>,
+    secrets: State<'_, Arc<secrets::Secrets>>,
     payload: SaveSettingsPayload,
 ) -> Result<SettingsView, String> {
     let mut settings = Settings {
@@ -329,7 +355,7 @@ fn settings_save(
 #[tauri::command]
 fn llm_key_clear(
     state: State<'_, AppState>,
-    secrets: State<'_, secrets::Secrets>,
+    secrets: State<'_, Arc<secrets::Secrets>>,
     id: String,
 ) -> Result<SettingsView, String> {
     let id = id.trim();
@@ -413,22 +439,34 @@ fn import_chat_export(
     .map_err(|e: Error| e.to_string())
 }
 
-/// Incrementally sync an IMAP account (Gmail via app password, or any
-/// host/port/user/password server). Only messages new since the last sync
-/// are fetched; re-syncing never duplicates.
+/// Incrementally sync an IMAP account. Two auth modes:
 ///
-/// Password handling: an entered password is used for this sync and kept in
-/// the OS keyring when available, otherwise in session memory only — never
-/// in the vault database. An empty password field reuses the stored one.
+/// - `"password"` (default): host/port/user + app password (Gmail) or
+///   account password. An entered password is used for this sync and kept
+///   in the OS keyring when available, otherwise in session memory only —
+///   never in the vault database. An empty password field reuses the
+///   stored one.
+/// - `"oauth"`: Gmail Google sign-in — the stored OAuth2 refresh token
+///   (from [`oauth_gmail_login`], OS keyring) is exchanged for a fresh
+///   access token and the sync authenticates via SASL XOAUTH2. Requires
+///   the `MAILCHAT_GMAIL_CLIENT_ID`/`_SECRET` env vars to be set.
+///
+/// Only messages new since the last sync are fetched; re-syncing never
+/// duplicates.
+///
+/// The flat argument list mirrors the sync form's fields, like every other
+/// Tauri command here.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn sync_imap(
     state: State<'_, AppState>,
-    secrets: State<'_, secrets::Secrets>,
+    secrets: State<'_, Arc<secrets::Secrets>>,
     host: String,
     port: Option<u16>,
     username: String,
     password: String,
     folders: Option<Vec<String>>,
+    auth: Option<String>,
 ) -> Result<ImapSyncOutcome, String> {
     // Hostnames are case-insensitive, so one server spelled with different
     // casing must map to one durable source instance. Usernames stay
@@ -437,43 +475,183 @@ async fn sync_imap(
     // username are distinct accounts until the server says otherwise.
     let host = host.trim().to_lowercase();
     let username = username.trim().to_string();
-    if host.is_empty() {
-        return Err("host is required (e.g. imap.gmail.com)".into());
-    }
     if username.is_empty() {
         return Err("username is required".into());
     }
+    let folders = folders.unwrap_or_default();
+    let port = port.unwrap_or(imap::GMAIL_IMAP_PORT);
 
-    // Resolve the password: entered now (and remembered) or stored before.
-    let (password, saved_to) = if password.is_empty() {
-        let stored = secrets
-            .load(&host, &username)
-            .ok_or_else(|| "no password stored for this account — enter one".to_string())?;
-        (stored, None)
-    } else {
-        let store = secrets.save(&host, &username, &password);
-        (password, Some(store))
-    };
-
-    let config = ImapConfig {
-        host,
-        port: port.unwrap_or(imap::GMAIL_IMAP_PORT),
-        username,
-        password,
-        folders: folders.unwrap_or_default(),
-    };
     let storage = Arc::clone(&state.storage);
-    // Network sync can take minutes; keep it off the UI thread.
-    let folders = tauri::async_runtime::spawn_blocking(move || {
+    let secrets = Arc::clone(secrets.inner());
+    // Secret resolution (keyring), token refresh (blocking HTTP), and the
+    // network sync itself all block; keep them off the UI thread.
+    let (folders, saved_to) = tauri::async_runtime::spawn_blocking(move || {
+        let auth = auth.as_deref().unwrap_or("password");
+        // Only the Gmail sign-in flow has a sensible default host; every
+        // other server must be named explicitly.
+        if host.is_empty() && auth != "oauth" {
+            return Err("host is required (e.g. imap.gmail.com)".to_string());
+        }
+        let host = if host.is_empty() {
+            imap::GMAIL_IMAP_HOST.to_string()
+        } else {
+            host
+        };
+        let (imap_auth, saved_to) = match auth {
+            "password" => {
+                // Resolve the password: entered now (and remembered) or
+                // stored before.
+                let (password, saved_to) = if password.is_empty() {
+                    let stored = secrets.load(&host, &username).ok_or_else(|| {
+                        "no password stored for this account — enter one".to_string()
+                    })?;
+                    (stored, None)
+                } else {
+                    let store = secrets.save(&host, &username, &password);
+                    (password, Some(store))
+                };
+                (ImapAuth::Password(password), saved_to)
+            }
+            "oauth" => {
+                // Refresh-token sign-in: mint a fresh access token and use
+                // SASL XOAUTH2. The refresh token itself never leaves the
+                // secret store (and never enters the vault database).
+                let config = oauth_config()?;
+                let refresh = secrets.load_refresh(&host, &username).ok_or_else(|| {
+                    "no Google sign-in stored for this account — use “Sign in with Google” first"
+                        .to_string()
+                })?;
+                let tokens =
+                    oauth::refresh_access_token(&config, &refresh).map_err(|e| e.to_string())?;
+                (
+                    ImapAuth::Xoauth2 {
+                        access_token: tokens.access_token,
+                    },
+                    None,
+                )
+            }
+            other => {
+                return Err(format!(
+                    "unknown auth mode {other:?} (expected \"password\" or \"oauth\")"
+                ))
+            }
+        };
+
+        let config = ImapConfig {
+            host,
+            port,
+            username,
+            auth: imap_auth,
+            folders,
+        };
         let storage = storage
             .lock()
             .map_err(|e| format!("storage lock poisoned: {e}"))?;
-        imap::sync(&config, &storage).map_err(|e| e.to_string())
+        imap::sync(&config, &storage)
+            .map_err(|e| e.to_string())
+            .map(|folders| (folders, saved_to))
     })
     .await
     .map_err(|e| format!("sync task failed: {e}"))??;
 
     Ok(ImapSyncOutcome { folders, saved_to })
+}
+
+/// The OAuth client credentials from the environment, or a clear error
+/// telling the user what to register and set (see README → IMAP sync).
+fn oauth_config() -> Result<OAuthConfig, String> {
+    oauth::OAuthConfig::from_env()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| {
+            "Gmail sign-in is not configured: set MAILCHAT_GMAIL_CLIENT_ID and \
+             MAILCHAT_GMAIL_CLIENT_SECRET to your own Google OAuth client (see README → \
+             IMAP sync → Gmail (Google sign-in))"
+                .to_string()
+        })
+}
+
+/// Run the Gmail Google sign-in: open the system browser at Google's
+/// consent page (PKCE + loopback redirect), wait for the redirect,
+/// exchange the code, and store the refresh token in the OS keyring
+/// (session memory fallback). Blocks until the sign-in completes or
+/// times out (~5 min). The short-lived access token is not kept — every
+/// sync mints a fresh one from the refresh token.
+#[tauri::command]
+async fn oauth_gmail_login(
+    secrets: State<'_, Arc<secrets::Secrets>>,
+    host: String,
+    username: String,
+) -> Result<OAuthLoginOutcome, String> {
+    let host = host.trim().to_lowercase();
+    let host = if host.is_empty() {
+        imap::GMAIL_IMAP_HOST.to_string()
+    } else {
+        host
+    };
+    let username = username.trim().to_lowercase();
+    if username.is_empty() {
+        return Err("username (your Gmail address) is required".into());
+    }
+    let config = oauth_config()?;
+    let hint = username.clone();
+    let secrets = Arc::clone(secrets.inner());
+    // Browser flow, token exchange, and the keyring write all block; keep
+    // them off the UI thread.
+    let outcome = tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
+        let tokens = oauth::run_login(
+            &config,
+            Some(&hint),
+            |url| webbrowser::open(url).map_err(|e| e.to_string()),
+            oauth::LOGIN_TIMEOUT,
+        )
+        .map_err(|e| e.to_string())?;
+        let refresh = tokens.refresh_token.ok_or_else(|| {
+            "Google returned no refresh token — consent must be granted; retry the sign-in"
+                .to_string()
+        })?;
+        let saved_to = secrets.save_refresh(&host, &username, &refresh);
+        Ok(OAuthLoginOutcome { username, saved_to })
+    })
+    .await
+    .map_err(|e| format!("sign-in task failed: {e}"))??;
+
+    Ok(outcome)
+}
+
+/// Gmail sign-in availability for the UI: whether the OAuth client is
+/// configured (env vars set) and whether the account already has a
+/// stored sign-in. Never exposes any secret.
+#[tauri::command]
+async fn oauth_status(
+    secrets: State<'_, Arc<secrets::Secrets>>,
+    host: Option<String>,
+    username: Option<String>,
+) -> Result<OAuthStatus, String> {
+    let secrets = Arc::clone(secrets.inner());
+    // The keyring read can block on the OS; keep it off the UI thread.
+    tauri::async_runtime::spawn_blocking(move || {
+        let configured = OAuthConfig::from_env()
+            .map(|c| c.is_some())
+            .unwrap_or(false);
+        let signed_in = match username {
+            Some(username) if !username.trim().is_empty() => {
+                let host = host
+                    .map(|h| h.trim().to_lowercase())
+                    .filter(|h| !h.is_empty())
+                    .unwrap_or_else(|| imap::GMAIL_IMAP_HOST.to_string());
+                let username = username.trim().to_lowercase();
+                secrets.load_refresh(&host, &username).is_some()
+            }
+            _ => false,
+        };
+        Ok(OAuthStatus {
+            configured,
+            signed_in,
+        })
+    })
+    .await
+    .map_err(|e| format!("status task failed: {e}"))?
+    .map_err(|e: String| format!("status check failed: {e}"))
 }
 
 /// Insert the built-in demo messages so a fresh install has searchable data.
@@ -620,7 +798,7 @@ pub fn run() {
             // Settings come from the file first; the environment keeps
             // working as a read-only fallback provider exactly as before
             // the Settings UI existed.
-            let secrets = secrets::Secrets::new();
+            let secrets = Arc::new(secrets::Secrets::new());
             let settings_path = data_dir.join(settings::SETTINGS_FILE);
             let settings = Settings::load(&settings_path);
             if let Err(e) = &settings {
@@ -650,7 +828,7 @@ pub fn run() {
                 embedder: HashEmbedder::new(),
                 watcher,
             });
-            app.manage(secrets);
+            app.manage(Arc::clone(&secrets));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -669,6 +847,8 @@ pub fn run() {
             watch_add_folder,
             watch_remove_folder,
             watch_status,
+            oauth_gmail_login,
+            oauth_status,
             seed_demo,
             stats,
             archive_stats,

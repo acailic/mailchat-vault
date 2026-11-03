@@ -136,7 +136,7 @@ fn mbox_fixture_and_imap_sync_produce_equivalent_archives() {
         host: "mock.test".to_string(),
         port: 993,
         username: "alice@example.com".to_string(),
-        password: "pw".to_string(),
+        auth: vimap::ImapAuth::Password("pw".to_string()),
         folders: Vec::new(),
     };
     let instance = vimap::ensure_source_instance(&imap_storage, &config).unwrap();

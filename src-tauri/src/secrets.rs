@@ -1,11 +1,13 @@
-//! IMAP account passwords and LLM API keys: OS keyring first, memory
-//! fallback.
+//! IMAP account passwords, OAuth2 refresh tokens, and LLM API keys: OS
+//! keyring first, memory fallback.
 //!
 //! Preferred store: the OS keyring — Secret Service (GNOME Keyring/KWallet)
 //! on Linux via a pure-Rust zbus client, Keychain Services on macOS,
 //! Credential Manager on Windows — under the service name `mailchat-vault`,
-//! one entry per secret: IMAP accounts as `user@host`, LLM provider API
-//! keys as `llm:<provider-id>`.
+//! one entry per secret: IMAP accounts as `user@host`, the OAuth2 refresh
+//! token from a Gmail sign-in as `oauth:user@host` (see
+//! [`Secrets::save_refresh`]; short-lived access tokens are never stored),
+//! LLM provider API keys as `llm:<provider-id>`.
 //!
 //! When the OS keyring is unavailable at runtime (headless session, locked
 //! keyring, unsupported platform), the secret is kept **only in process
@@ -92,6 +94,32 @@ impl Secrets {
         let password = self.load_key(&legacy_key)?;
         self.save(host, username, &password);
         Some(password)
+    }
+
+    /// Remember the OAuth2 refresh token for `user@host` — same stores
+    /// and guarantees as [`Self::save`], under a distinct `oauth:` key so
+    /// it can never collide with (or be mistaken for) an app password or
+    /// an LLM API key. Short-lived access tokens are never stored.
+    pub fn save_refresh(&self, host: &str, username: &str, token: &str) -> SecretStore {
+        let key = format!("oauth:{}", Self::account_key(host, username));
+        let keyring =
+            keyring::Entry::new(SERVICE, &key).and_then(|entry| entry.set_password(token));
+        match keyring {
+            Ok(()) => SecretStore::OsKeyring,
+            Err(_) => {
+                self.memory
+                    .lock()
+                    .expect("secrets memory lock")
+                    .insert(key, token.to_string());
+                SecretStore::Memory
+            }
+        }
+    }
+
+    /// Load the stored OAuth2 refresh token for `user@host`, mirroring
+    /// [`Self::load_key`]'s keyring-then-memory order.
+    pub fn load_refresh(&self, host: &str, username: &str) -> Option<String> {
+        self.load_key(&format!("oauth:{}", Self::account_key(host, username)))
     }
 
     /// Read one keyring/memory key: OS keyring first, then session memory.
