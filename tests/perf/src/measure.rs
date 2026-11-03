@@ -42,15 +42,21 @@ fn nearest_rank(sorted: &[f64], percentile: f64) -> f64 {
 pub struct SearchRow {
     /// Short label used in tables and the gate report.
     pub label: &'static str,
-    /// Free-text input exactly as the app would receive it.
+    /// Free-text input exactly as the app would receive it (empty =
+    /// newest-first browse).
     pub query: String,
-    /// Sanitized FTS5 MATCH expression the app would run.
+    /// Sanitized FTS5 MATCH expression the app would run (empty for
+    /// browse).
     pub match_expr: String,
     pub date_from: Option<String>,
     pub date_to: Option<String>,
     /// Page size (`LIMIT`), mirroring the app's pagination knob.
     pub limit: u32,
-    /// Total rows matching the query (counted once, untimed).
+    /// Page offset (`OFFSET`) — 0 for the first page, large for deep
+    /// pages.
+    pub offset: u32,
+    /// Total rows matching the query (the page's `total`; counted as
+    /// part of the timed `search_page` call, exactly what the UI pays).
     pub hits: u64,
     /// p95 budget (ms) when gating; `None` on informational runs.
     pub p95_budget_ms: Option<f64>,
@@ -66,8 +72,58 @@ pub struct StartupRow {
     pub runs: u32,
     /// `Storage::open` only (migrations + pragmas).
     pub open: LatencyStats,
-    /// `Storage::open` + `stats()` — the app's startup data path.
+    /// `Storage::open` + `stats()` — the pre-pool launch data path.
     pub open_stats: LatencyStats,
+    /// `DbPool::spawn` + first paged search on a read connection +
+    /// shutdown — the app's launch data path since M2.1 (three
+    /// connections, writer + job runner threads, then a query).
+    pub pool_spawn: LatencyStats,
+}
+
+/// One IPC-shaped measurement: the paged search round trip exactly as
+/// the `search_messages` command pays it — a read-connection hop
+/// through the pool plus the JSON serialization of the page (the
+/// payload that crosses the webview boundary). The webview/OS hop
+/// itself is not measurable in a core-only harness and is deliberately
+/// not estimated.
+#[derive(Debug, Clone, Serialize)]
+pub struct IpcRow {
+    pub label: &'static str,
+    /// Total rows matching the query (the page's `total`).
+    pub hits: u64,
+    /// Median serialized page size (bytes) — the IPC payload.
+    pub median_payload_bytes: u64,
+    #[serde(flatten)]
+    pub stats: LatencyStats,
+}
+
+/// Search latency measured while a bounded ingest commits through the
+/// pool's write lane (the M2.2 production import path) on the same
+/// database — the "query while ingesting" contract. `quiet_*` carry
+/// the same query's percentiles from the uninterrupted main suite of
+/// the same run for a direct comparison.
+#[derive(Debug, Clone, Serialize)]
+pub struct IngestSearchRow {
+    pub label: &'static str,
+    pub samples: u32,
+    pub quiet_p50_ms: f64,
+    pub quiet_p95_ms: f64,
+    pub quiet_p99_ms: f64,
+    #[serde(flatten)]
+    pub during: LatencyStats,
+}
+
+/// The concurrent-ingest measurement as a whole.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConcurrentIngestRow {
+    /// Messages the ingest job committed.
+    pub ingest_messages: u64,
+    pub ingest_secs: f64,
+    pub ingest_msgs_per_sec: f64,
+    /// Whether at least one search completed while the ingest was
+    /// still committing (false only on absurdly fast finishes).
+    pub overlapped: bool,
+    pub search: Vec<IngestSearchRow>,
 }
 
 /// Environment the benchmark ran on.
@@ -118,6 +174,11 @@ pub struct Report {
     pub fixture: FixtureInfo,
     pub startup: StartupRow,
     pub search: Vec<SearchRow>,
+    /// IPC-shaped paged-search round trips (read hop + serialization).
+    pub ipc: Vec<IpcRow>,
+    /// Search latency while a bounded ingest commits (query while
+    /// ingesting), `None` when the ingest phase was skipped (--ingest-count 0).
+    pub concurrent_ingest: Option<ConcurrentIngestRow>,
     pub gate: Option<GateResult>,
 }
 
@@ -128,6 +189,8 @@ pub struct BenchConfig {
     pub iterations: u32,
     pub warmup: u32,
     pub startup_runs: u32,
+    /// Messages the concurrent-ingest phase commits (`0` disables it).
+    pub ingest_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
