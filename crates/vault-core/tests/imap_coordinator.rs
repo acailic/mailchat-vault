@@ -94,8 +94,8 @@ fn eventually(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
 
 /// The credential resolver every plain round uses: the password for
 /// anyone (tests), like the app's keyring resolver does.
-fn password_for(_instance: &SourceInstance) -> Option<ImapAuth> {
-    Some(ImapAuth::Password(PASSWORD.to_string()))
+fn password_for(_instance: &SourceInstance) -> Result<Option<ImapAuth>, String> {
+    Ok(Some(ImapAuth::Password(PASSWORD.to_string())))
 }
 
 /// Run one round synchronously on this thread (no cancellation).
@@ -256,7 +256,7 @@ fn a_source_without_credentials_is_reported_not_errored() {
     register_source(&pool, &config_for(USER, server.addr.port()));
 
     // The resolver has nothing stored (the keyring emptied).
-    let round = sync_round_with(&pool, |_| None, || false, mock_connect);
+    let round = sync_round_with(&pool, |_| Ok(None), || false, mock_connect);
     assert_eq!(round.outcomes.len(), 1);
     assert_eq!(round.outcomes[0].status, SourceSyncStatus::NoCredentials);
     assert_eq!(total(&pool), 0, "no credentials means no sync attempt");

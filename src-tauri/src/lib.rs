@@ -884,24 +884,30 @@ fn resolve_imap_password(
 
 /// The coordinator round's credential resolution, per source: a stored
 /// app password first; otherwise a stored Google sign-in refreshed into
-/// a fresh access token (SASL XOAUTH2); otherwise `None` — the source is
-/// reported as [`vault_core::imap_coordinator::SourceSyncStatus::NoCredentials`],
-/// never an error. Secrets stay in the keyring/session memory; only the
-/// short-lived token exists for the round, in memory.
+/// a fresh access token (SASL XOAUTH2). `Ok(None)` — the source is
+/// reported as [`vault_core::imap_coordinator::SourceSyncStatus::NoCredentials`] —
+/// strictly means nothing stored; an `Err` means stored credentials
+/// exist but could not be used (no OAuth client configuration, or the
+/// token refresh failed). Secrets stay in the keyring/session memory;
+/// only the short-lived token exists for the round, in memory.
 fn resolve_imap_auth(
     secrets: &secrets::Secrets,
     oauth: Option<&OAuthConfig>,
     stored: &StoredImapConfig,
-) -> Option<ImapAuth> {
+) -> Result<Option<ImapAuth>, String> {
     if let Some(password) = secrets.load(&stored.host, &stored.username) {
-        return Some(ImapAuth::Password(password));
+        return Ok(Some(ImapAuth::Password(password)));
     }
-    let refresh = secrets.load_refresh(&stored.host, &stored.username)?;
-    let config = oauth?;
-    let tokens = oauth::refresh_access_token(config, &refresh).ok()?;
-    Some(ImapAuth::Xoauth2 {
+    let Some(refresh) = secrets.load_refresh(&stored.host, &stored.username) else {
+        return Ok(None);
+    };
+    let Some(config) = oauth else {
+        return Err("Google sign-in configured but no OAuth client credentials found".to_string());
+    };
+    let tokens = oauth::refresh_access_token(config, &refresh).map_err(|e| e.to_string())?;
+    Ok(Some(ImapAuth::Xoauth2 {
         access_token: tokens.access_token,
-    })
+    }))
 }
 
 /// Submit a background job (the v2 protocol). Returns immediately with a
@@ -1035,8 +1041,12 @@ fn run_job_spec(
             let round: RoundSummary = imap_coordinator::sync_round(
                 pool,
                 |instance| {
-                    StoredImapConfig::of(instance)
-                        .and_then(|stored| resolve_imap_auth(&secrets, oauth.as_ref(), &stored))
+                    match StoredImapConfig::of(instance) {
+                        Some(stored) => {
+                            resolve_imap_auth(&secrets, oauth.as_ref(), &stored)
+                        }
+                        None => Ok(None),
+                    }
                 },
                 || ctx.is_cancelled(),
             );

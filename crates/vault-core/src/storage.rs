@@ -1845,30 +1845,6 @@ impl Storage {
         Ok(row)
     }
 
-    /// Save (upsert) the incremental-sync cursor for one
-    /// `(source instance, folder)` — the connector-scoped variant of
-    /// [`Storage::set_imap_state`], keyed by the durable instance id.
-    /// Stores only folder cursors — never credentials.
-    pub fn set_imap_checkpoint(
-        &self,
-        instance_id: &str,
-        folder: &str,
-        uidvalidity: u32,
-        last_uid: u32,
-    ) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO sync_checkpoints
-                 (source_instance_id, folder, uidvalidity, last_uid, updated_at)
-             VALUES (?1, ?2, ?3, ?4, datetime('now'))
-             ON CONFLICT (source_instance_id, folder) DO UPDATE SET
-                uidvalidity = excluded.uidvalidity,
-                last_uid    = excluded.last_uid,
-                updated_at  = excluded.updated_at",
-            params![instance_id, folder, uidvalidity, last_uid],
-        )?;
-        Ok(())
-    }
-
     /// Per-source exclusion (M2.3): an excluded source is skipped by
     /// coordinator rounds while its archive, cursors, and configuration
     /// are kept intact — exclusion pauses a source, it never deletes

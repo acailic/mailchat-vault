@@ -128,9 +128,12 @@ pub struct RoundSummary {
 
 /// Run one coordinator round over every configured IMAP source.
 ///
-/// - `resolve` supplies each source's credentials ([`ImapAuth`]) or
-///   `None` when none are stored — the app resolves from the OS
-///   keyring here; the vault database is never asked and never told.
+/// - `resolve` supplies each source's credentials: `Ok(None)` when none
+///   are stored (the app resolves from the OS keyring here; the vault
+///   database is never asked and never told), `Err` when stored
+///   credentials cannot be used (e.g. a failed Google token refresh) —
+///   reported as [`SourceSyncStatus::Failed`], never conflated with
+///   having nothing stored.
 /// - `is_cancelled` is checked between sources: a cancelled round stops
 ///   early (the sources already finished keep their outcomes).
 ///
@@ -140,7 +143,7 @@ pub struct RoundSummary {
 /// the network.
 pub fn sync_round(
     pool: &DbPool,
-    resolve: impl Fn(&SourceInstance) -> Option<ImapAuth>,
+    resolve: impl Fn(&SourceInstance) -> Result<Option<ImapAuth>, String>,
     is_cancelled: impl Fn() -> bool,
 ) -> RoundSummary {
     // The production session builder: implicit-TLS connect + auth
@@ -153,7 +156,7 @@ pub fn sync_round(
 /// server (plain TCP, no TLS, no network access).
 pub fn sync_round_with<T: Read + Write>(
     pool: &DbPool,
-    resolve: impl Fn(&SourceInstance) -> Option<ImapAuth>,
+    resolve: impl Fn(&SourceInstance) -> Result<Option<ImapAuth>, String>,
     is_cancelled: impl Fn() -> bool,
     connect: impl Fn(&ImapConfig) -> crate::Result<Session<T>>,
 ) -> RoundSummary {
@@ -172,13 +175,16 @@ pub fn sync_round_with<T: Read + Write>(
         }
         let stored = StoredImapConfig::of(&instance).expect("filtered above");
         let status = match resolve(&instance) {
-            Some(auth) => match sync_one(&stored.with_auth(auth), &sink, &instance.id, &connect) {
-                Ok(folders) => SourceSyncStatus::Synced { folders },
-                Err(e) => SourceSyncStatus::Failed {
-                    error: e.to_string(),
-                },
-            },
-            None => SourceSyncStatus::NoCredentials,
+            Ok(Some(auth)) => {
+                match sync_one(&stored.with_auth(auth), &sink, &instance.id, &connect) {
+                    Ok(folders) => SourceSyncStatus::Synced { folders },
+                    Err(e) => SourceSyncStatus::Failed {
+                        error: e.to_string(),
+                    },
+                }
+            }
+            Ok(None) => SourceSyncStatus::NoCredentials,
+            Err(error) => SourceSyncStatus::Failed { error },
         };
         outcomes.push(SourceSyncOutcome {
             instance_id: instance.id,
