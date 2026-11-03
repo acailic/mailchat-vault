@@ -868,7 +868,7 @@ fn resolve_imap_password(
 fn job_submit(
     app: AppHandle,
     state: State<AppState>,
-    secrets: State<secrets::Secrets>,
+    secrets: State<'_, Arc<secrets::Secrets>>,
     kind: String,
     params: Value,
 ) -> Result<JobHandle, String> {

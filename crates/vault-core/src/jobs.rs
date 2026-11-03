@@ -242,6 +242,10 @@ pub struct JobEvent {
     /// RFC 3339 time of the change.
     pub at: String,
     pub job: JobId,
+    /// Flattened into the event object: the wire form is
+    /// `{seq, at, job, type, …}` — `type` tags the [`JobEventDetail`]
+    /// variant, matching the frontend protocol types (src/types.ts).
+    #[serde(flatten)]
     pub detail: JobEventDetail,
 }
 

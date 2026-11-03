@@ -792,3 +792,34 @@ fn imap_pool_sync_matches_direct_sync_archive() {
     assert_eq!(direct.stats().unwrap().total, 2);
     pool.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Wire format
+// ---------------------------------------------------------------------------
+
+/// Regression (M2.1 e2e): the v2 protocol consumer (src/types.ts `JobEvent`)
+/// reads a flat event object `{seq, at, job, type, ...}`. `JobEventDetail`
+/// must stay serde-flattened into the event — a nested `detail` key leaves
+/// `event.type` undefined in the frontend, so the jobs panel sticks on
+/// "unknown — queued" while jobs actually run to completion.
+#[test]
+fn job_event_serializes_flat_for_the_frontend() {
+    let event = vault_core::jobs::JobEvent {
+        seq: 7,
+        at: "2026-11-03T00:00:00Z".to_string(),
+        job: JobId(1),
+        detail: JobEventDetail::Progress {
+            done: 3,
+            total: 8,
+            message: "embedding".to_string(),
+        },
+    };
+    let wire = serde_json::to_value(&event).unwrap();
+    assert_eq!(wire["type"], json!("progress"));
+    assert_eq!(wire["job"], json!(1));
+    assert_eq!(wire["done"], json!(3));
+    assert!(
+        wire.get("detail").is_none(),
+        "detail must be flattened onto the event object, not nested: {wire}"
+    );
+}
