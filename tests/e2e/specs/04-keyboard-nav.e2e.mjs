@@ -10,6 +10,7 @@ export async function run(ctx) {
   await withSession({}, async (browser) => {
     await ui.waitForApp(browser);
     await ui.importMbox(browser, ui.archiveMbox);
+    await ui.openView(browser, "workspace"); // search controls are view-scoped
     const mode = await ui.uiMode(browser);
 
     // Enter in the query box submits the search (no button click).
