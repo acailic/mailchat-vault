@@ -152,7 +152,7 @@ fn newer_schema_is_refused_without_touching_the_file() {
             err,
             Error::SchemaTooNew {
                 db: 99,
-                supported: 9
+                supported: 10
             }
         ),
         "expected SchemaTooNew, got: {err}"

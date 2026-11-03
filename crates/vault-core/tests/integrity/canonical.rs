@@ -315,7 +315,7 @@ fn old_schema_fixture_migrates_without_loss() {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap(),
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     );
 
     // The legacy snapshot is untouched: same rows, verbatim.
