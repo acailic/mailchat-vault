@@ -193,9 +193,9 @@ while the fetch is stalled.
 
 Jobs carry **typed states** (`queued` → `running` → `succeeded` /
 `failed` / `cancelled`, the latter with typed error kinds: `storage`, `io`,
-`import`, `network`, `cancelled`, `queue_full`, `invalid`, `internal`)
-and report **progress** (the embedding job, per batch; the IMAP job, per
-folder). Every state change appends an event stamped with a global
+`import`, `network`, `cancelled`, `queue_full`, `invalid`, `internal`) and report
+**progress** (the embedding job, per batch). Every state change appends
+an event stamped with a global
 monotonic `seq`; the shell emits each one as a `job-event` window event,
 and the UI keeps a cursor. **Missed events are recoverable by polling**:
 `job_events_since(cursor)` returns exactly the gap plus a fresh job
@@ -283,7 +283,8 @@ Rows stream straight to the file, so exports of very large result sets don't hol
 
 ```sh
 cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram / Discord ingest, media extraction (real small fixture files), filtered/paged search, chat context, archive statistics (incl. the 1M-message dashboard perf contract), 100k FTS perf fixture, IMAP sync (mock server; durable source instances, OAuth2 login flow (mock OAuth server + mock IMAP, XOAUTH2 end-to-end), multi-folder occurrences, conflicting revisions), jobs (M2.1 pool: search-during-writes concurrency, bounded-queue backpressure, two-reader concurrency, typed job lifecycle/cancellation/progress, event-seq polling recovery incl. ring trimming, IMAP network-stall-does-not-block-writes proof), LLM search pipeline (mock LLM, no network), settings model (file round-trip, provider pairing rules, menu building), local embeddings (deterministic embedder, incremental job, cosine scan, hybrid ranking, 100k vector perf budgets), folder watching (real temp folders, through the pool), export (CSV/JSON/MBOX round-trips incl. unicode + large sets), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations, safe migration with injected before/within/after-conversion failures: snapshot kept readable, original restored byte-for-byte, durable failure-marker refusal on later opens, capacity preflight, newer-schema refusal)
-npm test                 # frontend unit + UI-state snapshot tests (vitest), incl. settings helpers, the provider-menu / settings wiring, and the background-jobs protocol client (cursor tracking, gap detection, trimmed reconciliation, panel rendering)npm run check            # TypeScript type-check
+npm test                 # frontend unit + UI-state snapshot tests (vitest), incl. settings helpers, the provider-menu / settings wiring, and the background-jobs protocol client (cursor tracking, gap detection, trimmed reconciliation, panel rendering)
+npm run check            # TypeScript type-check
 cargo test --workspace   # also compiles the Tauri app + its LLM provider registry and job-dispatch tests (needs the Linux libs above)
 ```
 

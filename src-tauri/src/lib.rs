@@ -822,10 +822,15 @@ impl JobSpec {
                     host: string_field("host")?.trim().to_lowercase(),
                     port: port as u16,
                     username: string_field("username")?,
-                    // The password comes resolved (entered or stored) —
-                    // an empty value means "reuse the stored one" only in
-                    // the v1 command; the v2 job requires it non-empty.
-                    password: string_field("password")?,
+                    // Parity with the v1 sync command: an empty (or
+                    // absent) password means "resolve from the stored
+                    // secret" — resolved in `job_submit` before the job
+                    // body runs.
+                    password: params
+                        .get("password")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
                     folders,
                 })
             }
@@ -852,8 +857,9 @@ fn job_submit(
     let pool = Arc::clone(&state.pool);
     let embedder = state.embedder;
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    // The IMAP password may be stored in the keyring: resolve it here (on
-    // the command thread) so the job body carries a ready config.
+    // Parity with the v1 sync command: an empty password means "reuse the
+    // stored one" — resolve it here (on the command thread) so the job
+    // body carries a ready config.
     let spec = match spec {
         JobSpec::ImapSync {
             host,
@@ -945,7 +951,7 @@ fn run_job_spec(
                 host: host.clone(),
                 port: *port,
                 username: username.clone(),
-                password: password.clone(),
+                auth: ImapAuth::Password(password.clone()),
                 folders: folders.clone(),
             };
             // Network on this thread; each storage call round-trips the
@@ -964,10 +970,10 @@ fn run_embed_job(ctx: &JobContext, embedder: HashEmbedder) -> std::result::Resul
     let model = embedder.id().to_string();
     let dim = embedder.dim();
     let start = Instant::now();
-    let total = ctx
+    let counts = ctx
         .read(|s| s.embedding_counts(&model))
-        .map_err(JobError::from)?
-        .messages;
+        .map_err(JobError::from)?;
+    let total = counts.messages.saturating_sub(counts.embedded);
     ctx.progress(0, total, "embedding");
     let mut embedded: u64 = 0;
     loop {
@@ -997,11 +1003,10 @@ fn run_embed_job(ctx: &JobContext, embedder: HashEmbedder) -> std::result::Resul
             break;
         }
     }
-    let remaining = ctx
+    let counts = ctx
         .read(|s| s.embedding_counts(&model))
-        .map_err(JobError::from)?
-        .messages
-        .saturating_sub(embedded);
+        .map_err(JobError::from)?;
+    let remaining = counts.messages.saturating_sub(counts.embedded);
     Ok(json!({
         "model": model,
         "dim": dim,
@@ -1286,6 +1291,40 @@ mod tests {
             }
         );
 
+        // Parity with the v1 sync command: an empty (or absent) password
+        // is accepted — job_submit resolves it from the stored secret.
+        assert_eq!(
+            JobSpec::parse(
+                "imap_sync",
+                &params(json!({
+                    "host": "imap.gmail.com",
+                    "username": "a@b.c",
+                    "password": "",
+                }))
+            )
+            .unwrap(),
+            JobSpec::ImapSync {
+                host: "imap.gmail.com".into(),
+                port: imap::GMAIL_IMAP_PORT,
+                username: "a@b.c".into(),
+                password: String::new(),
+                folders: Vec::new(),
+            }
+        );
+        assert_eq!(
+            JobSpec::parse(
+                "imap_sync",
+                &params(json!({"host": "imap.gmail.com", "username": "a@b.c"}))
+            )
+            .unwrap(),
+            JobSpec::ImapSync {
+                host: "imap.gmail.com".into(),
+                port: imap::GMAIL_IMAP_PORT,
+                username: "a@b.c".into(),
+                password: String::new(),
+                folders: Vec::new(),
+            }
+        );
         // Required-field and range errors name the field.
         let err = JobSpec::parse("import_mbox", &params(json!({}))).unwrap_err();
         assert!(err.contains("params.path"), "{err}");
