@@ -1040,13 +1040,9 @@ fn run_job_spec(
             ctx.progress(0, 1, "syncing sources");
             let round: RoundSummary = imap_coordinator::sync_round(
                 pool,
-                |instance| {
-                    match StoredImapConfig::of(instance) {
-                        Some(stored) => {
-                            resolve_imap_auth(&secrets, oauth.as_ref(), &stored)
-                        }
-                        None => Ok(None),
-                    }
+                |instance| match StoredImapConfig::of(instance) {
+                    Some(stored) => resolve_imap_auth(&secrets, oauth.as_ref(), &stored),
+                    None => Ok(None),
                 },
                 || ctx.is_cancelled(),
             );
