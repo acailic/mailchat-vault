@@ -313,11 +313,8 @@ fn pre_drifted_legacy_index_records_a_durable_refusal() {
     let snapshot = snapshot_path(&db, 2);
     {
         let conn = raw(&db);
-        conn.execute(
-            "DELETE FROM messages_fts_docsize WHERE rowid <= 3",
-            [],
-        )
-        .unwrap();
+        conn.execute("DELETE FROM messages_fts_docsize WHERE rowid <= 3", [])
+            .unwrap();
     }
     let before = hash_file(&db);
 

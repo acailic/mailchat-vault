@@ -136,12 +136,7 @@ pub(crate) fn write_failed_marker(db: &Path, reason: &str, snapshot: &Path) -> R
     let marker = failed_marker_path(db);
     let tmp = append_file_name(&marker, ".tmp");
     let mut file = File::create(&tmp).map_err(Error::Io)?;
-    write!(
-        file,
-        "reason: {reason}\nsnapshot: {}\n",
-        snapshot.display()
-    )
-    .map_err(Error::Io)?;
+    write!(file, "reason: {reason}\nsnapshot: {}\n", snapshot.display()).map_err(Error::Io)?;
     file.sync_all().map_err(Error::Io)?;
     fs::rename(&tmp, &marker).map_err(Error::Io)?;
     Ok(())
