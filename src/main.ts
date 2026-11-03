@@ -28,10 +28,11 @@ import {
 import type {
   ArchiveStats,
   ChatContext,
-  EmbedJobSummary,
   EmbeddingStatus,
   ChatImportOutcome,
   ExportSummary,  IngestSummary,
+  JobEvent,
+  JobEventsPage,
   MediaSummary,
   Message,
   SearchHit,
@@ -40,6 +41,14 @@ import type {
   WatchSnapshot,
 } from "./types";
 import { groupHits, moveIndex, neighborId, pageModel, splitTerms } from "./viewmodel";
+import {
+  applyJobEvent,
+  applyJobsPage,
+  hasActiveJob,
+  jobsStatusText,
+  newJobsTracker,
+  renderJobsList,
+} from "./jobsview";
 import { renderWatchEvents, renderWatchFolders, watchStatusText } from "./watchview";
 
 const PAGE_SIZE = 50;
@@ -121,6 +130,8 @@ const watchAddButton = document.querySelector<HTMLButtonElement>("#watch-add-btn
 const watchStatus = document.querySelector<HTMLElement>("#watch-status")!;
 const watchFoldersList = document.querySelector<HTMLUListElement>("#watch-folders")!;
 const watchEventsList = document.querySelector<HTMLUListElement>("#watch-events")!;
+const jobsStatus = document.querySelector<HTMLElement>("#jobs-status")!;
+const jobsList = document.querySelector<HTMLUListElement>("#jobs-list")!;
 const dashboard = document.querySelector<HTMLElement>("#dashboard")!;
 const dashboardStatus = document.querySelector<HTMLElement>("#dashboard-status")!;
 const dashboardRefreshButton = document.querySelector<HTMLButtonElement>("#stats-refresh")!;
@@ -350,18 +361,18 @@ async function refreshEmbedStatus(): Promise<void> {
   }
 }
 
+/** Submit the incremental embedding job through the v2 background-job
+ * protocol: progress streams into the jobs panel (0→total, per batch),
+ * and the button stays disabled for as long as an embedding job is
+ * queued or running. */
 async function runEmbedJob(): Promise<void> {
-  embedSeq++; // supersede any in-flight embed_status refresh
   embedButton.disabled = true;
-  embedStatus.textContent = "Embedding… (local, offline)";
+  embedStatus.textContent = "Embedding… (local, offline, background job)";
   try {
-    const summary = await invoke<EmbedJobSummary>("embed_messages", {});
-    embedStatus.textContent =
-      `Embedded ${summary.embedded} new · ${summary.remaining} pending` +
-      ` (${summary.elapsed_ms} ms, ${summary.model})`;
+    await invoke<{ id: number }>("job_submit", { kind: "embed_messages", params: {} });
+    // The panel takes it from here (started/progress/succeeded events).
   } catch (e) {
-    embedStatus.textContent = `Embedding failed: ${e}`;
-  } finally {
+    embedStatus.textContent = `Embedding job failed to start: ${e}`;
     embedButton.disabled = false;
   }
 }
@@ -1072,6 +1083,63 @@ void listen<WatchSnapshot>("watch-status", (event) => {
     void refreshStats();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Background jobs (v2 protocol: live events + cursor polling recovery)
+// ---------------------------------------------------------------------------
+
+const jobs = newJobsTracker();
+
+function renderJobs(): void {
+  jobsStatus.textContent = jobsStatusText(jobs);
+  renderJobsList(jobsList, jobs);
+  // The embedding button tracks its own job: disabled while queued or
+  // running, re-enabled once no embedding job is active.
+  embedButton.disabled = hasActiveJob(jobs, "embed_messages");
+  if (!embedButton.disabled && embedStatus.textContent.startsWith("Embedding…")) {
+    embedStatus.textContent = "";
+  }
+}
+
+/** Poll `job_events_since(cursor)` — the recovery path for missed window
+ * events (webview reload, a gap in seq). The page carries both the missed
+ * events and a fresh records snapshot. */
+async function syncJobs(): Promise<void> {
+  try {
+    const page = await invoke<JobEventsPage>("job_events_since", { seq: jobs.cursor });
+    applyJobsPage(jobs, page);
+    renderJobs();
+  } catch {
+    // Backend not ready (early boot) — the next job-event retry polls.
+    jobs.needsPoll = true;
+  }
+}
+
+/** A terminal event for an archive-changing kind refreshes the panels. */
+function refreshAfterJobEvent(event: JobEvent): void {
+  if (
+    event.type === "succeeded" ||
+    event.type === "failed" ||
+    event.type === "cancelled"
+  ) {
+    void refreshStats();
+    void refreshDashboard();
+    void refreshEmbedStatus();
+  }
+}
+
+void listen<JobEvent>("job-event", (event) => {
+  applyJobEvent(jobs, event.payload);
+  refreshAfterJobEvent(event.payload);
+  renderJobs();
+  if (jobs.needsPoll) {
+    void syncJobs(); // seq gap: recover the missed events by polling
+  }
+});
+
+// Boot recovery: fetch everything retained (also covers a webview reload
+// that happened while jobs were running — the cursor restarts at 0).
+void syncJobs();
 
 // Export
 // ---------------------------------------------------------------------------

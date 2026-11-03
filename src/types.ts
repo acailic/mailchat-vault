@@ -157,3 +157,62 @@ export interface ExportSummary {
   skipped: number;
 
 }
+
+// ---------------------------------------------------------------------------
+// v2 background jobs (mirrors `vault_core::jobs`; serde tagged, snake_case)
+// ---------------------------------------------------------------------------
+
+/** Typed job failure (tagged by `kind`). */
+export type JobError =
+  | { kind: "storage"; message: string }
+  | { kind: "io"; message: string }
+  | { kind: "import"; message: string }
+  | { kind: "network"; message: string }
+  | { kind: "cancelled" }
+  | { kind: "queue_full"; queue: string }
+  | { kind: "invalid"; message: string }
+  | { kind: "internal"; message: string };
+
+/** Cooperative progress last reported by a running job. */
+export interface JobProgress {
+  done: number;
+  total: number;
+  message: string;
+}
+
+/** A job's state machine (tagged by `state`). */
+export type JobState =
+  | { state: "queued" }
+  | { state: "running" }
+  | { state: "succeeded"; result: unknown }
+  | { state: "failed"; error: JobError }
+  | { state: "cancelled" };
+
+/** A job's current record — the authoritative state. */
+export interface JobRecord {
+  id: number;
+  kind: string;
+  state: JobState;
+  submitted_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  progress: JobProgress | null;
+}
+
+/** One job state change, stamped with a global monotonic `seq`. */
+export type JobEvent =
+  | { seq: number; at: string; job: number; type: "submitted"; kind: string }
+  | { seq: number; at: string; job: number; type: "started" }
+  | { seq: number; at: string; job: number; type: "progress"; done: number; total: number; message: string }
+  | { seq: number; at: string; job: number; type: "succeeded"; result: unknown }
+  | { seq: number; at: string; job: number; type: "failed"; error: JobError }
+  | { seq: number; at: string; job: number; type: "cancelled" };
+
+/** The `job_events_since` page: missed events plus a fresh snapshot. */
+export interface JobEventsPage {
+  events: JobEvent[];
+  latest_seq: number;
+  oldest_kept: number;
+  trimmed: boolean;
+  jobs: JobRecord[];
+}

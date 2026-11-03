@@ -1,5 +1,17 @@
 //! Mailchat Vault desktop app: a thin Tauri shell over `vault-core`.
 //!
+//! Since M2.1 the app opens the vault through [`vault_core::jobs::DbPool`]
+//! (a dedicated writer worker thread over a bounded write queue plus two
+//! read connections in WAL mode): every read command runs on an idle read
+//! connection, every write is marshaled through the queue, and long work
+//! (imports, IMAP sync, embedding) also exists as **v2 background jobs**
+//! — `job_submit` starts one, `job_get`/`job_list` report their typed
+//! states, `job_events_since` recovers missed `job-event` window events
+//! by polling a monotonic cursor, and `job_cancel` stops one
+//! cooperatively. No command ever performs network I/O while holding
+//! storage: an IMAP sync fetches on its job thread and only its database
+//! effects round-trip through the write queue.
+//!
 //! Commands exposed to the frontend:
 //! - `search_messages` — paged, filtered full-text search hitting SQLite FTS5
 //!   (relevance-ranked with match snippets, or newest-first browse).
@@ -34,6 +46,9 @@
 //!   flow with PKCE) and store the refresh token in the OS keyring.
 //! - `oauth_status` — Gmail sign-in availability for the UI (configured?
 //!   signed in?), never any secret.
+//! - `job_submit` / `job_get` / `job_list` / `job_events_since` /
+//!   `job_cancel` — the v2 background-job protocol (see above); progress
+//!   and state changes stream to the UI as `job-event` window events.
 //! - `seed_demo` — insert the built-in sample messages (idempotent).
 //! - `stats` — archive counts per source (drives the source filter chips).
 //! - `archive_stats` — dashboard aggregates: totals, date range, counts by
@@ -46,15 +61,20 @@
 use std::collections::HashSet;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use chrono::Utc;
 use serde::Serialize;
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use vault_core::chat_export::{self, ChatImportOutcome};
 use vault_core::export::{self, ExportFormat, ExportSummary};
 use vault_core::imap::{self, FolderSyncSummary, ImapAuth, ImapConfig};
 use vault_core::ingest::{ingest, Collected, IngestSummary, Source};
+use vault_core::jobs::{
+    DbPool, JobContext, JobError, JobEventsPage, JobId, JobRecord, PoolConfig, PoolSync,
+};
 use vault_core::llm::{
     self, AnthropicLlm, AskOutcome, LlmConfig, LlmStatus, PlanSource, PlannedQuery, QueryPlan,
 };
@@ -63,8 +83,9 @@ use vault_core::oauth::{self, OAuthConfig};
 use vault_core::query::{ChatContext, SearchPage, SearchQuery};
 use vault_core::settings::{self, Options, Settings, SETTINGS_VERSION};
 use vault_core::stats::{ArchiveStats, DEFAULT_TOP};
-use vault_core::storage::Storage;
-use vault_core::vector::{self, EmbedJobSummary, EmbeddingStatus, HashEmbedder};
+use vault_core::vector::{
+    self, EmbedJobSummary, Embedder, EmbeddingStatus, HashEmbedder, EMBED_BODY_PREFIX_CHARS,
+};
 use vault_core::watch::{FolderWatcher, WatchSnapshot};
 use vault_core::{demo, message, Error, Result as CoreResult};
 
@@ -73,12 +94,16 @@ mod secrets;
 
 use registry::{LlmRegistry, SaveSettingsPayload, Selection, SettingsView};
 
-/// Shared app state: one open storage handle guarded by a mutex, plus the
-/// LLM provider registry (settings profiles + keyring keys + env fallback),
-/// the local offline embedder behind hybrid ranking (stateless), and the
-/// background folder watcher.
+/// Batch size of the v2 embedding job (mirrors `vector`'s internal batch;
+/// progress is reported once per batch).
+const EMBED_JOB_BATCH: u64 = 500;
+
+/// Shared app state: the database pool (M2.1: writer worker + two read
+/// connections), the LLM provider registry (settings profiles + keyring
+/// keys + env fallback), the local offline embedder behind hybrid ranking
+/// (stateless), and the background folder watcher.
 struct AppState {
-    storage: Arc<Mutex<Storage>>,
+    pool: Arc<DbPool>,
     registry: Arc<Mutex<LlmRegistry>>,
     /// Where `settings_save` writes the settings file.
     settings_path: PathBuf,
@@ -115,8 +140,10 @@ struct OAuthStatus {
     signed_in: bool,
 }
 
-fn lock<'a>(state: &'a State<'_, AppState>) -> Result<MutexGuard<'a, Storage>, String> {
-    state.storage.lock().map_err(|e| e.to_string())
+/// The ticket `job_submit` returns.
+#[derive(Debug, Serialize)]
+struct JobHandle {
+    id: JobId,
 }
 
 /// Paged, filtered full-text search over the archive.
@@ -127,7 +154,10 @@ fn lock<'a>(state: &'a State<'_, AppState>) -> Result<MutexGuard<'a, Storage>, S
 /// `limit`/`offset`; `total` carries the match count for pagination.
 #[tauri::command]
 fn search_messages(state: State<AppState>, query: SearchQuery) -> Result<SearchPage, String> {
-    lock(&state)?.search_page(&query).map_err(|e| e.to_string())
+    state
+        .pool
+        .with_read(|s| s.search_page(&query))
+        .map_err(|e| e.to_string())
 }
 
 /// One message plus up to `radius` adjacent messages of the same chat
@@ -138,8 +168,9 @@ fn chat_context(
     id: i64,
     radius: Option<u32>,
 ) -> Result<Option<ChatContext>, String> {
-    lock(&state)?
-        .chat_context(id, radius.unwrap_or(8))
+    state
+        .pool
+        .with_read(|s| s.chat_context(id, radius.unwrap_or(8)))
         .map_err(|e| e.to_string())
 }
 
@@ -148,8 +179,8 @@ fn chat_context(
 /// ranking with the local vector leg when embeddings exist, then summarize
 /// the top results (RAG). Degrades to the plain term search whenever the LLM
 /// is unavailable or misbehaves — search results never depend on the LLM
-/// succeeding, and ranking never depends on embeddings existing. The
-/// storage lock is never held across an LLM round trip.
+/// succeeding, and ranking never depends on embeddings existing. Reads run
+/// on the pool's read connections; the LLM round trips hold no storage.
 ///
 /// `provider` optionally picks the backend for this ask: a settings
 /// profile id, `env` (the environment fallback), or `local` (plain local
@@ -203,9 +234,9 @@ fn llm_ask(
         }
     }
 
-    // Same steps as [`vault_core::llm::ask`], composed so that each storage
-    // lock is short-lived: translate (network) → validate (lock) → run +
-    // hybrid-rank (lock, local CPU) → summarize (network).
+    // Same steps as [`vault_core::llm::ask`], composed so that each read
+    // is short-lived: translate (network, no storage) → validate (read) →
+    // run + hybrid-rank (read, local CPU) → summarize (network).
     let planned = match &backend {
         None => PlannedQuery {
             plan: QueryPlan::plain(question),
@@ -214,22 +245,22 @@ fn llm_ask(
         },
         Some(backend) => {
             let candidate = llm::translate(backend, question, today);
-            let storage = lock(&state)?;
-            llm::validate(&storage, question, candidate)
+            state
+                .pool
+                .with_read(|s| llm::validate(s, question, candidate))
         }
     };
     let (results, ranking) = {
-        let storage = lock(&state)?;
-        let fts_results = llm::run_plan(&storage, &planned, limit).map_err(|e| e.to_string())?;
-        let hybrid = llm::rank_hybrid(
-            &storage,
-            &state.embedder,
-            question,
-            &planned,
-            &fts_results,
-            limit,
-        )
-        .map_err(|e| e.to_string())?;
+        let fts_results = state
+            .pool
+            .with_read(|s| llm::run_plan(s, &planned, limit))
+            .map_err(|e| e.to_string())?;
+        let hybrid = state
+            .pool
+            .with_read(|s| {
+                llm::rank_hybrid(s, &state.embedder, question, &planned, &fts_results, limit)
+            })
+            .map_err(|e| e.to_string())?;
         (hybrid.results, hybrid.ranking)
     };
     let (answer, summary_notes) = match &backend {
@@ -370,17 +401,14 @@ fn llm_key_clear(
 
 /// Run the incremental local embedding job: embeds only messages still
 /// lacking an embedding for the current model, in batches. Completely
-/// offline and CPU-bound; large first runs can take a moment, so the work
-/// runs off the UI thread.
+/// offline and CPU-bound; runs on the writer through the bounded queue.
 #[tauri::command]
 async fn embed_messages(state: State<'_, AppState>) -> Result<EmbedJobSummary, String> {
-    let storage = Arc::clone(&state.storage);
+    let pool = Arc::clone(&state.pool);
     let embedder = state.embedder;
     tauri::async_runtime::spawn_blocking(move || {
-        let storage = storage
-            .lock()
-            .map_err(|e| format!("storage lock poisoned: {e}"))?;
-        vector::run_embedding_job(&storage, &embedder, None).map_err(|e| e.to_string())
+        pool.submit_write(move |s| vector::run_embedding_job(s, &embedder, None))
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("embedding task failed: {e}"))?
@@ -390,26 +418,32 @@ async fn embed_messages(state: State<'_, AppState>) -> Result<EmbedJobSummary, S
 /// messages are embedded, and how many are still pending.
 #[tauri::command]
 fn embed_status(state: State<AppState>) -> Result<EmbeddingStatus, String> {
-    let storage = lock(&state)?;
-    vector::embedding_status(&storage, &state.embedder).map_err(|e| e.to_string())
+    state
+        .pool
+        .with_read(|s| vector::embedding_status(s, &state.embedder))
+        .map_err(|e| e.to_string())
 }
 
 /// Import every message of an `.mbox` file (idempotent; re-importing skips
 /// already-stored messages).
 #[tauri::command]
-fn import_mbox(state: State<AppState>, path: String) -> Result<IngestSummary, String> {
-    let source = MboxSource::new(path);
-    let storage = lock(&state)?;
-    ingest(&storage, &source).map_err(|e: Error| e.to_string())
+async fn import_mbox(state: State<'_, AppState>, path: String) -> Result<IngestSummary, String> {
+    let pool = Arc::clone(&state.pool);
+    tauri::async_runtime::spawn_blocking(move || {
+        pool.submit_write(move |s| ingest(s, &MboxSource::new(path)))
+            .map_err(|e: Error| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("import task failed: {e}"))?
 }
 
-/// Import a chat export: a WhatsApp `.txt` export, a Telegram
-/// `result.json` (a directory containing it works too), a Signal
-/// conversation `.json` (e.g. from `sigtop export-messages -f json`, one
-/// file per conversation), or a Discord Data Package messages export —
-/// a single channel `messages.json`, the package's `messages/` directory,
-/// or the package root. The format is detected from the file contents.
-/// Re-importing skips already-stored messages.
+/// Import a chat export: a WhatsApp `.txt` export, a Telegram `result.json`
+/// (a directory containing it works too), a Signal conversation `.json`
+/// (e.g. from `sigtop export-messages -f json`, one file per conversation),
+/// or a Discord Data Package messages export — a single channel
+/// `messages.json`, the package's `messages/` directory, or the package
+/// root. The format is detected from the file contents. Re-importing skips
+/// already-stored messages.
 ///
 /// With `extract_media` (default `true`), media files referenced by the
 /// export are copied into the app data `media/` store (hash-named,
@@ -417,9 +451,9 @@ fn import_mbox(state: State<AppState>, path: String) -> Result<IngestSummary, St
 /// in the archive get their links backfilled, so re-importing an export
 /// with media enriches it.
 #[tauri::command]
-fn import_chat_export(
+async fn import_chat_export(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     path: String,
     extract_media: Option<bool>,
 ) -> Result<ChatImportOutcome, String> {
@@ -429,14 +463,15 @@ fn import_chat_export(
     } else {
         None
     };
-    let storage = lock(&state)?;
-    chat_export::import(
-        &storage,
-        Path::new(&path),
-        extract_media,
-        data_dir.as_deref(),
-    )
-    .map_err(|e: Error| e.to_string())
+    let pool = Arc::clone(&state.pool);
+    tauri::async_runtime::spawn_blocking(move || {
+        pool.submit_write(move |s| {
+            chat_export::import(s, Path::new(&path), extract_media, data_dir.as_deref())
+        })
+        .map_err(|e: Error| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("import task failed: {e}"))?
 }
 
 /// Incrementally sync an IMAP account. Two auth modes:
@@ -452,7 +487,15 @@ fn import_chat_export(
 ///   the `MAILCHAT_GMAIL_CLIENT_ID`/`_SECRET` env vars to be set.
 ///
 /// Only messages new since the last sync are fetched; re-syncing never
-/// duplicates.
+/// duplicates. Password handling: an entered password is used for this
+/// sync and kept in the OS keyring when available, otherwise in session
+/// memory only — never in the vault database. An empty password field
+/// reuses the stored one.
+///
+/// M2.1: the sync's network waits happen on this blocking task; every
+/// database effect (instance, cursors, inserts) round-trips through the
+/// pool's bounded write queue ([`PoolSync`]) — searches keep working
+/// during a sync, and no transaction ever spans a network read.
 ///
 /// The flat argument list mirrors the sync form's fields, like every other
 /// Tauri command here.
@@ -481,7 +524,7 @@ async fn sync_imap(
     let folders = folders.unwrap_or_default();
     let port = port.unwrap_or(imap::GMAIL_IMAP_PORT);
 
-    let storage = Arc::clone(&state.storage);
+    let pool = Arc::clone(&state.pool);
     let secrets = Arc::clone(secrets.inner());
     // Secret resolution (keyring), token refresh (blocking HTTP), and the
     // network sync itself all block; keep them off the UI thread.
@@ -544,10 +587,7 @@ async fn sync_imap(
             auth: imap_auth,
             folders,
         };
-        let storage = storage
-            .lock()
-            .map_err(|e| format!("storage lock poisoned: {e}"))?;
-        imap::sync(&config, &storage)
+        imap::sync_with(&config, &PoolSync(&pool))
             .map_err(|e| e.to_string())
             .map(|folders| (folders, saved_to))
     })
@@ -656,9 +696,14 @@ async fn oauth_status(
 
 /// Insert the built-in demo messages so a fresh install has searchable data.
 #[tauri::command]
-fn seed_demo(state: State<AppState>) -> Result<IngestSummary, String> {
-    let storage = lock(&state)?;
-    ingest(&storage, &DemoSource).map_err(|e: Error| e.to_string())
+async fn seed_demo(state: State<'_, AppState>) -> Result<IngestSummary, String> {
+    let pool = Arc::clone(&state.pool);
+    tauri::async_runtime::spawn_blocking(move || {
+        pool.submit_write(move |s| ingest(s, &DemoSource))
+            .map_err(|e: Error| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("seed task failed: {e}"))?
 }
 
 /// Arm a watched folder: existing and new/modified export files
@@ -692,14 +737,342 @@ fn watch_status(state: State<AppState>) -> WatchSnapshot {
     state.watcher.snapshot()
 }
 
+// ---------------------------------------------------------------------------
+// v2 background jobs
+// ---------------------------------------------------------------------------
+
+/// What one `job_submit` starts (validated `kind` + parameters). Kept as a
+/// pure value so parameter validation is testable without app state.
+#[derive(Debug, PartialEq)]
+enum JobSpec {
+    SeedDemo,
+    ImportMbox {
+        path: String,
+    },
+    ImportChatExport {
+        path: String,
+        extract_media: bool,
+    },
+    EmbedMessages,
+    ImapSync {
+        host: String,
+        port: u16,
+        username: String,
+        password: String,
+        folders: Vec<String>,
+    },
+}
+
+impl JobSpec {
+    /// The `kind` string reported in job records and events.
+    fn kind(&self) -> &'static str {
+        match self {
+            JobSpec::SeedDemo => "seed_demo",
+            JobSpec::ImportMbox { .. } => "import_mbox",
+            JobSpec::ImportChatExport { .. } => "import_chat_export",
+            JobSpec::EmbedMessages => "embed_messages",
+            JobSpec::ImapSync { .. } => "imap_sync",
+        }
+    }
+
+    /// Parse and validate a `{kind, params}` request. Field errors name
+    /// the field; unknown kinds list the supported set.
+    fn parse(kind: &str, params: &Value) -> Result<Self, String> {
+        let string_field = |name: &str| -> Result<String, String> {
+            params
+                .get(name)
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| format!("params.{name} is required"))
+        };
+        match kind {
+            "seed_demo" | "embed_messages" => Ok(match kind {
+                "seed_demo" => JobSpec::SeedDemo,
+                _ => JobSpec::EmbedMessages,
+            }),
+            "import_mbox" => Ok(JobSpec::ImportMbox {
+                path: string_field("path")?,
+            }),
+            "import_chat_export" => {
+                let extract_media = params
+                    .get("extract_media")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                Ok(JobSpec::ImportChatExport {
+                    path: string_field("path")?,
+                    extract_media,
+                })
+            }
+            "imap_sync" => {
+                let port = params
+                    .get("port")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(imap::GMAIL_IMAP_PORT as u64);
+                if !(1..=65535).contains(&port) {
+                    return Err("params.port must be a valid port".into());
+                }
+                let folders = params
+                    .get("folders")
+                    .and_then(Value::as_array)
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Ok(JobSpec::ImapSync {
+                    host: string_field("host")?.trim().to_lowercase(),
+                    port: port as u16,
+                    username: string_field("username")?.trim().to_string(),
+                    // Parity with the v1 sync command: an empty (or
+                    // absent) password means "resolve from the stored
+                    // secret" — resolved in `job_submit` before the job
+                    // body runs.
+                    password: params
+                        .get("password")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    folders,
+                })
+            }
+            other => Err(format!(
+                "unknown job kind “{other}” (supported: seed_demo, import_mbox, \
+                 import_chat_export, embed_messages, imap_sync)"
+            )),
+        }
+    }
+}
+
+/// Two-way password parity with the v1 sync command: an entered password
+/// is remembered (keyring) and used for the run; an empty one resolves
+/// the stored secret, erroring when none is stored.
+fn resolve_imap_password(
+    secrets: &secrets::Secrets,
+    host: &str,
+    username: &str,
+    password: &str,
+) -> Result<String, String> {
+    if password.is_empty() {
+        secrets
+            .load(host, username)
+            .ok_or_else(|| "no password stored for this account — enter one".to_string())
+    } else {
+        secrets.save(host, username, password);
+        Ok(password.to_string())
+    }
+}
+
+/// Submit a background job (the v2 protocol). Returns immediately with a
+/// [`JobHandle`]; follow the job through `job-event` window events and
+/// recover missed ones with `job_events_since`.
+#[tauri::command]
+fn job_submit(
+    app: AppHandle,
+    state: State<AppState>,
+    secrets: State<'_, Arc<secrets::Secrets>>,
+    kind: String,
+    params: Value,
+) -> Result<JobHandle, String> {
+    let spec = JobSpec::parse(&kind, &params)?;
+    let pool = Arc::clone(&state.pool);
+    let embedder = state.embedder;
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    // Parity with the v1 sync command: an entered password is kept in the
+    // keyring; an empty one resolves the stored secret. Resolved here (on
+    // the command thread) so the job body carries a ready config.
+    let spec = match spec {
+        JobSpec::ImapSync {
+            host,
+            port,
+            username,
+            password,
+            folders,
+        } => {
+            let password = resolve_imap_password(&secrets, &host, &username, &password)?;
+            JobSpec::ImapSync {
+                host,
+                port,
+                username,
+                password,
+                folders,
+            }
+        }
+        other => other,
+    };
+    let job_pool = Arc::clone(&pool);
+    pool.try_submit_job(spec.kind(), move |ctx: &JobContext| {
+        run_job_spec(ctx, &spec, &job_pool, embedder, &data_dir)
+    })
+    .map(|id| JobHandle { id })
+    .map_err(|e| e.to_string())
+}
+
+/// Execute one validated [`JobSpec`] on the job runner thread. All storage
+/// access goes through the pool; every kind reports progress and a JSON
+/// result summary. (Unit-tested through `JobSpec::parse`; execution is
+/// covered end-to-end by vault-core's jobs tests.)
+fn run_job_spec(
+    ctx: &JobContext,
+    spec: &JobSpec,
+    pool: &DbPool,
+    embedder: HashEmbedder,
+    data_dir: &Path,
+) -> std::result::Result<Value, JobError> {
+    match spec {
+        JobSpec::SeedDemo => {
+            if ctx.is_cancelled() {
+                return Err(JobError::Cancelled);
+            }
+            let summary = ctx.write(|s| ingest(s, &DemoSource))?;
+            Ok(serde_json::to_value(&summary).unwrap_or(Value::Null))
+        }
+        JobSpec::ImportMbox { path } => {
+            if ctx.is_cancelled() {
+                return Err(JobError::Cancelled);
+            }
+            let source = MboxSource::new(path);
+            ctx.progress(0, 1, path);
+            let summary = ctx.write(move |s| ingest(s, &source))?;
+            ctx.progress(1, 1, path);
+            Ok(serde_json::to_value(&summary).unwrap_or(Value::Null))
+        }
+        JobSpec::ImportChatExport {
+            path,
+            extract_media,
+        } => {
+            if ctx.is_cancelled() {
+                return Err(JobError::Cancelled);
+            }
+            let extract = *extract_media;
+            let media_dir = if extract {
+                Some(data_dir.to_path_buf())
+            } else {
+                None
+            };
+            let moved_path = path.clone();
+            ctx.progress(0, 1, path);
+            let outcome = ctx.write(move |s| {
+                chat_export::import(s, Path::new(&moved_path), extract, media_dir.as_deref())
+            })?;
+            ctx.progress(1, 1, path);
+            Ok(serde_json::to_value(&outcome).unwrap_or(Value::Null))
+        }
+        JobSpec::EmbedMessages => run_embed_job(ctx, embedder),
+        JobSpec::ImapSync {
+            host,
+            port,
+            username,
+            password,
+            folders,
+        } => {
+            let config = ImapConfig {
+                host: host.clone(),
+                port: *port,
+                username: username.clone(),
+                auth: ImapAuth::Password(password.clone()),
+                folders: folders.clone(),
+            };
+            // Network on this thread; each storage call round-trips the
+            // bounded write queue via the pool adapter.
+            let sink = PoolSync(pool);
+            let summaries = imap::sync_with(&config, &sink)?;
+            Ok(serde_json::to_value(&summaries).unwrap_or(Value::Null))
+        }
+    }
+}
+
+/// The incremental embedding job with per-batch progress: pending list
+/// (read) → embed (CPU, offline) → batch write, repeat. Reports progress
+/// after every batch and checks cancellation between batches.
+fn run_embed_job(ctx: &JobContext, embedder: HashEmbedder) -> std::result::Result<Value, JobError> {
+    let model = embedder.id().to_string();
+    let dim = embedder.dim();
+    let start = Instant::now();
+    let counts = ctx
+        .read(|s| s.embedding_counts(&model))
+        .map_err(JobError::from)?;
+    let total = counts.messages.saturating_sub(counts.embedded);
+    ctx.progress(0, total, "embedding");
+    let mut embedded: u64 = 0;
+    loop {
+        if ctx.is_cancelled() {
+            return Err(JobError::Cancelled);
+        }
+        let model_for_read = model.clone();
+        let pending = ctx
+            .read(|s| s.pending_embeddings(&model_for_read, EMBED_JOB_BATCH))
+            .map_err(JobError::from)?;
+        if pending.is_empty() {
+            break;
+        }
+        let items: Vec<(i64, Vec<f32>)> = pending
+            .iter()
+            .map(|(id, body)| {
+                let prefix: String = body.chars().take(EMBED_BODY_PREFIX_CHARS).collect();
+                (*id, embedder.embed(&prefix))
+            })
+            .collect();
+        let wrote = items.len() as u64;
+        let model_for_write = model.clone();
+        ctx.write(move |s| s.embed_messages_batch(&model_for_write, dim, &items))?;
+        embedded += wrote;
+        ctx.progress(embedded, total, "embedding");
+        if wrote < EMBED_JOB_BATCH {
+            break;
+        }
+    }
+    let counts = ctx
+        .read(|s| s.embedding_counts(&model))
+        .map_err(JobError::from)?;
+    let remaining = counts.messages.saturating_sub(counts.embedded);
+    Ok(json!({
+        "model": model,
+        "dim": dim,
+        "embedded": embedded,
+        "remaining": remaining,
+        "elapsed_ms": start.elapsed().as_millis() as u64,
+    }))
+}
+
+/// One job's current record (`None` for an unknown or already-evicted id).
+#[tauri::command]
+fn job_get(state: State<AppState>, id: JobId) -> Option<JobRecord> {
+    state.pool.job(id)
+}
+
+/// All current records: active plus recently finished jobs.
+#[tauri::command]
+fn job_list(state: State<AppState>) -> Vec<JobRecord> {
+    state.pool.jobs()
+}
+
+/// Polling recovery: every event after `seq`, plus the current job
+/// snapshot. `trimmed` warns that events older than `oldest_kept` were
+/// dropped — reconcile from `jobs` then. `job_events_since(0)` fetches
+/// everything retained (boot recovery after a webview reload).
+#[tauri::command]
+fn job_events_since(state: State<AppState>, seq: u64) -> JobEventsPage {
+    state.pool.events_since(seq)
+}
+
+/// Ask a job to stop (cooperative; the job finishes at its next safe
+/// point). Returns whether the job was still cancellable.
+#[tauri::command]
+fn job_cancel(state: State<AppState>, id: JobId) -> bool {
+    state.pool.cancel_job(id)
+}
+
 /// Export the current search results (every row matching the query's text
 /// and filters, ignoring pagination, in the order the UI shows) to `path`.
 ///
 /// `format` is `"csv"`, `"json"` (JSON Lines) or `"mbox"`; MBOX carries
 /// only email-channel rows and reports the rest as `skipped`. Rows stream
-/// through a `BufWriter` (never all in memory); like `sync_imap`, the
-/// storage lock is held for the whole write, so searches wait for large
-/// exports instead of racing the streaming read.
+/// through a `BufWriter` (never all in memory) off the UI thread; since
+/// M2.1 the stream reads from a read connection, so imports and syncs
+/// keep committing while a large export writes.
 #[tauri::command]
 async fn export_search(
     state: State<'_, AppState>,
@@ -708,17 +1081,16 @@ async fn export_search(
     path: String,
 ) -> Result<ExportSummary, String> {
     let format = ExportFormat::parse(&format).map_err(|e| e.to_string())?;
-    let storage = Arc::clone(&state.storage);
+    let pool = Arc::clone(&state.pool);
     tauri::async_runtime::spawn_blocking(move || {
-        let storage = storage
-            .lock()
-            .map_err(|e| format!("storage lock poisoned: {e}"))?;
-        let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
-        let mut out = BufWriter::new(file);
-        let summary = export::export_search(&storage, &query, format, &mut out)
-            .and_then(|s| Ok(out.flush().map(|_| s)?))
-            .map_err(|e| e.to_string())?;
-        Ok(summary)
+        pool.with_read(|s| -> CoreResult<ExportSummary> {
+            let file = std::fs::File::create(&path).map_err(Error::from)?;
+            let mut out = BufWriter::new(file);
+            let summary = export::export_search(s, &query, format, &mut out)
+                .and_then(|s| out.flush().map(|_| s).map_err(Error::from))?;
+            Ok(summary)
+        })
+        .map_err(|e: Error| e.to_string())
     })
     .await
     .map_err(|e| format!("export task failed: {e}"))?
@@ -735,22 +1107,21 @@ async fn export_chat(
     path: String,
 ) -> Result<Option<ExportSummary>, String> {
     let format = ExportFormat::parse(&format).map_err(|e| e.to_string())?;
-    let storage = Arc::clone(&state.storage);
+    let pool = Arc::clone(&state.pool);
     tauri::async_runtime::spawn_blocking(move || {
-        let storage = storage
-            .lock()
-            .map_err(|e| format!("storage lock poisoned: {e}"))?;
-        // Existence is checked before the destination is touched: an
-        // unknown id (message deleted between list render and export
-        // click) must leave no file at the user-chosen path.
-        if storage.get(id).map_err(|e| e.to_string())?.is_none() {
-            return Ok(None);
-        }
-        let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
-        let mut out = BufWriter::new(file);
-        export::export_chat(&storage, id, format, &mut out)
-            .and_then(|s| Ok(out.flush().map(|_| s)?))
-            .map_err(|e| e.to_string())
+        pool.with_read(|s| -> CoreResult<Option<ExportSummary>> {
+            // Existence is checked before the destination is touched: an
+            // unknown id (message deleted between list render and export
+            // click) must leave no file at the user-chosen path.
+            if s.get(id)?.is_none() {
+                return Ok(None);
+            }
+            let file = std::fs::File::create(&path).map_err(Error::from)?;
+            let mut out = BufWriter::new(file);
+            export::export_chat(s, id, format, &mut out)
+                .and_then(|s| out.flush().map(|_| s).map_err(Error::from))
+        })
+        .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("export task failed: {e}"))?
@@ -759,7 +1130,10 @@ async fn export_chat(
 /// Archive counts: total and per source.
 #[tauri::command]
 fn stats(state: State<AppState>) -> Result<message::Stats, String> {
-    lock(&state)?.stats().map_err(|e| e.to_string())
+    state
+        .pool
+        .with_read(|s| s.stats())
+        .map_err(|e| e.to_string())
 }
 
 /// Dashboard aggregates in one round trip: total messages, the archive's
@@ -767,8 +1141,9 @@ fn stats(state: State<AppState>) -> Result<message::Stats, String> {
 /// authors (bounded by `top`, default 10, clamped to 100).
 #[tauri::command]
 fn archive_stats(state: State<AppState>, top: Option<u32>) -> Result<ArchiveStats, String> {
-    lock(&state)?
-        .archive_stats(top.unwrap_or(DEFAULT_TOP))
+    state
+        .pool
+        .with_read(|s| s.archive_stats(top.unwrap_or(DEFAULT_TOP)))
         .map_err(|e| e.to_string())
 }
 
@@ -794,7 +1169,18 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
             std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
-            let storage = Storage::open(data_dir.join("vault.db")).map_err(|e| e.to_string())?;
+            // M2.1: one pool over the vault file — writer worker + two
+            // read connections. Job events stream to the UI; the same
+            // events are recoverable by polling `job_events_since`.
+            let emit_handle = app.handle().clone();
+            let pool = DbPool::spawn(
+                data_dir.join("vault.db"),
+                PoolConfig::default(),
+                move |event| {
+                    let _ = emit_handle.emit("job-event", event);
+                },
+            )
+            .map_err(|e| e.to_string())?;
             // Settings come from the file first; the environment keeps
             // working as a read-only fallback provider exactly as before
             // the Settings UI existed.
@@ -809,20 +1195,20 @@ pub fn run() {
                 eprintln!("LLM env config ignored: {e}");
             }
             let registry = LlmRegistry::load(settings, env, |id| secrets.load_llm_key(id));
-            let storage = Arc::new(Mutex::new(storage));
             // Folder watcher: imports new/modified export files from the
-            // user's chosen folders in the background and pushes every
-            // status change to the UI as a `watch-status` event.
+            // user's chosen folders through the pool's write queue and
+            // pushes every status change to the UI as a `watch-status`
+            // event.
             let emit_handle = app.handle().clone();
             let watcher = FolderWatcher::spawn(
-                Arc::clone(&storage),
+                Arc::clone(&pool),
                 vault_core::watch::WatchConfig::default(),
                 move |snapshot| {
                     let _ = emit_handle.emit("watch-status", snapshot);
                 },
             );
             app.manage(AppState {
-                storage,
+                pool,
                 registry: Arc::new(Mutex::new(registry)),
                 settings_path,
                 embedder: HashEmbedder::new(),
@@ -849,6 +1235,11 @@ pub fn run() {
             watch_status,
             oauth_gmail_login,
             oauth_status,
+            job_submit,
+            job_get,
+            job_list,
+            job_events_since,
+            job_cancel,
             seed_demo,
             stats,
             archive_stats,
@@ -857,4 +1248,170 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running mailchat vault");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params(map: Value) -> Value {
+        map
+    }
+
+    #[test]
+    fn job_spec_parses_and_validates_each_kind() {
+        assert_eq!(
+            JobSpec::parse("seed_demo", &params(json!({}))).unwrap(),
+            JobSpec::SeedDemo
+        );
+        assert_eq!(
+            JobSpec::parse("embed_messages", &params(json!({}))).unwrap(),
+            JobSpec::EmbedMessages
+        );
+        assert_eq!(
+            JobSpec::parse("import_mbox", &params(json!({"path": "/a/b.mbox"}))).unwrap(),
+            JobSpec::ImportMbox {
+                path: "/a/b.mbox".into()
+            }
+        );
+        // extract_media defaults to true, false round-trips.
+        assert_eq!(
+            JobSpec::parse("import_chat_export", &params(json!({"path": "/c.txt"}))).unwrap(),
+            JobSpec::ImportChatExport {
+                path: "/c.txt".into(),
+                extract_media: true
+            }
+        );
+        assert_eq!(
+            JobSpec::parse(
+                "import_chat_export",
+                &params(json!({"path": "/c.txt", "extract_media": false}))
+            )
+            .unwrap(),
+            JobSpec::ImportChatExport {
+                path: "/c.txt".into(),
+                extract_media: false
+            }
+        );
+        assert_eq!(
+            JobSpec::parse(
+                "imap_sync",
+                &params(json!({
+                    "host": "IMAP.Gmail.COM",
+                    "username": "  a@b.c  ",
+                    "password": "pw",
+                }))
+            )
+            .unwrap(),
+            JobSpec::ImapSync {
+                host: "imap.gmail.com".into(),
+                port: imap::GMAIL_IMAP_PORT,
+                username: "a@b.c".into(),
+                password: "pw".into(),
+                folders: Vec::new(),
+            }
+        );
+
+        // Parity with the v1 sync command: an empty (or absent) password
+        // is accepted — job_submit resolves it from the stored secret.
+        assert_eq!(
+            JobSpec::parse(
+                "imap_sync",
+                &params(json!({
+                    "host": "imap.gmail.com",
+                    "username": "a@b.c",
+                    "password": "",
+                }))
+            )
+            .unwrap(),
+            JobSpec::ImapSync {
+                host: "imap.gmail.com".into(),
+                port: imap::GMAIL_IMAP_PORT,
+                username: "a@b.c".into(),
+                password: String::new(),
+                folders: Vec::new(),
+            }
+        );
+        assert_eq!(
+            JobSpec::parse(
+                "imap_sync",
+                &params(json!({"host": "imap.gmail.com", "username": "a@b.c"}))
+            )
+            .unwrap(),
+            JobSpec::ImapSync {
+                host: "imap.gmail.com".into(),
+                port: imap::GMAIL_IMAP_PORT,
+                username: "a@b.c".into(),
+                password: String::new(),
+                folders: Vec::new(),
+            }
+        );
+        // Required-field and range errors name the field.
+        let err = JobSpec::parse("import_mbox", &params(json!({}))).unwrap_err();
+        assert!(err.contains("params.path"), "{err}");
+        let err = JobSpec::parse(
+            "imap_sync",
+            &params(json!({"host": "h", "username": "u", "password": "p", "port": 99999})),
+        )
+        .unwrap_err();
+        assert!(err.contains("params.port"), "{err}");
+        // Unknown kinds list the supported set.
+        let err = JobSpec::parse("make_coffee", &params(json!({}))).unwrap_err();
+        assert!(err.contains("unknown job kind"), "{err}");
+        assert!(err.contains("imap_sync"), "{err}");
+    }
+
+    #[test]
+    fn job_submit_imap_password_resolution_is_two_way() {
+        let secrets = secrets::Secrets::new();
+        let host = "imap.password-test.invalid";
+        let username = "TwoWay@Test.invalid";
+        // Entered: used for the run and remembered in the keyring.
+        assert_eq!(
+            resolve_imap_password(&secrets, host, username, "entered-pw").unwrap(),
+            "entered-pw"
+        );
+        // A later empty submit resolves the stored credential — no re-entry.
+        assert_eq!(
+            resolve_imap_password(&secrets, host, username, "").unwrap(),
+            "entered-pw"
+        );
+        // An account with nothing stored still requires entry.
+        assert_eq!(
+            resolve_imap_password(&secrets, host, "None@Test.invalid", "").unwrap_err(),
+            "no password stored for this account — enter one"
+        );
+    }
+
+    #[test]
+    fn job_spec_kinds_round_trip() {
+        assert_eq!(JobSpec::SeedDemo.kind(), "seed_demo");
+        assert_eq!(JobSpec::EmbedMessages.kind(), "embed_messages");
+        assert_eq!(
+            JobSpec::ImportMbox {
+                path: String::new()
+            }
+            .kind(),
+            "import_mbox"
+        );
+        assert_eq!(
+            JobSpec::ImportChatExport {
+                path: String::new(),
+                extract_media: true
+            }
+            .kind(),
+            "import_chat_export"
+        );
+        assert_eq!(
+            JobSpec::ImapSync {
+                host: String::new(),
+                port: 993,
+                username: String::new(),
+                password: String::new(),
+                folders: Vec::new()
+            }
+            .kind(),
+            "imap_sync"
+        );
+    }
 }

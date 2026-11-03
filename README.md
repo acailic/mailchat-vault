@@ -18,6 +18,7 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice �
 - **Manual/demo source**: import an `.mbox` file (no IMAP needed) — subjects, authors, dates, and decoded text bodies are archived and searchable.
 - **Chat imports**: WhatsApp `.txt` exports, Telegram Desktop `result.json` exports, Signal Desktop conversation `.json` exports (e.g. `sigtop export-messages -f json`), and Discord Data Package `messages.json` files — texts, authors, and timestamps are archived and searchable; quoted replies are kept as metadata, and Signal/Discord attachments are recorded in `raw_json` (Discord reactions too). **Media extraction** for WhatsApp and Telegram: files referenced by the export (images, documents, voice notes) are copied into a content-addressed `media/` store in app data — hash-named (SHA-256), deduplicated by content — and linked from the message's `raw_json`, with a media section in the detail view. Extraction can be switched off with the **extract media** toggle; text-only exports import fine (missing files are just counted), and re-importing an export with its files backfills media links into already-stored messages. The format is auto-detected from the file contents, so re-importing the same export never duplicates messages.
 - **IMAP sync (Gmail & friends)**: incremental, UIDVALIDITY/UID-tracked sync from any IMAP server over host/port/user — Gmail via **Google sign-in (OAuth2 → SASL XOAUTH2)** or **app password**; any other IMAP server via user/password. Folders map to the message `channel` field; re-syncing never duplicates. Secrets are prompted for or obtained via OAuth, kept in the OS keyring when available and in session memory otherwise — never in the database.
+- **Background jobs (M2.1)**: the archive is served by a database pool — one dedicated **writer worker thread** behind a **bounded write queue** plus **two read connections** (WAL) — so searches never wait behind imports, syncs, or embedding runs. Long operations run as **typed background jobs** (queued → running → succeeded/failed/cancelled, with progress events) exposed through the v2 `job_*` IPC commands; misses in the `job-event` event stream are recovered by **polling with a monotonic cursor**. Network work (an IMAP fetch) never runs inside the write lane, a storage lock, or a transaction (see below).
 - **Folder watching**: pick folders (typed path or the native picker) and every new or modified `.mbox` / WhatsApp `.txt` / Telegram `result.json` / Signal conversation `.json` export file under them is imported automatically in the background — watched folders persist across restarts, write bursts are debounced until a file settles, re-imports never duplicate (the same dedup contract as manual import), and skips/errors are shown in the UI without ever stopping the watcher (see below).
 - **Statistics dashboard**: archive aggregates in one view — total messages and date range, a per-day histogram (auto-downsampled to months/years when the archive spans too many days), and tables with inline bars for messages per source, top chats, and top authors. Served from trigger-maintained counter tables (schema migration 6), so the whole dashboard answers in **< 100 ms even on 1M messages** (asserted by a generated 1M-fixture test).
 - **Search tool UI** over the FTS5 index:
@@ -34,9 +35,9 @@ This is the **v0 foundation + usable search tool**: a complete vertical slice �
 ## Repository layout
 
 ```
-crates/vault-core/   # storage (SQLite/FTS5, migrations + safe-migration path: snapshot/preflight/validation/rollback), filtered/paged search queries, archive statistics (dashboard aggregates), ingest trait, mail parsing, mbox / WhatsApp / Telegram / Signal / Discord sources, media extraction into the content-addressed store, IMAP sync (password + OAuth2/XOAUTH2), OAuth2 login flow, LLM search pipeline, local embeddings + hybrid ranking, folder watching, CSV/JSON/MBOX export, settings model (providers, pairing rules) — no UI deps
-src-tauri/           # Tauri app shell: commands (search_messages, chat_context, llm_ask, llm_status, embed_messages, embed_status, import_mbox, import_chat_export with optional media extraction, sync_imap, oauth_gmail_login, oauth_status, watch_add_folder, watch_remove_folder, watch_status, seed_demo, stats, archive_stats, export_search, export_chat, settings_get, settings_save, llm_key_clear) + LLM provider registry + secret storage (passwords & OAuth refresh tokens, keyring) + watch-status events
-src/                 # frontend (vanilla TS): search + filters + pagination + detail view (with media links), ask UI with provider menu + embedding controls, settings screen, statistics dashboard (CSS bar charts, no chart library), import & IMAP sync controls (app password or Google sign-in), folder watching panel, export controls
+crates/vault-core/   # storage (SQLite/FTS5, migrations + safe-migration path: snapshot/preflight/validation/rollback), filtered/paged search queries, archive statistics (dashboard aggregates), ingest trait, mail parsing, mbox / WhatsApp / Telegram / Signal / Discord sources, media extraction into the content-addressed store, IMAP sync (password + OAuth2/XOAUTH2, incl. the SyncStorage trait splitting network from storage), jobs (M2.1 database pool: writer worker + two read connections + bounded queues + typed job registry/event log), OAuth2 login flow, LLM search pipeline, local embeddings + hybrid ranking, folder watching, CSV/JSON/MBOX export, settings model (providers, pairing rules) — no UI deps
+src-tauri/           # Tauri app shell: commands (search_messages, chat_context, llm_ask, llm_status, embed_messages, embed_status, import_mbox, import_chat_export with optional media extraction, sync_imap, oauth_gmail_login, oauth_status, watch_add_folder, watch_remove_folder, watch_status, job_submit, job_get, job_list, job_events_since, job_cancel — the v2 background-job protocol, seed_demo, stats, archive_stats, export_search, export_chat, settings_get, settings_save, llm_key_clear) + LLM provider registry + secret storage (passwords & OAuth refresh tokens, keyring) + watch-status/job-event events
+src/                 # frontend (vanilla TS): search + filters + pagination + detail view (with media links), ask UI with provider menu + embedding controls, settings screen, statistics dashboard (CSS bar charts, no chart library), import & IMAP sync controls (app password or Google sign-in), folder watching panel, background-jobs panel (v2 event/polling client), export controls
 index.html           # single-page shell
 ```
 
@@ -163,6 +164,49 @@ The status line shows how many folders are watched and how many files are
 still settling; the events list below shows folder add/removals, imports
 (with new/duplicate counts), skips, and errors. A background import
 refreshes the source chips and stats like any manual import.
+
+## Background jobs (M2.1)
+
+Since M2.1 the app never serves the archive through one guarded
+connection. Instead, a **database pool** opens the vault file through
+several SQLite connections in WAL mode — each one initialized with the
+same pragmas and custom functions — and splits the work:
+
+- a **writer worker thread** owns the one write connection. Writes are
+closures submitted over a **bounded queue** (capacity-bounded: backpressure
+instead of unbounded memory, one writer instead of lock contention), and
+submitters wait for their result — the v1 commands keep their synchronous
+IPC shape while gaining the pool's guarantees.
+- **two read connections** serve searches, stats, dashboard reads, and
+exports; two readers may work at once, and WAL means none of them ever
+waits for a commit.
+- a **job runner thread** executes long operations (the v2 background
+jobs: `embed_messages`, `import_mbox`, `import_chat_export`,
+`imap_sync`, `seed_demo`). A job never holds a connection: its reads and
+writes round-trip the pool, so waiting on the IMAP server — or embedding
+a large archive — occupies neither the write lane nor a read slot.
+ **No network operation runs inside the writer, a storage lock, or a
+transaction**: the IMAP sync (`SyncStorage` + the `PoolSync` adapter)
+fetched on its own thread between write round-trips, proven by a test
+that parks the mock server mid-fetch and completes a write + a search
+while the fetch is stalled.
+
+Jobs carry **typed states** (`queued` → `running` → `succeeded` /
+`failed` / `cancelled`, the latter with typed error kinds: `storage`, `io`,
+`import`, `network`, `cancelled`, `queue_full`, `invalid`, `internal`) and report
+**progress** (the embedding job, per batch). Every state change appends
+an event stamped with a global
+monotonic `seq`; the shell emits each one as a `job-event` window event,
+and the UI keeps a cursor. **Missed events are recoverable by polling**:
+`job_events_since(cursor)` returns exactly the gap plus a fresh job
+snapshot, and a `trimmed` flag tells the client the bounded event ring
+no longer holds part of the gap — it then reconciles from the snapshot.
+The same poll at cursor 0 is the boot recovery after a webview reload.
+Cancellation is cooperative (`job_cancel` sets a flag the job checks at
+safe points). The **Background jobs** panel in the UI renders the active
+and recent jobs with progress; the *Update local embeddings* button now
+submits its work through this protocol.
+
 ## Settings
 
 The **Settings screen** is where LLM providers are configured — one place, no environment variables needed:
@@ -238,10 +282,10 @@ Rows stream straight to the file, so exports of very large result sets don't hol
 ## Tests
 
 ```sh
-cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram / Discord ingest, media extraction (real small fixture files), filtered/paged search, chat context, archive statistics (incl. the 1M-message dashboard perf contract), 100k FTS perf fixture, IMAP sync (mock server; durable source instances, OAuth2 login flow (mock OAuth server + mock IMAP, XOAUTH2 end-to-end), multi-folder occurrences, conflicting revisions), LLM search pipeline (mock LLM, no network), settings model (file round-trip, provider pairing rules, menu building), local embeddings (deterministic embedder, incremental job, cosine scan, hybrid ranking, 100k vector perf budgets), folder watching (real temp folders), export (CSV/JSON/MBOX round-trips incl. unicode + large sets), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations, safe migration with injected before/within/after-conversion failures: snapshot kept readable, original restored byte-for-byte, durable failure-marker refusal on later opens, capacity preflight, newer-schema refusal)
-npm test                 # frontend unit + UI-state snapshot tests (vitest), incl. settings helpers and the provider-menu / settings wiring
+cargo test               # vault-core: storage, migrations, dedup, FTS search, mbox / WhatsApp / Telegram / Discord ingest, media extraction (real small fixture files), filtered/paged search, chat context, archive statistics (incl. the 1M-message dashboard perf contract), 100k FTS perf fixture, IMAP sync (mock server; durable source instances, OAuth2 login flow (mock OAuth server + mock IMAP, XOAUTH2 end-to-end), multi-folder occurrences, conflicting revisions), jobs (M2.1 pool: search-during-writes concurrency, bounded-queue backpressure, two-reader concurrency, typed job lifecycle/cancellation/progress, event-seq polling recovery incl. ring trimming, IMAP network-stall-does-not-block-writes proof), LLM search pipeline (mock LLM, no network), settings model (file round-trip, provider pairing rules, menu building), local embeddings (deterministic embedder, incremental job, cosine scan, hybrid ranking, 100k vector perf budgets), folder watching (real temp folders, through the pool), export (CSV/JSON/MBOX round-trips incl. unicode + large sets), integrity suite (corruption & crash recovery, export/import round-trips, VACUUM/ANALYZE, schema migrations, safe migration with injected before/within/after-conversion failures: snapshot kept readable, original restored byte-for-byte, durable failure-marker refusal on later opens, capacity preflight, newer-schema refusal)
+npm test                 # frontend unit + UI-state snapshot tests (vitest), incl. settings helpers, the provider-menu / settings wiring, and the background-jobs protocol client (cursor tracking, gap detection, trimmed reconciliation, panel rendering)
 npm run check            # TypeScript type-check
-cargo test --workspace   # also compiles the Tauri app + its LLM provider registry tests (needs the Linux libs above)
+cargo test --workspace   # also compiles the Tauri app + its LLM provider registry and job-dispatch tests (needs the Linux libs above)
 ```
 
 The vector layer's budgets over 100k embedded messages (enforced by `tests/vector_perf.rs`): first-run embedding job < 15 s, cosine scan < 200 ms, full local hybrid ask < 250 ms; the FTS < 100 ms contract stays in `search_perf.rs`.
