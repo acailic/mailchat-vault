@@ -407,7 +407,7 @@ export function mergeContextPages(
   page: ConversationContext,
 ): ContextEntry[] {
   const merged = [...entries];
-  for (const m of page.before) {
+  for (const m of [...page.before].reverse()) {
     if (!merged.some((e) => e.id === m.id)) {
       merged.unshift({
         id: m.id,

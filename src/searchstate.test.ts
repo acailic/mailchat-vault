@@ -350,4 +350,21 @@ describe("reading-pane context model", () => {
     expect(merged.map((e) => e.id)).toEqual([0, 1, 2, 3, 4]);
     expect(merged.filter((e) => e.current).map((e) => e.id)).toEqual([3]);
   });
+
+  it("a multi-row earlier page stays oldest → newest at the front", () => {
+    const entries = contextEntries(ctx as never);
+    const earlier = {
+      ...ctx,
+      before: [
+        { id: -2, author: "Ana", sent_at: "2025-12-30T10:00:00Z", time_confidence: "explicit_offset", body: "minus two" },
+        { id: -1, author: "Ana", sent_at: "2025-12-31T10:00:00Z", time_confidence: "explicit_offset", body: "minus one" },
+        { id: 0, author: "Ana", sent_at: "2026-01-01T10:00:00Z", time_confidence: "explicit_offset", body: "zero" },
+        { id: 1, author: "Ana", sent_at: "2026-01-01T10:00:00Z", time_confidence: "explicit_offset", body: "one" },
+      ],
+      after: [],
+    };
+    const merged = mergeContextPages(entries, earlier as never);
+    expect(merged.map((e) => e.id)).toEqual([-2, -1, 0, 1, 2, 3, 4]);
+    expect(merged.filter((e) => e.current).map((e) => e.id)).toEqual([3]);
+  });
 });
