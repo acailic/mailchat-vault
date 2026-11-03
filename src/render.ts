@@ -48,7 +48,7 @@ export interface ResultsOptions {
   activeIndex: number;
   /** Query terms for client-side highlighting when a hit has no snippet. */
   terms: string[];
-  onOpen: (id: number) => void;
+  onOpen: (index: number, id: number) => void;
 }
 
 function hitBody(hit: SearchHit, terms: string[]): HTMLElement {
@@ -90,7 +90,7 @@ export function renderResults(list: HTMLElement, opts: ResultsOptions): void {
       meta.className = "meta";
       meta.textContent = `${m.author || "unknown"} · ${formatSentAt(m.sent_at)} · ${m.channel}`;
       item.append(meta, hitBody(hit, terms));
-      item.addEventListener("click", () => onOpen(m.id));
+      item.addEventListener("click", () => onOpen(index, m.id));
       list.append(item);
     }
     children.push(section);

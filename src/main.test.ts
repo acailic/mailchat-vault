@@ -2036,10 +2036,18 @@ describe("workspace shell", () => {
     expect($("#detail").classList.contains("open")).toBe(false);
   });
 
-  it("opening a message focuses its heading in swapped layouts, Back restores the result", async () => {
+  it("opening a message focuses its heading in swapped layouts, Back restores the clicked row", async () => {
     await boot();
     setViewportWidth(900); // medium: reading replaces the results area
-    await openDetailViaResult();
+    searchRespondsWith(() => pageOf(HITS, 3));
+    tauri.handlers.set("chat_context", () => CTX);
+    input("#search").value = "vault";
+    pressKey(input("#search"), "Enter");
+    await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
+    const row = $("#results .hit-item") as HTMLElement;
+    row.focus();
+    row.click();
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
     const heading = $("#detail .detail-card h2");
     expect(win.document.activeElement).toBe(heading);
     $("#back-to-results").click();
@@ -2047,7 +2055,8 @@ describe("workspace shell", () => {
     expect(app().dataset.reading).toBe("closed");
     // The initiating result row receives focus again.
     const active = win.document.activeElement as unknown as HTMLElement | null;
-    expect(active?.closest("#results-col")).toBeTruthy();
+    expect(active?.classList.contains("hit-item")).toBe(true);
+    expect(active?.getAttribute("aria-current")).toBe("true");
   });
 
   it("in wide layout opening a message does not steal focus", async () => {

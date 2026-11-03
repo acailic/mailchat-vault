@@ -185,7 +185,10 @@ function renderAll(): void {
     groups: groupHits(state.hits),
     activeIndex: state.activeIndex,
     terms,
-    onOpen: (id) => void openDetail(id),
+    onOpen: (index, id) => {
+      state.activeIndex = index;
+      void openDetail(id);
+    },
   });
   renderPagination(pagination, pageModel(state.total, state.offset, PAGE_SIZE), {
     onPrev: () => void runSearch(state.offset - PAGE_SIZE),
