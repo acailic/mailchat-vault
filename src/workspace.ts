@@ -159,7 +159,13 @@ export function initWorkspace(): WorkspaceController {
     },
     readingClosed() {
       const active = document.activeElement;
-      if (!active || active === document.body) {
+      // Restore when focus is already gone (body/null) or still sits inside
+      // the closing reading pane: a real browser keeps the just-activated
+      // Back/Close button focused until style recalc drops it to <body> a
+      // frame later, so waiting for body here skips the restore entirely.
+      const inReading =
+        active instanceof Element && active.closest("#reading") !== null;
+      if (!active || active === document.body || inReading) {
         const activeRow = document.querySelector<HTMLElement>(
           '#results .hit-item[aria-current="true"]',
         );
