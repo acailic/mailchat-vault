@@ -130,8 +130,10 @@ const RETRYABLE_SESSION_ERROR =
 /**
  * Run `fn(browser, ctx)` against a fresh app instance.
  *
- * @param {{ env?: Record<string, string> }} options extra environment for
- *   the app (LLM variables); XDG_DATA_HOME is always a fresh temp dir.
+ * @param {{ env?: Record<string, string>, dataDir?: string }} options extra
+ *   environment for the app (LLM variables); XDG_DATA_HOME is a fresh temp
+ *   dir unless `dataDir` names an existing one (restart-over-existing-state
+ *   scenarios).
  * @param {(browser: import('webdriverio').Browser, ctx: SessionContext) => Promise<void>} fn
  * @returns {Promise<{ dataDir: string, driverLog: string }>} kept for
  *   post-mortems when `keepData` is set.
@@ -158,7 +160,7 @@ export async function withSession(options, fn, { keepData = false } = {}) {
 
 async function withSessionAttempt(options, fn, { keepData }) {
   const extraEnv = options.env ?? {};
-  const dataDir = await mkdtemp(path.join(tmpdir(), "mailchat-e2e-"));
+  const dataDir = options.dataDir ?? (await mkdtemp(path.join(tmpdir(), "mailchat-e2e-")));
   const port = await freePort();
   const nativePort = await freePort();
 

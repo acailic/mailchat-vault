@@ -78,6 +78,13 @@ struct Knobs {
     /// `AUTHENTICATE XOAUTH2` with exactly that user/token pair and
     /// refuses `LOGIN` — the XOAUTH2-only mode the OAuth sync tests use.
     xoauth2: Mutex<Option<(String, String)>>,
+    /// When `Some(uid)`, the next `UID FETCH` that would deliver that uid
+    /// silently skips it (and clears the knob — one shot). The uid stays
+    /// in the mailbox, so `UID SEARCH` keeps returning it: the scripted
+    /// "searched but never delivered" case (a message expunged between
+    /// the two commands, which RFC 3501 lets the server answer by simply
+    /// omitting it from the FETCH response).
+    hidden_uid: Mutex<Option<u32>>,
 }
 
 /// Handle to the running mock server.
@@ -102,6 +109,7 @@ impl MockImap {
             stall_fetch_once: Mutex::new(None),
             stall_gate: (Mutex::new(false), Condvar::new()),
             xoauth2: Mutex::new(None),
+            hidden_uid: Mutex::new(None),
         });
         {
             let mailboxes = Arc::clone(&mailboxes);
@@ -169,6 +177,13 @@ impl MockImap {
         let (gate, signal) = &self.knobs.stall_gate;
         *gate.lock().unwrap() = true;
         signal.notify_all();
+    }
+
+    /// Make exactly the next `UID FETCH` of `uid` skip delivering it —
+    /// a successfully completed FETCH response that simply lacks the
+    /// searched uid (one shot). Used by the missing-fetch scenarios.
+    pub fn hide_uid_from_fetch_once(&self, uid: u32) {
+        *self.knobs.hidden_uid.lock().unwrap() = Some(uid);
     }
 
     /// Replace a mailbox wholesale (also how UIDVALIDITY resets are
@@ -415,6 +430,21 @@ fn serve(
                                 })
                                 .enumerate()
                             {
+                                // The scripted missing-fetch: this uid is
+                                // silently omitted from this response.
+                                let hidden = {
+                                    let mut knob = knobs.hidden_uid.lock().unwrap();
+                                    match *knob {
+                                        Some(hidden) if hidden == uid => {
+                                            *knob = None;
+                                            true
+                                        }
+                                        _ => false,
+                                    }
+                                };
+                                if hidden {
+                                    continue;
+                                }
                                 let prefix = format!(
                                     "* {} FETCH (UID {uid} RFC822 {{{}}}",
                                     seq + 1,

@@ -509,6 +509,36 @@ const MIGRATIONS: &[(i64, &str)] = &[
             WHERE connector_key IS NOT NULL;
         "#,
     ),
+    (
+        9,
+        // The IMAP coordinator's durable accounting (M2.3). Additive:
+        // `sync_failed_items` is the failed-item ledger — one row per
+        // fetched item the vault could not store (unparseable mail, a
+        // fetch that never arrived), with the reason and attempt count,
+        // so "what fell and why" stays visible across restarts. Keyed by
+        // the full (instance, folder, uid, uidvalidity) tuple: a
+        // UIDVALIDITY reset starts a fresh namespace, and the ledger rows
+        // of an abandoned validity are cleared when the checkpoint adopts
+        // the new one (the rescan re-derives the truth for those UIDs).
+        // `source_instances.excluded` is the per-source exclusion switch:
+        // an excluded source is skipped by coordinator rounds while its
+        // archive and cursors are kept intact.
+        r#"
+        CREATE TABLE sync_failed_items (
+            source_instance_id TEXT NOT NULL REFERENCES source_instances (id),
+            folder             TEXT NOT NULL,
+            uid                INTEGER NOT NULL,
+            uidvalidity        INTEGER NOT NULL,
+            -- Fixed human-readable cause; never message content.
+            reason             TEXT NOT NULL,
+            attempts           INTEGER NOT NULL DEFAULT 1,
+            first_failed_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            last_failed_at     TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (source_instance_id, folder, uid, uidvalidity)
+        );
+        ALTER TABLE source_instances ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0;
+        "#,
+    ),
 ];
 
 /// Rust halves of migrations, for backfill logic that SQL alone cannot
@@ -823,7 +853,7 @@ impl Storage {
     pub fn list_source_instances(&self) -> Result<Vec<SourceInstance>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, label, connector_key, config_json, state,
-                    last_attempt_at, last_success_at, created_at
+                    excluded, last_attempt_at, last_success_at, created_at
              FROM source_instances ORDER BY created_at, id",
         )?;
         let rows = stmt
@@ -889,7 +919,77 @@ impl Storage {
         occurrence: &Occurrence<'_>,
     ) -> Result<MailInsertOutcome> {
         let tx = self.conn.unchecked_transaction()?;
+        let outcome =
+            Self::insert_mail_message_tx(&tx, instance_id, msg, subject, identity, occurrence)?;
+        tx.commit()?;
+        Ok(outcome)
+    }
 
+    /// Commit one IMAP fetch batch atomically (M2.3): the batch's mail
+    /// inserts, its failed-item ledger updates, and the folder checkpoint
+    /// advance all land in **one transaction**, so an interruption can
+    /// never leave the cursor disagreeing with what is durably stored
+    /// (the pre-M2.3 shape — per-message commits plus a separate
+    /// checkpoint write — could only fall back on refetch-dedup after a
+    /// crash in that window).
+    ///
+    /// - `mails`: the batch's parsed messages, inserted through the full
+    ///   [`Storage::insert_mail_message`] contract (dedup, occurrence,
+    ///   revisions) inside the batch transaction.
+    /// - `failures`: items the round observed but could not store (uid →
+    ///   fixed reason). Ledger rows upsert (attempt count + last time
+    ///   bump on repeat); the cursor may advance past them because the
+    ///   ledger — not silence — remembers them, and every later round
+    ///   retries them (see [`Storage::imap_failed_uids`]).
+    /// - `resolved`: previously-failed uids this batch stored fine; their
+    ///   ledger rows are deleted here, in the same transaction.
+    ///
+    /// When `uidvalidity` differs from the folder's stored checkpoint the
+    /// commit adopts the new validity and clears the folder's ledger rows
+    /// from abandoned validities (the reset rescan re-derives them).
+    /// `last_uid` is the checkpoint value to persist with this batch
+    /// (typically the batch's highest accounted uid).
+    // The flat argument list mirrors the batch's wire shape (folder,
+    // validity, cursor, three payload slices) — the same call frame the
+    // sync carries per fetch batch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_imap_batch(
+        &self,
+        instance_id: &str,
+        folder: &str,
+        uidvalidity: u32,
+        last_uid: u32,
+        mails: &[MailBatchItem<'_>],
+        failures: &[BatchFailure<'_>],
+        resolved: &[u32],
+    ) -> Result<MailBatchOutcome> {
+        let tx = self.conn.unchecked_transaction()?;
+        let outcome = Self::commit_imap_batch_tx(
+            &tx,
+            instance_id,
+            folder,
+            uidvalidity,
+            last_uid,
+            mails,
+            failures,
+            resolved,
+        )?;
+        tx.commit()?;
+        Ok(outcome)
+    }
+
+    /// The transaction-scoped half of [`Storage::insert_mail_message`]
+    /// (and the per-item insert used by [`Storage::commit_imap_batch`]): no
+    /// transaction of its own, so a caller can run several inserts inside
+    /// one batch transaction. Callers commit.
+    fn insert_mail_message_tx(
+        tx: &Connection,
+        instance_id: &str,
+        msg: &NewMessage,
+        subject: &str,
+        identity: &ConnectorIdentity<'_>,
+        occurrence: &Occurrence<'_>,
+    ) -> Result<MailInsertOutcome> {
         // Exact identity tuple (same revision): the message is already
         // archived under this instance; record the observation only.
         let existing: Option<i64> = tx
@@ -918,7 +1018,6 @@ impl Storage {
                     occurrence.uidvalidity
                 ],
             )?;
-            tx.commit()?;
             return Ok(MailInsertOutcome::Duplicate { id });
         }
 
@@ -995,11 +1094,107 @@ impl Storage {
             params![instance_id, identity.namespace, identity.external_key],
             |row| row.get(0),
         )?;
-        tx.commit()?;
         Ok(MailInsertOutcome::Inserted {
             id,
             conflicting_revision: revisions > 1,
         })
+    }
+
+    /// The transaction-scoped half of [`Storage::commit_imap_batch`].
+    /// Callers commit; an error rolls the whole batch back.
+    #[allow(clippy::too_many_arguments)]
+    fn commit_imap_batch_tx(
+        tx: &Connection,
+        instance_id: &str,
+        folder: &str,
+        uidvalidity: u32,
+        last_uid: u32,
+        mails: &[MailBatchItem<'_>],
+        failures: &[BatchFailure<'_>],
+        resolved: &[u32],
+    ) -> Result<MailBatchOutcome> {
+        // A validity change adopts the new namespace atomically: stale
+        // ledger rows from abandoned validities cannot survive into the
+        // rescan era (the rescan re-derives the truth for those UIDs).
+        let saved: Option<(u32, u32)> = tx
+            .query_row(
+                "SELECT uidvalidity, last_uid FROM sync_checkpoints
+                 WHERE source_instance_id = ?1 AND folder = ?2",
+                params![instance_id, folder],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if saved.is_some_and(|(validity, _)| validity != uidvalidity) {
+            tx.execute(
+                "DELETE FROM sync_failed_items
+                 WHERE source_instance_id = ?1 AND folder = ?2 AND uidvalidity != ?3",
+                params![instance_id, folder, uidvalidity],
+            )?;
+        }
+
+        let mut outcome = MailBatchOutcome::default();
+        for item in mails {
+            match Self::insert_mail_message_tx(
+                tx,
+                instance_id,
+                item.message,
+                item.subject,
+                &item.identity,
+                &item.occurrence,
+            )? {
+                MailInsertOutcome::Inserted {
+                    conflicting_revision,
+                    ..
+                } => {
+                    outcome.inserted += 1;
+                    if conflicting_revision {
+                        outcome.conflicting_revisions += 1;
+                    }
+                }
+                MailInsertOutcome::Duplicate { .. } => outcome.skipped += 1,
+            }
+        }
+        for failure in failures {
+            tx.execute(
+                "INSERT INTO sync_failed_items
+                     (source_instance_id, folder, uid, uidvalidity, reason,
+                      attempts, first_failed_at, last_failed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1, datetime('now'), datetime('now'))
+                 ON CONFLICT (source_instance_id, folder, uid, uidvalidity) DO UPDATE SET
+                     reason         = excluded.reason,
+                     attempts       = attempts + 1,
+                     last_failed_at = excluded.last_failed_at",
+                params![
+                    instance_id,
+                    folder,
+                    failure.uid,
+                    uidvalidity,
+                    failure.reason
+                ],
+            )?;
+            outcome.failed += 1;
+        }
+        if !resolved.is_empty() {
+            let mut stmt = tx.prepare(
+                "DELETE FROM sync_failed_items
+                 WHERE source_instance_id = ?1 AND folder = ?2 AND uidvalidity = ?3
+                   AND uid = ?4",
+            )?;
+            for uid in resolved {
+                stmt.execute(params![instance_id, folder, uidvalidity, uid])?;
+            }
+        }
+        tx.execute(
+            "INSERT INTO sync_checkpoints
+                 (source_instance_id, folder, uidvalidity, last_uid, updated_at)
+             VALUES (?1, ?2, ?3, ?4, datetime('now'))
+             ON CONFLICT (source_instance_id, folder) DO UPDATE SET
+                uidvalidity = excluded.uidvalidity,
+                last_uid    = excluded.last_uid,
+                updated_at  = excluded.updated_at",
+            params![instance_id, folder, uidvalidity, last_uid],
+        )?;
+        Ok(outcome)
     }
 
     /// The folder/import observations recorded for one message, oldest
@@ -1650,28 +1845,82 @@ impl Storage {
         Ok(row)
     }
 
-    /// Save (upsert) the incremental-sync cursor for one
-    /// `(source instance, folder)` — the connector-scoped variant of
-    /// [`Storage::set_imap_state`], keyed by the durable instance id.
-    /// Stores only folder cursors — never credentials.
-    pub fn set_imap_checkpoint(
+    /// Per-source exclusion (M2.3): an excluded source is skipped by
+    /// coordinator rounds while its archive, cursors, and configuration
+    /// are kept intact — exclusion pauses a source, it never deletes
+    /// anything. Re-including restores it to the next round.
+    pub fn set_source_excluded(&self, id: &str, excluded: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE source_instances SET excluded = ?2 WHERE id = ?1",
+            params![id, excluded as i64],
+        )?;
+        Ok(())
+    }
+
+    /// The failed-item ledger: every item a sync observed but could not
+    /// store, with the reason and attempt count — the durable
+    /// "what fell and why" accounting (M2.3). `instance` filters to one
+    /// source; `None` lists every source's failures, oldest first.
+    pub fn list_failed_items(&self, instance: Option<&str>) -> Result<Vec<FailedItem>> {
+        let sql = match instance {
+            Some(_) => {
+                "SELECT source_instance_id, folder, uid, uidvalidity, reason,
+                        attempts, first_failed_at, last_failed_at
+                 FROM sync_failed_items WHERE source_instance_id = ?1
+                 ORDER BY first_failed_at, source_instance_id, folder, uid"
+            }
+            None => {
+                "SELECT source_instance_id, folder, uid, uidvalidity, reason,
+                        attempts, first_failed_at, last_failed_at
+                 FROM sync_failed_items
+                 ORDER BY first_failed_at, source_instance_id, folder, uid"
+            }
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let map = |row: &Row<'_>| {
+            Ok(FailedItem {
+                source_instance_id: row.get(0)?,
+                folder: row.get(1)?,
+                uid: row.get(2)?,
+                uidvalidity: row.get(3)?,
+                reason: row.get(4)?,
+                attempts: row.get(5)?,
+                first_failed_at: row.get(6)?,
+                last_failed_at: row.get(7)?,
+            })
+        };
+        let rows = match instance {
+            Some(instance) => stmt
+                .query_map(params![instance], map)?
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+            None => stmt
+                .query_map([], map)?
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+        };
+        Ok(rows)
+    }
+
+    /// The failed uids under one `(instance, folder, validity)` — the
+    /// retry set the next round re-fetches (they sit at or below the
+    /// checkpoint: the cursor advanced past them only because the ledger
+    /// remembered them). Ascending by uid.
+    pub fn imap_failed_uids(
         &self,
         instance_id: &str,
         folder: &str,
         uidvalidity: u32,
-        last_uid: u32,
-    ) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO sync_checkpoints
-                 (source_instance_id, folder, uidvalidity, last_uid, updated_at)
-             VALUES (?1, ?2, ?3, ?4, datetime('now'))
-             ON CONFLICT (source_instance_id, folder) DO UPDATE SET
-                uidvalidity = excluded.uidvalidity,
-                last_uid    = excluded.last_uid,
-                updated_at  = excluded.updated_at",
-            params![instance_id, folder, uidvalidity, last_uid],
+    ) -> Result<Vec<u32>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT uid FROM sync_failed_items
+             WHERE source_instance_id = ?1 AND folder = ?2 AND uidvalidity = ?3
+             ORDER BY uid",
         )?;
-        Ok(())
+        let rows = stmt
+            .query_map(params![instance_id, folder, uidvalidity], |row| {
+                row.get::<_, u32>(0)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     // -----------------------------------------------------------------------
@@ -2282,6 +2531,9 @@ pub struct SourceInstance {
     pub config_json: String,
     /// `"connected"` after a successful sync, `"disconnected"` otherwise.
     pub state: String,
+    /// Per-source exclusion (M2.3): coordinator rounds skip excluded
+    /// sources while keeping their archive and cursors.
+    pub excluded: bool,
     pub last_attempt_at: Option<String>,
     pub last_success_at: Option<String>,
     pub created_at: String,
@@ -2295,9 +2547,10 @@ fn source_instance_from_row(row: &Row<'_>) -> rusqlite::Result<SourceInstance> {
         connector_key: row.get(3)?,
         config_json: row.get(4)?,
         state: row.get(5)?,
-        last_attempt_at: row.get(6)?,
-        last_success_at: row.get(7)?,
-        created_at: row.get(8)?,
+        excluded: row.get::<_, i64>(6)? != 0,
+        last_attempt_at: row.get(7)?,
+        last_success_at: row.get(8)?,
+        created_at: row.get(9)?,
     })
 }
 
@@ -2336,6 +2589,58 @@ pub enum MailInsertOutcome {
     /// The exact identity (same external key *and* revision) was already
     /// archived; only the occurrence was recorded.
     Duplicate { id: i64 },
+}
+
+/// One parsed mail of an IMAP fetch batch, ready for
+/// [`Storage::commit_imap_batch`]: the message (folder fields already
+/// applied), its subject, and the identity + occurrence it archives under.
+#[derive(Debug, Clone)]
+pub struct MailBatchItem<'a> {
+    pub message: &'a NewMessage,
+    pub subject: &'a str,
+    pub identity: ConnectorIdentity<'a>,
+    pub occurrence: Occurrence<'a>,
+}
+
+/// One failed item of an IMAP fetch batch (M2.3): the uid the round
+/// accounted but could not store, with a fixed human-readable reason —
+/// never message content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchFailure<'a> {
+    pub uid: u32,
+    pub reason: &'a str,
+}
+
+/// Counts of one atomic batch commit
+/// (see [`Storage::commit_imap_batch`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MailBatchOutcome {
+    /// Messages newly stored in the batch.
+    pub inserted: u64,
+    /// Messages the batch skipped as already archived (dedup).
+    pub skipped: u64,
+    /// Items the batch led to the failed-item ledger.
+    pub failed: u64,
+    /// Newly stored rows that are a **conflicting revision** of an
+    /// already-archived external key.
+    pub conflicting_revisions: u64,
+}
+
+/// One row of the failed-item ledger
+/// (see [`Storage::list_failed_items`]): what fell, where, why, how many
+/// times the vault has retried it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailedItem {
+    pub source_instance_id: String,
+    pub folder: String,
+    pub uid: u32,
+    pub uidvalidity: u32,
+    /// Fixed human-readable cause; never message content.
+    pub reason: String,
+    /// How many rounds have observed the failure (1 on first record).
+    pub attempts: u32,
+    pub first_failed_at: String,
+    pub last_failed_at: String,
 }
 
 /// A recorded observation of one archived message

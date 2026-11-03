@@ -18,6 +18,10 @@
 //!   folder is recreated ([`uidvalidity_reset`]);
 //! - **partial sync resume** — an interrupted sync continues without
 //!   duplicates ([`partial_resume`]);
+//! - **atomic batches + failed-item ledger** (M2.3) — one transaction
+//!   per fetch batch; missing fetches and unparseable mails ledgered
+//!   durably, retried, cleared on resolution and on validity resets
+//!   ([`atomic_batches`]);
 //! - **incremental sync** — only new messages are fetched
 //!   ([`incremental`]);
 //! - **folder → channel mapping** ([`folder_channel`]);
@@ -27,6 +31,7 @@
 #[path = "../imap_mock/mod.rs"]
 mod imap_mock;
 
+mod atomic_batches;
 mod credentials_no_persist;
 mod error_collection;
 mod folder_channel;

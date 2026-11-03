@@ -38,6 +38,11 @@
 //! - `sync_imap` — incremental IMAP/Gmail sync (first live mail source):
 //!   app password, or Google sign-in (OAuth2 → XOAUTH2) when `auth` says
 //!   so.
+//! - `sources_list` / `source_set_excluded` / `source_failures` — the
+//!   M2.3 source surface: configured sources with their exclusion flag,
+//!   per-source exclusion (skipped by coordinator rounds, archive kept),
+//!   and the durable failed-item ledger (what fell, why, how often
+//!   retried — visible, never silent).
 //! - `watch_add_folder` / `watch_remove_folder` / `watch_status` —
 //!   automatic folder watching: new/modified export files in user-chosen
 //!   folders are imported in the background; the UI is kept current via
@@ -49,6 +54,11 @@
 //! - `job_submit` / `job_get` / `job_list` / `job_events_since` /
 //!   `job_cancel` — the v2 background-job protocol (see above); progress
 //!   and state changes stream to the UI as `job-event` window events.
+//!   Kinds: `seed_demo`, `import_mbox`, `import_chat_export`,
+//!   `embed_messages`, `imap_sync` (one named account), and
+//!   `imap_sync_all` (the M2.3 coordinator round over every configured,
+//!   non-excluded IMAP source, credentials resolved per source from the
+//!   keyring).
 //! - `seed_demo` — insert the built-in sample messages (idempotent).
 //! - `stats` — archive counts per source (drives the source filter chips).
 //! - `archive_stats` — dashboard aggregates: totals, date range, counts by
@@ -71,6 +81,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use vault_core::chat_export::{self, ChatImportOutcome};
 use vault_core::export::{self, ExportFormat, ExportSummary};
 use vault_core::imap::{self, FolderSyncSummary, ImapAuth, ImapConfig};
+use vault_core::imap_coordinator::{self, RoundSummary, StoredImapConfig};
 use vault_core::ingest::{ingest, Collected, IngestSummary, Source};
 use vault_core::jobs::{
     DbPool, JobContext, JobError, JobEventsPage, JobId, JobRecord, PoolConfig, PoolSync,
@@ -83,6 +94,7 @@ use vault_core::oauth::{self, OAuthConfig};
 use vault_core::query::{ChatContext, SearchPage, SearchQuery};
 use vault_core::settings::{self, Options, Settings, SETTINGS_VERSION};
 use vault_core::stats::{ArchiveStats, DEFAULT_TOP};
+use vault_core::storage::{FailedItem, SourceInstance};
 use vault_core::vector::{
     self, EmbedJobSummary, Embedder, EmbeddingStatus, HashEmbedder, EMBED_BODY_PREFIX_CHARS,
 };
@@ -761,6 +773,7 @@ enum JobSpec {
         password: String,
         folders: Vec<String>,
     },
+    ImapSyncAll,
 }
 
 impl JobSpec {
@@ -772,6 +785,7 @@ impl JobSpec {
             JobSpec::ImportChatExport { .. } => "import_chat_export",
             JobSpec::EmbedMessages => "embed_messages",
             JobSpec::ImapSync { .. } => "imap_sync",
+            JobSpec::ImapSyncAll => "imap_sync_all",
         }
     }
 
@@ -838,9 +852,12 @@ impl JobSpec {
                     folders,
                 })
             }
+            // The coordinator round: no parameters — it syncs every
+            // configured, non-excluded IMAP source (M2.3).
+            "imap_sync_all" => Ok(JobSpec::ImapSyncAll),
             other => Err(format!(
                 "unknown job kind “{other}” (supported: seed_demo, import_mbox, \
-                 import_chat_export, embed_messages, imap_sync)"
+                 import_chat_export, embed_messages, imap_sync, imap_sync_all)"
             )),
         }
     }
@@ -863,6 +880,34 @@ fn resolve_imap_password(
         secrets.save(host, username, password);
         Ok(password.to_string())
     }
+}
+
+/// The coordinator round's credential resolution, per source: a stored
+/// app password first; otherwise a stored Google sign-in refreshed into
+/// a fresh access token (SASL XOAUTH2). `Ok(None)` — the source is
+/// reported as [`vault_core::imap_coordinator::SourceSyncStatus::NoCredentials`] —
+/// strictly means nothing stored; an `Err` means stored credentials
+/// exist but could not be used (no OAuth client configuration, or the
+/// token refresh failed). Secrets stay in the keyring/session memory;
+/// only the short-lived token exists for the round, in memory.
+fn resolve_imap_auth(
+    secrets: &secrets::Secrets,
+    oauth: Option<&OAuthConfig>,
+    stored: &StoredImapConfig,
+) -> Result<Option<ImapAuth>, String> {
+    if let Some(password) = secrets.load(&stored.host, &stored.username) {
+        return Ok(Some(ImapAuth::Password(password)));
+    }
+    let Some(refresh) = secrets.load_refresh(&stored.host, &stored.username) else {
+        return Ok(None);
+    };
+    let Some(config) = oauth else {
+        return Err("Google sign-in configured but no OAuth client credentials found".to_string());
+    };
+    let tokens = oauth::refresh_access_token(config, &refresh).map_err(|e| e.to_string())?;
+    Ok(Some(ImapAuth::Xoauth2 {
+        access_token: tokens.access_token,
+    }))
 }
 
 /// Submit a background job (the v2 protocol). Returns immediately with a
@@ -903,8 +948,9 @@ fn job_submit(
         other => other,
     };
     let job_pool = Arc::clone(&pool);
+    let secrets = Arc::clone(secrets.inner());
     pool.try_submit_job(spec.kind(), move |ctx: &JobContext| {
-        run_job_spec(ctx, &spec, &job_pool, embedder, &data_dir)
+        run_job_spec(ctx, &spec, &job_pool, embedder, &data_dir, &secrets)
     })
     .map(|id| JobHandle { id })
     .map_err(|e| e.to_string())
@@ -913,13 +959,14 @@ fn job_submit(
 /// Execute one validated [`JobSpec`] on the job runner thread. All storage
 /// access goes through the pool; every kind reports progress and a JSON
 /// result summary. (Unit-tested through `JobSpec::parse`; execution is
-/// covered end-to-end by vault-core's jobs tests.)
+/// covered end-to-end by vault-core's jobs and coordinator tests.)
 fn run_job_spec(
     ctx: &JobContext,
     spec: &JobSpec,
     pool: &DbPool,
     embedder: HashEmbedder,
     data_dir: &Path,
+    secrets: &Arc<secrets::Secrets>,
 ) -> std::result::Result<Value, JobError> {
     match spec {
         JobSpec::SeedDemo => {
@@ -981,6 +1028,27 @@ fn run_job_spec(
             let summaries = imap::sync_with(&config, &sink)?;
             Ok(serde_json::to_value(&summaries).unwrap_or(Value::Null))
         }
+        JobSpec::ImapSyncAll => {
+            // One coordinator round over every configured IMAP source
+            // (M2.3): excluded sources are skipped, credentials resolve
+            // per source from the keyring (password, then Google
+            // sign-in), a source without credentials is reported rather
+            // than errored, and each folder's batches commit atomically
+            // with their checkpoint + failed-item ledger updates.
+            let oauth = OAuthConfig::from_env().ok().flatten();
+            let secrets = Arc::clone(secrets);
+            ctx.progress(0, 1, "syncing sources");
+            let round: RoundSummary = imap_coordinator::sync_round(
+                pool,
+                |instance| match StoredImapConfig::of(instance) {
+                    Some(stored) => resolve_imap_auth(&secrets, oauth.as_ref(), &stored),
+                    None => Ok(None),
+                },
+                || ctx.is_cancelled(),
+            );
+            ctx.progress(1, 1, "sources synced");
+            Ok(serde_json::to_value(&round).unwrap_or(Value::Null))
+        }
     }
 }
 
@@ -1035,6 +1103,46 @@ fn run_embed_job(ctx: &JobContext, embedder: HashEmbedder) -> std::result::Resul
         "remaining": remaining,
         "elapsed_ms": start.elapsed().as_millis() as u64,
     }))
+}
+
+/// Every durable source instance in the vault (M2.3): kind, label,
+/// connector key, connected state, per-source `excluded` flag, and the
+/// attempt/success stamps. Never credentials — those live in the OS
+/// keyring (see `secrets`), never in the database.
+#[tauri::command]
+fn sources_list(state: State<AppState>) -> Result<Vec<SourceInstance>, String> {
+    state
+        .pool
+        .with_read(|s| s.list_source_instances().map_err(|e| e.to_string()))
+}
+
+/// Per-source exclusion (M2.3): an excluded source is skipped by every
+/// coordinator round (`imap_sync_all`) while its archive, cursors, and
+/// configuration are kept intact. An explicit single-source `sync_imap`
+/// still runs for an excluded source — manual override stays manual.
+#[tauri::command]
+fn source_set_excluded(
+    state: State<AppState>,
+    source_id: String,
+    excluded: bool,
+) -> Result<(), String> {
+    let pool = Arc::clone(&state.pool);
+    pool.submit_write(move |s| s.set_source_excluded(&source_id, excluded))
+        .map_err(|e| e.to_string())
+}
+
+/// The failed-item ledger (M2.3): what fell, where, why, and how many
+/// times the vault has retried it — the durable accounting behind every
+/// IMAP sync. `source_id` filters to one source; `None` lists all.
+#[tauri::command]
+fn source_failures(
+    state: State<AppState>,
+    source_id: Option<String>,
+) -> Result<Vec<FailedItem>, String> {
+    state.pool.with_read(|s| {
+        s.list_failed_items(source_id.as_deref())
+            .map_err(|e| e.to_string())
+    })
 }
 
 /// One job's current record (`None` for an unknown or already-evicted id).
@@ -1230,6 +1338,9 @@ pub fn run() {
             import_mbox,
             import_chat_export,
             sync_imap,
+            sources_list,
+            source_set_excluded,
+            source_failures,
             watch_add_folder,
             watch_remove_folder,
             watch_status,
@@ -1412,6 +1523,17 @@ mod tests {
             }
             .kind(),
             "imap_sync"
+        );
+        assert_eq!(JobSpec::ImapSyncAll.kind(), "imap_sync_all");
+        assert_eq!(
+            JobSpec::parse("imap_sync_all", &serde_json::json!({})).unwrap(),
+            JobSpec::ImapSyncAll
+        );
+        // Extra parameters are ignored for the coordinator round: it
+        // takes its configuration from the vault's source instances.
+        assert_eq!(
+            JobSpec::parse("imap_sync_all", &serde_json::json!({ "host": "x" })).unwrap(),
+            JobSpec::ImapSyncAll
         );
     }
 }
