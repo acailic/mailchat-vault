@@ -1,22 +1,26 @@
 //! Chat export format detection and import for the generic "import chat
 //! export" path: the picked file's contents decide which source parses it.
 //!
-//! [`import`] orchestrates the whole flow — detect, collect, extract
-//! media (when enabled and a data dir is given), then ingest with media
-//! backfill — so the Tauri shell stays thin and the flow is testable
-//! without the app.
+//! [`import_bounded`] orchestrates the whole flow — detect, stream,
+//! batch-commit (extracting media when enabled and a data dir is given) —
+//! so the Tauri shell stays thin and the flow is testable without the app.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::discord::{is_discord_export, is_discord_export_dir, DiscordSource, DISCORD_SOURCE};
-use crate::ingest::{ingest_collected, IngestSummary};
-use crate::media::{self, MediaSummary};
-use crate::signal::{is_signal_export, SignalSource, SIGNAL_SOURCE};
-use crate::storage::Storage;
-use crate::telegram::{is_telegram_export, TelegramSource};
-use crate::whatsapp::{is_whatsapp_export, WhatsappSource};
+use crate::bounded::{
+    import_id_for, BoundedOutcome, BoundedRun, IngestSink, MediaKind, StreamSource,
+};
+use crate::discord::{
+    is_discord_export, is_discord_export_dir, is_discord_export_reader, DiscordSource,
+};
+use crate::ingest::IngestSummary;
+use crate::media::MediaSummary;
+use crate::signal::{is_signal_export, is_signal_export_reader, SignalSource};
+use crate::telegram::{is_telegram_export, is_telegram_export_reader, TelegramSource};
+use crate::whatsapp::{is_whatsapp_export, is_whatsapp_export_reader, WhatsappSource};
 use crate::{Error, Result};
 
 /// Recognized chat export formats.
@@ -53,6 +57,32 @@ pub fn detect_chat_format(bytes: &[u8]) -> Option<ChatFormat> {
     None
 }
 
+/// [`detect_chat_format`] streamed from the picked file: detection reads
+/// the format probes' bounded views (the JSON walkers skip `messages`
+/// element by element; WhatsApp only looks at the first 30 lines), so an
+/// arbitrarily large export is detected without loading it (M2.2).
+pub fn detect_chat_format_reader(path: &Path) -> Result<Option<ChatFormat>> {
+    let file = fs::File::open(path)?;
+    let mut file = std::io::BufReader::new(file);
+    use std::io::Seek as _;
+    if is_discord_export_reader(&mut file) {
+        return Ok(Some(ChatFormat::Discord));
+    }
+    file.rewind()?;
+    if is_telegram_export_reader(&mut file) {
+        return Ok(Some(ChatFormat::Telegram));
+    }
+    file.rewind()?;
+    if is_signal_export_reader(&mut file) {
+        return Ok(Some(ChatFormat::Signal));
+    }
+    file.rewind()?;
+    if is_whatsapp_export_reader(&mut file) {
+        return Ok(Some(ChatFormat::WhatsApp));
+    }
+    Ok(None)
+}
+
 /// Outcome of a chat export import: the ingest summary plus (when media
 /// extraction ran) how the media pass went.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,109 +91,13 @@ pub struct ChatImportOutcome {
     pub media: Option<MediaSummary>,
 }
 
-/// Import a chat export: a WhatsApp `.txt` export, a Telegram
-/// `result.json` (a directory containing `result.json` works too), a
-/// Signal conversation `.json` (e.g. from `sigtop export-messages -f
-/// json`, one file per conversation), or a Discord Data Package export —
-/// a single channel `messages.json`, the package's `messages/` directory,
-/// or the package root. The format is detected from the file contents
-/// (directory picks must be recognizable as a Discord Data Package).
-///
-/// Media extraction runs when `extract_media` is set and `data_dir` (the
-/// app data dir that will hold the `media/` store) is given: export files
-/// are copied into `data_dir/media/` hash-named and linked from each
-/// message's `raw_json`; messages already in the archive get their links
-/// backfilled, so re-importing an export with media enriches it. Pass
-/// `extract_media = false` (or `data_dir = None`) to import text only.
-/// Signal and Discord exports record attachments in `raw_json` only —
-/// media extraction is not implemented for Signal or Discord yet.
-pub fn import(
-    storage: &Storage,
-    picked: &Path,
-    extract_media: bool,
-    data_dir: Option<&Path>,
-) -> Result<ChatImportOutcome> {
-    let file = resolve_export_file(picked)?;
-    // A directory pick is a Discord Data Package by this point
-    // (resolve_export_file returns the dir itself only in that case);
-    // there is no single file to sniff, so the format is decided here.
-    let format = if file.is_dir() {
-        ChatFormat::Discord
-    } else {
-        let bytes = std::fs::read(&file)?;
-        detect_chat_format(&bytes).ok_or_else(|| {
-            Error::ChatImport(format!(
-                "unrecognized chat export format: {} (expected a WhatsApp .txt export, a Telegram result.json, a Signal conversation .json, or a Discord messages.json)",
-                file.display()
-            ))
-        })?
-    };
-
-    let collected = match format {
-        ChatFormat::Telegram => {
-            use crate::ingest::Source;
-            TelegramSource::new(&file).collect()?
-        }
-        ChatFormat::Signal => {
-            use crate::ingest::Source;
-            SignalSource::new(&file).collect()?
-        }
-        ChatFormat::WhatsApp => {
-            use crate::ingest::Source;
-            WhatsappSource::new(&file).collect()?
-        }
-        ChatFormat::Discord => {
-            use crate::ingest::Source;
-            DiscordSource::new(&file).collect()?
-        }
-    };
-
-    let mut media_summary = None;
-    let mut messages = collected.messages;
-    if extract_media {
-        if let Some(data_dir) = data_dir {
-            let export_root = file
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("."));
-            match format {
-                ChatFormat::Telegram => {
-                    let mut summary = MediaSummary::default();
-                    media::extract_telegram(&mut messages, &export_root, data_dir, &mut summary)?;
-                    media_summary = Some(summary);
-                }
-                ChatFormat::WhatsApp => {
-                    let mut summary = MediaSummary::default();
-                    media::extract_whatsapp(&mut messages, &export_root, data_dir, &mut summary)?;
-                    media_summary = Some(summary);
-                }
-                // Signal and Discord attachments stay recorded in `raw_json`
-                // only — media extraction is not implemented for them yet.
-                ChatFormat::Signal => {}
-                ChatFormat::Discord => {}
-            }
+impl From<BoundedOutcome> for ChatImportOutcome {
+    fn from(outcome: BoundedOutcome) -> Self {
+        Self {
+            summary: outcome.summary,
+            media: outcome.media,
         }
     }
-
-    let source_name = match format {
-        ChatFormat::Telegram => crate::telegram::TELEGRAM_SOURCE,
-        ChatFormat::Signal => SIGNAL_SOURCE,
-        ChatFormat::WhatsApp => crate::whatsapp::WHATSAPP_SOURCE,
-        ChatFormat::Discord => DISCORD_SOURCE,
-    };
-    let summary = ingest_collected(
-        storage,
-        source_name,
-        crate::ingest::Collected {
-            messages,
-            failed: collected.failed,
-        },
-        media_summary.as_mut(),
-    )?;
-    Ok(ChatImportOutcome {
-        summary,
-        media: media_summary,
-    })
 }
 
 /// Resolve the picked path to the export file: `result.json` inside a
@@ -184,6 +118,75 @@ fn resolve_export_file(picked: &Path) -> Result<PathBuf> {
         )));
     }
     Ok(picked.to_path_buf())
+}
+
+/// Resolve a picked path to its format and its **streaming** source (the
+/// bounded counterpart of `import`'s detection step). A directory pick is
+/// a Discord Data Package by this point (`resolve_export_file` returns
+/// the dir itself only in that case).
+pub fn resolve_stream_source(
+    picked: &Path,
+) -> Result<(ChatFormat, PathBuf, Box<dyn StreamSource + Send>)> {
+    let file = resolve_export_file(picked)?;
+    if file.is_dir() {
+        let source = DiscordSource::new(file.clone());
+        return Ok((ChatFormat::Discord, file, Box::new(source)));
+    }
+    let format = detect_chat_format_reader(&file)?.ok_or_else(|| {
+        Error::ChatImport(format!(
+            "unrecognized chat export format: {} (expected a WhatsApp .txt export, a Telegram result.json, a Signal conversation .json, or a Discord messages.json)",
+            file.display()
+        ))
+    })?;
+    let source: Box<dyn StreamSource + Send> = match format {
+        ChatFormat::Telegram => Box::new(TelegramSource::new(&file)),
+        ChatFormat::Signal => Box::new(SignalSource::new(&file)),
+        ChatFormat::WhatsApp => Box::new(WhatsappSource::new(&file)),
+        ChatFormat::Discord => Box::new(DiscordSource::new(&file)),
+    };
+    Ok((format, file, source))
+}
+
+/// The bounded production import (M2.2): same formats, same detection,
+/// same media behavior as [`import`], but streamed — the parser never
+/// holds the archive, batches commit atomically with checkpoint
+/// advancement, cancellation preserves committed data and correct
+/// counts, and an interrupted run resumes from its checkpoint on the
+/// next call with the same input (see [`crate::bounded`]).
+///
+/// Media extraction runs per batch on the caller's thread (file copies
+/// stay outside every storage lock); Signal and Discord record
+/// attachments in `raw_json` only, as in [`import`].
+pub fn import_bounded(
+    sink: &mut dyn IngestSink,
+    picked: &Path,
+    extract_media: bool,
+    data_dir: Option<&Path>,
+    is_cancelled: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(u64, u64, &str),
+) -> Result<BoundedOutcome> {
+    let (format, file, source) = resolve_stream_source(picked)?;
+    let mut run = BoundedRun::new(import_id_for("chat-import", &file));
+    let export_root = file
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    if extract_media {
+        if let Some(data_dir) = data_dir {
+            match format {
+                ChatFormat::Telegram => {
+                    run.media = Some((MediaKind::Telegram, export_root.as_path(), data_dir))
+                }
+                ChatFormat::WhatsApp => {
+                    run.media = Some((MediaKind::WhatsApp, export_root.as_path(), data_dir))
+                }
+                // Signal and Discord attachments stay recorded in `raw_json`
+                // only — media extraction is not implemented for them yet.
+                ChatFormat::Signal | ChatFormat::Discord => {}
+            }
+        }
+    }
+    run.run(source.as_ref(), sink, is_cancelled, progress)
 }
 
 #[cfg(test)]

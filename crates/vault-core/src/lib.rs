@@ -13,7 +13,13 @@
 //!   snapshot with capacity preflight, single-transaction conversion,
 //!   post-conversion index validation, rollback/reopen from the
 //!   snapshot, and refusal of newer-schema databases.
-//! - [`ingest`]: the [`ingest::Source`] abstraction and idempotent ingest.
+//! - [`ingest`]: the [`ingest::Source`] whole-archive abstraction — a
+//!   convenience for small parser tests; production paths stream through
+//!   [`bounded`] instead.
+//! - [`bounded`]: the M2.2 bounded ingest — streaming parser interfaces
+//!   ([`bounded::StreamSource`]) and the batch-commit driver with
+//!   cancellation, durable issue records, and restart recovery
+//!   ([`bounded::BoundedRun`]).
 //! - [`mail`]: shared RFC 5322 raw-mail parsing (used by mbox and IMAP),
 //!   including the In-Reply-To/References reply graph.
 //! - [`mbox`]: the manual/demo `.mbox` file source.
@@ -53,6 +59,7 @@
 //! - [`export`]: export search results or whole chats to CSV / JSON Lines /
 //!   MBOX.
 
+pub mod bounded;
 pub mod chat_export;
 pub mod demo;
 pub mod discord;

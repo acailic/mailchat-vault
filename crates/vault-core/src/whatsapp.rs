@@ -33,16 +33,18 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use serde_json::{json, Map, Value};
 use sha2::Digest as _;
 
+use crate::bounded::{EntryOutcome, Flow, StreamItem, StreamSource};
 use crate::ingest::{Collected, Source};
 use crate::message::NewMessage;
 use crate::util::fnv1a_fields;
-use crate::Result;
+use crate::{Error, Result};
 
 /// Source name and dedup namespace for WhatsApp imports.
 pub const WHATSAPP_SOURCE: &str = "whatsapp";
@@ -99,6 +101,37 @@ impl Source for WhatsappSource {
     }
 }
 
+/// The bounded streaming path (M2.2): three streamed passes over the
+/// file — (1) the day/month order from the first 2000 lines, (2) the
+/// conversation-key inputs (participant set + first authored message),
+/// (3) the messages themselves, one assembled message alive at a time.
+/// Every pass holds at most one line plus the pending message being
+/// assembled, whatever the export's size. Re-reading is the price of the
+/// key derivation (ids hash over the whole chat's identity), and it
+/// keeps memory flat instead.
+impl StreamSource for WhatsappSource {
+    fn name(&self) -> &str {
+        WHATSAPP_SOURCE
+    }
+
+    fn stream(&self, skip: u64, emit: &mut dyn FnMut(StreamItem) -> Result<Flow>) -> Result<()> {
+        let chat_id = self
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let zone_label = iana_time_zone::get_timezone().unwrap_or_else(|_| "local".to_string());
+        stream_whatsapp_tz(
+            || Ok(BufReader::new(fs::File::open(&self.path)?)),
+            &chat_id,
+            &Local,
+            &zone_label,
+            skip,
+            emit,
+        )
+    }
+}
+
 /// Parse WhatsApp export text into messages, interpreting the exporter's
 /// naive local timestamps in the machine's local timezone (the IANA name
 /// is recorded when resolvable).
@@ -125,21 +158,204 @@ pub fn parse_whatsapp_tz<Tz: TimeZone>(
     tz: &Tz,
     zone_label: &str,
 ) -> Result<Collected> {
-    let text = decode_export(bytes);
-    let day_first = detect_day_first(&text);
+    let mut messages: Vec<NewMessage> = Vec::new();
+    let mut failed: u64 = 0;
+    stream_whatsapp_tz(
+        || Ok(std::io::Cursor::new(bytes)),
+        chat_id,
+        tz,
+        zone_label,
+        0,
+        &mut |item| {
+            match item {
+                StreamItem::Message(msg) => messages.push(msg),
+                StreamItem::Failed { .. } => failed += 1,
+            }
+            Ok(Flow::Continue)
+        },
+    )?;
+    Ok(Collected { messages, failed })
+}
 
-    let mut finished: Vec<Finished> = Vec::new();
+/// The shared bounded engine behind the whole-file parser and the
+/// streaming source: three streamed passes (date order, conversation-key
+/// inputs, messages), one assembled message alive at a time. `open` is
+/// called once per pass, so any `BufRead` factory works — a file, a
+/// cursor over in-memory bytes (the collect path), a test fixture.
+pub fn stream_whatsapp_tz<R: BufRead, Tz: TimeZone>(
+    open: impl Fn() -> std::io::Result<R>,
+    chat_id: &str,
+    tz: &Tz,
+    zone_label: &str,
+    skip: u64,
+    emit: &mut dyn FnMut(StreamItem) -> Result<Flow>,
+) -> Result<()> {
+    // Pass 1: the date order from the file's own leading lines.
+    let mut lines = Lines::new(open()?);
+    let day_first = detect_day_first_from(&mut lines);
+    lines.finish()?;
+
+    // Pass 2: conversation-key inputs — every distinct author plus the
+    // first authored message (see [`whatsapp_conversation_key`]).
+    let mut authors: BTreeSet<String> = BTreeSet::new();
+    let mut anchor: Option<(String, String, String)> = None;
+    let mut lines = Lines::new(open()?);
+    for_each_finished(&mut lines, day_first, |f| {
+        if !f.author.is_empty() {
+            authors.insert(f.author.clone());
+            if anchor.is_none() {
+                anchor = Some((f.author.clone(), f.naive_text.clone(), f.body.clone()));
+            }
+        }
+        true
+    });
+    lines.finish()?;
+    let conversation_key = whatsapp_conversation_key(
+        authors.iter().map(String::as_str),
+        anchor
+            .as_ref()
+            .map(|(a, t, b)| (a.as_str(), t.as_str(), b.as_str())),
+    );
+    // When no key could be derived (no authored message at all) the ids
+    // hash over the display stem, exactly as the legacy path did.
+    let hash_chat = if conversation_key.is_empty() {
+        chat_id
+    } else {
+        &conversation_key
+    };
+
+    // Pass 3: the messages. The occurrence counter advances for skipped
+    // items too (conversion happens before the skip check), so a resumed
+    // run lands on exactly the same generated ids.
+    let mut skip = skip;
+    let mut occurrence: HashMap<u64, u32> = HashMap::new();
+    let mut lines = Lines::new(open()?);
+    let mut failure: Option<Error> = None;
+    let mut stopped = false;
+    for_each_finished(&mut lines, day_first, |f| {
+        if failure.is_some() || stopped {
+            return false;
+        }
+        let msg = finished_to_message(
+            f,
+            chat_id,
+            hash_chat,
+            &conversation_key,
+            &mut occurrence,
+            tz,
+            zone_label,
+        );
+        match crate::bounded::emit_entry(EntryOutcome::Message(msg), &mut skip, emit) {
+            Ok(Flow::Continue) => true,
+            Ok(Flow::Stop) => {
+                stopped = true;
+                false
+            }
+            Err(e) => {
+                failure = Some(e);
+                false
+            }
+        }
+    });
+    lines.finish()?;
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Lines of an export, streamed: each `read_until` pulls one line, decoded
+/// lossily UTF-8 with the trailing `\n`/`\r\n` stripped and a leading BOM
+/// dropped from the first line. Per-line lossy decoding equals whole-file
+/// lossy decoding split on lines (an invalid UTF-8 sequence can never
+/// contain or straddle `\n`), so the streamed and whole-file parsers see
+/// identical text. A read error ends the iteration and is held for
+/// [`Lines::finish`].
+struct Lines<R> {
+    reader: R,
+    first: bool,
+    done: bool,
+    error: Option<std::io::Error>,
+}
+
+impl<R: BufRead> Lines<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader,
+            first: true,
+            done: false,
+            error: None,
+        }
+    }
+
+    /// Raise a read error captured during iteration (if any).
+    fn finish(&mut self) -> Result<()> {
+        match self.error.take() {
+            Some(e) => Err(e.into()),
+            None => Ok(()),
+        }
+    }
+}
+
+impl<R: BufRead> Iterator for Lines<R> {
+    type Item = String;
+
+    fn next(&mut self) -> Option<String> {
+        if self.done {
+            return None;
+        }
+        let mut buf = Vec::new();
+        match self.reader.read_until(b'\n', &mut buf) {
+            Ok(0) => {
+                self.done = true;
+                return None;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                self.error = Some(e);
+                self.done = true;
+                return None;
+            }
+        }
+        if buf.last() == Some(&b'\n') {
+            buf.pop();
+            if buf.last() == Some(&b'\r') {
+                buf.pop();
+            }
+        }
+        let mut line = String::from_utf8_lossy(&buf).into_owned();
+        if self.first {
+            self.first = false;
+            if let Some(stripped) = line.strip_prefix('\u{feff}') {
+                line = stripped.to_string();
+            }
+        }
+        Some(line)
+    }
+}
+
+/// The message-assembly state machine, shared by every pass and the
+/// whole-file parser: continuation lines join the pending message, a
+/// quoted-reply marker consumes the next line as the reference, headers
+/// start messages. `f` receives each finished message and returns whether
+/// to keep reading (`false` stops the pass promptly).
+fn for_each_finished<I, F>(lines: I, day_first: bool, mut f: F)
+where
+    I: Iterator<Item = String>,
+    F: FnMut(Finished) -> bool,
+{
     let mut pending: Option<Pending> = None;
-
-    for line in text.lines() {
+    for line in lines {
         // Right after a quoted-reply marker the next line is the quoted
         // reference, even when it looks exactly like a message header
         // (WhatsApp echoes the full `[stamp] Author: text` line).
         let awaiting_quote = pending.as_ref().is_some_and(|p| p.awaiting_quote);
         if !awaiting_quote {
-            if let Some(h) = parse_header(line, day_first) {
+            if let Some(h) = parse_header(&line, day_first) {
                 if let Some(p) = pending.take() {
-                    finished.push(finish_pending(p));
+                    if !f(finish_pending(p)) {
+                        return;
+                    }
                 }
                 let awaiting_quote = is_quoted_marker(&strip_bidi(&h.body));
                 pending = Some(Pending {
@@ -155,72 +371,55 @@ pub fn parse_whatsapp_tz<Tz: TimeZone>(
             if !p.body.is_empty() {
                 p.body.push('\n');
             }
-            p.body.push_str(line);
+            p.body.push_str(&line);
             p.awaiting_quote = false;
         }
         // Lines before the first header (BOM leftovers, stray text) are
         // dropped.
     }
     if let Some(p) = pending.take() {
-        finished.push(finish_pending(p));
+        f(finish_pending(p));
     }
+}
 
-    // Conversation key from the export's own content: every distinct
-    // author (sorted) plus a fingerprint of the first authored message.
-    let authors: BTreeSet<&str> = finished
-        .iter()
-        .filter(|f| !f.author.is_empty())
-        .map(|f| f.author.as_str())
-        .collect();
-    let anchor = finished.iter().find(|f| !f.author.is_empty());
-    let conversation_key = whatsapp_conversation_key(
-        authors.iter().copied(),
-        anchor.map(|f| (f.author.as_str(), f.naive_text.as_str(), f.body.as_str())),
-    );
-    // When no key could be derived (no authored message at all) the ids
-    // hash over the display stem, exactly as the legacy path did.
-    let hash_chat = if conversation_key.is_empty() {
-        chat_id
-    } else {
-        &conversation_key
+/// Turn one assembled message into a [`NewMessage`] (the per-message tail
+/// of the whole-file parser, shared with the streaming pass): DST-aware
+/// time resolution in the explicit zone and the content-hash id over the
+/// stable conversation key, with the occurrence counter keeping identical
+/// back-to-back messages distinct.
+fn finished_to_message<Tz: TimeZone>(
+    f: Finished,
+    chat_id: &str,
+    hash_chat: &str,
+    conversation_key: &str,
+    occurrence: &mut HashMap<u64, u32>,
+    tz: &Tz,
+    zone_label: &str,
+) -> NewMessage {
+    // DST-aware interpretation in the explicit zone; a wall-time a
+    // DST gap removes has no instant at all (kept unresolved).
+    let (sent_at, time_confidence) = match local_to_utc(&f.naive, tz) {
+        Some(instant) => (
+            instant.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            "legacy_assumed",
+        ),
+        None => (String::new(), "unresolved"),
     };
 
-    let mut messages: Vec<NewMessage> = Vec::new();
-    let mut occurrence: HashMap<u64, u32> = HashMap::new();
-    for f in finished {
-        // DST-aware interpretation in the explicit zone; a wall-time a
-        // DST gap removes has no instant at all (kept unresolved).
-        let (sent_at, time_confidence) = match local_to_utc(&f.naive, tz) {
-            Some(instant) => (
-                instant.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-                "legacy_assumed",
-            ),
-            None => (String::new(), "unresolved"),
-        };
+    let base = fnv1a_fields(&[hash_chat, &f.author, &f.naive_text, &f.body]);
+    let seen = occurrence.entry(base).or_insert(0);
+    let external_id = format!("generated-{:016x}-{}", base, seen);
+    *seen += 1;
 
-        // Content-hash dedup id over the stable conversation key; the
-        // occurrence counter keeps identical back-to-back messages
-        // distinct while re-imports stay idempotent.
-        let base = fnv1a_fields(&[hash_chat, &f.author, &f.naive_text, &f.body]);
-        let seen = occurrence.entry(base).or_insert(0);
-        let external_id = format!("generated-{:016x}-{}", base, seen);
-        *seen += 1;
-
-        let mut msg = NewMessage::new(WHATSAPP_SOURCE, external_id, f.author, sent_at, f.body);
-        msg.channel = "chat".to_string();
-        msg.chat_id = chat_id.to_string();
-        msg.raw_json = Value::Object(f.raw).to_string();
-        msg.conversation_key = conversation_key.clone();
-        msg.original_timestamp = f.naive_text.clone();
-        msg.timezone = zone_label.to_string();
-        msg.time_confidence = time_confidence.to_string();
-        messages.push(msg);
-    }
-
-    Ok(Collected {
-        messages,
-        failed: 0,
-    })
+    let mut msg = NewMessage::new(WHATSAPP_SOURCE, external_id, f.author, sent_at, f.body);
+    msg.channel = "chat".to_string();
+    msg.chat_id = chat_id.to_string();
+    msg.raw_json = Value::Object(f.raw).to_string();
+    msg.conversation_key = conversation_key.to_string();
+    msg.original_timestamp = f.naive_text.clone();
+    msg.timezone = zone_label.to_string();
+    msg.time_confidence = time_confidence.to_string();
+    msg
 }
 
 /// A parsed message with its raw fields ready for storage.
@@ -285,6 +484,17 @@ pub fn is_whatsapp_export(bytes: &[u8]) -> bool {
     text.lines()
         .take(30)
         .any(|line| parse_header(line, true).is_some() || parse_header(line, false).is_some())
+}
+
+/// [`is_whatsapp_export`] streamed from a reader: only the first 30 lines
+/// are read, so detection of an arbitrarily large file stays bounded
+/// (the whole-file `decode_export` variant remains for tests and small
+/// buffers).
+pub fn is_whatsapp_export_reader<R: std::io::Read>(reader: R) -> bool {
+    let mut lines = Lines::new(BufReader::new(reader));
+    (&mut lines)
+        .take(30)
+        .any(|line| parse_header(&line, true).is_some() || parse_header(&line, false).is_some())
 }
 
 /// A message while its continuation lines are still being collected.
@@ -410,11 +620,20 @@ fn normalize_time_token(token: &str) -> String {
 /// component over 12 proves day-first (or is a year: `yyyy-mm-dd`), a
 /// second component over 12 proves month-first. Ambiguous files default
 /// to day-first, the common case outside the US.
+/// [`detect_day_first`] over a whole decoded text — the test-facing
+/// spelling (the parsers themselves use the streamed variant).
+#[cfg(test)]
 fn detect_day_first(text: &str) -> bool {
+    detect_day_first_from(text.lines().map(str::to_string))
+}
+
+/// [`detect_day_first`] over streamed lines (only the first 2000 are
+/// consulted, mirroring the whole-file parser).
+fn detect_day_first_from<I: Iterator<Item = String>>(lines: I) -> bool {
     let mut day_first_seen = false;
     let mut month_first_seen = false;
-    for line in text.lines().take(2000) {
-        if let Some(token) = leading_date_token(line) {
+    for line in lines.take(2000) {
+        if let Some(token) = leading_date_token(&line) {
             let comps: Vec<Option<u32>> = token
                 .split(['/', '-', '.'])
                 .map(|c| c.parse::<u32>().ok())

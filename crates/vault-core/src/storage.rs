@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 
 use chrono::{Datelike, Days, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use rusqlite::types::Value as SqlValue;
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, Transaction};
 use serde::{Deserialize, Serialize};
 
 use crate::message::{InsertOutcome, Message, NewMessage, SourceCount, Stats};
@@ -520,9 +520,6 @@ const MIGRATIONS: &[(i64, &str)] = &[
         // UIDVALIDITY reset starts a fresh namespace, and the ledger rows
         // of an abandoned validity are cleared when the checkpoint adopts
         // the new one (the rescan re-derives the truth for those UIDs).
-        // `source_instances.excluded` is the per-source exclusion switch:
-        // an excluded source is skipped by coordinator rounds while its
-        // archive and cursors are kept intact.
         r#"
         CREATE TABLE sync_failed_items (
             source_instance_id TEXT NOT NULL REFERENCES source_instances (id),
@@ -537,6 +534,40 @@ const MIGRATIONS: &[(i64, &str)] = &[
             PRIMARY KEY (source_instance_id, folder, uid, uidvalidity)
         );
         ALTER TABLE source_instances ADD COLUMN excluded INTEGER NOT NULL DEFAULT 0;
+        "#,
+    ),
+    (
+        10,
+        // Bounded ingest recovery (M2.2). `import_checkpoints` holds the
+        // committed item position of an in-flight bounded import so an
+        // interrupted run resumes from the last committed position
+        // instead of re-parsing or duplicating; the row is deleted in the
+        // same transaction that completes the import, so only genuinely
+        // interrupted imports leave a checkpoint behind. `import_issues`
+        // are the durable per-item parse failures (one row per failed
+        // item, with its stream position): they outlive the checkpoint
+        // because they are the record of what could not be archived,
+        // queryable through `Storage::import_issues`.
+        r#"
+        CREATE TABLE import_checkpoints (
+            import_id       TEXT PRIMARY KEY,
+            source          TEXT NOT NULL,
+            committed_items INTEGER NOT NULL DEFAULT 0,
+            created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE import_issues (
+            id           INTEGER PRIMARY KEY,
+            import_id    TEXT NOT NULL,
+            -- Ordinal of the failed item in the import's item stream
+            -- (messages + failures; silently skipped entries do not
+            -- count), so the record points back at the failing entry.
+            position     INTEGER NOT NULL,
+            external_ref TEXT NOT NULL DEFAULT '',
+            reason       TEXT NOT NULL,
+            recorded_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE UNIQUE INDEX idx_import_issues_import ON import_issues (import_id, position);
         "#,
     ),
 ];
@@ -706,89 +737,137 @@ impl Storage {
     /// columns come from the message's explicit fields when set.
     pub fn insert_message(&self, msg: &NewMessage) -> Result<InsertOutcome> {
         let tx = self.conn.unchecked_transaction()?;
-        let instance = resolve_legacy_instance(&tx, &msg.source)?;
+        let outcome = insert_message_in_tx(&tx, msg)?;
+        tx.commit()?;
+        Ok(outcome)
+    }
 
-        // Dedup on the canonical identity: first write wins forever.
-        let existing: Option<i64> = tx
-            .query_row(
-                "SELECT message_id FROM message_identities
-                 WHERE source_instance_id = ?1 AND namespace = 'legacy'
-                   AND external_key = ?2 AND revision_hash = ''",
-                params![instance, msg.external_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(id) = existing {
-            // Record the repeat observation only (idempotent on the
-            // occurrence tuple); the archived row itself stays untouched.
-            tx.execute(
-                "INSERT OR IGNORE INTO message_occurrences
-                     (message_id, scope, provider_item_id)
-                 VALUES (?1, 'import', ?2)",
-                params![id, msg.external_id],
-            )?;
-            // A re-import of the same chat under a rename still refreshes
-            // the conversation label (identity is stable, names follow).
-            if !msg.conversation_key.is_empty() && !msg.chat_id.is_empty() {
-                if let Some(conv) =
-                    find_provider_conversation(&tx, &instance, &msg.conversation_key)?
-                {
-                    tx.execute(
-                        "UPDATE conversations SET label = ?2 WHERE id = ?1 AND label <> ?2",
-                        params![conv, msg.chat_id],
-                    )?;
+    /// Commit one bounded-import batch atomically (M2.2): message rows
+    /// (with the same dedup/media-link semantics as
+    /// [`Storage::insert_message`] followed by
+    /// [`Storage::attach_media`]), durable issue records for the batch's
+    /// failed items, and the import checkpoint advancement — all in one
+    /// transaction, so an interruption leaves either the whole batch or
+    /// none of it, and the checkpoint can never claim items that were
+    /// not committed.
+    ///
+    /// `committed_after` is the number of items whose fate is durable
+    /// once this batch lands (messages + recorded failures consumed so
+    /// far); `completes` marks the import finished, deleting its
+    /// checkpoint row in the same transaction (a completed import needs
+    /// no resume point; re-running it starts fresh and dedups).
+    pub fn commit_import_batch(
+        &self,
+        import_id: &str,
+        source: &str,
+        messages: &[NewMessage],
+        issues: &[ImportIssueRecord<'_>],
+        committed_after: u64,
+        completes: bool,
+    ) -> Result<ImportBatchCounts> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut counts = ImportBatchCounts::default();
+        for msg in messages {
+            match insert_message_in_tx(&tx, msg)? {
+                InsertOutcome::Inserted(_) => {
+                    counts.inserted += 1;
+                    if !media_entries(&msg.raw_json).is_empty() {
+                        counts.media_linked += 1;
+                    }
+                }
+                InsertOutcome::Duplicate(id) => {
+                    counts.skipped += 1;
+                    let entries = media_entries(&msg.raw_json);
+                    if !entries.is_empty() && attach_media_in_tx(&tx, id, &entries)? {
+                        counts.media_linked += 1;
+                    }
                 }
             }
-            tx.commit()?;
-            return Ok(InsertOutcome::Duplicate(id));
         }
-
-        let conversation = resolve_conversation(&tx, &instance, msg)?;
-        let (original_timestamp, timezone, time_confidence) = time_provenance(msg)?;
-        let sent_instant = if msg.sent_at.is_empty() {
-            None
+        for issue in issues {
+            tx.execute(
+                "INSERT INTO import_issues (import_id, position, external_ref, reason)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (import_id, position) DO NOTHING",
+                params![import_id, issue.position, issue.external_ref, issue.reason],
+            )?;
+        }
+        if completes {
+            tx.execute(
+                "DELETE FROM import_checkpoints WHERE import_id = ?1",
+                params![import_id],
+            )?;
         } else {
-            Some(msg.sent_at.as_str())
-        };
-        let id: i64 = tx.query_row(
-            r#"
-            INSERT INTO archive_messages
-                (source_instance_id, conversation_id, external_id, channel, chat_id,
-                 author, subject, body, raw_json,
-                 sent_instant, original_timestamp, timezone, time_confidence, content_hash)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-            RETURNING id
-            "#,
+            tx.execute(
+                "INSERT INTO import_checkpoints (import_id, source, committed_items, updated_at)
+                 VALUES (?1, ?2, ?3, datetime('now'))
+                 ON CONFLICT(import_id) DO UPDATE SET
+                    committed_items = excluded.committed_items,
+                    updated_at     = excluded.updated_at",
+                params![import_id, source, committed_after],
+            )?;
+        }
+        tx.commit()?;
+        Ok(counts)
+    }
+
+    /// The committed item count of an interrupted bounded import, if one
+    /// is recorded for `import_id` (see [`Storage::commit_import_batch`]).
+    pub fn import_checkpoint(&self, import_id: &str) -> Result<Option<u64>> {
+        let count = self
+            .conn
+            .query_row(
+                "SELECT committed_items FROM import_checkpoints WHERE import_id = ?1",
+                params![import_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        Ok(count.map(|c| c.max(0) as u64))
+    }
+
+    /// One import's durable issue records (parse failures), paged by
+    /// position, oldest first.
+    pub fn import_issues(
+        &self,
+        import_id: &str,
+        offset: u64,
+        limit: u64,
+    ) -> Result<Vec<ImportIssue>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, import_id, position, external_ref, reason, recorded_at
+             FROM import_issues
+             WHERE import_id = ?1
+             ORDER BY position
+             LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = stmt.query_map(
             params![
-                instance,
-                conversation,
-                msg.external_id,
-                msg.channel,
-                msg.chat_id,
-                msg.author,
-                msg.body,
-                msg.raw_json,
-                sent_instant,
-                original_timestamp,
-                timezone,
-                time_confidence,
-                content_hash(msg),
+                import_id,
+                limit.min(i64::MAX as u64) as i64,
+                offset.min(i64::MAX as u64) as i64
             ],
+            |row| {
+                Ok(ImportIssue {
+                    id: row.get(0)?,
+                    import_id: row.get(1)?,
+                    position: row.get::<_, i64>(2)?.max(0) as u64,
+                    external_ref: row.get(3)?,
+                    reason: row.get(4)?,
+                    recorded_at: row.get(5)?,
+                })
+            },
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// How many issue records one import recorded.
+    pub fn import_issue_count(&self, import_id: &str) -> Result<u64> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM import_issues WHERE import_id = ?1",
+            params![import_id],
             |row| row.get(0),
         )?;
-        tx.execute(
-            "INSERT INTO message_identities
-                 (source_instance_id, namespace, external_key, message_id)
-             VALUES (?1, 'legacy', ?2, ?3)",
-            params![instance, msg.external_id, id],
-        )?;
-        tx.execute(
-            "INSERT INTO message_occurrences (message_id, scope, provider_item_id)
-             VALUES (?1, 'import', ?2)",
-            params![id, msg.external_id],
-        )?;
-        tx.commit()?;
-        Ok(InsertOutcome::Inserted(id))
+        Ok(count.max(0) as u64)
     }
 
     // ------------------------------------------------------------------
@@ -2137,56 +2216,9 @@ impl Storage {
     /// harmlessly). Returns `true` when the row changed; an all-duplicates
     /// merge is a no-op, so re-imports stay idempotent.
     pub fn attach_media(&self, id: i64, entries: &[serde_json::Value]) -> Result<bool> {
-        if entries.is_empty() {
-            return Ok(false);
-        }
-        let existing_raw: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT raw_json FROM archive_messages WHERE id = ?1",
-                params![id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(existing_raw) = existing_raw else {
-            return Ok(false);
-        };
-        let mut raw: serde_json::Value = serde_json::from_str(&existing_raw)
-            .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
-        if !raw.is_object() {
-            raw = serde_json::Value::Object(Default::default());
-        }
-        let obj = raw.as_object_mut().expect("just wrapped into an object");
-        let media = obj
-            .entry("media".to_string())
-            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
-        if !media.is_array() {
-            *media = serde_json::Value::Array(Vec::new());
-        }
-        let array = media.as_array_mut().expect("just coerced to array");
-        let known: std::collections::HashSet<String> = array
-            .iter()
-            .filter_map(|e| {
-                e.get("sha256")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            })
-            .collect();
-        let mut changed = false;
-        for entry in entries {
-            let sha = entry.get("sha256").and_then(serde_json::Value::as_str);
-            if sha.is_none_or(str::is_empty) || sha.is_some_and(|s| known.contains(s)) {
-                continue;
-            }
-            array.push(entry.clone());
-            changed = true;
-        }
-        if changed {
-            self.conn.execute(
-                "UPDATE archive_messages SET raw_json = ?1 WHERE id = ?2",
-                params![raw.to_string(), id],
-            )?;
-        }
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = attach_media_in_tx(&tx, id, entries)?;
+        tx.commit()?;
         Ok(changed)
     }
 
@@ -2218,6 +2250,172 @@ impl Storage {
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+}
+
+/// Insert one message inside an open transaction — the shared body of
+/// [`Storage::insert_message`] (one-message transaction) and
+/// [`Storage::commit_import_batch`] (many-message batch transaction).
+/// Identical dedup semantics in both: an existing identity records the
+/// repeat occurrence and refreshes the conversation label, then reports
+/// `Duplicate`; a new row lands in `archive_messages` with its identity
+/// alias and first `import` occurrence.
+fn insert_message_in_tx(tx: &Transaction<'_>, msg: &NewMessage) -> Result<InsertOutcome> {
+    let instance = resolve_legacy_instance(tx, &msg.source)?;
+
+    // Dedup on the canonical identity: first write wins forever.
+    let existing: Option<i64> = tx
+        .query_row(
+            "SELECT message_id FROM message_identities
+             WHERE source_instance_id = ?1 AND namespace = 'legacy'
+               AND external_key = ?2 AND revision_hash = ''",
+            params![instance, msg.external_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        // Record the repeat observation only (idempotent on the
+        // occurrence tuple); the archived row itself stays untouched.
+        tx.execute(
+            "INSERT OR IGNORE INTO message_occurrences
+                 (message_id, scope, provider_item_id)
+             VALUES (?1, 'import', ?2)",
+            params![id, msg.external_id],
+        )?;
+        // A re-import of the same chat under a rename still refreshes
+        // the conversation label (identity is stable, names follow).
+        if !msg.conversation_key.is_empty() && !msg.chat_id.is_empty() {
+            if let Some(conv) = find_provider_conversation(tx, &instance, &msg.conversation_key)? {
+                tx.execute(
+                    "UPDATE conversations SET label = ?2 WHERE id = ?1 AND label <> ?2",
+                    params![conv, msg.chat_id],
+                )?;
+            }
+        }
+        return Ok(InsertOutcome::Duplicate(id));
+    }
+
+    let conversation = resolve_conversation(tx, &instance, msg)?;
+    let (original_timestamp, timezone, time_confidence) = time_provenance(msg)?;
+    let sent_instant = if msg.sent_at.is_empty() {
+        None
+    } else {
+        Some(msg.sent_at.as_str())
+    };
+    let id: i64 = tx.query_row(
+        r#"
+        INSERT INTO archive_messages
+            (source_instance_id, conversation_id, external_id, channel, chat_id,
+             author, subject, body, raw_json,
+             sent_instant, original_timestamp, timezone, time_confidence, content_hash)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+        RETURNING id
+        "#,
+        params![
+            instance,
+            conversation,
+            msg.external_id,
+            msg.channel,
+            msg.chat_id,
+            msg.author,
+            msg.body,
+            msg.raw_json,
+            sent_instant,
+            original_timestamp,
+            timezone,
+            time_confidence,
+            content_hash(msg),
+        ],
+        |row| row.get(0),
+    )?;
+    tx.execute(
+        "INSERT INTO message_identities
+             (source_instance_id, namespace, external_key, message_id)
+         VALUES (?1, 'legacy', ?2, ?3)",
+        params![instance, msg.external_id, id],
+    )?;
+    tx.execute(
+        "INSERT INTO message_occurrences (message_id, scope, provider_item_id)
+         VALUES (?1, 'import', ?2)",
+        params![id, msg.external_id],
+    )?;
+    Ok(InsertOutcome::Inserted(id))
+}
+
+/// The non-empty `media` array of a message's `raw_json`, if any — the
+/// media-extraction pass writes it there ([`crate::media`]), and the
+/// ingest paths link/backfill from it.
+fn media_entries(raw_json: &str) -> Vec<serde_json::Value> {
+    serde_json::from_str::<serde_json::Value>(raw_json)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("media")
+                .and_then(|m| m.as_array())
+                .filter(|a| !a.is_empty())
+                .cloned()
+        })
+        .unwrap_or_default()
+}
+
+/// Merge `entries` into a message's existing `media` array inside an open
+/// transaction (the shared body of [`Storage::attach_media`] and the
+/// duplicate path of [`Storage::commit_import_batch`]). Returns whether
+/// anything changed.
+fn attach_media_in_tx(
+    tx: &Transaction<'_>,
+    id: i64,
+    entries: &[serde_json::Value],
+) -> Result<bool> {
+    if entries.is_empty() {
+        return Ok(false);
+    }
+    let existing_raw: Option<String> = tx
+        .query_row(
+            "SELECT raw_json FROM archive_messages WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(existing_raw) = existing_raw else {
+        return Ok(false);
+    };
+    let mut raw: serde_json::Value = serde_json::from_str(&existing_raw)
+        .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
+    if !raw.is_object() {
+        raw = serde_json::Value::Object(Default::default());
+    }
+    let obj = raw.as_object_mut().expect("just wrapped into an object");
+    let media = obj
+        .entry("media".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if !media.is_array() {
+        *media = serde_json::Value::Array(Vec::new());
+    }
+    let array = media.as_array_mut().expect("just coerced to array");
+    let known: std::collections::HashSet<String> = array
+        .iter()
+        .filter_map(|e| {
+            e.get("sha256")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    let mut changed = false;
+    for entry in entries {
+        let sha = entry.get("sha256").and_then(serde_json::Value::as_str);
+        if sha.is_none_or(str::is_empty) || sha.is_some_and(|s| known.contains(s)) {
+            continue;
+        }
+        array.push(entry.clone());
+        changed = true;
+    }
+    if changed {
+        tx.execute(
+            "UPDATE archive_messages SET raw_json = ?1 WHERE id = ?2",
+            params![raw.to_string(), id],
+        )?;
+    }
+    Ok(changed)
 }
 
 /// Find the legacy source instance for `namespace`, creating an unresolved
@@ -2692,6 +2890,42 @@ fn hit_from_row(row: &Row<'_>) -> rusqlite::Result<SearchHit> {
         message: message_from_row(row)?,
         snippet: row.get(9)?,
     })
+}
+
+/// One durable parse-failure record handed to
+/// [`Storage::commit_import_batch`]: `position` is the failed item's
+/// ordinal in the import's item stream, `external_ref` the best-effort
+/// upstream reference (often the broken entry's id, empty when the entry
+/// carried none), `reason` a short parser-level explanation (never raw
+/// file bytes).
+#[derive(Debug, Clone)]
+pub struct ImportIssueRecord<'a> {
+    pub position: u64,
+    pub external_ref: &'a str,
+    pub reason: &'a str,
+}
+
+/// A stored issue record, as returned by [`Storage::import_issues`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportIssue {
+    pub id: i64,
+    pub import_id: String,
+    pub position: u64,
+    pub external_ref: String,
+    pub reason: String,
+    pub recorded_at: String,
+}
+
+/// Per-batch counters returned by [`Storage::commit_import_batch`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ImportBatchCounts {
+    /// Messages newly stored by this batch.
+    pub inserted: u64,
+    /// Messages skipped because their identity already existed.
+    pub skipped: u64,
+    /// Messages whose media links were written or backfilled (inserts
+    /// carrying a `media` array plus duplicates that gained entries).
+    pub media_linked: u64,
 }
 
 /// Filter SQL fragments (`AND ...` clauses referencing table aliases `m`
