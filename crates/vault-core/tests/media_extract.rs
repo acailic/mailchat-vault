@@ -166,7 +166,7 @@ fn telegram_media_is_extracted_hash_named_and_linked() {
 
     // The photo message's raw_json: verbatim export fields plus the link.
     let raw: serde_json::Value =
-        serde_json::from_str(&raw_json_of(&mut storage, "123456789/102")).unwrap();
+        serde_json::from_str(&raw_json_of(&storage, "123456789/102")).unwrap();
     assert_eq!(raw["photo"], "photos/photo_102@01-11-2023_11-02-00.jpg");
     assert_eq!(raw["width"], 800);
     let entry = &raw["media"][0];
@@ -181,18 +181,18 @@ fn telegram_media_is_extracted_hash_named_and_linked() {
 
     // Document and voice: kinds from field/media_type.
     let doc: serde_json::Value =
-        serde_json::from_str(&raw_json_of(&mut storage, "123456789/103")).unwrap();
+        serde_json::from_str(&raw_json_of(&storage, "123456789/103")).unwrap();
     assert_eq!(doc["media"][0]["kind"], "document");
     assert_eq!(doc["media"][0]["name"], "plan.pdf");
     let voice: serde_json::Value =
-        serde_json::from_str(&raw_json_of(&mut storage, "123456789/104")).unwrap();
+        serde_json::from_str(&raw_json_of(&storage, "123456789/104")).unwrap();
     assert_eq!(voice["media_type"], "voice_message");
     assert_eq!(voice["media"][0]["kind"], "audio");
     assert_eq!(voice["media"][0]["name"], "audio_104@01-11-2023.ogg");
 
     // Text message untouched: no media array.
     let text: serde_json::Value =
-        serde_json::from_str(&raw_json_of(&mut storage, "123456789/100")).unwrap();
+        serde_json::from_str(&raw_json_of(&storage, "123456789/100")).unwrap();
     assert!(text.get("media").is_none());
 }
 
@@ -226,7 +226,7 @@ fn video_thumbnail_keeps_image_kind_and_file_takes_the_hint() {
     assert_eq!(media.stored, 2);
     assert_eq!(media.deduped, 0);
 
-    let raw: serde_json::Value = serde_json::from_str(&raw_json_of(&mut storage, "9/1")).unwrap();
+    let raw: serde_json::Value = serde_json::from_str(&raw_json_of(&storage, "9/1")).unwrap();
     let thumb = &raw["media"][0];
     let clip = &raw["media"][1];
     assert_eq!(
@@ -249,8 +249,8 @@ fn telegram_reimport_dedups_files_and_rows() {
 
     sb.import_with_media(&mut storage);
     let before: Vec<String> = vec![
-        raw_json_of(&mut storage, "123456789/102"),
-        raw_json_of(&mut storage, "123456789/103"),
+        raw_json_of(&storage, "123456789/102"),
+        raw_json_of(&storage, "123456789/103"),
     ];
 
     let outcome = sb.import_with_media(&mut storage);
@@ -265,8 +265,8 @@ fn telegram_reimport_dedups_files_and_rows() {
     assert_eq!(fs::read_dir(sb.store_dir()).unwrap().count(), 3);
 
     let after: Vec<String> = vec![
-        raw_json_of(&mut storage, "123456789/102"),
-        raw_json_of(&mut storage, "123456789/103"),
+        raw_json_of(&storage, "123456789/102"),
+        raw_json_of(&storage, "123456789/103"),
     ];
     assert_eq!(before, after, "re-import must not rewrite raw_json");
 }
@@ -295,9 +295,8 @@ fn identical_content_in_two_messages_is_deduped_by_hash() {
     assert_eq!(media.linked, 2);
     // One file on disk; both messages link to it.
     assert_eq!(fs::read_dir(sb.store_dir()).unwrap().count(), 1);
-    let first: serde_json::Value = serde_json::from_str(&raw_json_of(&mut storage, "7/1")).unwrap();
-    let second: serde_json::Value =
-        serde_json::from_str(&raw_json_of(&mut storage, "7/2")).unwrap();
+    let first: serde_json::Value = serde_json::from_str(&raw_json_of(&storage, "7/1")).unwrap();
+    let second: serde_json::Value = serde_json::from_str(&raw_json_of(&storage, "7/2")).unwrap();
     assert_eq!(first["media"][0]["path"], second["media"][0]["path"]);
     assert_eq!(first["media"][0]["sha256"], second["media"][0]["sha256"]);
     assert_eq!(first["media"][0]["name"], "a.jpg");
@@ -352,11 +351,8 @@ fn identical_content_referenced_as_jpg_then_jpeg_is_stored_once() {
         "recognized by content despite the extension"
     );
     assert_eq!(fs::read_dir(sb.store_dir()).unwrap().count(), 1);
-    let raw: serde_json::Value = serde_json::from_str(&raw_json_of(&mut storage, "12/1")).unwrap();
-    assert_eq!(
-        raw["media"][0]["path"],
-        first_stored_path(&mut storage, "11/1")
-    );
+    let raw: serde_json::Value = serde_json::from_str(&raw_json_of(&storage, "12/1")).unwrap();
+    assert_eq!(raw["media"][0]["path"], first_stored_path(&storage, "11/1"));
 }
 
 /// Store path recorded for the first import, so the test can prove the
@@ -388,7 +384,7 @@ fn text_only_export_counts_missing_and_imports_anyway() {
     assert_eq!(media.stored, 0);
     assert_eq!(media.linked, 0);
     // No media array was added, and no store directory was created.
-    let raw: serde_json::Value = serde_json::from_str(&raw_json_of(&mut storage, "9/1")).unwrap();
+    let raw: serde_json::Value = serde_json::from_str(&raw_json_of(&storage, "9/1")).unwrap();
     assert!(raw.get("media").is_none());
     assert!(!sb.store_dir().exists());
 }
@@ -405,7 +401,7 @@ fn reimport_with_media_backfills_an_existing_archive() {
     assert!(outcome.media.is_none());
     assert!(!sb.store_dir().exists());
     let plain: serde_json::Value =
-        serde_json::from_str(&raw_json_of(&mut storage, "123456789/102")).unwrap();
+        serde_json::from_str(&raw_json_of(&storage, "123456789/102")).unwrap();
     assert!(plain.get("media").is_none());
 
     // Same export, extraction on: all rows are duplicates but the three
@@ -418,7 +414,7 @@ fn reimport_with_media_backfills_an_existing_archive() {
     assert_eq!(media.stored, 3);
     assert_eq!(media.linked, 3);
     let linked: serde_json::Value =
-        serde_json::from_str(&raw_json_of(&mut storage, "123456789/102")).unwrap();
+        serde_json::from_str(&raw_json_of(&storage, "123456789/102")).unwrap();
     assert_eq!(linked["media"][0]["kind"], "image");
     // Original fields survive the backfill merge.
     assert_eq!(linked["photo"], "photos/photo_102@01-11-2023_11-02-00.jpg");
