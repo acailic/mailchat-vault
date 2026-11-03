@@ -203,6 +203,10 @@ async function withSessionAttempt(options, fn, { keepData }) {
   const failures = [];
   try {
     await waitForPort(port, 20_000);
+    // tauri-driver forwards /session to the WebKitWebDriver it spawned on
+    // --native-port; under CI load that bind can lag tauri-driver's own, and
+    // an early request surfaces as UND_ERR_SOCKET / "Connection refused".
+    await waitForPort(nativePort, 20_000);
     browser = await remote({
       hostname: "127.0.0.1",
       port,

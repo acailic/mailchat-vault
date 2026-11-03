@@ -48,6 +48,7 @@ export async function run(ctx) {
       assert.includes(note, "mock-model via 127.0.0.1", "note names model and host");
 
       await ui.importMbox(browser, ui.archiveMbox);
+      await ui.openView(browser, "workspace"); // ask controls are view-scoped
 
       // --- ask 1: LLM-planned vault search narrowed to the midnight pair ---
       const askInput = await browser.$("#ask");

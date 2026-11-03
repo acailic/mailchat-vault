@@ -143,6 +143,7 @@ export async function run(ctx) {
     );
 
     // The jobs panel labels the round for an end user.
+    await ui.openView(browser, "activity");
     const label = await ui.waitForText(browser, "#jobs-list", "IMAP sync (all sources)", {
       timeoutMsg: "the jobs panel never showed the imap_sync_all label",
     });

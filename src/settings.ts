@@ -150,7 +150,15 @@ export function keyStoreNote(store: SettingsView["key_store"]): string {
   return "";
 }
 
-/** Apply a theme choice to the document (idempotent). */
+/** Apply a theme choice to the document (idempotent). "system" clears
+ * the explicit theme so the prefers-color-scheme media query in the
+ * design tokens decides; explicit light/dark pin the token palette. */
 export function applyTheme(theme: Theme): void {
-  document.documentElement.style.colorScheme = theme === "system" ? "" : theme;
+  const root = document.documentElement;
+  root.style.colorScheme = theme === "system" ? "" : theme;
+  if (theme === "system") {
+    delete root.dataset.theme;
+  } else {
+    root.dataset.theme = theme;
+  }
 }

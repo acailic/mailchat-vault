@@ -109,9 +109,12 @@ describe("applyTheme", () => {
   it("forces light/dark and resets to system", () => {
     applyTheme("dark");
     expect(document.documentElement.style.colorScheme).toBe("dark");
+    expect(document.documentElement.dataset.theme).toBe("dark");
     applyTheme("light");
     expect(document.documentElement.style.colorScheme).toBe("light");
+    expect(document.documentElement.dataset.theme).toBe("light");
     applyTheme("system");
     expect(document.documentElement.style.colorScheme).toBe("");
+    expect(document.documentElement.dataset.theme).toBeUndefined();
   });
 });

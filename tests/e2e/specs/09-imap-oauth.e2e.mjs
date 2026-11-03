@@ -40,6 +40,7 @@ export async function run(ctx) {
   // Session 1: no OAuth env vars — the sign-in is explicitly off.
   await withSession({}, async (browser) => {
     await ui.waitForApp(browser);
+    await ui.openView(browser, "sources");
 
     // Default mode is app password: the password field shows, the Google
     // sign-in button does not.
@@ -110,6 +111,7 @@ export async function run(ctx) {
     },
     async (browser) => {
       await ui.waitForApp(browser);
+      await ui.openView(browser, "sources");
       await (await browser.$("#imap-user")).setValue("you@gmail.com");
       await pickAuthMode(browser, "oauth");
       const hint = await ui.waitForText(
