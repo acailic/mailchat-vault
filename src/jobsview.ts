@@ -147,6 +147,8 @@ export function jobKindLabel(kind: string): string {
       return "local embeddings";
     case "imap_sync":
       return "IMAP sync";
+    case "imap_sync_all":
+      return "IMAP sync (all sources)";
     default:
       return kind;
   }

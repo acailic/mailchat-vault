@@ -63,7 +63,8 @@ use serde_json::Value;
 use crate::imap::{ImapConfig, SyncStorage};
 use crate::message::NewMessage;
 use crate::storage::{
-    ConnectorIdentity, MailInsertOutcome, NewSourceInstance, Occurrence, Storage,
+    BatchFailure, ConnectorIdentity, MailBatchItem, MailBatchOutcome, NewSourceInstance,
+    Occurrence, Storage,
 };
 use crate::{Error, Result};
 
@@ -946,6 +947,35 @@ impl<'a> JobContext<'a> {
 // IMAP sync over the pool
 // ---------------------------------------------------------------------------
 
+/// The owned mirror of one [`MailBatchItem`] — the queue is `'static`, so
+/// [`PoolSync::commit_batch`] clones the borrowed call frame into the
+/// write closure and re-borrows it on the writer lane.
+struct OwnedBatchMail {
+    message: NewMessage,
+    subject: String,
+    namespace: String,
+    external_key: String,
+    revision_hash: String,
+    scope: String,
+    provider_item_id: String,
+    occurrence_uidvalidity: Option<u32>,
+}
+
+impl From<&MailBatchItem<'_>> for OwnedBatchMail {
+    fn from(item: &MailBatchItem<'_>) -> Self {
+        Self {
+            message: item.message.clone(),
+            subject: item.subject.to_string(),
+            namespace: item.identity.namespace.to_string(),
+            external_key: item.identity.external_key.to_string(),
+            revision_hash: item.identity.revision_hash.to_string(),
+            scope: item.occurrence.scope.to_string(),
+            provider_item_id: item.occurrence.provider_item_id.to_string(),
+            occurrence_uidvalidity: item.occurrence.uidvalidity,
+        }
+    }
+}
+
 /// [`SyncStorage`] adapter that marshals every storage call of an IMAP
 /// sync through the pool's bounded write queue.
 ///
@@ -994,50 +1024,65 @@ impl SyncStorage for PoolSync<'_> {
             .submit_write(move |s| s.get_imap_checkpoint(&instance, &folder))
     }
 
-    fn set_checkpoint(
+    fn commit_batch(
         &self,
         instance: &str,
         folder: &str,
         uidvalidity: u32,
         last_uid: u32,
-    ) -> Result<()> {
+        mails: &[MailBatchItem<'_>],
+        failures: &[BatchFailure<'_>],
+        resolved: &[u32],
+    ) -> Result<MailBatchOutcome> {
+        // One write round trip carries the whole batch: the network waits
+        // that produced it happened on this thread, before the submission,
+        // and the transaction on the writer lane never spans them.
+        let instance = instance.to_string();
+        let folder = folder.to_string();
+        let mails: Vec<OwnedBatchMail> = mails.iter().map(OwnedBatchMail::from).collect();
+        let failures: Vec<(u32, String)> = failures
+            .iter()
+            .map(|f| (f.uid, f.reason.to_string()))
+            .collect();
+        let resolved = resolved.to_vec();
+        self.0.submit_write(move |s| {
+            let items: Vec<MailBatchItem<'_>> = mails
+                .iter()
+                .map(|m| MailBatchItem {
+                    message: &m.message,
+                    subject: &m.subject,
+                    identity: ConnectorIdentity {
+                        namespace: &m.namespace,
+                        external_key: &m.external_key,
+                        revision_hash: &m.revision_hash,
+                    },
+                    occurrence: Occurrence {
+                        scope: &m.scope,
+                        provider_item_id: &m.provider_item_id,
+                        uidvalidity: m.occurrence_uidvalidity,
+                    },
+                })
+                .collect();
+            let batch_failures: Vec<BatchFailure<'_>> = failures
+                .iter()
+                .map(|(uid, reason)| BatchFailure { uid: *uid, reason })
+                .collect();
+            s.commit_imap_batch(
+                &instance,
+                &folder,
+                uidvalidity,
+                last_uid,
+                &items,
+                &batch_failures,
+                &resolved,
+            )
+        })
+    }
+
+    fn failed_uids(&self, instance: &str, folder: &str, uidvalidity: u32) -> Result<Vec<u32>> {
         let instance = instance.to_string();
         let folder = folder.to_string();
         self.0
-            .submit_write(move |s| s.set_imap_checkpoint(&instance, &folder, uidvalidity, last_uid))
-    }
-
-    fn insert_mail(
-        &self,
-        instance: &str,
-        message: &NewMessage,
-        subject: &str,
-        identity: &ConnectorIdentity<'_>,
-        occurrence: &Occurrence<'_>,
-    ) -> Result<MailInsertOutcome> {
-        // The queue is 'static, so the borrowed call frame is cloned into
-        // the closure; inserts stay exactly as cheap as the direct path.
-        let instance = instance.to_string();
-        let message = message.clone();
-        let subject = subject.to_string();
-        let namespace = identity.namespace.to_string();
-        let external_key = identity.external_key.to_string();
-        let revision_hash = identity.revision_hash.to_string();
-        let scope = occurrence.scope.to_string();
-        let provider_item_id = occurrence.provider_item_id.to_string();
-        let uidvalidity = occurrence.uidvalidity;
-        self.0.submit_write(move |s| {
-            let identity = ConnectorIdentity {
-                namespace: &namespace,
-                external_key: &external_key,
-                revision_hash: &revision_hash,
-            };
-            let occurrence = Occurrence {
-                scope: &scope,
-                provider_item_id: &provider_item_id,
-                uidvalidity,
-            };
-            s.insert_mail_message(&instance, &message, &subject, &identity, &occurrence)
-        })
+            .submit_write(move |s| s.imap_failed_uids(&instance, &folder, uidvalidity))
     }
 }
