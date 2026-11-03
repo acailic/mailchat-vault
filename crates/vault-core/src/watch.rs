@@ -25,7 +25,11 @@
 //!   events) is published on every change for the UI to render.
 //!
 //! This module has no UI dependencies; the Tauri shell maps snapshots to
-//! window events and the commands to `watch_*` IPC commands.
+//! window events and the commands to `watch_*` IPC commands. Since M2.1
+//! the watcher works through the [`crate::jobs::DbPool`]: folder add/
+//! remove and imports are writes on the bounded queue, watched-folder
+//! lookups are reads — the watch loop never holds a connection while it
+//! waits on the filesystem.
 
 use std::collections::HashMap;
 use std::fs;
@@ -42,6 +46,7 @@ use notify::{recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
 use serde::Serialize;
 
 use crate::ingest::{ingest, IngestSummary, Source};
+use crate::jobs::DbPool;
 use crate::mbox::MboxSource;
 use crate::signal::{is_signal_export_reader, SignalSource};
 use crate::storage::Storage;
@@ -162,7 +167,7 @@ impl FolderWatcher {
     /// `running == false` and folder commands return errors — the process
     /// never panics from the watcher.
     pub fn spawn(
-        storage: Arc<Mutex<Storage>>,
+        pool: Arc<DbPool>,
         config: WatchConfig,
         on_change: impl Fn(&WatchSnapshot) + Send + Sync + 'static,
     ) -> Self {
@@ -172,7 +177,7 @@ impl FolderWatcher {
         let thread = std::thread::Builder::new()
             .name("folder-watch".into())
             .spawn(move || {
-                run_loop(storage, config, on_change, control_rx, snapshot_for_thread);
+                run_loop(pool, config, on_change, control_rx, snapshot_for_thread);
             })
             .ok();
         if thread.is_none() {
@@ -256,10 +261,13 @@ fn lock_snap(snapshot: &Arc<Mutex<WatchSnapshot>>) -> MutexGuard<'_, WatchSnapsh
     snapshot.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-fn lock_storage(storage: &Arc<Mutex<Storage>>) -> Result<MutexGuard<'_, Storage>, String> {
-    storage
-        .lock()
-        .map_err(|e| format!("storage lock poisoned: {e}"))
+/// Run a write through the pool's bounded queue, stringified for the
+/// watcher's event log (all failures become events, never panics).
+fn pool_write<T: Send + 'static>(
+    pool: &Arc<DbPool>,
+    op: impl FnOnce(&Storage) -> crate::Result<T> + Send + 'static,
+) -> std::result::Result<T, String> {
+    pool.submit_write(op).map_err(|e| e.to_string())
 }
 
 /// Set the pending count, publish the snapshot, and notify `on_change`
@@ -407,7 +415,7 @@ fn scan_dir(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 
 /// The watch loop: filesystem events + commands in, imports out.
 fn run_loop(
-    storage: Arc<Mutex<Storage>>,
+    pool: Arc<DbPool>,
     config: WatchConfig,
     on_change: impl Fn(&WatchSnapshot) + Send + Sync + 'static,
     control: Receiver<Command>,
@@ -448,9 +456,7 @@ fn run_loop(
     // folder stays configured, so it re-arms on the next start once
     // present again.
     {
-        let stored: Vec<String> = match lock_storage(&storage)
-            .and_then(|s| s.watched_folders().map_err(|e| e.to_string()))
-        {
+        let stored: Vec<String> = match pool.with_read(|s| s.watched_folders()) {
             Ok(stored) => stored,
             Err(e) => {
                 let mut snap = lock_snap(&snapshot);
@@ -530,14 +536,7 @@ fn run_loop(
                 Command::AddFolder { path, ack } => {
                     let result = {
                         let mut snap = lock_snap(&snapshot);
-                        add_folder(
-                            &mut watcher,
-                            &storage,
-                            &mut pending,
-                            &mut snap,
-                            &config,
-                            &path,
-                        )
+                        add_folder(&mut watcher, &pool, &mut pending, &mut snap, &config, &path)
                     };
                     publish(&snapshot, &pending, &on_change);
                     let _ = ack.send(result);
@@ -545,14 +544,7 @@ fn run_loop(
                 Command::RemoveFolder { path, ack } => {
                     let result = {
                         let mut snap = lock_snap(&snapshot);
-                        remove_folder(
-                            &mut watcher,
-                            &storage,
-                            &mut pending,
-                            &mut snap,
-                            &config,
-                            &path,
-                        )
+                        remove_folder(&mut watcher, &pool, &mut pending, &mut snap, &config, &path)
                     };
                     publish(&snapshot, &pending, &on_change);
                     let _ = ack.send(result);
@@ -570,7 +562,7 @@ fn run_loop(
         if !due.is_empty() {
             for path in due {
                 pending.remove(&path);
-                import_file(&storage, &snapshot, &config, &on_change, &path);
+                import_file(&pool, &snapshot, &config, &on_change, &path);
             }
             publish(&snapshot, &pending, &on_change);
         }
@@ -581,7 +573,7 @@ fn run_loop(
 /// if the persist fails), enqueue the initial scan.
 fn add_folder(
     watcher: &mut notify::RecommendedWatcher,
-    storage: &Arc<Mutex<Storage>>,
+    pool: &Arc<DbPool>,
     pending: &mut HashMap<PathBuf, Instant>,
     snap: &mut WatchSnapshot,
     config: &WatchConfig,
@@ -598,9 +590,8 @@ fn add_folder(
         return Ok(()); // already watched — idempotent
     }
     arm_folder(watcher, &canonical)?;
-    if let Err(e) =
-        lock_storage(storage).and_then(|s| s.add_watched_folder(&key).map_err(|e| e.to_string()))
-    {
+    let persist_key = key.clone();
+    if let Err(e) = pool_write(pool, move |s| s.add_watched_folder(&persist_key)) {
         // Persist failed: undo the arm so the watcher matches its records.
         let _ = watcher.unwatch(&canonical);
         return Err(e);
@@ -623,7 +614,7 @@ fn add_folder(
 /// is not watched is a successful no-op.
 fn remove_folder(
     watcher: &mut notify::RecommendedWatcher,
-    storage: &Arc<Mutex<Storage>>,
+    pool: &Arc<DbPool>,
     pending: &mut HashMap<PathBuf, Instant>,
     snap: &mut WatchSnapshot,
     config: &WatchConfig,
@@ -642,9 +633,8 @@ fn remove_folder(
     let mut removed_any = false;
     for key in &keys {
         let ks = key.to_string_lossy().into_owned();
-        match lock_storage(storage)
-            .and_then(|s| s.remove_watched_folder(&ks).map_err(|e| e.to_string()))
-        {
+        let k = ks.clone();
+        match pool_write(pool, move |s| s.remove_watched_folder(&k)) {
             Ok(deleted) => removed_any |= deleted,
             Err(e) => {
                 push_event(
@@ -682,7 +672,7 @@ fn remove_folder(
 /// Import one settled file through the normal source pipeline (dedup
 /// contract applies). All failures become events, never panics.
 fn import_file(
-    storage: &Arc<Mutex<Storage>>,
+    pool: &Arc<DbPool>,
     snapshot: &Arc<Mutex<WatchSnapshot>>,
     config: &WatchConfig,
     on_change: &impl Fn(&WatchSnapshot),
@@ -690,18 +680,18 @@ fn import_file(
 ) {
     let display = path.display().to_string();
     let event = match import_source_for(path) {
-        Ok(Some(source)) => match lock_storage(storage)
-            .and_then(|s| ingest(&s, source.as_ref()).map_err(|e| e.to_string()))
-        {
-            Ok(summary) => WatchEvent::Imported {
-                path: display,
-                summary,
-            },
-            Err(e) => WatchEvent::Failed {
-                path: display,
-                error: e,
-            },
-        },
+        Ok(Some(source)) => {
+            match pool_write(pool, move |s| ingest(s, source.as_ref())) {
+                Ok(summary) => WatchEvent::Imported {
+                    path: display,
+                    summary,
+                },
+                Err(e) => WatchEvent::Failed {
+                    path: display,
+                    error: e,
+                },
+            }
+        }
         Ok(None) => WatchEvent::Skipped {
             path: display,
             reason: "not a recognized export (.mbox, WhatsApp .txt, Telegram result.json, or Signal conversation .json)"
@@ -728,7 +718,7 @@ fn import_file(
 /// the WhatsApp line check, and Telegram and Signal detection stream the
 /// file through a small fixed-size buffer, so an unrelated huge file costs
 /// neither a full read nor a parse tree.
-fn import_source_for(path: &Path) -> Result<Option<Box<dyn Source>>, String> {
+fn import_source_for(path: &Path) -> Result<Option<Box<dyn Source + Send>>, String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
