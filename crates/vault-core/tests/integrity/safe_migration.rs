@@ -24,7 +24,7 @@ use vault_core::Error;
 
 use crate::util::{hash_file, raw, scratch_dir, version2_db_with_data};
 
-const KNOWN_VERSION: i64 = 11;
+const KNOWN_VERSION: i64 = 12;
 const ROWS: usize = 9;
 
 fn v2_fixture() -> (tempfile::TempDir, PathBuf) {
@@ -152,7 +152,7 @@ fn newer_schema_is_refused_without_touching_the_file() {
             err,
             Error::SchemaTooNew {
                 db: 99,
-                supported: 11
+                supported: 12
             }
         ),
         "expected SchemaTooNew, got: {err}"

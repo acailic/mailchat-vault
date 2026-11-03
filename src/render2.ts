@@ -1,0 +1,499 @@
+/// DOM rendering for the v2 search UI (M3.2): flat results rows, applied
+/// filter chips, and the v2 reading pane (detail + chronological context).
+/// Pure builders like render.ts — every dynamic string goes through
+/// textContent, tested via happy-dom in render2.test.ts.
+
+import { formatSentAt, humanSize, snippet as truncateBody } from "./format";
+import {
+  appendSegments,
+} from "./render";
+import {
+  type ContextEntry,
+  type FilterChip,
+  messageLink,
+} from "./searchstate";
+import {
+  highlightSegments,
+  parseSnippet,
+  splitTerms,
+} from "./viewmodel";
+import type {
+  ConversationContext,
+  ImportScope,
+  MessageSummary,
+} from "./v2types";
+
+// ---------------------------------------------------------------------------
+// Flat results
+// ---------------------------------------------------------------------------
+
+export interface FlatResultsOptions {
+  hits: MessageSummary[];
+  /** Keyboard-active row (-1 = none). */
+  activeIndex: number;
+  /** Row the user opened (Back restored it); -1 = none. */
+  selectedId: number | null;
+  /** Ids checked for selection export. */
+  selection: Set<number>;
+  /** Query terms for client-side highlighting in browse mode. */
+  terms: string[];
+  onOpen: (id: number) => void;
+  onToggleSelect: (id: number) => void;
+}
+
+/** The time-uncertainty marker shown instead of a fabricated timestamp. */
+export function timeLabel(hit: MessageSummary): string {
+  const base = formatSentAt(hit.sent_at ?? "");
+  if (!hit.sent_at) return base;
+  // Legacy-assumed dates stay visible but labeled (A04 honesty).
+  return hit.time_confidence === "legacy_assumed"
+    ? `${base} (assumed)`
+    : hit.time_confidence === "unresolved"
+      ? `${base} (unresolved)`
+      : base;
+}
+
+function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): HTMLLIElement {
+  const li = document.createElement("li");
+  li.className =
+    "hit-item" +
+    (at === opts.activeIndex ? " active" : "") +
+    (opts.selectedId === hit.id ? " selected" : "");
+  li.dataset.id = String(hit.id);
+  li.dataset.index = String(at);
+  if (at === opts.activeIndex) li.setAttribute("aria-current", "true");
+
+  // Selection checkbox for the explicit selection export.
+  const check = document.createElement("input");
+  check.type = "checkbox";
+  check.className = "row-select";
+  check.checked = opts.selection.has(hit.id);
+  check.setAttribute("aria-label", `Select message ${hit.id} for export`);
+  check.addEventListener("click", (event) => event.stopPropagation());
+  check.addEventListener("change", () => opts.onToggleSelect(hit.id));
+
+  const main = document.createElement("div");
+  main.className = "hit-main";
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  const parts = [
+    hit.author || "unknown",
+    timeLabel(hit),
+    hit.source_label,
+  ];
+  if (hit.conversation_label) parts.push(hit.conversation_label);
+  meta.textContent = parts.join(" · ");
+  if (hit.attachment_count > 0) {
+    const files = document.createElement("span");
+    files.className = "badge attachments";
+    files.title =
+      hit.available_attachment_count < hit.attachment_count
+        ? `${hit.attachment_count} attachment references, ${hit.available_attachment_count} preserved`
+        : `${hit.attachment_count} attachments`;
+    files.textContent =
+      hit.available_attachment_count < hit.attachment_count
+        ? `📎 ${hit.available_attachment_count}/${hit.attachment_count}`
+        : `📎 ${hit.attachment_count}`;
+    meta.append(" ", files);
+  }
+  if (hit.has_conflicting_revision) {
+    const conflict = document.createElement("span");
+    conflict.className = "badge conflict";
+    conflict.title = "Another revision of this message exists in the archive";
+    conflict.textContent = "revisions";
+    meta.append(" ", conflict);
+  }
+
+  const body = document.createElement("div");
+  body.className = "body";
+  if (hit.snippet) {
+    appendSegments(body, parseSnippet(hit.snippet));
+  } else if (hit.subject) {
+    body.textContent = hit.subject;
+  } else {
+    // Browse without a subject: nothing bounded to show — the metadata
+    // row is the honest summary (bodies are a detail-view payload).
+    body.textContent = "";
+  }
+
+  main.append(meta, body);
+  li.append(check, main);
+  li.setAttribute("role", "button");
+  li.setAttribute("tabindex", "0");
+  li.title = "Open this message";
+  const open = () => opts.onOpen(hit.id);
+  li.addEventListener("click", open);
+  li.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      event.stopPropagation();
+      open();
+    }
+  });
+  return li;
+}
+
+/** Render the flat, stable results list (no conversation regrouping). */
+export function renderFlatResults(el: HTMLElement, opts: FlatResultsOptions): void {
+  el.replaceChildren(...opts.hits.map((hit, at) => resultRow(hit, opts, at)));
+}
+
+// ---------------------------------------------------------------------------
+// Applied filter chips
+// ---------------------------------------------------------------------------
+
+export interface FilterChipsOptions {
+  chips: FilterChip[];
+  onRemove: (chip: FilterChip) => void;
+  onClear: () => void;
+}
+
+/** Removable chips for the applied filters + a Clear all button. */
+export function renderFilterChips(el: HTMLElement, opts: FilterChipsOptions): void {
+  const chips = opts.chips.map((chip) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "chip filter-chip";
+    button.dataset.kind = chip.kind;
+    button.title = `Remove filter: ${chip.label}`;
+    const label = document.createElement("span");
+    label.textContent = chip.label;
+    const x = document.createElement("span");
+    x.className = "chip-x";
+    x.textContent = "×";
+    x.setAttribute("aria-hidden", "true");
+    button.append(label, " ", x);
+    button.addEventListener("click", () => opts.onRemove(chip));
+    return button;
+  });
+  if (chips.length > 0) {
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "chip clear-chips";
+    clear.textContent = "Clear filters";
+    clear.addEventListener("click", opts.onClear);
+    el.replaceChildren(...chips, clear);
+  } else {
+    el.replaceChildren();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Import-scope picker
+// ---------------------------------------------------------------------------
+
+/** Fill the import-scope <select> from the listed scopes. */
+export function fillImportScopes(
+  select: HTMLSelectElement,
+  scopes: ImportScope[],
+  selected: string | null,
+): void {
+  const options: HTMLOptionElement[] = [];
+  const any = document.createElement("option");
+  any.value = "";
+  any.textContent = "any import";
+  options.push(any);
+  for (const scope of scopes) {
+    const option = document.createElement("option");
+    option.value = scope.import_id;
+    option.textContent = `${scope.import_id} (${scope.messages} messages)`;
+    options.push(option);
+  }
+  select.replaceChildren(...options);
+  select.value = selected ?? "";
+  if (select.value !== (selected ?? "")) select.value = "";
+}
+
+// ---------------------------------------------------------------------------
+// Refresh notice
+// ---------------------------------------------------------------------------
+
+/** Show or hide the "archive changed under your results" refresh offer. */
+export function renderRefreshNotice(
+  el: HTMLElement,
+  visible: boolean,
+  onRefresh: () => void,
+): void {
+  el.replaceChildren();
+  el.hidden = !visible;
+  if (!visible) return;
+  const note = document.createElement("span");
+  note.className = "meta";
+  note.textContent = "The archive changed — results may be out of date.";
+  const button = document.createElement("button");
+  button.type = "button";
+  button.id = "refresh-results-btn";
+  button.textContent = "Refresh";
+  button.addEventListener("click", onRefresh);
+  el.append(note, " ", button);
+}
+
+// ---------------------------------------------------------------------------
+// v2 reading pane
+// ---------------------------------------------------------------------------
+
+export interface Detail2Options {
+  ctx: ConversationContext;
+  /** Held context rows (merged pages), for thread rendering. */
+  entries: ContextEntry[];
+  /** Query text for whole-word highlighting in the anchor body. */
+  queryText: string;
+  hasMoreBefore: boolean;
+  hasMoreAfter: boolean;
+  onOpenMessage: (id: number) => void;
+  onLoadEarlier: () => void;
+  onLoadLater: () => void;
+  onCopy: () => void;
+  onCopyLink: () => void;
+  onExport: () => void;
+  /** Export the whole verified conversation thread (v1 export_chat). */
+  onExportChat: () => void;
+  onClose: () => void;
+}
+
+function contextRow(
+  entry: ContextEntry,
+  terms: string[],
+  onOpen: (id: number) => void,
+): HTMLLIElement {
+  const row = document.createElement("li");
+  row.className = "thread-row" + (entry.current ? " current" : "");
+  row.dataset.id = String(entry.id);
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  meta.textContent = `${entry.author || "unknown"} · ${formatSentAt(entry.sentAt ?? "")}`;
+  const body = document.createElement("div");
+  body.className = "body";
+  if (entry.current) {
+    appendSegments(body, highlightSegments(entry.body, terms));
+  } else {
+    body.textContent = truncateBody(entry.body, 140);
+  }
+  row.append(meta, body);
+  if (!entry.current) {
+    row.classList.add("link");
+    row.setAttribute("role", "button");
+    row.setAttribute("tabindex", "0");
+    row.title = "Open this message";
+    const open = () => onOpen(entry.id);
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        event.stopPropagation();
+        open();
+      }
+    });
+  }
+  return row;
+}
+
+/** Render the v2 reading pane: detail card + context thread + actions. */
+export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
+  const { ctx, entries } = opts;
+  const detail = ctx.anchor;
+  const terms = splitTerms(opts.queryText);
+
+  const card = document.createElement("article");
+  card.className = "detail-card";
+
+  const header = document.createElement("header");
+  const title = document.createElement("h2");
+  title.textContent = detail.author || "unknown";
+  const actions = document.createElement("div");
+  actions.className = "header-actions";
+  const copyButton = document.createElement("button");
+  copyButton.type = "button";
+  copyButton.className = "copy-btn";
+  copyButton.textContent = "Copy";
+  copyButton.title = "Copy the message text with provenance";
+  copyButton.addEventListener("click", opts.onCopy);
+  const linkButton = document.createElement("button");
+  linkButton.type = "button";
+  linkButton.className = "copy-link-btn";
+  linkButton.textContent = "Copy link";
+  linkButton.title = `Copy the internal locator (${messageLink(detail.id)})`;
+  linkButton.addEventListener("click", opts.onCopyLink);
+  const exportButton = document.createElement("button");
+  exportButton.type = "button";
+  exportButton.className = "export-selection-btn";
+  exportButton.textContent = "Export…";
+  exportButton.title = "Export this message as text or JSON";
+  exportButton.addEventListener("click", opts.onExport);
+  const exportChatButton = document.createElement("button");
+  exportChatButton.type = "button";
+  exportChatButton.className = "export-chat-btn";
+  exportChatButton.textContent = "Export chat…";
+  exportChatButton.title = "Export the whole conversation thread";
+  exportChatButton.addEventListener("click", opts.onExportChat);
+  const closeButton = document.createElement("button");
+  closeButton.type = "button";
+  closeButton.className = "close-btn";
+  closeButton.textContent = "Back to results";
+  closeButton.addEventListener("click", opts.onClose);
+  actions.append(copyButton, linkButton, exportButton, exportChatButton, closeButton);
+  header.append(title, actions);
+
+  const meta = document.createElement("dl");
+  meta.className = "meta-table";
+  const metaRow = (label: string, value: string) => {
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    meta.append(dt, dd);
+  };
+  metaRow("source", detail.source_label);
+  metaRow("from", detail.author || "unknown");
+  if (detail.subject) metaRow("subject", detail.subject);
+  if (detail.conversation_label) {
+    metaRow(
+      "conversation",
+      ctx.unverified_conversation
+        ? `${detail.conversation_label} (could not be verified)`
+        : detail.conversation_label,
+    );
+  }
+  metaRow(
+    "date",
+    detail.sent_at
+      ? `${formatSentAt(detail.sent_at)} (${detail.time_confidence})`
+      : `unknown (${detail.time_confidence})`,
+  );
+  if (detail.original_timestamp) {
+    metaRow("original timestamp", detail.original_timestamp);
+  }
+  metaRow("message id", detail.external_id || String(detail.id));
+
+  const body = document.createElement("div");
+  body.className = "detail-body";
+  const bodyHeading = document.createElement("h3");
+  bodyHeading.textContent = "Message";
+  const bodyText = document.createElement("div");
+  bodyText.className = "body";
+  appendSegments(bodyText, highlightSegments(detail.body, terms));
+  body.append(bodyHeading, bodyText);
+
+  const sections: HTMLElement[] = [header, meta];
+
+  if (ctx.unverified_conversation) {
+    const note = document.createElement("p");
+    note.className = "meta unverified-note";
+    note.textContent = "Conversation could not be verified — showing the selected message only.";
+    sections.push(note);
+  }
+
+  if (detail.attachments.length > 0) {
+    const media = document.createElement("section");
+    media.className = "detail-media";
+    const heading = document.createElement("h3");
+    heading.textContent = "Attachments";
+    const list = document.createElement("ul");
+    list.className = "media-list";
+    for (const attachment of detail.attachments) {
+      const item = document.createElement("li");
+      item.className = "media-item" + (attachment.available ? "" : " unresolved");
+      const kind = document.createElement("span");
+      kind.className = "media-kind";
+      kind.textContent = attachment.kind;
+      const name = document.createElement("span");
+      name.className = "media-name";
+      name.textContent = attachment.name;
+      const size = document.createElement("span");
+      size.className = "meta";
+      // UX wording: a reference without preserved bytes reads as not
+      // included in the export (honest until M4 preserves it).
+      size.textContent = attachment.available
+        ? attachment.path
+          ? `${humanSize(attachment.size)} · ${attachment.path}`
+          : humanSize(attachment.size)
+        : "not in export";
+      item.append(kind, name, size);
+      list.append(item);
+    }
+    media.append(heading, list);
+    sections.push(media);
+  }
+
+  const threadSection = document.createElement("section");
+  threadSection.className = "detail-thread";
+  const threadHeading = document.createElement("h3");
+  threadHeading.textContent = "Conversation context";
+  const loadEarlier = document.createElement("button");
+  loadEarlier.type = "button";
+  loadEarlier.className = "load-earlier-btn";
+  loadEarlier.textContent = "Load earlier";
+  loadEarlier.disabled = !opts.hasMoreBefore;
+  loadEarlier.addEventListener("click", opts.onLoadEarlier);
+  const loadLater = document.createElement("button");
+  loadLater.type = "button";
+  loadLater.className = "load-later-btn";
+  loadLater.textContent = "Load later";
+  loadLater.disabled = !opts.hasMoreAfter;
+  loadLater.addEventListener("click", opts.onLoadLater);
+  const threadBar = document.createElement("div");
+  threadBar.className = "row";
+  threadBar.append(loadEarlier, loadLater);
+  const thread = document.createElement("ol");
+  thread.className = "thread";
+  thread.append(
+    ...entries.map((entry) => contextRow(entry, terms, opts.onOpenMessage)),
+  );
+  threadSection.append(threadHeading, threadBar, thread);
+  sections.push(threadSection);
+
+  const provenance = document.createElement("details");
+  provenance.className = "detail-provenance";
+  const provenanceSummary = document.createElement("summary");
+  provenanceSummary.textContent = "Provenance";
+  const provenanceBody = document.createElement("div");
+  if (detail.occurrences.length > 0) {
+    const occurrences = document.createElement("ul");
+    occurrences.className = "provenance-list";
+    for (const occurrence of detail.occurrences) {
+      const item = document.createElement("li");
+      const importPart = occurrence.import_id ? ` · import ${occurrence.import_id}` : "";
+      item.textContent = `${occurrence.scope} · item ${occurrence.provider_item_id} · observed ${occurrence.observed_at}${importPart}`;
+      occurrences.append(item);
+    }
+    provenanceBody.append(occurrences);
+  } else {
+    const none = document.createElement("p");
+    none.className = "meta";
+    none.textContent = "No recorded observations.";
+    provenanceBody.append(none);
+  }
+  if (detail.revisions.length > 0) {
+    const revisions = document.createElement("ul");
+    revisions.className = "provenance-list";
+    for (const revision of detail.revisions) {
+      const item = document.createElement("li");
+      const open = document.createElement("button");
+      open.type = "button";
+      open.textContent = `Open revision ${revision.message_id}`;
+      open.addEventListener("click", () => opts.onOpenMessage(revision.message_id));
+      item.append(open, ` · ${revision.identity}`);
+      revisions.append(item);
+    }
+    provenanceBody.append(revisions);
+  }
+  provenance.append(provenanceSummary, provenanceBody);
+  sections.push(provenance);
+
+  const technical = document.createElement("details");
+  technical.className = "detail-technical";
+  const technicalSummary = document.createElement("summary");
+  technicalSummary.textContent = "Technical details";
+  const technicalBody = document.createElement("pre");
+  technicalBody.className = "raw-json";
+  try {
+    technicalBody.textContent = JSON.stringify(JSON.parse(detail.raw_json), null, 2);
+  } catch {
+    technicalBody.textContent = detail.raw_json;
+  }
+  technical.append(technicalSummary, technicalBody);
+  sections.push(technical);
+
+  card.append(...sections);
+  el.replaceChildren(card);
+}

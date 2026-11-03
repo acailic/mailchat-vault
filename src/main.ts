@@ -12,11 +12,38 @@ import { formatSentAt, snippet } from "./format";
 import { describePlan, privacyNoteFor, type AskOutcome, type LlmStatus } from "./llmview";
 import {
   renderDashboard,
-  renderDetail,
   renderPagination,
-  renderResults,
   renderSourceChips,
 } from "./render";
+import {
+  fillImportScopes,
+  renderDetail2,
+  renderFilterChips,
+  renderFlatResults,
+  renderRefreshNotice,
+} from "./render2";
+import {
+  buildRequest,
+  captureResults,
+  contextCursors,
+  contextEntries,
+  dateBoundsValid,
+  filterChips,
+  hasActiveFilters,
+  mergeContextPages,
+  messageLink,
+  messageToText,
+  parseMessageLink,
+  restoreIndices,
+  revisionChanged,
+  withoutChip,
+  type FilterChip,
+  type SearchFilters,
+} from "./searchstate";
+import type {
+  AppError,
+  ImportScope,
+} from "./v2types";
 import {
   applyTheme,
   keyStoreNote,
@@ -44,11 +71,12 @@ import type {
   ExportSummary,
   JobEvent,
   Message,
+  SourceInstance,
   Stats,
   SyncScheduleView,
   WatchSnapshot,
 } from "./types";
-import { groupHits, moveIndex, neighborId, pageModel, splitTerms } from "./viewmodel";
+import { moveIndex, pageModel, splitTerms } from "./viewmodel";
 import {
   applyJobEvent,
   applyJobsPage,
@@ -73,6 +101,14 @@ const sourceChips = document.querySelector<HTMLElement>("#source-chips")!;
 const authorInput = document.querySelector<HTMLInputElement>("#author")!;
 const fromDateInput = document.querySelector<HTMLInputElement>("#from-date")!;
 const toDateInput = document.querySelector<HTMLInputElement>("#to-date")!;
+const sortOrderSelect = document.querySelector<HTMLSelectElement>("#sort-order")!;
+const hasAttachmentSelect = document.querySelector<HTMLSelectElement>("#has-attachment")!;
+const importScopeSelect = document.querySelector<HTMLSelectElement>("#import-scope")!;
+const activeFilterChips = document.querySelector<HTMLElement>("#active-filter-chips")!;
+const refreshNotice = document.querySelector<HTMLElement>("#refresh-notice")!;
+const selectionFormatSelect = document.querySelector<HTMLSelectElement>("#selection-format")!;
+const exportSelectionButton = document.querySelector<HTMLButtonElement>("#export-selection-btn")!;
+const selectionStatus = document.querySelector<HTMLElement>("#selection-status")!;
 const clearFiltersButton = document.querySelector<HTMLButtonElement>("#clear-filters")!;
 const statusLine = document.querySelector<HTMLElement>("#status")!;
 const resultsList = document.querySelector<HTMLElement>("#results")!;
@@ -119,6 +155,10 @@ const dashboard = document.querySelector<HTMLElement>("#dashboard")!;
 const dashboardStatus = document.querySelector<HTMLElement>("#dashboard-status")!;
 const dashboardRefreshButton = document.querySelector<HTMLButtonElement>("#stats-refresh")!;
 const exportFormatSelect = document.querySelector<HTMLSelectElement>("#export-format")!;
+// Source instances (id ↔ display label) for the v2 source filter.
+let sourceInstances: SourceInstance[] = [];
+// The import scopes offered by the import-scope filter.
+let importScopes: ImportScope[] = [];
 const exportButton = document.querySelector<HTMLButtonElement>("#export-btn")!;
 const exportStatus = document.querySelector<HTMLElement>("#export-status")!;
 const askProvider = document.querySelector<HTMLSelectElement>("#ask-provider")!;
@@ -180,25 +220,46 @@ function renderAskResults(list: HTMLUListElement, messages: Message[]): void {
 }
 
 function renderAll(): void {
-  const terms = splitTerms(state.text);
-  renderResults(resultsList, {
-    groups: groupHits(state.hits),
+  const terms = splitTerms(state.filters.text);
+  renderFlatResults(resultsList, {
+    hits: state.hits,
     activeIndex: state.activeIndex,
+    selectedId: state.selectedId,
+    selection: state.selection,
     terms,
-    onOpen: (index, id) => {
-      state.activeIndex = index;
+    onOpen: (id: number) => {
+      const at = state.hits.findIndex((h) => h.id === id);
+      if (at >= 0) state.activeIndex = at;
       void openDetail(id);
     },
+    onToggleSelect: toggleRowSelection,
   });
   renderPagination(pagination, pageModel(state.total, state.offset, PAGE_SIZE), {
     onPrev: () => void runSearch(state.offset - PAGE_SIZE),
     onNext: () => void runSearch(state.offset + PAGE_SIZE),
   });
+  renderFilterChips(activeFilterChips, {
+    chips: filterChips(state.filters, {
+      source: (id) => sourceInstances.find((s) => s.id === id)?.label ?? id,
+      import: (id) => importScopes.find((s) => s.import_id === id)?.import_id ?? id,
+    }),
+    onRemove: (chip) => removeFilterChip(chip),
+    onClear: clearFilters,
+  });
+  renderRefreshNotice(refreshNotice, state.refreshNeeded, () => void runSearch(0));
   if (state.detail) {
-    renderDetail(detailPanel, {
+    renderDetail2(detailPanel, {
       ctx: state.detail,
-      queryText: state.text,
+      entries: state.detailEntries,
+      queryText: state.detailQueryText,
+      hasMoreBefore: state.detail.has_more_before,
+      hasMoreAfter: state.detail.has_more_after,
       onOpenMessage: (id) => void openDetail(id),
+      onLoadEarlier: () => void loadContextPage(true),
+      onLoadLater: () => void loadContextPage(false),
+      onCopy: () => void copyMessage(),
+      onCopyLink: () => void copyLink(),
+      onExport: () => void exportSingleMessage(),
       onExportChat: () => void exportChat(),
       onClose: closeDetail,
     });
@@ -207,6 +268,10 @@ function renderAll(): void {
     detailPanel.classList.remove("open");
     detailPanel.replaceChildren();
   }
+  const selected = state.selection.size;
+  exportSelectionButton.disabled = selected === 0;
+  exportSelectionButton.textContent =
+    selected > 0 ? `Export selected (${selected})…` : "Export selected…";
   // The shell mirrors the reading state (drives the medium/compact swap
   // and the wide empty placeholder).
   workspace.store.setReadingOpen(state.detail !== null);
@@ -226,6 +291,25 @@ function refreshChips(stats: Stats): void {
       void runSearch(0);
     },
   });
+}
+
+/** Load the canonical source instances (id ↔ label) for the v2 filter. */
+async function refreshSources(): Promise<void> {
+  try {
+    sourceInstances = await ipc.sourcesList();
+  } catch {
+    sourceInstances = []; // chips/stats still work; ids resolve on retry
+  }
+}
+
+/** Load the import scopes for the import-scope filter chip. */
+async function refreshImportScopes(): Promise<void> {
+  try {
+    importScopes = await ipc.listImportScopesV2();
+  } catch {
+    importScopes = [];
+  }
+  fillImportScopes(importScopeSelect, importScopes, state.filters.importJobId);
 }
 
 function renderAsk(outcome: AskOutcome): void {
@@ -586,55 +670,134 @@ async function refreshDashboard(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Search
+// Search (v2: flat stable ranking, filter chips, empty browse, refresh)
 // ---------------------------------------------------------------------------
+
+/** Read the current filter controls into a filter model (names → ids). */
+function readFilters(text: string): SearchFilters {
+  const labelToIds = new Map<string, string[]>();
+  for (const instance of sourceInstances) {
+    const ids = labelToIds.get(instance.label) ?? [];
+    ids.push(instance.id);
+    labelToIds.set(instance.label, ids);
+  }
+  // A display label may cover several source instances (same IMAP account
+  // under different TLS modes): the chip filters every instance carrying
+  // that label. An unmapped name still narrows the search — a name that is
+  // not a source id matches nothing, visible rather than silently broad.
+  const sourceIds = state.sources.flatMap((name) => labelToIds.get(name) ?? [name]);
+  return {
+    text,
+    sourceIds,
+    author: authorInput.value.trim(),
+    fromDate: fromDateInput.value,
+    toDate: toDateInput.value,
+    timezone: "",
+    hasAttachment:
+      hasAttachmentSelect.value === "" ? null : hasAttachmentSelect.value === "with",
+    importJobId: importScopeSelect.value === "" ? null : importScopeSelect.value,
+    sort: sortOrderSelect.value === "newest" ? "newest" : "relevance",
+  };
+}
+
+/** Push a filter model back into the controls (chip removal, Clear). */
+function writeFilters(f: SearchFilters): void {
+  const idToLabel = new Map(sourceInstances.map((s) => [s.id, s.label]));
+  state.sources = [...new Set(f.sourceIds.map((id) => idToLabel.get(id) ?? ""))].filter(
+    (name) => name !== "",
+  );
+  authorInput.value = f.author;
+  fromDateInput.value = f.fromDate;
+  toDateInput.value = f.toDate;
+  hasAttachmentSelect.value =
+    f.hasAttachment === null ? "" : f.hasAttachment ? "with" : "without";
+  importScopeSelect.value = f.importJobId ?? "";
+  sortOrderSelect.value = f.sort;
+}
+
+/** Remove one applied filter chip and re-run (resets to page one). */
+function removeFilterChip(chip: FilterChip): void {
+  writeFilters(withoutChip(state.filters, chip));
+  void runSearch(0);
+}
 
 async function runSearch(offset = 0): Promise<void> {
   const token = searchGuard.next();
   const text = searchInput.value.trim();
-  if (!text && !state.sources.length && !authorInput.value.trim() && !fromDateInput.value && !toDateInput.value) {
+  // A pasted message locator opens that message directly (deep link).
+  const linked = parseMessageLink(text);
+  if (linked !== null) {
+    void openDetail(linked);
+    return;
+  }
+  const filters = readFilters(text);
+  if (!text && !hasActiveFilters(filters)) {
     state.hits = [];
     state.total = 0;
     state.offset = 0;
     state.activeIndex = -1;
+    state.selectedId = null;
+    state.selection.clear();
+    state.pageRevision = null;
+    state.refreshNeeded = false;
     setStatus("Type something to search, or set a filter to browse.");
     renderAll();
     return;
   }
-  state.text = text;
-  state.author = authorInput.value.trim();
-  state.fromDate = fromDateInput.value;
-  state.toDate = toDateInput.value;
+  // Reject reversed day bounds inline before invocation (UX contract).
+  if (!dateBoundsValid(filters.fromDate, filters.toDate)) {
+    setStatus(
+      `Reversed date range: from ${filters.fromDate} is after to ${filters.toDate}.`,
+      true,
+    );
+    return;
+  }
   const requestedOffset = Math.max(0, offset);
   setStatus("Searching…");
   try {
-    const page = await ipc.searchMessages({
-      text: state.text,
-      sources: state.sources,
-      author: state.author,
-      from_date: state.fromDate,
-      to_date: state.toDate,
-      limit: PAGE_SIZE,
-      offset: requestedOffset,
-    });
+    const page = await ipc.searchArchiveV2(buildRequest(filters, PAGE_SIZE, requestedOffset));
     if (!searchGuard.isCurrent(token)) return; // a newer search superseded this response
+    const fresh = requestedOffset === 0;
+    if (!fresh && revisionChanged(state.pageRevision, page.archive_revision)) {
+      // The archive changed under the pagination: keep the visible rows'
+      // revision and offer a refresh instead of silently restarting (A07).
+      state.refreshNeeded = true;
+    } else if (fresh) {
+      state.refreshNeeded = false;
+      state.pageRevision = page.archive_revision;
+    }
+    state.filters = filters;
     state.hits = page.hits;
     state.total = page.total;
     state.offset = page.offset;
-    state.activeIndex = -1;
-    const groups = groupHits(page.hits).length;
+    if (fresh) {
+      // A fresh submission resets selection and page.
+      state.activeIndex = -1;
+      state.selectedId = null;
+      state.selection.clear();
+      state.resultsSnapshot = null;
+    }
     const range =
       page.total === 0
         ? "0 results"
         : `${page.offset + 1}–${Math.min(page.offset + PAGE_SIZE, page.total)} of ${page.total}`;
     setStatus(
-      `${range}${page.total > 0 ? ` · ${groups} chat group${groups === 1 ? "" : "s"}` : ""}` +
-        (state.text ? ` for “${state.text}”` : ""),
+      `${range}${state.filters.text ? ` for “${state.filters.text}”` : ""}` +
+        (state.refreshNeeded ? " · new data available" : ""),
     );
     renderAll();
   } catch (e) {
-    if (searchGuard.isCurrent(token)) setStatus(String(e), true);
+    if (searchGuard.isCurrent(token)) setStatus(describeError(e), true);
   }
+}
+
+/** Render an IPC error readably (structured AppError or legacy string). */
+function describeError(e: unknown): string {
+  if (e && typeof e === "object" && "code" in e && "message" in e) {
+    const err = e as AppError;
+    return err.field ? `${err.message} (${err.field})` : err.message;
+  }
+  return String(e);
 }
 
 function clearFilters(): void {
@@ -642,35 +805,151 @@ function clearFilters(): void {
   authorInput.value = "";
   fromDateInput.value = "";
   toDateInput.value = "";
+  hasAttachmentSelect.value = "";
+  importScopeSelect.value = "";
+  sortOrderSelect.value = "relevance";
   void refreshStats();
   void runSearch(0);
 }
 
+/** Toggle one result row's export-selection checkbox. */
+function toggleRowSelection(id: number): void {
+  if (state.selection.has(id)) state.selection.delete(id);
+  else state.selection.add(id);
+  renderAll();
+}
+
 // ---------------------------------------------------------------------------
-// Detail view (the reading pane)
+// Reading pane (v2: detail + chronological context, restorable results)
 // ---------------------------------------------------------------------------
+
+const CONTEXT_PAGE = 8;
 
 async function openDetail(id: number): Promise<void> {
   const token = detailGuard.next();
+  // Capture the results state once per visit (Back restores it).
+  if (!state.detail) {
+    state.resultsSnapshot = captureResults(resultsList, state.activeIndex, id);
+  }
   try {
-    const ctx = await ipc.chatContext(id, 8);
+    const ctx = await ipc.conversationContextV2({ id, limit: CONTEXT_PAGE });
     if (!detailGuard.isCurrent(token)) return; // a newer load superseded this response
-    if (ctx) {
-      state.detail = ctx;
-      renderAll();
-      workspace.readingOpened();
-      detailPanel.querySelector<HTMLElement>(".detail-card")?.scrollIntoView({ block: "nearest" });
-    }
+    state.detail = ctx;
+    state.detailEntries = contextEntries(ctx);
+    state.detailQueryText = state.filters.text;
+    state.selectedId = id;
+    renderAll();
+    workspace.readingOpened();
+    detailPanel.querySelector<HTMLElement>(".detail-card")?.scrollIntoView({ block: "nearest" });
   } catch (e) {
-    if (detailGuard.isCurrent(token)) setStatus(String(e), true);
+    if (!detailGuard.isCurrent(token)) return;
+    const err = e as AppError;
+    if (err?.code === "not_found") {
+      setStatus("Message is no longer in this vault.", true);
+    } else {
+      setStatus(describeError(e), true);
+    }
+  }
+}
+
+/** Load one more context page (earlier or later) without losing the anchor. */
+async function loadContextPage(before: boolean): Promise<void> {
+  if (!state.detail) return;
+  const { beforeCursor, afterCursor } = contextCursors(state.detailEntries);
+  const token = detailGuard.next();
+  try {
+    const ctx = await ipc.conversationContextV2({
+      id: state.detail.anchor.id,
+      beforeCursor: before ? beforeCursor : null,
+      afterCursor: before ? null : afterCursor,
+      limit: CONTEXT_PAGE,
+    });
+    if (!detailGuard.isCurrent(token)) return;
+    state.detailEntries = mergeContextPages(state.detailEntries, ctx);
+    state.detail = {
+      ...state.detail,
+      has_more_before: before ? ctx.has_more_before : state.detail.has_more_before,
+      has_more_after: before ? state.detail.has_more_after : ctx.has_more_after,
+    };
+    renderAll();
+  } catch (e) {
+    if (detailGuard.isCurrent(token)) setStatus(describeError(e), true);
   }
 }
 
 function closeDetail(): void {
   detailGuard.invalidate(); // supersede any in-flight load so it cannot re-open the pane
+  const snapshot = state.resultsSnapshot;
+  state.resultsSnapshot = null;
   state.detail = null;
+  state.detailEntries = [];
+  const restored = restoreIndices(state.hits, snapshot);
+  state.activeIndex = restored.activeIndex;
+  state.selectedId = restored.selectedId;
   renderAll();
+  // Restore the scroll position after the rows exist again.
+  if (snapshot) resultsList.scrollTop = snapshot.scrollTop;
   workspace.readingClosed();
+}
+
+// ---------------------------------------------------------------------------
+// Copy / link / selection export (from results and the reading pane)
+// ---------------------------------------------------------------------------
+
+async function copyText(text: string, label: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus(`${label} copied to clipboard.`);
+  } catch {
+    setStatus(`Could not access the clipboard for ${label}.`, true);
+  }
+}
+
+function copyMessage(): void {
+  if (state.detail) void copyText(messageToText(state.detail.anchor), "Message");
+}
+
+function copyLink(): void {
+  if (state.detail) void copyText(messageLink(state.detail.anchor.id), "Message link");
+}
+
+async function exportSelection(ids: number[]): Promise<void> {
+  if (ids.length === 0) {
+    selectionStatus.textContent = "Check result rows first, then export them.";
+    return;
+  }
+  const format = selectionFormatSelect.value === "json" ? "json" : "text";
+  const ext = format === "json" ? "json" : "txt";
+  const path = await save({
+    title: "Export selection",
+    defaultPath: `mailchat-selection.${ext}`,
+    filters: [
+      format === "json"
+        ? { name: "JSON file", extensions: ["json"] }
+        : { name: "Text file", extensions: ["txt"] },
+    ],
+  });
+  if (typeof path !== "string") return;
+  try {
+    const summary = await ipc.exportMessagesV2({ ids, format, path });
+    selectionStatus.textContent =
+      `Exported ${summary.written} message${summary.written === 1 ? "" : "s"}` +
+      (summary.missing > 0
+        ? ` (${summary.missing} no longer in the vault and skipped)`
+        : "") +
+      ".";
+  } catch (e) {
+    selectionStatus.textContent = describeError(e);
+  }
+}
+
+function exportSelectionFromResults(): void {
+  // Every checked id exports — across pages too (M3.2 fix contract).
+  void exportSelection([...state.selection]);
+}
+
+function exportSingleMessage(): void {
+  if (state.detail) void exportSelection([state.detail.anchor.id]);
 }
 
 // Back-to-results (medium/compact): the results area is restored with its
@@ -708,9 +987,11 @@ document.addEventListener("keydown", (event) => {
   if (state.detail) {
     if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       const dir = event.key === "ArrowUp" ? -1 : 1;
-      const id = neighborId(state.detail, dir);
-      if (id !== null) {
-        void openDetail(id);
+      const entries = state.detailEntries;
+      const at = entries.findIndex((e) => e.current);
+      const target = entries[at + dir];
+      if (target) {
+        void openDetail(target.id);
       }
       event.preventDefault();
     }
@@ -731,7 +1012,7 @@ document.addEventListener("keydown", (event) => {
     event.preventDefault();
   } else if (event.key === "Enter") {
     if (state.activeIndex >= 0 && state.hits[state.activeIndex]) {
-      void openDetail(state.hits[state.activeIndex].message.id);
+      void openDetail(state.hits[state.activeIndex].id);
       event.preventDefault();
     }
   }
@@ -756,6 +1037,8 @@ async function importMbox(): Promise<void> {
       `Imported ${summary.inserted} new, ${summary.skipped} already present` +
       `${failedPart} (of ${summary.seen} in ${summary.source}).`;
     await refreshStats();
+    void refreshImportScopes();
+    void refreshSources();
     void refreshEmbedStatus();
     void refreshDashboard();
   } catch (e) {
@@ -806,6 +1089,8 @@ async function importChatExport(): Promise<void> {
       `${failedPart} (of ${summary.seen} in ${summary.source}).` +
       describeMedia(outcome.media);
     await refreshStats();
+    void refreshImportScopes();
+    void refreshSources();
     void refreshEmbedStatus();
     void refreshDashboard();
   } catch (e) {
@@ -821,6 +1106,8 @@ async function seedDemo(): Promise<void> {
     const summary = await ipc.seedDemo();
     importStatus.textContent = `Demo messages: ${summary.inserted} new, ${summary.skipped} already present.`;
     await refreshStats();
+    void refreshImportScopes();
+    void refreshSources();
     void refreshEmbedStatus();
     void refreshDashboard();
   } catch (e) {
@@ -1144,6 +1431,14 @@ function refreshAfterJobEvent(event: JobEvent): void {
     void refreshStats();
     void refreshDashboard();
     void refreshEmbedStatus();
+    void refreshSources();
+    void refreshImportScopes();
+    if (event.type === "succeeded" && state.hits.length > 0) {
+      // The archive may have changed under the visible results: offer a
+      // refresh, never silently move rows (A07).
+      state.refreshNeeded = true;
+      renderAll();
+    }
   }
 }
 
@@ -1204,11 +1499,11 @@ async function exportResults(): Promise<void> {
   try {
     const summary = await ipc.exportSearch({
       query: {
-        text: state.text,
+        text: state.filters.text,
         sources: state.sources,
-        author: state.author,
-        from_date: state.fromDate,
-        to_date: state.toDate,
+        author: state.filters.author,
+        from_date: state.filters.fromDate,
+        to_date: state.filters.toDate,
         limit: PAGE_SIZE,
         offset: 0,
       },
@@ -1234,7 +1529,7 @@ async function exportChat(): Promise<void> {
   exportStatus.textContent = "Exporting chat…";
   try {
     const summary = await ipc.exportChat({
-      id: detail.message.id,
+      id: detail.anchor.id,
       format,
       path,
     });
@@ -1266,6 +1561,10 @@ authorInput.addEventListener("keydown", (event) => {
 });
 fromDateInput.addEventListener("change", () => void runSearch(0));
 toDateInput.addEventListener("change", () => void runSearch(0));
+sortOrderSelect.addEventListener("change", () => void runSearch(0));
+hasAttachmentSelect.addEventListener("change", () => void runSearch(0));
+importScopeSelect.addEventListener("change", () => void runSearch(0));
+exportSelectionButton.addEventListener("click", exportSelectionFromResults);
 clearFiltersButton.addEventListener("click", clearFilters);
 importButton.addEventListener("click", () => void importMbox());
 chatImportButton.addEventListener("click", () => void importChatExport());
@@ -1302,6 +1601,8 @@ providerRows.addEventListener("click", (event) => {
 
 setStatus("Type something to search, or set a filter to browse.");
 renderAll();
+void refreshSources();
+void refreshImportScopes();
 void refreshStats();
 void refreshDashboard();
 void refreshLlm();

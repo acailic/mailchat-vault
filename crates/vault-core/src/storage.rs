@@ -593,6 +593,35 @@ const MIGRATIONS: &[(i64, &str)] = &[
         INSERT INTO sync_schedule (id) VALUES (1);
         "#,
     ),
+    (
+        12,
+        // The v2 search surface (M3.2). Two additive pieces:
+        //
+        // - `archive_meta` is a small key/value table for vault-level
+        //   metadata that must survive restarts without a schema bump;
+        //   `archive_revision` is incremented inside every
+        //   content-changing transaction (message inserts, media
+        //   backfills, future deletes) so `search_archive_v2` pages can
+        //   report "the archive changed under your pagination" instead
+        //   of silently restarting it (A07).
+        // - `message_occurrences.import_id` records which bounded import
+        //   run (the stable `import_id` M2.2 already keys checkpoints and
+        //   issues on) first observed the message, powering the
+        //   "View imported messages" import-scope filter. Pre-existing
+        //   occurrences keep `''` (provenance was never recorded); the
+        //   first import wins, exactly like the occurrence tuple itself.
+        r#"
+        CREATE TABLE archive_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        INSERT INTO archive_meta (key, value) VALUES ('archive_revision', '0');
+        ALTER TABLE message_occurrences
+            ADD COLUMN import_id TEXT NOT NULL DEFAULT '';
+        CREATE INDEX idx_message_occurrences_import
+            ON message_occurrences (import_id);
+        "#,
+    ),
 ];
 
 /// Rust halves of migrations, for backfill logic that SQL alone cannot
@@ -611,7 +640,9 @@ const RUST_MIGRATIONS: &[(i64, RustMigration)] = &[(7, backfill_conversation_key
 /// (a dedicated writer thread plus read connections, WAL mode).
 #[derive(Debug)]
 pub struct Storage {
-    conn: Connection,
+    /// Private to this module except the v2 query module
+    /// ([`crate::search2`]), which owns the v2 IPC read paths.
+    pub(crate) conn: Connection,
 }
 
 /// The newest schema version this build knows how to produce. Databases
@@ -760,7 +791,8 @@ impl Storage {
     /// columns come from the message's explicit fields when set.
     pub fn insert_message(&self, msg: &NewMessage) -> Result<InsertOutcome> {
         let tx = self.conn.unchecked_transaction()?;
-        let outcome = insert_message_in_tx(&tx, msg)?;
+        let outcome = insert_message_in_tx(&tx, "", msg)?;
+        bump_archive_revision(&tx)?;
         tx.commit()?;
         Ok(outcome)
     }
@@ -791,7 +823,7 @@ impl Storage {
         let tx = self.conn.unchecked_transaction()?;
         let mut counts = ImportBatchCounts::default();
         for msg in messages {
-            match insert_message_in_tx(&tx, msg)? {
+            match insert_message_in_tx(&tx, import_id, msg)? {
                 InsertOutcome::Inserted(_) => {
                     counts.inserted += 1;
                     if !media_entries(&msg.raw_json).is_empty() {
@@ -830,6 +862,9 @@ impl Storage {
                 params![import_id, source, committed_after],
             )?;
         }
+        // Any committed batch can change what a paginated search sees:
+        // bump the revision in the same transaction (A07 refresh signal).
+        bump_archive_revision(&tx)?;
         tx.commit()?;
         Ok(counts)
     }
@@ -1023,6 +1058,7 @@ impl Storage {
         let tx = self.conn.unchecked_transaction()?;
         let outcome =
             Self::insert_mail_message_tx(&tx, instance_id, msg, subject, identity, occurrence)?;
+        bump_archive_revision(&tx)?;
         tx.commit()?;
         Ok(outcome)
     }
@@ -1076,6 +1112,7 @@ impl Storage {
             failures,
             resolved,
         )?;
+        bump_archive_revision(&tx)?;
         tx.commit()?;
         Ok(outcome)
     }
@@ -2279,8 +2316,29 @@ impl Storage {
     pub fn attach_media(&self, id: i64, entries: &[serde_json::Value]) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let changed = attach_media_in_tx(&tx, id, entries)?;
+        if changed {
+            // A media link changes result summaries (attachment counts),
+            // so it counts as content.
+            bump_archive_revision(&tx)?;
+        }
         tx.commit()?;
         Ok(changed)
+    }
+
+    /// The current archive revision (M3.2): bumped inside every
+    /// content-changing transaction. Search responses carry it so the UI
+    /// can offer a refresh when the archive changed under a paginated
+    /// result set (A07).
+    pub fn archive_revision(&self) -> Result<u64> {
+        let value: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM archive_meta WHERE key = 'archive_revision'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value.and_then(|v| v.parse().ok()).unwrap_or(0))
     }
 
     /// Remember a watched folder (idempotent on the canonical path).
@@ -2319,8 +2377,14 @@ impl Storage {
 /// Identical dedup semantics in both: an existing identity records the
 /// repeat occurrence and refreshes the conversation label, then reports
 /// `Duplicate`; a new row lands in `archive_messages` with its identity
-/// alias and first `import` occurrence.
-fn insert_message_in_tx(tx: &Transaction<'_>, msg: &NewMessage) -> Result<InsertOutcome> {
+/// alias and first `import` occurrence. `import_id` stamps the bounded
+/// import run that observed the message (M3.2 import-scope filter); the
+/// single-message convenience path passes `""` (provenance unknown).
+fn insert_message_in_tx(
+    tx: &Transaction<'_>,
+    import_id: &str,
+    msg: &NewMessage,
+) -> Result<InsertOutcome> {
     let instance = resolve_legacy_instance(tx, &msg.source)?;
 
     // Dedup on the canonical identity: first write wins forever.
@@ -2338,9 +2402,9 @@ fn insert_message_in_tx(tx: &Transaction<'_>, msg: &NewMessage) -> Result<Insert
         // occurrence tuple); the archived row itself stays untouched.
         tx.execute(
             "INSERT OR IGNORE INTO message_occurrences
-                 (message_id, scope, provider_item_id)
-             VALUES (?1, 'import', ?2)",
-            params![id, msg.external_id],
+                 (message_id, scope, provider_item_id, import_id)
+             VALUES (?1, 'import', ?2, ?3)",
+            params![id, msg.external_id, import_id],
         )?;
         // A re-import of the same chat under a rename still refreshes
         // the conversation label (identity is stable, names follow).
@@ -2395,11 +2459,31 @@ fn insert_message_in_tx(tx: &Transaction<'_>, msg: &NewMessage) -> Result<Insert
         params![instance, msg.external_id, id],
     )?;
     tx.execute(
-        "INSERT INTO message_occurrences (message_id, scope, provider_item_id)
-         VALUES (?1, 'import', ?2)",
-        params![id, msg.external_id],
+        "INSERT INTO message_occurrences (message_id, scope, provider_item_id, import_id)
+         VALUES (?1, 'import', ?2, ?3)",
+        params![id, msg.external_id, import_id],
     )?;
     Ok(InsertOutcome::Inserted(id))
+}
+
+/// Increment `archive_meta.archive_revision` inside a content-changing
+/// transaction (M3.2). Every committed batch that can change what a
+/// paginated search returns — message inserts, occurrence enrichments,
+/// media backfills, (future) deletes — bumps the counter in the same
+/// transaction, so `search_archive_v2` responses can carry a revision
+/// that is consistent with the rows they contain and the UI can offer a
+/// refresh instead of silently restarting pagination (A07). Over-
+/// reporting (bumping on a no-op batch) is safe: it only offers a
+/// refresh; under-reporting would hide real changes.
+fn bump_archive_revision(tx: &Connection) -> Result<()> {
+    tx.execute(
+        "INSERT INTO archive_meta (key, value) VALUES ('archive_revision', '1')
+         ON CONFLICT(key) DO UPDATE SET
+            value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+         WHERE key = 'archive_revision'",
+        [],
+    )?;
+    Ok(())
 }
 
 /// The non-empty `media` array of a message's `raw_json`, if any — the

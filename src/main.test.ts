@@ -12,14 +12,16 @@ import { Window } from "happy-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ArchiveStats,
-  ChatContext,
   Message,
-  SearchHit,
-  SearchPage,
   Stats,
   SyncScheduleView,
   WatchSnapshot,
 } from "./types";
+import type {
+  ConversationContext,
+  MessageSummary,
+  SearchArchivePage,
+} from "./v2types";
 
 // Timestamps must render timezone-independently here (same approach as
 // render.test.ts); formatSentAt itself is covered by format.test.ts.
@@ -106,24 +108,74 @@ function message(id: number, source: string, chatId: string, body: string, autho
   };
 }
 
-function hitOf(m: Message, snippet: string | null = null): SearchHit {
-  return { message: m, snippet };
+function summary(
+  id: number,
+  source: string,
+  conversation: string | null,
+  author: string,
+  snippetText = "vault …",
+): MessageSummary {
+  return {
+    id,
+    source_id: `inst-${source}`,
+    source_label: source,
+    conversation_id: conversation ? `conv-${conversation}` : null,
+    conversation_label: conversation,
+    author,
+    subject: null,
+    sent_at: `2026-01-${String(id).padStart(2, "0")}T10:00:00Z`,
+    time_confidence: "legacy_assumed",
+    snippet: snippetText,
+    attachment_count: 0,
+    available_attachment_count: 0,
+    has_conflicting_revision: false,
+  };
 }
 
-function pageOf(hits: SearchHit[], total: number, offset = 0): SearchPage {
-  return { hits, total, limit: 50, offset };
+function pageOf(hits: MessageSummary[], total: number, offset = 0, revision = 4): SearchArchivePage {
+  return { hits, total, limit: 50, offset, archive_revision: revision };
 }
 
-const HITS: SearchHit[] = [
-  hitOf(message(1, "mbox", "thread-a", "quarterly vault report")),
-  hitOf(message(2, "mbox", "thread-a", "vault again", "bruno")),
-  hitOf(message(3, "demo", "", "vault keys")),
+const HITS: MessageSummary[] = [
+  summary(1, "mbox", "thread-a", "ana"),
+  summary(2, "mbox", "thread-a", "bruno"),
+  summary(3, "demo", null, "ana"),
 ];
 
-const CTX: ChatContext = {
-  before: [message(10, "mbox", "thread-a", "earlier"), message(11, "mbox", "thread-a", "before current")],
-  message: message(1, "mbox", "thread-a", "quarterly vault report"),
-  after: [message(12, "mbox", "thread-a", "after current"), message(13, "mbox", "thread-a", "much later")],
+const CTX: ConversationContext = {
+  anchor: {
+    id: 1,
+    source_id: "inst-mbox",
+    source_label: "mbox",
+    channel: "email",
+    chat_id: "thread-a",
+    external_id: "e1",
+    conversation_id: "conv-thread-a",
+    conversation_label: "thread-a",
+    conversation_confidence: "verified",
+    author: "ana",
+    subject: null,
+    body: "quarterly vault report",
+    sent_at: "2026-01-01T10:00:00Z",
+    original_timestamp: "2026-01-01T10:00:00Z",
+    timezone: "",
+    time_confidence: "legacy_assumed",
+    attachments: [],
+    occurrences: [{ scope: "import", provider_item_id: "e1", uidvalidity: null, import_id: "imp-1", observed_at: "2026-01-01 00:00:00" }],
+    revisions: [],
+    raw_json: "{}",
+  },
+  before: [
+    { id: 10, author: "ana", sent_at: "2026-01-01T09:00:00Z", time_confidence: "legacy_assumed", body: "earlier" },
+    { id: 11, author: "ana", sent_at: "2026-01-01T09:30:00Z", time_confidence: "legacy_assumed", body: "before current" },
+  ],
+  after: [
+    { id: 12, author: "ana", sent_at: "2026-01-01T11:00:00Z", time_confidence: "legacy_assumed", body: "after current" },
+    { id: 13, author: "ana", sent_at: "2026-01-01T12:00:00Z", time_confidence: "legacy_assumed", body: "much later" },
+  ],
+  unverified_conversation: false,
+  has_more_before: false,
+  has_more_after: false,
 };
 
 function deferred<T>() {
@@ -172,22 +224,22 @@ function fireChange(target: DispatchTarget): void {
 }
 
 function searchCalls(): Array<{ cmd: string; args: unknown }> {
-  return tauri.calls.filter((c) => c.cmd === "search_messages");
+  return tauri.calls.filter((c) => c.cmd === "search_archive_v2");
 }
 
 function ctxCalls(): Array<{ cmd: string; args: unknown }> {
-  return tauri.calls.filter((c) => c.cmd === "chat_context");
+  return tauri.calls.filter((c) => c.cmd === "conversation_context_v2");
 }
 
 function searchRespondsWith(respond: () => unknown): void {
-  tauri.handlers.set("search_messages", respond);
+  tauri.handlers.set("search_archive_v2", respond);
 }
 
 function queueResponses(responses: unknown[]): void {
   const pending = [...responses];
   searchRespondsWith(() => {
     const next = pending.shift();
-    if (next === undefined) throw new Error("unexpected extra search_messages call");
+    if (next === undefined) throw new Error("unexpected extra search_archive_v2 call");
     return next;
   });
 }
@@ -202,6 +254,7 @@ async function boot(): Promise<void> {
   win = new Window();
   vi.stubGlobal("window", win);
   vi.stubGlobal("document", win.document);
+  vi.stubGlobal("navigator", win.navigator);
   // Note: the happy-dom environment replaces the global URL class, so the
   // index.html path is resolved through node:url instead of new URL().
   const indexHtml = join(dirname(fileURLToPath(import.meta.url)), "..", "index.html");
@@ -219,7 +272,7 @@ async function boot(): Promise<void> {
 async function bootSearched(): Promise<void> {
   await boot();
   searchRespondsWith(() => pageOf(HITS, 3));
-  tauri.handlers.set("chat_context", () => CTX);
+  tauri.handlers.set("conversation_context_v2", () => CTX);
   await runQuery("vault");
   await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
 }
@@ -229,6 +282,42 @@ beforeEach(() => {
   tauri.calls.length = 0;
   tauri.handlers.clear();
   tauri.handlers.set("stats", () => STATS);
+  // Canonical source instances (id ↔ display label) for the v2 source
+  // filter; import scopes for the import-scope chip.
+  tauri.handlers.set("sources_list", () => [
+    {
+      id: "inst-mbox",
+      kind: "legacy",
+      label: "mbox",
+      connector_key: "mbox",
+      config_json: "{}",
+      state: "connected",
+      excluded: false,
+      last_attempt_at: null,
+      last_success_at: null,
+      created_at: "2026-01-01 00:00:00",
+    },
+    {
+      id: "inst-demo",
+      kind: "legacy",
+      label: "demo",
+      connector_key: "demo",
+      config_json: "{}",
+      state: "connected",
+      excluded: false,
+      last_attempt_at: null,
+      last_success_at: null,
+      created_at: "2026-01-01 00:00:00",
+    },
+  ]);
+  tauri.handlers.set("list_import_scopes_v2", () => [
+    {
+      import_id: "imp-1",
+      messages: 2,
+      first_observed_at: "2026-01-01 00:00:00",
+      last_observed_at: "2026-01-01 00:00:00",
+    },
+  ]);
   tauriEvents.listeners.clear();
   dialog.open.mockReset();
   dialog.savedPath = null;});
@@ -271,25 +360,28 @@ describe("search box", () => {
     await bootSearched();
     expect(searchCalls()).toHaveLength(1);
     expect(searchCalls()[0].args).toEqual({
-      query: {
+      request: {
         text: "vault",
-        sources: [],
+        source_ids: [],
         author: "",
-        from_date: "",
-        to_date: "",
+        from_date: null,
+        to_date: null,
+        timezone: "",
+        has_attachment: null,
+        import_job_id: null,
+        sort: "relevance",
         limit: 50,
         offset: 0,
       },
     });
-    expect($("#status").textContent).toBe("1–3 of 3 · 2 chat groups for “vault”");
+    expect($("#status").textContent).toBe("1–3 of 3 for “vault”");
     expect($("#status").classList.contains("error")).toBe(false);
-    // Results are grouped by chat with a count per group.
-    const headers = [...win.document.querySelectorAll("#results .group h3")].map(
-      (h) => h.textContent,
-    );
-    expect(headers).toEqual(["mbox · thread-a (2)", "demo · no thread (1)"]);
-    expect(win.document.querySelectorAll("#results .hit-item").length).toBe(3);
-    // Full grouped-results snapshot (timezone-independent via mocked format).
+    // Results are a flat list: one row per hit, backend order, no
+    // conversation regrouping headers.
+    expect(win.document.querySelectorAll("#results .group, #results .group h3").length).toBe(0);
+    const rows = [...win.document.querySelectorAll("#results .hit-item")];
+    expect(rows.map((r) => (r as unknown as HTMLElement).dataset.id)).toEqual(["1", "2", "3"]);
+    // Full flat-results snapshot (timezone-independent via mocked format).
     expect($("#results").innerHTML).toMatchSnapshot();
   });
 
@@ -304,7 +396,7 @@ describe("search box", () => {
 
   it("shows the loading state until the response lands", async () => {
     await boot();
-    const slow = deferred<SearchPage>();
+    const slow = deferred<SearchArchivePage>();
     searchRespondsWith(() => slow.promise);
     input("#search").value = "vault";
     pressKey(input("#search"), "Enter");
@@ -315,7 +407,9 @@ describe("search box", () => {
 
   it("a failing search marks the status line as an error and keeps old results", async () => {
     await bootSearched();
-    searchRespondsWith(() => Promise.reject("backend exploded"));
+    searchRespondsWith(() =>
+      Promise.reject({ code: "internal", message: "backend exploded", retryable: true }),
+    );
     await runQuery("boom");
     await vi.waitFor(() => expect($("#status").textContent).toBe("backend exploded"));
     expect($("#status").classList.contains("error")).toBe(true);
@@ -342,8 +436,8 @@ describe("search box", () => {
 describe("stale-response guard", () => {
   it("a late response from an earlier query never overwrites the newest results", async () => {
     await boot();
-    const slowOld = deferred<SearchPage>();
-    const oldHits = [hitOf(message(5, "old", "old-thread", "stale result"))];
+    const slowOld = deferred<SearchArchivePage>();
+    const oldHits = [summary(5, "old", "old-thread", "ana", "stale result")];
     queueResponses([slowOld.promise, Promise.resolve(pageOf(HITS, 3))]);
 
     await runQuery("old");
@@ -355,14 +449,14 @@ describe("stale-response guard", () => {
     // The slow first query finally resolves — it must be discarded.
     slowOld.resolve(pageOf(oldHits, 99));
     await flush();
-    expect($("#status").textContent).toBe("1–3 of 3 · 2 chat groups for “new”");
+    expect($("#status").textContent).toBe("1–3 of 3 for “new”");
     expect(win.document.querySelectorAll("#results .hit-item").length).toBe(3);
     expect(win.document.querySelector('#results .hit-item[data-id="5"]')).toBeNull();
   });
 
   it("an error from a superseded query is ignored", async () => {
     await boot();
-    const slowOld = deferred<SearchPage>();
+    const slowOld = deferred<SearchArchivePage>();
     queueResponses([slowOld.promise, Promise.resolve(pageOf(HITS, 3))]);
     await runQuery("old");
     await runQuery("new");
@@ -370,7 +464,7 @@ describe("stale-response guard", () => {
 
     slowOld.reject("too late");
     await flush();
-    expect($("#status").textContent).toBe("1–3 of 3 · 2 chat groups for “new”");
+    expect($("#status").textContent).toBe("1–3 of 3 for “new”");
     expect($("#status").classList.contains("error")).toBe(false);
   });
 
@@ -381,7 +475,7 @@ describe("stale-response guard", () => {
     await vi.waitFor(() => expect($(".page-info").textContent).toBe("1–50 of 120 · page 1/3"));
 
     // Next page request is slow; meanwhile a new query races past it.
-    const slowPage = deferred<SearchPage>();
+    const slowPage = deferred<SearchArchivePage>();
     queueResponses([slowPage.promise, Promise.resolve(pageOf(HITS, 3, 0))]);
     pageButtons()[1].click(); // Next → offset 50, slow
     input("#search").value = "other";
@@ -390,10 +484,10 @@ describe("stale-response guard", () => {
 
     slowPage.resolve(pageOf(HITS.slice(0, 2), 120, 50));
     await flush();
-    expect($("#status").textContent).toBe("1–3 of 3 · 2 chat groups for “other”");
+    expect($("#status").textContent).toBe("1–3 of 3 for “other”");
     expect($(".page-info").textContent).toBe("1–3 of 3 · page 1/1");
     expect(
-      searchCalls().map((c) => (c.args as { query: { offset: number } }).query.offset),
+      searchCalls().map((c) => (c.args as { request: { offset: number } }).request.offset),
     ).toEqual([0, 50, 0]);
   });
 });
@@ -410,10 +504,10 @@ describe("filters", () => {
     ($('[data-source="mbox"]') as HTMLElement).click();
     await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
     expect(searchCalls()[0].args).toMatchObject({
-      query: { text: "", sources: ["mbox"] },
+      request: { text: "", source_ids: ["inst-mbox"] },
     });
     // Browse mode: no query echo in the status line.
-    expect($("#status").textContent).toBe("1–6 of 6 · 1 chat group");
+    expect($("#status").textContent).toBe("1–6 of 6");
     const chip = $('[data-source="mbox"]');
     expect(chip.classList.contains("on")).toBe(true);
     expect(chip.getAttribute("aria-pressed")).toBe("true");
@@ -436,8 +530,8 @@ describe("filters", () => {
     input("#author").value = "  bruno ";
     pressKey(input("#author"), "Enter");
     await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
-    expect(searchCalls()[0].args).toMatchObject({ query: { text: "", author: "bruno" } });
-    expect($("#status").textContent).toBe("1–1 of 1 · 1 chat group");
+    expect(searchCalls()[0].args).toMatchObject({ request: { text: "", author: "bruno" } });
+    expect($("#status").textContent).toBe("1–1 of 1");
   });
 
   it("date filters apply on change", async () => {
@@ -446,13 +540,13 @@ describe("filters", () => {
     input("#from-date").value = "2026-01-01";
     fireChange(input("#from-date"));
     await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
-    expect(searchCalls()[0].args).toMatchObject({ query: { from_date: "2026-01-01" } });
+    expect(searchCalls()[0].args).toMatchObject({ request: { from_date: "2026-01-01" } });
 
     input("#to-date").value = "2026-01-31";
     fireChange(input("#to-date"));
     await vi.waitFor(() => expect(searchCalls().length).toBe(2));
     expect(searchCalls()[1].args).toMatchObject({
-      query: { from_date: "2026-01-01", to_date: "2026-01-31" },
+      request: { from_date: "2026-01-01", to_date: "2026-01-31" },
     });
   });
 
@@ -501,9 +595,9 @@ describe("pagination", () => {
     searchRespondsWith(() => pageOf(HITS.slice(0, 2), 120, 0));
     pageButtons()[0].click();
     await vi.waitFor(() => expect($(".page-info").textContent).toBe("1–50 of 120 · page 1/3"));
-    expect(searchCalls().map((c) => (c.args as { query: { offset: number } }).query.offset)).toEqual([
-      0, 50, 0,
-    ]);
+    expect(
+      searchCalls().map((c) => (c.args as { request: { offset: number } }).request.offset),
+    ).toEqual([0, 50, 0]);
   });
 });
 
@@ -512,11 +606,13 @@ describe("pagination", () => {
 // ---------------------------------------------------------------------------
 
 describe("detail view", () => {
-  it("opens on click, fetches the thread with radius 8, and snapshots the panel", async () => {
+  it("opens on click, fetches the context with paged cursors, and snapshots the panel", async () => {
     await bootSearched();
     ($('.hit-item[data-id="1"]') as HTMLElement).click();
     await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
-    expect(ctxCalls().map((c) => c.args)).toEqual([{ id: 1, radius: 8 }]);
+    expect(ctxCalls().map((c) => c.args)).toEqual([
+      { id: 1, beforeCursor: null, afterCursor: null, limit: 8 },
+    ]);
     expect(win.document.querySelectorAll("#detail .thread-row").length).toBe(5);
     expect(($(".thread-row.current") as HTMLElement).dataset.id).toBe("1");
     expect(win.document.querySelectorAll("#detail .thread-row.link").length).toBe(4);
@@ -545,22 +641,27 @@ describe("detail view", () => {
 
     pressKey(win.document, "ArrowUp");
     await vi.waitFor(() => expect(ctxCalls()).toHaveLength(2));
-    expect(ctxCalls()[1].args).toEqual({ id: 11, radius: 8 });
+    expect(ctxCalls()[1].args).toEqual({ id: 11, beforeCursor: null, afterCursor: null, limit: 8 });
 
     pressKey(win.document, "ArrowDown");
     await vi.waitFor(() => expect(ctxCalls()).toHaveLength(3));
-    expect(ctxCalls()[2].args).toEqual({ id: 12, radius: 8 });
+    expect(ctxCalls()[2].args).toEqual({ id: 12, beforeCursor: null, afterCursor: null, limit: 8 });
   });
 
   it("an arrow at the thread edge loads nothing", async () => {
     await boot();
     searchRespondsWith(() => pageOf(HITS, 3));
-    const topEdge: ChatContext = {
+    const topEdge: ConversationContext = {
+      anchor: CTX.anchor,
       before: [],
-      message: message(1, "mbox", "thread-a", "quarterly vault report"),
-      after: [message(2, "mbox", "thread-a", "next message")],
+      after: [
+        { id: 2, author: "ana", sent_at: "2026-01-02T10:00:00Z", time_confidence: "legacy_assumed", body: "next message" },
+      ],
+      unverified_conversation: false,
+      has_more_before: false,
+      has_more_after: false,
     };
-    tauri.handlers.set("chat_context", () => topEdge);
+    tauri.handlers.set("conversation_context_v2", () => topEdge);
     await runQuery("vault");
     await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
     ($('.hit-item[data-id="1"]') as HTMLElement).click();
@@ -571,16 +672,20 @@ describe("detail view", () => {
     expect(ctxCalls()).toHaveLength(1); // only the initial open
   });
 
-  it("a vanished message (null context) leaves the panel closed", async () => {
+  it("a vanished message is a clean not-found, panel stays closed", async () => {
     await boot();
     searchRespondsWith(() => pageOf(HITS, 3));
-    tauri.handlers.set("chat_context", () => null);
+    tauri.handlers.set("conversation_context_v2", () =>
+      Promise.reject({ code: "not_found", message: "no message with id 1" }),
+    );
     await runQuery("vault");
     await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
     ($('.hit-item[data-id="1"]') as HTMLElement).click();
-    await flush();
+    await vi.waitFor(() =>
+      expect($("#status").textContent).toBe("Message is no longer in this vault."),
+    );
     expect($("#detail").classList.contains("open")).toBe(false);
-    expect($("#status").classList.contains("error")).toBe(false);
+    expect($("#status").classList.contains("error")).toBe(true);
   });
 
   it("clicking a thread neighbor opens that message", async () => {
@@ -589,7 +694,319 @@ describe("detail view", () => {
     await vi.waitFor(() => expect(ctxCalls()).toHaveLength(1));
     ($('.thread-row[data-id="12"]') as HTMLElement).click();
     await vi.waitFor(() => expect(ctxCalls()).toHaveLength(2));
-    expect(ctxCalls()[1].args).toEqual({ id: 12, radius: 8 });
+    expect(ctxCalls()[1].args).toEqual({ id: 12, beforeCursor: null, afterCursor: null, limit: 8 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v2 search features (M3.2): chips, attachment/import filters, deep links,
+// restorable selection/scroll, refresh notice, selection export, copy
+// ---------------------------------------------------------------------------
+
+describe("v2 filters", () => {
+  it("the attachment filter sends has_attachment on change", async () => {
+    await boot();
+    searchRespondsWith(() => pageOf(HITS.slice(0, 1), 1));
+    const select = $<HTMLSelectElement>("#has-attachment");
+    select.value = "with";
+    fireChange(select);
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    expect(searchCalls()[0].args).toMatchObject({ request: { has_attachment: true } });
+
+    select.value = "without";
+    fireChange(select);
+    await vi.waitFor(() => expect(searchCalls().length).toBe(2));
+    expect(searchCalls()[1].args).toMatchObject({ request: { has_attachment: false } });
+  });
+
+  it("the import-scope filter lists scopes and filters by the chosen run", async () => {
+    await boot();
+    await vi.waitFor(() => {
+      const select = $<HTMLSelectElement>("#import-scope");
+      expect([...select.querySelectorAll("option")].map((o) => o.value)).toEqual([
+        "",
+        "imp-1",
+      ]);
+    });
+    searchRespondsWith(() => pageOf(HITS.slice(0, 1), 2));
+    const select = $<HTMLSelectElement>("#import-scope");
+    select.value = "imp-1";
+    fireChange(select);
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    expect(searchCalls()[0].args).toMatchObject({ request: { import_job_id: "imp-1" } });
+  });
+
+  it("the sort choice is sent for text searches", async () => {
+    await boot();
+    searchRespondsWith(() => pageOf(HITS, 3));
+    input("#search").value = "vault";
+    const select = $<HTMLSelectElement>("#sort-order");
+    select.value = "newest";
+    fireChange(select);
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    expect(searchCalls()[0].args).toMatchObject({ request: { sort: "newest", text: "vault" } });
+  });
+
+  it("applied filters render as removable chips; removal re-runs the search", async () => {
+    await boot();
+    await vi.waitFor(() => expect(win.document.querySelectorAll(".chip").length).toBe(2));
+    searchRespondsWith(() => pageOf(HITS.slice(0, 1), 1));
+    ($('[data-source="demo"]') as HTMLElement).click();
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    input("#author").value = "ana";
+    pressKey(input("#author"), "Enter");
+    await vi.waitFor(() => expect(searchCalls().length).toBe(2));
+
+    const chips = [...win.document.querySelectorAll("#active-filter-chips .filter-chip")];
+    expect(chips.map((c) => c.textContent?.trim())).toEqual(["demo ×", "author: ana ×"]);
+
+    // Removing the author chip keeps the source filter.
+    (chips[1] as unknown as HTMLElement).click();
+    await vi.waitFor(() => expect(searchCalls().length).toBe(3));
+    expect(searchCalls()[2].args).toMatchObject({
+      request: { source_ids: ["inst-demo"], author: "" },
+    });
+    expect(win.document.querySelectorAll("#active-filter-chips .filter-chip").length).toBe(1);
+  });
+
+  it("reversed date bounds are rejected inline before any invocation", async () => {
+    await boot();
+    input("#from-date").value = "2026-02-02";
+    input("#to-date").value = "2026-02-01";
+    input("#search").value = "vault";
+    pressKey(input("#search"), "Enter");
+    await flush();
+    expect(searchCalls()).toHaveLength(0);
+    expect($("#status").textContent).toContain("Reversed date range");
+    expect($("#status").classList.contains("error")).toBe(true);
+  });
+});
+
+describe("deep links", () => {
+  it("a pasted mailchat://message/<id> locator opens that message directly", async () => {
+    await boot();
+    tauri.handlers.set("conversation_context_v2", () => CTX);
+    input("#search").value = "mailchat://message/7";
+    pressKey(input("#search"), "Enter");
+    await vi.waitFor(() => expect(ctxCalls()).toHaveLength(1));
+    expect(ctxCalls()[0].args).toMatchObject({ id: 7 });
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
+    // No search ran: the locator is navigation, not a text query.
+    expect(searchCalls()).toHaveLength(0);
+  });
+
+  it("non-link text still searches normally", async () => {
+    await boot();
+    searchRespondsWith(() => pageOf(HITS, 3));
+    input("#search").value = "mailchat://message/12x";
+    pressKey(input("#search"), "Enter");
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    expect((searchCalls()[0].args as { request: { text: string } }).request.text).toBe(
+      "mailchat://message/12x",
+    );
+  });
+});
+
+describe("restorable selection and scroll", () => {
+  it("Back to results re-selects the opened row and restores the scroll", async () => {
+    await bootSearched();
+    // Move the keyboard selection to row 2 (id 2) and scroll the list.
+    pressKey(win.document.body, "ArrowDown");
+    pressKey(win.document.body, "ArrowDown");
+    const results = $("#results");
+    results.scrollTop = 240;
+
+    ($('.hit-item[data-id="2"]') as HTMLElement).click();
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
+    expect((win.document.querySelector('.hit-item[data-id="2"]') as unknown as HTMLElement).classList.contains("selected")).toBe(true);
+
+    // Opening replaced the rows (renderAll) — scroll and selection must
+    // come back on Back, not immediately.
+    ($(".close-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect((win.document.querySelector('.hit-item[data-id="2"]') as unknown as HTMLElement).classList.contains("selected")).toBe(true),
+    );
+    expect(($(".hit-item.active") as HTMLElement).dataset.id).toBe("2");
+    expect($("#results").scrollTop).toBe(240);
+    expect($("#detail").classList.contains("open")).toBe(false);
+  });
+
+  it("a fresh search resets the selection and snapshot", async () => {
+    await bootSearched();
+    ($('.hit-item[data-id="1"]') as HTMLElement).click();
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
+    ($(".close-btn") as HTMLElement).click();
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(false));
+
+    searchRespondsWith(() => pageOf(HITS.slice(1), 1));
+    await runQuery("next");
+    await vi.waitFor(() => expect($("#status").textContent).toContain("1–1 of 1"));
+    expect(win.document.querySelector(".hit-item.selected")).toBeNull();
+    expect(win.document.querySelector(".hit-item.active")).toBeNull();
+  });
+});
+
+describe("archive revision refresh (A07)", () => {
+  it("a page response at a different revision offers Refresh instead of silently restarting", async () => {
+    await boot();
+    searchRespondsWith(() => pageOf(HITS.slice(0, 2), 120, 0, 5));
+    await runQuery("vault");
+    await vi.waitFor(() => expect($(".page-info").textContent).toBe("1–50 of 120 · page 1/3"));
+    expect($("#refresh-notice").hidden).toBe(true);
+
+    // The archive changed while paginating: the next page carries a new
+    // revision — a refresh offer appears, rows are not silently reset.
+    searchRespondsWith(() => pageOf(HITS.slice(0, 2), 121, 50, 6));
+    pageButtons()[1].click();
+    await vi.waitFor(() => expect($("#refresh-notice").hidden).toBe(false));
+    expect($("#refresh-notice").textContent).toContain("archive changed");
+    expect($("#status").textContent).toContain("new data available");
+
+    // Refresh re-runs the fresh submission and clears the notice.
+    searchRespondsWith(() => pageOf(HITS.slice(0, 2), 121, 0, 6));
+    ($("#refresh-notice button") as HTMLElement).click();
+    await vi.waitFor(() => expect($("#refresh-notice").hidden).toBe(true));
+    expect($("#status").textContent).not.toContain("new data available");
+  });
+
+  it("a succeeded job while results are visible offers Refresh", async () => {
+    await bootSearched();
+    expect($("#refresh-notice").hidden).toBe(true);
+    tauriEvents.listeners.get("job-event")?.({ payload: { seq: 1, at: "", job: 1, type: "succeeded" } });
+    await vi.waitFor(() => expect($("#refresh-notice").hidden).toBe(false));
+  });
+});
+
+describe("selection export and copy actions", () => {
+  it("checking rows enables Export selected and exports the checked ids in order", async () => {
+    await bootSearched();
+    const boxes = [...win.document.querySelectorAll("#results input.row-select")] as unknown as HTMLInputElement[];
+    expect(($("#export-selection-btn") as HTMLButtonElement).disabled).toBe(true);
+    boxes[2].checked = true;
+    fireChange(boxes[2]);
+    boxes[0].checked = true;
+    fireChange(boxes[0]);
+    await vi.waitFor(() =>
+      expect(($("#export-selection-btn") as HTMLButtonElement).disabled).toBe(false),
+    );
+    expect($("#export-selection-btn").textContent).toBe("Export selected (2)…");
+
+    dialog.savedPath = "/tmp/selection.txt";
+    tauri.handlers.set("export_messages_v2", () => ({ format: "text", written: 2, missing: 0 }));
+    ($("#export-selection-btn") as HTMLElement).click();
+    await vi.waitFor(() => expect($("#selection-status").textContent).toBe("Exported 2 messages."));
+    const call = tauri.calls.find((c) => c.cmd === "export_messages_v2");
+    expect(call?.args).toEqual({ ids: [3, 1], format: "text", path: "/tmp/selection.txt" });
+  });
+
+  it("an export with vanished ids reports the skipped count honestly", async () => {
+    await bootSearched();
+    const boxes = [...win.document.querySelectorAll("#results input.row-select")] as unknown as HTMLInputElement[];
+    boxes[0].checked = true;
+    fireChange(boxes[0]);
+    dialog.savedPath = "/tmp/selection.json";
+    $<HTMLSelectElement>("#selection-format").value = "json";
+    tauri.handlers.set("export_messages_v2", () => ({ format: "json", written: 0, missing: 1 }));
+    ($("#export-selection-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect($("#selection-status").textContent).toBe(
+        "Exported 0 messages (1 no longer in the vault and skipped).",
+      ),
+    );
+  });
+
+  it("Copy message and Copy link write provenance text and the locator", async () => {
+    await bootSearched();
+    const clipboard = vi.fn((_text: string) => Promise.resolve());
+    Object.defineProperty(win.navigator, "clipboard", {
+      value: { writeText: clipboard },
+      configurable: true,
+    });
+    ($('.hit-item[data-id="1"]') as HTMLElement).click();
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
+
+    ($(".copy-btn") as HTMLElement).click();
+    await vi.waitFor(() => expect(clipboard).toHaveBeenCalledTimes(1));
+    const copiedText = clipboard.mock.calls[0][0];
+    expect(copiedText).toContain("quarterly vault report");
+    expect(copiedText).toContain("import imp-1");
+    await vi.waitFor(() => expect($("#status").textContent).toContain("Message copied"));
+
+    ($(".copy-link-btn") as HTMLElement).click();
+    await vi.waitFor(() => expect(clipboard).toHaveBeenCalledTimes(2));
+    expect(clipboard.mock.calls[1][0]).toBe("mailchat://message/1");
+  });
+
+  it("the pane's Export… exports exactly the open message", async () => {
+    await bootSearched();
+    ($('.hit-item[data-id="1"]') as HTMLElement).click();
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
+    dialog.savedPath = "/tmp/one.txt";
+    tauri.handlers.set("export_messages_v2", () => ({ format: "text", written: 1, missing: 0 }));
+    ($(".export-selection-btn") as HTMLElement).click();
+    await vi.waitFor(() => expect($("#selection-status").textContent).toBe("Exported 1 message."));
+    const call = tauri.calls.find((c) => c.cmd === "export_messages_v2");
+    expect(call?.args).toMatchObject({ ids: [1], format: "text" });
+  });
+});
+
+describe("context paging (load earlier/later)", () => {
+  it("Load earlier pages beyond the held rows with the outermost cursor", async () => {
+    await boot();
+    searchRespondsWith(() => pageOf(HITS, 3));
+    const more: ConversationContext = {
+      ...CTX,
+      has_more_before: true,
+      has_more_after: false,
+    };
+    tauri.handlers.set("conversation_context_v2", () => more);
+    await runQuery("vault");
+    await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
+    ($('.hit-item[data-id="1"]') as HTMLElement).click();
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
+    expect(($(".load-earlier-btn") as HTMLButtonElement).disabled).toBe(false);
+    expect(win.document.querySelectorAll("#detail .thread-row").length).toBe(5);
+
+    const earlierPage: ConversationContext = {
+      anchor: CTX.anchor,
+      before: [
+        { id: 8, author: "ana", sent_at: "2026-01-01T08:00:00Z", time_confidence: "legacy_assumed", body: "way earlier" },
+      ],
+      after: [],
+      unverified_conversation: false,
+      has_more_before: false,
+      has_more_after: false,
+    };
+    tauri.handlers.set("conversation_context_v2", () => earlierPage);
+    ($(".load-earlier-btn") as HTMLElement).click();
+    await vi.waitFor(() => expect(ctxCalls().length).toBe(2));
+    expect(ctxCalls()[1].args).toMatchObject({
+      id: 1,
+      beforeCursor: 10,
+      afterCursor: null,
+      limit: 8,
+    });
+    await vi.waitFor(() => expect(win.document.querySelectorAll("#detail .thread-row").length).toBe(6));
+    // The anchor stays; Load earlier is exhausted now.
+    expect(($(".thread-row.current") as HTMLElement).dataset.id).toBe("1");
+    expect(($(".load-earlier-btn") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("an unverified conversation shows the notice and no neighbors", async () => {
+    await boot();
+    searchRespondsWith(() => pageOf(HITS, 3));
+    tauri.handlers.set("conversation_context_v2", () => ({
+      ...CTX,
+      before: [],
+      after: [],
+      unverified_conversation: true,
+    }));
+    await runQuery("vault");
+    await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
+    ($('.hit-item[data-id="1"]') as HTMLElement).click();
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
+    expect($("#detail").textContent).toContain("Conversation could not be verified");
+    expect(win.document.querySelectorAll("#detail .thread-row").length).toBe(1);
   });
 });
 
@@ -631,7 +1048,7 @@ describe("keyboard navigation", () => {
     pressKey(win.document.body, "ArrowDown");
     pressKey(win.document.body, "Enter");
     await vi.waitFor(() => expect(ctxCalls()).toHaveLength(1));
-    expect(ctxCalls()[0].args).toEqual({ id: 1, radius: 8 });
+    expect(ctxCalls()[0].args).toEqual({ id: 1, beforeCursor: null, afterCursor: null, limit: 8 });
     await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
   });
 
@@ -1948,7 +2365,7 @@ describe("workspace shell", () => {
 
   function openDetailViaResult(): Promise<void> {
     searchRespondsWith(() => pageOf(HITS, 3));
-    tauri.handlers.set("chat_context", () => CTX);
+    tauri.handlers.set("conversation_context_v2", () => CTX);
     return (async () => {
       input("#search").value = "vault";
       pressKey(input("#search"), "Enter");
@@ -1994,7 +2411,7 @@ describe("workspace shell", () => {
     $('[data-source="mbox"]').click();
     await flush();
     expect(app().dataset.view).toBe("workspace");
-    expect(tauri.calls.some((c) => c.cmd === "search_messages")).toBe(true);
+    expect(tauri.calls.some((c) => c.cmd === "search_archive_v2")).toBe(true);
   });
 
   it("resize drives the layout state through wide/medium/compact", async () => {
@@ -2040,7 +2457,7 @@ describe("workspace shell", () => {
     await boot();
     setViewportWidth(900); // medium: reading replaces the results area
     searchRespondsWith(() => pageOf(HITS, 3));
-    tauri.handlers.set("chat_context", () => CTX);
+    tauri.handlers.set("conversation_context_v2", () => CTX);
     input("#search").value = "vault";
     pressKey(input("#search"), "Enter");
     await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
@@ -2067,14 +2484,14 @@ describe("workspace shell", () => {
     row.focus();
     pressKey(row, "Enter");
     await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
-    expect(ctxCalls().at(-1)?.args).toEqual({ id: Number(row.dataset.id), radius: 8 });
+    expect(ctxCalls().at(-1)?.args).toMatchObject({ id: Number(row.dataset.id) });
   });
 
   it("opening a message in wide layout keeps focus on the current thread row", async () => {
     await boot();
     setViewportWidth(1280);
     searchRespondsWith(() => pageOf(HITS, 3));
-    tauri.handlers.set("chat_context", () => CTX);
+    tauri.handlers.set("conversation_context_v2", () => CTX);
     input("#search").value = "vault";
     pressKey(input("#search"), "Enter");
     await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
@@ -2093,18 +2510,25 @@ describe("workspace shell", () => {
     threadRow.focus();
     pressKey(threadRow, " ");
     await vi.waitFor(() => expect(ctxCalls().length).toBeGreaterThan(1));
-    expect(ctxCalls().at(-1)?.args).toEqual({ id: Number(threadRow.dataset.id), radius: 8 });
+    expect(ctxCalls().at(-1)?.args).toMatchObject({ id: Number(threadRow.dataset.id) });
   });
 
   it("arrow thread navigation keeps focus on the current thread row", async () => {
     await bootSearched();
     setViewportWidth(1280);
-    const all = [...CTX.before, CTX.message, ...CTX.after];
-    const ctxFor = (id: number): ChatContext => {
+    const all = [...CTX.before, CTX.anchor, ...CTX.after];
+    const ctxFor = (id: number): ConversationContext => {
       const at = all.findIndex((m) => m.id === id);
-      return { before: all.slice(0, at), message: all[at], after: all.slice(at + 1) };
+      return {
+        anchor: { ...CTX.anchor, id },
+        before: all.slice(0, at).filter((m) => m.id !== id),
+        after: all.slice(at + 1),
+        unverified_conversation: false,
+        has_more_before: false,
+        has_more_after: false,
+      };
     };
-    tauri.handlers.set("chat_context", (args: unknown) =>
+    tauri.handlers.set("conversation_context_v2", (args: unknown) =>
       ctxFor((args as { id: number }).id),
     );
     input("#search").value = "vault";
@@ -2164,7 +2588,7 @@ describe("workspace shell", () => {
     await boot();
     setViewportWidth(1280);
     searchRespondsWith(() => pageOf(HITS, 3));
-    tauri.handlers.set("chat_context", () => CTX);
+    tauri.handlers.set("conversation_context_v2", () => CTX);
     input("#search").value = "vault";
     pressKey(input("#search"), "Enter");
     await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
