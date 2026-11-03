@@ -96,6 +96,32 @@ impl Secrets {
         Some(password)
     }
 
+    /// Remember the OAuth2 refresh token for `user@host` — same stores
+    /// and guarantees as [`Self::save`], under a distinct `oauth:` key so
+    /// it can never collide with (or be mistaken for) an app password or
+    /// an LLM API key. Short-lived access tokens are never stored.
+    pub fn save_refresh(&self, host: &str, username: &str, token: &str) -> SecretStore {
+        let key = format!("oauth:{}", Self::account_key(host, username));
+        let keyring =
+            keyring::Entry::new(SERVICE, &key).and_then(|entry| entry.set_password(token));
+        match keyring {
+            Ok(()) => SecretStore::OsKeyring,
+            Err(_) => {
+                self.memory
+                    .lock()
+                    .expect("secrets memory lock")
+                    .insert(key, token.to_string());
+                SecretStore::Memory
+            }
+        }
+    }
+
+    /// Load the stored OAuth2 refresh token for `user@host`, mirroring
+    /// [`Self::load_key`]'s keyring-then-memory order.
+    pub fn load_refresh(&self, host: &str, username: &str) -> Option<String> {
+        self.load_key(&format!("oauth:{}", Self::account_key(host, username)))
+    }
+
     /// Read one keyring/memory key: OS keyring first, then session memory.
     fn load_key(&self, key: &str) -> Option<String> {
         if let Ok(entry) = keyring::Entry::new(SERVICE, key) {
