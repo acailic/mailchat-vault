@@ -54,10 +54,21 @@ export async function waitForText(browser, selector, predicate, { timeout = 15_0
   return textOf(browser, selector);
 }
 
+/** Clear an element's text so a settle-wait can only be satisfied by the
+ * NEW action's output: the previous action's lingering status satisfies
+ * the same predicate, so a stale poll could return before the trigger is
+ * even processed (CI flake: stale results list clicked). */
+async function clearStatus(browser, selector) {
+  await browser.execute((sel) => {
+    document.querySelector(sel).textContent = "";
+  }, selector);
+}
+
 /** Type a path into the import field, click Import, return the final status. */
 export async function importMbox(browser, mboxPath) {
   const input = await browser.$("#mbox-path");
   await input.setValue(mboxPath);
+  await clearStatus(browser, "#import-status");
   const button = await browser.$("#import-btn");
   await button.click();
   // Both UI generations print "Imported N new, M already present (of X in src)."
@@ -70,6 +81,7 @@ export async function importMbox(browser, mboxPath) {
 }
 
 export async function seedDemo(browser) {
+  await clearStatus(browser, "#import-status");
   const button = await browser.$("#seed-btn");
   await button.click();
   return waitForText(browser, "#import-status", "Demo messages:", {
@@ -82,6 +94,7 @@ export async function search(browser, text) {
   const input = await browser.$("#search");
   await input.click();
   await input.setValue(text);
+  await clearStatus(browser, "#status");
   await browser.keys("Enter");
   return waitForText(
     browser,

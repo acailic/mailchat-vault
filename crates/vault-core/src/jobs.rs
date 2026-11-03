@@ -60,11 +60,12 @@ use std::thread::JoinHandle;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::bounded::IngestSink;
 use crate::imap::{ImapConfig, SyncStorage};
 use crate::message::NewMessage;
 use crate::storage::{
-    BatchFailure, ConnectorIdentity, MailBatchItem, MailBatchOutcome, NewSourceInstance,
-    Occurrence, Storage,
+    BatchFailure, ConnectorIdentity, ImportBatchCounts, ImportIssueRecord, MailBatchItem,
+    MailBatchOutcome, NewSourceInstance, Occurrence, Storage,
 };
 use crate::{Error, Result};
 
@@ -940,6 +941,62 @@ impl<'a> JobContext<'a> {
     /// Whether cancellation was requested; check at safe points.
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bounded ingest over the pool (M2.2)
+// ---------------------------------------------------------------------------
+
+/// [`IngestSink`] over the pool: every checkpoint read and batch commit
+/// round-trips the bounded write queue, so a bounded import's parsing and
+/// media copying (which happen on the caller's thread between commits)
+/// never occupy the writer or a read connection while they read or copy.
+pub struct PoolSink<'a>(pub &'a DbPool);
+
+impl IngestSink for PoolSink<'_> {
+    fn checkpoint(&mut self, import_id: &str) -> Result<Option<u64>> {
+        let import_id = import_id.to_string();
+        self.0
+            .submit_write(move |s| s.import_checkpoint(&import_id))
+    }
+
+    fn commit_batch(
+        &mut self,
+        import_id: &str,
+        source: &str,
+        messages: &[NewMessage],
+        issues: &[ImportIssueRecord<'_>],
+        committed_after: u64,
+        completes: bool,
+    ) -> Result<ImportBatchCounts> {
+        // The write queue is 'static, so the borrowed call frame is cloned
+        // into the closure — one bounded batch's worth of data.
+        let import_id = import_id.to_string();
+        let source = source.to_string();
+        let messages = messages.to_vec();
+        let issues: Vec<(u64, String, String)> = issues
+            .iter()
+            .map(|i| (i.position, i.external_ref.to_string(), i.reason.to_string()))
+            .collect();
+        self.0.submit_write(move |s| {
+            let records: Vec<ImportIssueRecord<'_>> = issues
+                .iter()
+                .map(|(position, external_ref, reason)| ImportIssueRecord {
+                    position: *position,
+                    external_ref: external_ref.as_str(),
+                    reason: reason.as_str(),
+                })
+                .collect();
+            s.commit_import_batch(
+                &import_id,
+                &source,
+                &messages,
+                &records,
+                committed_after,
+                completes,
+            )
+        })
     }
 }
 
