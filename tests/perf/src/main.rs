@@ -710,9 +710,19 @@ fn measure_concurrent_ingest(
     let mut result_value: Option<u64> = None;
     while let Some(record) = pool.job(job) {
         if let vault_core::jobs::JobState::Succeeded { result } = &record.state {
-            result_value = result.get("inserted").and_then(|v| v.as_u64());
+            match result.get("inserted").and_then(|v| v.as_u64()) {
+                Some(n) => result_value = Some(n),
+                None => {
+                    return Err(format!(
+                        "ingest job succeeded without an 'inserted' count: {result}"
+                    ));
+                }
+            }
         }
         if record.state.is_terminal() {
+            if let vault_core::jobs::JobState::Failed { error } = &record.state {
+                return Err(format!("concurrent-ingest job failed: {error:?}"));
+            }
             break;
         }
         for spec in &specs {
@@ -724,9 +734,13 @@ fn measure_concurrent_ingest(
             }
         }
     }
-    // The job record may already be evicted (or terminal state observed
-    // late); fall back to the requested count when the result is unread.
-    let ingest_messages = result_value.unwrap_or(count);
+    // A vanished record (registry eviction) or a cancelled job also ends
+    // the loop without a readable result; neither may stand in for a count.
+    let Some(ingest_messages) = result_value else {
+        return Err(
+            "concurrent-ingest job ended without a readable 'inserted' result".to_string(),
+        );
+    };
     let ingest_secs = started.elapsed().as_secs_f64();
 
     let search: Vec<IngestSearchRow> = samples
@@ -757,6 +771,11 @@ fn measure_concurrent_ingest(
 /// fixture stays exactly `--count` messages; checkpoint the WAL after.
 fn cleanup_ingest_rows(db_path: &Path) -> Result<(), String> {
     let conn = Connection::open(db_path).map_err(|e| format!("cleanup open: {e}"))?;
+    // SQLite defaults foreign_keys to OFF per connection; without this
+    // the ON DELETE CASCADE children (identities, occurrences,
+    // embeddings) survive as orphans pointing at deleted messages.
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(|e| format!("cleanup pragma: {e}"))?;
     conn.execute(
         "DELETE FROM archive_messages WHERE source_instance_id = \
          (SELECT id FROM source_instances WHERE legacy_namespace = ?1)",

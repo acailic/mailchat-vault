@@ -55,15 +55,12 @@ async function ipcSettled(browser, cmd, args) {
 }
 
 export async function run(ctx) {
-  const { withSession, assert, ui, sqlite, vaultDbPath } = ctx;
+  const { withSession, assert, ui, vaultDbPath } = ctx;
 
   let firstDataDir;
   await withSession({}, async (browser, { dataDir }) => {
     firstDataDir = dataDir;
     await ui.waitForApp(browser);
-    if (!sqlite) {
-      throw new Error("sqlite3 CLI unavailable — this spec needs direct DB asserts");
-    }
     const db = vaultDbPath(dataDir);
 
     // 1. Opt-in default: off, 15-minute interval, nothing scheduled.
@@ -121,22 +118,30 @@ export async function run(ctx) {
     assert.equal(view.rounds_submitted, 0, "enabling did not submit a round");
     assert.equal(view.next_due_in_secs, 1800, "the first round is one interval out");
 
-    // 4. The opt-in is durable: the singleton row in the vault database.
-    const rows = await ctx.sqlite.query(
-      db,
-      "SELECT enabled, interval_ms FROM sync_schedule WHERE id = 1",
-    );
-    assert.equal(rows.length, 1, "one schedule row");
-    assert.equal(
-      Number(rows[0].enabled),
-      1,
-      "the schedule persists enabled in the vault database",
-    );
-    assert.equal(
-      Number(rows[0].interval_ms),
-      1_800_000,
-      "the interval persists in the vault database",
-    );
+    // 4. The opt-in is durable: the singleton row in the vault database
+    // (direct reads follow the suite contract: skipped when the sqlite3
+    // CLI is unavailable, on the runner announcement).
+    if (!ctx.sqlite) {
+      ctx.log(
+        "      (sqlite3 CLI unavailable — skipping direct DB assertions)",
+      );
+    } else {
+      const rows = await ctx.sqlite.query(
+        db,
+        "SELECT enabled, interval_ms FROM sync_schedule WHERE id = 1",
+      );
+      assert.equal(rows.length, 1, "one schedule row");
+      assert.equal(
+        Number(rows[0].enabled),
+        1,
+        "the schedule persists enabled in the vault database",
+      );
+      assert.equal(
+        Number(rows[0].interval_ms),
+        1_800_000,
+        "the interval persists in the vault database",
+      );
+    }
   },
     { keepData: true },
   );

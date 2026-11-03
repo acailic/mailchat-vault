@@ -83,12 +83,6 @@ impl Default for SyncSchedule {
 }
 
 impl SyncSchedule {
-    /// This schedule with the interval clamped into the accepted range
-    /// (the product bounds; see [`MIN_INTERVAL_MS`]).
-    pub fn normalized(self) -> Self {
-        self.normalized_within(MIN_INTERVAL_MS, MAX_INTERVAL_MS)
-    }
-
     /// This schedule with the interval clamped into `min_ms..=max_ms`.
     /// The scheduler clamps with its configured bounds before persisting
     /// (the app runs the product bounds; tests shrink them to exercise
