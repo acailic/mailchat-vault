@@ -2768,6 +2768,27 @@ describe("auto-sync", () => {
     expect($("#auto-sync-status").textContent).toContain("job 7");
   });
 
+  it("preserves a saved interval outside the standard choices when toggling", async () => {
+    tauri.handlers.set("sync_schedule_get", () => ({
+      ...SCHEDULE_OFF,
+      enabled: true,
+      interval_minutes: 7,
+    }));
+    tauri.handlers.set("sync_schedule_set", () => ({ ...SCHEDULE_OFF, interval_minutes: 7 }));
+    await boot();
+    const select = $<HTMLSelectElement>("#auto-sync-interval");
+    expect(select.value).toBe("7");
+    input("#auto-sync-toggle").checked = false;
+    fireChange(input("#auto-sync-toggle"));
+    await vi.waitFor(() =>
+      expect($("#auto-sync-status").textContent).toContain("Auto-sync off"),
+    );
+    expect(tauri.calls.find((c) => c.cmd === "sync_schedule_set")?.args)
+      .toEqual({ enabled: false, intervalMinutes: 7 });
+    expect(select.value).toBe("7");
+    expect(Array.from(select.options).filter((o) => o.value === "7")).toHaveLength(1);
+  });
+
   it("a failed change surfaces the error instead of guessing state", async () => {
     tauri.handlers.set("sync_schedule_get", () => SCHEDULE_OFF);
     tauri.handlers.set("sync_schedule_set", () => Promise.reject("vault busy"));
