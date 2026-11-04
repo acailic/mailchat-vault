@@ -1,0 +1,56 @@
+# Clean Ubuntu target image for the Linux release smoke tests.
+#
+# It is a *stand-in for a desktop session*, not a build or app
+# environment: it provides only what any real Ubuntu desktop ships by
+# default (X display, GL software rendering, Wayland client library,
+# freedesktop integration tools) — and deliberately NONE of the
+# application's own libraries (libwebkit2gtk-4.1, libgtk-3, libsoup,
+# librsvg, ... are absent).
+#
+# libwayland-client0 deserves a note: linuxdeploy deliberately does not
+# bundle the Wayland client libraries into AppImages (they must match
+# the running compositor), so every GTK AppImage loads them from the
+# system — and every Ubuntu desktop (Wayland or Xorg session) has them
+# installed via GNOME. A bare container does not; the smoke image adds
+# it as desktop-session plumbing.
+#
+# The same holds for the mesa stack (libgl1/libegl1/libgles2/libgbm1,
+# libgl1-mesa-dri): GPU/GL libraries are never bundled into AppImages
+# because they must match the system driver — every desktop ships
+# them. WebKit loads libGLESv2 at runtime (GPU process), which is why
+# it is here even though no bundled object links it. libfribidi0 /
+# libharfbuzz0b (pango text shaping) round out the desktop text stack.
+#
+#   - the deb suite proves `apt install ./x.deb` pulls the app runtime
+#     itself (declared Depends) and registers launcher/icon/MIME
+#   - the AppImage suite proves the AppImage bundles its own runtime
+#     and runs on this bare image without any extra packages
+#
+# Build (normally done by smoke-linux.sh):
+#   docker build --build-arg UBUNTU_VERSION=22.04 \
+#     -f scripts/release/Dockerfile.smoke scripts/release/smoke
+ARG UBUNTU_VERSION=22.04
+FROM ubuntu:${UBUNTU_VERSION}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      desktop-file-utils \
+      shared-mime-info \
+      xdg-utils \
+      xvfb \
+      xauth \
+      x11-utils \
+      libgl1 \
+      libglx-mesa0 \
+      libgl1-mesa-dri \
+      libegl1 \
+      libgles2 \
+      libgbm1 \
+      libwayland-client0 \
+      libfribidi0 \
+      libharfbuzz0b \
+      procps \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /smoke

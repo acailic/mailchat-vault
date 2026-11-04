@@ -1,0 +1,52 @@
+# Build toolchain image for mailchat-vault Linux bundles (AppImage + deb).
+#
+# Ubuntu 22.04 (oldest supported LTS) is the build base on purpose:
+# binaries and bundles link against its glibc/library versions, so the
+# artifacts run on 22.04 and anything newer (verified by
+# scripts/release/smoke-linux.sh on 22.04 and 24.04).
+#
+# desktop-file-utils + shared-mime-info are required at *bundle* time:
+# linuxdeploy validates the generated .desktop entry while assembling
+# the AppImage.
+FROM ubuntu:22.04
+
+ARG NODE_MAJOR=22
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential \
+      ca-certificates \
+      curl \
+      desktop-file-utils \
+      file \
+      git \
+      libayatana-appindicator3-dev \
+      libgtk-3-dev \
+      librsvg2-dev \
+      libwebkit2gtk-4.1-dev \
+      patchelf \
+      pkg-config \
+      shared-mime-info \
+      xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install rustup outside /root so the build can run as an arbitrary
+# uid (the host user) — /root is not traversable for other users.
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
+ENV PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+      | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
+    && chmod -R a+rX /usr/local/rustup /usr/local/cargo \
+    && rustc --version
+
+# Writable-by-anyone mount point for the host cargo cache volume
+# (docker seeds an empty named volume from this directory, keeping its
+# permissions, so non-root builds can populate it).
+RUN mkdir -p /cargo && chmod 1777 /cargo
+
+RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src

@@ -109,6 +109,39 @@ jobs:
           target/release/bundle/appimage/*.AppImage
           target/release/bundle/deb/*.deb
 
+  # M6.3 acceptance gate: run the deb + AppImage smoke suites against
+  # clean ubuntu 22.04 AND 24.04 containers (the same script used
+  # locally: scripts/release/smoke-linux.sh). Verifies apt dependency
+  # resolution, .desktop + icon + MIME association installed by the deb,
+  # launcher-style launch without a terminal, and that the AppImage is
+  # self-contained on a system with no app libraries.
+  smoke-linux:
+    needs: build-linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ["22.04", "24.04"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-bundles
+          path: bundles
+
+      - name: Run Linux release smoke (deb + AppImage) on ubuntu-${{ matrix.ubuntu }}
+        run: scripts/release/smoke-linux.sh --bundles bundles --versions "${{ matrix.ubuntu }}" --logs smoke-logs
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-smoke-${{ matrix.ubuntu }}
+          path: smoke-logs/
+          if-no-files-found: ignore
+
   build-macos:
     needs: create-release
     runs-on: macos-latest

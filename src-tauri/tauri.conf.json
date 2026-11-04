@@ -29,6 +29,23 @@
     "active": true,
     "targets": ["appimage", "deb"],
     "category": "Utility",
+    "shortDescription": "Local email & chat archive",
+    "longDescription": "Mailchat Vault — private local archive and full-text search over your own email and chat history. Imports mbox, WhatsApp, Telegram, Signal and Discord exports; nothing leaves the machine.",
+    "fileAssociations": [
+      {
+        "ext": ["mbox"],
+        "name": "Mbox mailbox",
+        "description": "Mbox mail archive importable into Mailchat Vault",
+        "mimeType": "application/mbox",
+        "role": "Viewer"
+      }
+    ],
+    "linux": {
+      "deb": {
+        "postInstallScript": "packaging/deb-postinst",
+        "postRemoveScript": "packaging/deb-postrm"
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",
