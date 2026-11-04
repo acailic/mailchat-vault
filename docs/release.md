@@ -44,6 +44,10 @@ npm run tauri build -- --bundles app,dmg    # e.g. on macOS
 npm run tauri build -- --bundles msi,nsis   # e.g. on Windows
 ```
 
+Bundles land under the workspace `target/release/bundle/` (or
+`target/universal-apple-darwin/release/bundle/` for a `--target
+universal-apple-darwin` build).
+
 ### Desktop integration (Linux)
 
 Both Linux artifacts carry the freedesktop integration a launcher
