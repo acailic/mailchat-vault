@@ -1,0 +1,26 @@
+#!/bin/sh
+# Debian postinst for mailchat-vault.
+#
+# Registers the desktop entry (launcher), icon cache and MIME
+# association (.mbox -> application/mbox) with the freedesktop
+# databases. Every tool is optional: on minimal systems without
+# desktop-file-utils / shared-mime-info the app still installs; the
+# databases are simply not refreshed there (a real desktop session
+# ships these tools and its package triggers cover the same step).
+set -e
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database -q /usr/share/applications || true
+fi
+
+if command -v update-mime-database >/dev/null 2>&1; then
+    update-mime-database /usr/share/mime || true
+fi
+
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+fi
+
+#DEBHELPER#
+
+exit 0
