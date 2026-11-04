@@ -95,3 +95,51 @@ export function privacyNote(status: LlmStatus): string {
   if (!item) return "";
   return privacyNoteFor(item, status.summarize_top);
 }
+
+// ---------------------------------------------------------------------------
+// M5: explicit AI consent (per-session, visible, never persisted)
+// ---------------------------------------------------------------------------
+
+/** One-line description of the session AI-consent state (always visible). */
+export function consentStatusLine(granted: boolean): string {
+  return granted
+    ? "AI consent: granted for this session — your question and the top results may be sent to the selected provider."
+    : "AI consent: not granted — asks run fully locally; nothing is sent to any provider.";
+}
+
+/** The consent prompt shown before the first network ask of a session:
+ * states exactly what would leave the machine, for this provider. */
+export function consentPromptText(item: ProviderMenuItem, summarizeTop: number): string {
+  return (
+    `Allow sending for this session? Your question, then the top ${summarizeTop} ` +
+    `matching messages (bodies truncated to 500 chars), would be sent to ` +
+    `${item.model} via ${item.host} to translate and summarize the ask.`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// M5: source-linked answers (citations → archived messages)
+// ---------------------------------------------------------------------------
+
+/** A citation marker parsed out of an answer (`[1]`, `[2]`, …). */
+export interface CitationMarker {
+  cite: number;
+}
+
+/** Split an answer into plain text runs and citation markers `[n]`. The
+ * summary prompt numbers the context blocks `[1]…[top]` in the same order
+ * as the returned results, so marker `n` maps to result `n - 1` — the
+ * clickable evidence trail from the answer to the original messages. */
+export function splitCitations(answer: string): Array<string | CitationMarker> {
+  const parts: Array<string | CitationMarker> = [];
+  const re = /\[(\d{1,3})\]/g;
+  let last = 0;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(answer)) !== null) {
+    if (match.index > last) parts.push(answer.slice(last, match.index));
+    parts.push({ cite: Number(match[1]) });
+    last = match.index + match[0].length;
+  }
+  if (last < answer.length) parts.push(answer.slice(last));
+  return parts;
+}

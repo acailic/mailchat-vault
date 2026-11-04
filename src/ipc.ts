@@ -229,6 +229,9 @@ export function llmAsk(args: {
   question: string;
   limit: number;
   provider: string | null;
+  /** M5 AI-consent gate: `true` is the only way any network round trip
+   * happens; without it the backend runs the ask fully locally. */
+  consent: boolean;
 }): Promise<AskOutcome> {
   return invoke<AskOutcome>("llm_ask", args);
 }
