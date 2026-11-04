@@ -1008,7 +1008,7 @@ document.addEventListener("keydown", (event) => {
       const at = entries.findIndex((e) => e.current);
       const target = entries[at + dir];
       if (target) {
-        void openDetail(target.id);
+        void openDetail(target.id).then(() => workspace.refocusCurrentThreadRow());
       }
       event.preventDefault();
     }

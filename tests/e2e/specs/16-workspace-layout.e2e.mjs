@@ -20,6 +20,11 @@ const shotsDir = path.resolve(
   "fixtures",
   "screenshots",
 );
+const fixturesDir = path.resolve(
+  path.dirname(new URL(import.meta.url).pathname),
+  "..",
+  "fixtures",
+);
 
 /** Save a screenshot fixture into the repo (best effort). */
 async function fixtureShot(browser, name) {
@@ -354,9 +359,18 @@ export async function run(ctx) {
     // Detail thread-arrow navigation keeps focus on the (new) current row:
     // opening a neighbour re-renders the detail pane and destroys the
     // focused thread row; the shell must refocus '.thread-row.current'.
-    // "obsidian" matches only the midnight pair (m2/m3) — same mbox chat
-    // group, so both directions have neighbour rows.
-    await ui.search(browser, "obsidian");
+    // M3.2: the v2 reading pane shows neighbours only for VERIFIED
+    // conversations — the mbox file group is honestly anchor-only (see
+    // the detail-view spec), so this drives the focus contract through
+    // the Signal fixture's stable-key conversation instead.
+    const signalFixture = path.join(fixturesDir, "signal-conversation.json");
+    const signalImport = await browser.execute(
+      async (cmd, payload) => window.__TAURI_INTERNALS__.invoke(cmd, payload),
+      "import_chat_export",
+      { path: signalFixture },
+    );
+    assert.ok(signalImport?.summary?.inserted > 0, "signal conversation imported for context focus");
+    await ui.search(browser, "reagiram");
     await browser.execute(() => {
       document.querySelector("#results .hit-item").click();
     });
@@ -371,7 +385,12 @@ export async function run(ctx) {
     await browser.execute(() => {
       document.querySelector("#detail .thread-row.link").focus();
     });
-    await browser.keys("ArrowDown");
+    // The reagiram hit is the conversation's newest message, so the walk
+    // direction with neighbours is UP (earlier rows).
+    const currentBeforeArrow = await browser.execute(
+      () => document.querySelector("#detail .thread-row.current")?.dataset.id,
+    );
+    await browser.keys("ArrowUp");
     await browser.waitUntil(
       async () =>
         (await browser.execute(() => document.activeElement?.classList.contains("current") === true)) ===
@@ -385,7 +404,11 @@ export async function run(ctx) {
     }));
     assert.ok(
       currentAfterArrow.activeIsCurrent,
-      "thread ArrowDown refocuses the re-rendered current row",
+      "thread ArrowUp refocuses the re-rendered current row",
+    );
+    assert.ok(
+      currentAfterArrow.currentId !== currentBeforeArrow,
+      "the arrow actually walked to a neighbour",
     );
     assert.ok(
       currentAfterArrow.currentId !== null && currentAfterArrow.currentId !== undefined,
