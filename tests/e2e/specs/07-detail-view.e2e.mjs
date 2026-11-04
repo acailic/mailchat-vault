@@ -1,5 +1,10 @@
-// Path: detail view + adjacent (thread) messages. Ships with the filtered
-// search UI (fm/mailchat-search-ui); skipped on builds without it.
+// Path: v2 detail view (M3.2) — the reading pane over the canonical
+// store. The fixture's mbox chat is grouped only by its file name (no
+// reply-graph evidence), which M1/M3 treat honestly as an *unverified*
+// grouping: the pane shows the selected message and a "could not be
+// verified" notice, never guessed neighbours. Verified-conversation
+// context (neighbours, load earlier/later) is covered by the
+// signal-import spec (09), whose conversations carry stable keys.
 
 export const name = "detail-view";
 
@@ -43,35 +48,48 @@ export async function run(ctx) {
     assert.ok(/source\s*\n?\s*mbox/.test(table.replace(/  +/g, " ")), "meta table shows source");
     assert.includes(table, "e2e-m", "meta table shows the external message id");
 
-    // Thread neighbours: the whole mbox chat is adjacent to the opened hit.
+    // The reading actions are present: copy, copy link, export.
+    for (const selector of [".copy-btn", ".copy-link-btn", ".export-selection-btn"]) {
+      assert.ok(
+        await (await browser.$(`#detail ${selector}`)).isExisting(),
+        `detail header renders ${selector}`,
+      );
+    }
+
+    // Unverified grouping: the anchor alone plus the honest notice.
     const threadRows = await browser.$$("#detail ol.thread li.thread-row");
-    assert.equal(threadRows.length, 8, "all 8 chat messages are thread neighbours");
+    assert.equal(threadRows.length, 1, "unverified grouping shows the anchor only");
     assert.equal(
       await browser.$$("#detail li.thread-row.current").length,
       1,
-      "exactly one current thread row",
+      "the anchor is the current row",
+    );
+    assert.equal(
+      await browser.$$("#detail li.thread-row.link").length,
+      0,
+      "no clickable neighbours are guessed for an unverified grouping",
+    );
+    const pane = await browser.$("#detail").getText();
+    assert.includes(
+      pane,
+      "Conversation could not be verified",
+      "the pane explains the unverified grouping",
     );
 
-    // Clicking a neighbour link moves the detail to that message.
-    const links = await browser.$$("#detail li.thread-row.link");
-    assert.ok(links.length > 0, "neighbour rows are clickable links");
-    const link = links[0];
-    const linkMeta = await link.$(".meta").getText();
-    const linkAuthor = linkMeta.split("·")[0].trim();
-    await link.click();
-    await browser.waitUntil(
-      async () => (await browser.$("#detail .detail-card h2").getText()) === linkAuthor,
-      { timeoutMsg: "clicking a neighbour did not switch the detail view" },
-    );
+    // Arrow keys have no thread neighbours to walk in this grouping; the
+    // panel stays open on the anchor.
+    await browser.execute(() => document.activeElement?.blur());
+    await browser.keys("ArrowDown");
+    await browser.waitUntil(async () => await detailOpen(), {
+      timeoutMsg: "arrow key closed the detail panel",
+    });
     assert.equal(
       await browser.$$("#detail li.thread-row.current").length,
       1,
-      "current marker moved with the view",
+      "arrow key did not fabricate a neighbour",
     );
 
-    // Esc closes the panel. Blur first: the re-render replaced the clicked
-    // thread row, and a key event targeted at the detached node would never
-    // reach the document-level handler.
+    // Esc closes the panel.
     await browser.execute(() => document.activeElement?.blur());
     await browser.keys("Escape");
     await browser.waitUntil(async () => !(await detailOpen()), {

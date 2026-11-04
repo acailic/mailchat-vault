@@ -9,7 +9,16 @@
 //
 // No DOM, no Tauri: unit-tested in state.test.ts.
 
-import type { SearchHit, ChatContext } from "./types";
+import type {
+  ConversationContext,
+  MessageSummary,
+} from "./v2types";
+import {
+  DEFAULT_FILTERS,
+  type ContextEntry,
+  type ResultsSnapshot,
+  type SearchFilters,
+} from "./searchstate";
 
 // ---------------------------------------------------------------------------
 // Layout (narrow-window states)
@@ -149,32 +158,50 @@ export class WorkspaceStore {
 
 // ---------------------------------------------------------------------------
 // Search/results application state (the panel data behind the workspace)
+// M3.2: the search flow runs on the v2 IPC surface — flat MessageSummary
+// rows, the v2 reading pane, and the selection/scroll snapshot contract.
 // ---------------------------------------------------------------------------
 
 export interface UiState {
-  text: string;
+  /** The filters of the currently rendered results (canonical). */
+  filters: SearchFilters;
+  /** Source display names selected via chips (mapped to ids per search). */
   sources: string[];
-  author: string;
-  fromDate: string;
-  toDate: string;
   offset: number;
   total: number;
-  hits: SearchHit[];
+  hits: MessageSummary[];
   activeIndex: number;
-  detail: ChatContext | null;
+  /** The row the user opened (Back re-selects it). */
+  selectedId: number | null;
+  /** Rows checked for the explicit selection export. */
+  selection: Set<number>;
+  /** Archive revision of the visible results (refresh signal, A07). */
+  pageRevision: number | null;
+  refreshNeeded: boolean;
+  detail: ConversationContext | null;
+  /** Merged context rows held in the reading pane. */
+  detailEntries: ContextEntry[];
+  /** Query text at open time (highlight source for the anchor body). */
+  detailQueryText: string;
+  /** Captured on open, consumed by Back (selection/scroll restore). */
+  resultsSnapshot: ResultsSnapshot | null;
 }
 
 export function initialUiState(): UiState {
   return {
-    text: "",
+    filters: { ...DEFAULT_FILTERS },
     sources: [],
-    author: "",
-    fromDate: "",
-    toDate: "",
     offset: 0,
     total: 0,
     hits: [],
     activeIndex: -1,
+    selectedId: null,
+    selection: new Set(),
+    pageRevision: null,
+    refreshNeeded: false,
     detail: null,
+    detailEntries: [],
+    detailQueryText: "",
+    resultsSnapshot: null,
   };
 }

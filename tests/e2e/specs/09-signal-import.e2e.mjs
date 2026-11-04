@@ -71,9 +71,10 @@ export async function run(ctx) {
     const hitText = await hits[0].getText();
     assert.ok(hitText.includes("reagiram"), "hit body shows the message text");
     assert.ok(hitText.includes("+385912345678"), "hit meta shows the author");
-    const groupLabel = await browser.$("#results .group h3");
-    assert.matches(await groupLabel.getText(), /signal/i,
-      "hit group header shows the signal source and the export file stem");
+    // M3.2: results are a flat list — the conversation label rides in
+    // the row's meta line instead of a group header.
+    const hitMeta = await hits[0].$(".meta").getText();
+    assert.includes(hitMeta, "signal", "flat row meta shows the signal source");
 
     // Highlighted query terms in the rendered row.
     const marks = await browser.$$("#results li.hit-item mark");
@@ -95,6 +96,26 @@ export async function run(ctx) {
     assert.includes(table, "+385912345678", "detail shows the author");
     const threadRows = await browser.$$("#detail ol.thread li.thread-row");
     assert.equal(threadRows.length, 5, "all 5 conversation messages as thread neighbours");
+
+    // M3.2 verified-conversation context: neighbours are clickable and
+    // the anchor marker follows (the unverified-grouping counterpart is
+    // the detail-view spec).
+    const links = await browser.$$("#detail li.thread-row.link");
+    assert.ok(links.length > 0, "verified conversation rows are clickable links");
+    const linkMeta = await links[0].$(".meta").getText();
+    const linkAuthor = linkMeta.split("·")[0].trim();
+    await links[0].click();
+    await browser.waitUntil(
+      async () => (await browser.$("#detail .detail-card h2").getText()) === linkAuthor,
+      { timeoutMsg: "clicking a neighbour did not switch the detail view" },
+    );
+    assert.equal(
+      await browser.$$("#detail li.thread-row.current").length,
+      1,
+      "current marker moved with the view",
+    );
+    await browser.execute(() => document.activeElement?.blur());
+    await browser.keys("Escape");
     // --- re-import dedups --------------------------------------------------
     const reimport = await invoke(browser, "import_chat_export", { path: signalFixture });
     assert.ok(reimport.ok, `re-import command succeeded: ${reimport.error ?? ""}`);

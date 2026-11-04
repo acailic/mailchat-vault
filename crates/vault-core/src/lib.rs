@@ -78,6 +78,7 @@ pub mod query;
 pub mod safe_migration;
 pub mod scheduler;
 pub mod search;
+pub mod search2;
 pub mod settings;
 pub mod signal;
 pub mod stats;
