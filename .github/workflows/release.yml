@@ -31,10 +31,17 @@ permissions:
   contents: write # create-release drafts the release; build jobs upload assets
 
 env:
-  RELEASE_BODY: >-
+  RELEASE_BODY: |
     See the assets below and docs/release.md for install & smoke-test
     instructions. Linux AppImage/.deb, macOS .dmg and Windows .msi/.exe
     are unsigned in this round.
+
+    macOS install: open the .dmg and drag the app to /Applications. The
+    dmg is unsigned (ad-hoc signature only), so Gatekeeper blocks the
+    first launch: right-click the app -> Open -> Open, or run
+    `xattr -cr /Applications/mailchat-vault.app` in Terminal first.
+
+    Windows first run: SmartScreen -> "More info" -> "Run anyway".
 
 jobs:
   create-release:
@@ -173,6 +180,14 @@ jobs:
         run: |
           app="$(find target/universal-apple-darwin/release/bundle/macos -name '*.app' -maxdepth 1)"
           tar -czf "${app%.app}.app.tar.gz" -C "$(dirname "$app")" "$(basename "$app")"
+
+      # M6.1: never attach an unverified dmg — smoke-test it the same way
+      # the ci.yml macos-dmg-smoke job does before it reaches the draft.
+      - name: Smoke-test the dmg (mount, copy, --version/--help)
+        run: |
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          dmg="$(find target/universal-apple-darwin/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)"
+          scripts/dmg-smoke-test.sh "$dmg" "$version"
 
       - uses: actions/upload-artifact@v4
         with:

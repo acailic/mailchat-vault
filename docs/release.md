@@ -17,10 +17,15 @@ builds a **draft** GitHub Release with:
 | Windows x64 | `windows-latest` | `mailchat-vault_<v>_x64_en-US.msi`, NSIS `.exe` setup |
 
 The release stays a **draft** until someone runs the smoke test below and
-publishes it. The bundles are also attached as workflow-run artifacts
-(`linux-bundles`, `macos-bundles`, `windows-bundles`) for inspection before
-publishing. Version bump flow: raise `version` in `src-tauri/tauri.conf.json`
-and the workspace `Cargo.toml`, commit, tag `v<version>`, push the tag.
+publishes it. The macOS dmg is additionally smoke-tested automatically
+(see [macOS](#macos)): the release workflow mounts it, copies the app
+out, and runs `--version`/`--help` before attaching it, and the same test
+runs on every push/PR via the `macos-dmg-smoke` job in
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml). The bundles
+are also attached as workflow-run artifacts (`linux-bundles`,
+`macos-bundles`, `windows-bundles`) for inspection before publishing.
+Version bump flow: raise `version` in `src-tauri/tauri.conf.json` and the
+workspace `Cargo.toml`, commit, tag `v<version>`, push the tag.
 
 The same packaging can be built locally without any host toolchain
 (besides docker) with:
@@ -66,19 +71,120 @@ as the handler (Viewer role; the app imports the file's mail).
 ## Code-signing status (this round: none)
 
 - **Linux** — AppImage and `.deb` need no signing; nothing is signed.
-- **macOS** — the `.dmg`/`.app` are **unsigned** (ad-hoc signature only, no
-  Developer ID). On first launch Gatekeeper blocks a downloaded app:
-  right-click → *Open*, or after moving it to `/Applications`:
-  ```sh
-  xattr -cr /Applications/mailchat-vault.app
-  ```
+- **macOS** — the `.dmg`/`.app` are **unsigned** (ad-hoc signature only,
+  no Developer ID). See the [macOS chapter](#macos) for the Gatekeeper
+  first-launch instructions and the notarization plan.
 - **Windows** — `.msi`/`.exe` are **unsigned**; SmartScreen will show
   "Windows protected your PC" → *More info* → *Run anyway*.
 
 Adding real signing later means wiring the secrets into the release
 workflow (`APPLE_CERTIFICATE` + `APPLE_CERTIFICATE_PASSWORD` +
-`APPLE_SIGNING_IDENTITY` for Developer ID notarization; an EV/code-signing
-certificate for Windows) — intentionally out of scope here.
+`APPLE_SIGNING_IDENTITY` + notarization credentials for Developer ID
+notarization on macOS; an EV/code-signing certificate for Windows) — for
+macOS the exact steps are written out in
+[Notarization TODO](#notarization-todo-apple-developer-account-required);
+Windows signing stays out of scope.
+
+## macOS
+
+### Artifacts
+
+Each release ships a **universal** `mailchat-vault_<v>_universal.dmg`
+and a `.app.tar.gz` (the same app, tarballed — for scriptable installs).
+The universal dmg shipped and was confirmed on the `v0.1.0` release, and
+the build is guarded: the binary inside is checked to contain **both
+`x86_64` and `arm64`** slices, so one dmg runs on Intel and Apple Silicon
+Macs alike.
+
+### Install
+
+1. Download `mailchat-vault_<v>_universal.dmg` from the release assets.
+2. Open it and drag **Mailchat Vault** to `/Applications`.
+3. Get past Gatekeeper once (below), then launch normally — from now on
+   it opens like any other app.
+
+### Gatekeeper first launch (unsigned app — required)
+
+The app is **not notarized** this round, so Gatekeeper blocks the first
+launch of a downloaded copy with *“… cannot be opened because the
+developer cannot be verified”* (or, after an OS update, *“damaged and
+can't be opened”*). That is expected. Either:
+
+- **Right-click** the app in `/Applications` → **Open** → **Open** in the
+  dialog (once is enough for that copy), or
+- clear the quarantine flag Terminal-style:
+  ```sh
+  xattr -cr /Applications/mailchat-vault.app
+  ```
+
+The prompt returns only for a **freshly downloaded** copy (the quarantine
+flag is per-download). It disappears entirely once notarization is in —
+see the TODO below.
+
+### Automated dmg smoke test
+
+`scripts/dmg-smoke-test.sh` checks a dmg end-to-end headlessly: mount,
+copy the `.app` out (the scripted drag), verify the universal slices,
+then run `mailchat-vault --version` and `--help` and check exit codes
+and output. No install, no window server needed.
+
+```sh
+# against a built dmg, pinning the version it must print:
+scripts/dmg-smoke-test.sh target/universal-apple-darwin/release/bundle/dmg/mailchat-vault_0.1.0_universal.dmg 0.1.0
+# ...or against a downloaded dmg, without pinning the version:
+scripts/dmg-smoke-test.sh ~/Downloads/mailchat-vault_0.1.0_universal.dmg
+```
+
+It runs in two places automatically:
+
+- the `macos-dmg-smoke` job in `ci.yml` builds the universal dmg on a
+  macOS runner and runs the script on every push/PR;
+- the `build-macos` job of `release.yml` runs it on the freshly built dmg
+  **before** attaching it to the draft release — an unverified dmg never
+  reaches a release.
+
+Walk the [UI checklist](#ui-checklist-any-platform-2-minutes) manually
+once per release on top of that.
+
+### Known limitations
+
+- **Unsigned / not notarized** — every fresh download hits the Gatekeeper
+  prompt above until
+  [notarization](#notarization-todo-apple-developer-account-required)
+  lands. Nothing about the app itself is broken; the signature is ad-hoc.
+- **No auto-update** — new releases are a fresh dmg download; there is no
+  in-app updater.
+- The smoke test exercises launch + CLI, not the full UI; the manual UI
+  checklist is still the human gate before publishing.
+
+### Notarization TODO (Apple Developer account required)
+
+Notarization is **blocked on an Apple Developer Program membership**
+(~US$99/year, one account for the team) — that purchase is a maintainer
+decision, deliberately outside this codebase. Once the account exists,
+the wiring is exactly this — no code changes needed:
+
+1. **Certificates**: in the developer portal (or Xcode → Settings →
+   Accounts → Manage Certificates) create a **Developer ID Application**
+   certificate; export it as a `.p12` with a password.
+2. **Notary credentials**: create an app-specific password at
+   appleid.apple.com for `notarytool` (used with the team's Apple ID).
+3. **Repo secrets** (Settings → Secrets and variables → Actions):
+   - `APPLE_CERTIFICATE` — the `.p12`, base64: `base64 -i cert.p12 | pbcopy`
+   - `APPLE_CERTIFICATE_PASSWORD` — the `.p12` export password
+   - `APPLE_SIGNING_IDENTITY` — e.g. `Developer ID Application: Name (TEAMID)`
+   - `APPLE_ID` — the team Apple ID
+   - `APPLE_PASSWORD` — the app-specific password from step 2
+   - `APPLE_TEAM_ID`
+4. **Expose them to the `build-macos` job** in `release.yml` as `env:`
+   entries. The Tauri bundler/tauri-action read exactly these names:
+   with them present it signs with the Developer ID, submits to Apple's
+   notary service, and staples the ticket automatically.
+5. **Verify**: `spctl -a -vv -t exec` on the shipped binary should say
+   `accepted, Notarized Developer ID`; a downloaded dmg then opens with
+   no Gatekeeper prompt.
+6. **Docs**: drop the Gatekeeper section above, update the release-notes
+   body in `release.yml`, and note the minimum supported macOS version.
 
 ### SmartScreen on Windows — the full story
 
@@ -234,7 +340,14 @@ xvfb-run -a timeout 20s ./mailchat-vault_0.1.0_amd64.AppImage --appimage-extract
 
 ### macOS
 
-Open the `.dmg`, drag the app to `/Applications`, clear the quarantine
+Run the automated smoke test on the dmg (see
+[macOS → Automated dmg smoke test](#automated-dmg-smoke-test)):
+
+```sh
+scripts/dmg-smoke-test.sh ~/Downloads/mailchat-vault_0.1.0_universal.dmg
+```
+
+Then open the `.dmg`, drag the app to `/Applications`, clear the quarantine
 attribute (`xattr -cr` above, or right-click → *Open* once), then run the UI
 checklist.
 
@@ -253,4 +366,6 @@ check — use the **Windows smoke** workflow instead; see
 Publish the release only when the smoke test passed on at least the Linux
 artifacts (that is the platform this round was validated on), and the
 **Windows smoke** workflow is green when the release ships Windows
-assets.
+assets. The macOS dmg is already smoke-tested automatically by the
+release workflow (see [macOS](#macos)); walking its UI checklist on a
+Mac is the remaining manual step before publishing it.

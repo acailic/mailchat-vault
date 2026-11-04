@@ -57,6 +57,40 @@ jobs:
       - name: Rust tests (core + app)
         run: cargo test --workspace
 
+  # M6.1: macOS dmg smoke test. Builds the universal .dmg exactly the
+  # way the release workflow does, then runs scripts/dmg-smoke-test.sh
+  # against it: mount, copy the .app out, verify the binary is universal
+  # (x86_64 + arm64), and headlessly run --version/--help. Proves the
+  # packaged macOS artifact actually launches before a release ships it.
+  macos-dmg-smoke:
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build the universal dmg
+        run: npm run tauri build -- --target universal-apple-darwin --bundles app,dmg
+
+      - name: dmg smoke test (mount, copy, --version/--help)
+        run: |
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          dmg="$(find target/universal-apple-darwin/release/bundle/dmg -maxdepth 1 -name '*.dmg' -print -quit)"
+          scripts/dmg-smoke-test.sh "$dmg" "$version"
+
   # Full E2E: drives the real app binary through tauri-driver/WebDriver
   # under Xvfb (see tests/e2e/README.md). Every path here runs headless.
   # Pinned to 24.04: it is the image the suite was validated on, and it

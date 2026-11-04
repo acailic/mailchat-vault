@@ -1926,7 +1926,48 @@ fn serve_media_object(
     }
 }
 
+/// Response text for a recognized headless CLI flag, printed by [`run`]
+/// before the GUI starts.
+///
+/// `--version`/`-V` and `--help`/`-h` exist so packaged builds can be
+/// smoke-tested headlessly without a window server (see
+/// `scripts/dmg-smoke-test.sh`): they print to stdout and exit 0 instead
+/// of opening the vault window. Anything else — including no arguments —
+/// returns `None` and the GUI launches as usual.
+fn cli_flag_response(args: &[String]) -> Option<String> {
+    for arg in args {
+        match arg.as_str() {
+            "--version" | "-V" => {
+                return Some(format!("mailchat-vault {}\n", env!("CARGO_PKG_VERSION")));
+            }
+            "--help" | "-h" => {
+                return Some(
+                    concat!(
+                        "Mailchat Vault — local email & chat archive desktop app.\n",
+                        "\n",
+                        "Usage: mailchat-vault [--version | --help]\n",
+                        "\n",
+                        "Without flags the vault window opens. Flags:\n",
+                        "  -V, --version  print the version and exit\n",
+                        "  -h, --help     print this help and exit\n",
+                    )
+                    .to_string(),
+                );
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 pub fn run() {
+    // Headless CLI flags: handle them before any GUI/window-server work
+    // so the packaged binary answers `--version`/`--help` anywhere,
+    // including a CI runner with no display.
+    if let Some(text) = cli_flag_response(&std::env::args().skip(1).collect::<Vec<_>>()) {
+        print!("{text}");
+        return;
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -2566,5 +2607,36 @@ mod tests {
         assert_eq!(outcome.results.len(), 4);
         assert!(outcome.notes[0].contains("no API key"));
         pool.shutdown();
+    }
+
+    #[test]
+    fn cli_flag_version() {
+        for flag in ["--version", "-V"] {
+            let out = cli_flag_response(&[flag.to_string()]).unwrap();
+            assert_eq!(
+                out,
+                format!("mailchat-vault {}\n", env!("CARGO_PKG_VERSION")),
+                "flag {flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_flag_help() {
+        for flag in ["--help", "-h"] {
+            let out = cli_flag_response(&[flag.to_string()]).unwrap();
+            assert!(out.contains("Usage: mailchat-vault"), "flag {flag}");
+            assert!(out.contains("--version"), "flag {flag}");
+            assert!(out.ends_with('\n'), "flag {flag}");
+        }
+    }
+
+    #[test]
+    fn cli_flag_none_for_gui_and_unknown_args() {
+        assert!(cli_flag_response(&[]).is_none());
+        assert!(cli_flag_response(&["some-export-file.mbox".to_string()]).is_none());
+        // The first recognized flag wins among mixed arguments.
+        let out = cli_flag_response(&["ignored.mbox".to_string(), "-V".to_string()]).unwrap();
+        assert!(out.starts_with("mailchat-vault "));
     }
 }
