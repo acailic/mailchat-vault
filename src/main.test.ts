@@ -2087,6 +2087,7 @@ describe("ask provider menu", () => {
       question: "vault?",
       limit: 50,
       provider: "local",
+      consent: false,
     });
 
     // And back to the provider for the next ask.
@@ -2100,6 +2101,7 @@ describe("ask provider menu", () => {
       question: "again",
       limit: 50,
       provider: "zai",
+      consent: false, // no consent granted in this test: the ask stays local
     });
   });
 
@@ -2168,6 +2170,318 @@ describe("ask provider menu", () => {
     await flush();
     expect(input("#ask-provider").value).toBe("local");
     expect($("#llm-note").textContent).toContain("LLM assist is off");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M5: explicit AI consent + source-linked answers (evidence navigation)
+// ---------------------------------------------------------------------------
+
+/** What `llm_ask` returns for a consent-less network ask: fully local,
+ * with the visible backend note (mirrors the backend's downgrade). */
+const LOCAL_ASK_OUTCOME: AskOutcome = {
+  plan: { match_expr: '"vault"', date_from: null, date_to: null },
+  plan_source: "local",
+  ranking: "fts_only",
+  results: [
+    message(21, "mbox", "thread-a", "vault sync planning went fine"),
+    message(22, "demo", "", "the syncing of the vault had problems"),
+  ],
+  answer: null,
+  notes: [
+    "AI consent not granted — this ask ran fully locally; nothing was sent to any provider",
+  ],
+};
+
+/** A thread-context fixture anchored at the requested message, so the
+ * detail pane renders the *original* source plus its conversation. */
+function ctxFor(id: number): ConversationContext {
+  const source = (ASK_OUTCOME.results as Message[]).find((m) => m.id === id);
+  return {
+    ...CTX,
+    anchor: {
+      ...CTX.anchor,
+      id,
+      body: source ? source.body : CTX.anchor.body,
+    },
+  };
+}
+
+function askCalls(): Array<{ cmd: string; args: unknown }> {
+  return tauri.calls.filter((c) => c.cmd === "llm_ask");
+}
+
+/** Boot with a usable network provider preselected; the ask handler
+ * answers like the real backend: local without consent, full RAG with. */
+async function bootConsentable(): Promise<void> {
+  tauri.handlers.set("llm_status", () => ({
+    enabled: true,
+    model: "glm-5",
+    host: "api.z.ai",
+    summarize_top: 8,
+    providers: [LOCAL_ITEM, ZAI_ITEM],
+    default_provider: "zai",
+  }));
+  tauri.handlers.set("llm_ask", (args: unknown) =>
+    (args as { consent: boolean }).consent ? ASK_OUTCOME : LOCAL_ASK_OUTCOME,
+  );
+  tauri.handlers.set(
+    "conversation_context_v2",
+    (args: unknown) => ctxFor((args as { id: number }).id),
+  );
+  await boot();
+  await vi.waitFor(() => expect(input("#ask-provider").value).toBe("zai"));
+}
+
+async function askFromInput(question: string): Promise<void> {
+  input("#ask").value = question;
+  pressKey(input("#ask"), "Enter");
+  await vi.waitFor(() => expect(askCalls().length).toBeGreaterThan(0));
+}
+
+describe("ask AI consent + evidence navigation", () => {
+  it("boots with consent not granted, visibly, and no prompt", async () => {
+    await bootConsentable();
+    await vi.waitFor(() =>
+      expect($("#consent-status").textContent).toContain("AI consent: not granted"),
+    );
+    expect($("#consent-status").textContent).toContain("fully locally");
+    expect($<HTMLButtonElement>("#consent-revoke-btn").hidden).toBe(true);
+    expect($("#consent-prompt").hidden).toBe(true);
+  });
+
+  it("a network ask without consent runs locally and shows the per-question prompt", async () => {
+    await bootConsentable();
+    await askFromInput("vault?");
+    expect(askCalls()[0].args).toMatchObject({ provider: "zai", consent: false });
+    // The prompt states exactly what would leave the machine.
+    expect($("#consent-prompt").hidden).toBe(false);
+    expect($("#consent-text").textContent).toContain("glm-5 via api.z.ai");
+    expect($("#consent-text").textContent).toContain("top 8 matching messages");
+    // The local outcome is visible: local plan label + the backend note.
+    await vi.waitFor(() =>
+      expect($("#ask-status").textContent).toContain("local full-text"),
+    );
+    expect($("#ask-notes").textContent).toContain("AI consent not granted");
+    expect($("#answer").hidden).toBe(true);
+  });
+
+  it("an open prompt re-renders when the provider selection changes to another network provider", async () => {
+    tauri.handlers.set("llm_status", () => ({
+      enabled: true,
+      model: "glm-5",
+      host: "api.z.ai",
+      summarize_top: 8,
+      providers: [LOCAL_ITEM, ZAI_ITEM, { ...KEYLESS_ITEM, available: true }],
+      default_provider: "zai",
+    }));
+    tauri.handlers.set("llm_ask", () => LOCAL_ASK_OUTCOME);
+    await boot();
+    await vi.waitFor(() => expect(input("#ask-provider").value).toBe("zai"));
+    await askFromInput("vault?");
+    expect($("#consent-prompt").hidden).toBe(false);
+    expect($("#consent-text").textContent).toContain("glm-5 via api.z.ai");
+    // Switch to the second network provider while the prompt is open:
+    // the sentence must now name the destination a consent click would
+    // actually use.
+    input("#ask-provider").value = "mine";
+    fireChange(input("#ask-provider"));
+    expect($("#consent-prompt").hidden).toBe(false);
+    expect($("#consent-text").textContent).toContain("m via 127.0.0.1");
+    expect($("#consent-text").textContent).not.toContain("api.z.ai");
+  });
+
+  it("a late consent-less outcome never overwrites the consented ask's answer", async () => {
+    await bootConsentable();
+    let releaseLocal!: () => void;
+    const localGate = new Promise<void>((r) => (releaseLocal = r));
+    tauri.handlers.set("llm_ask", (args: unknown) => {
+      const { consent } = args as { consent: boolean };
+      return consent
+        ? Promise.resolve(ASK_OUTCOME)
+        : localGate.then(() => LOCAL_ASK_OUTCOME);
+    });
+    await askFromInput("vault?");
+    expect($("#consent-prompt").hidden).toBe(false);
+    // Send & ask fires the consented ask while the consent-less one is
+    // still in flight; the consent-less response then lands last.
+    $("#consent-allow-btn").click();
+    await vi.waitFor(() => expect(askCalls().length).toBe(2));
+    await vi.waitFor(() => expect($("#answer").hidden).toBe(false));
+    releaseLocal();
+    await new Promise((r) => setTimeout(r, 0));
+    // The consented answer and its plan line survive the stale response.
+    expect($("#answer").textContent).toBe(ASK_OUTCOME.answer);
+    expect($("#ask-status").textContent).toContain("planned by LLM");
+    expect($("#ask-notes").textContent).not.toContain("AI consent not granted");
+  });
+
+  it("Send & ask grants consent, re-asks with consent:true, and remembers it", async () => {
+    await bootConsentable();
+    await askFromInput("vault?");
+    $("#consent-allow-btn").click();
+    await vi.waitFor(() => expect(askCalls().length).toBe(2));
+    expect(askCalls()[1].args).toMatchObject({
+      question: "vault?",
+      provider: "zai",
+      consent: true,
+    });
+    // State visible; prompt gone.
+    expect($("#consent-prompt").hidden).toBe(true);
+    await vi.waitFor(() =>
+      expect($("#consent-status").textContent).toContain("granted for this session"),
+    );
+    expect($<HTMLButtonElement>("#consent-revoke-btn").hidden).toBe(false);
+    // Remembered within the session: the next ask goes straight out.
+    await askFromInput("again?");
+    expect(askCalls().length).toBe(3);
+    expect(askCalls()[2].args).toMatchObject({ question: "again?", consent: true });
+    expect($("#consent-prompt").hidden).toBe(true);
+  });
+
+  it("Keep asking locally dismisses the prompt; asks stay consent:false", async () => {
+    await bootConsentable();
+    await askFromInput("vault?");
+    $("#consent-local-btn").click();
+    expect($("#consent-prompt").hidden).toBe(true);
+    expect($("#consent-status").textContent).toContain("not granted");
+    await askFromInput("once more?");
+    expect(askCalls().length).toBe(2);
+    expect(askCalls()[1].args).toMatchObject({ consent: false });
+    // The next network ask re-offers the prompt.
+    expect($("#consent-prompt").hidden).toBe(false);
+  });
+
+  it("Revoke resets a granted consent mid-session", async () => {
+    await bootConsentable();
+    await askFromInput("vault?");
+    $("#consent-allow-btn").click();
+    await vi.waitFor(() =>
+      expect($("#consent-status").textContent).toContain("granted for this session"),
+    );
+    $("#consent-revoke-btn").click();
+    await vi.waitFor(() =>
+      expect($("#consent-status").textContent).toContain("not granted"),
+    );
+    expect($<HTMLButtonElement>("#consent-revoke-btn").hidden).toBe(true);
+    await askFromInput("after revoke?");
+    expect(askCalls().at(-1)!.args).toMatchObject({ consent: false });
+    expect($("#consent-prompt").hidden).toBe(false);
+  });
+
+  it("consent is session-scoped: a fresh app session starts ungranted", async () => {
+    await bootConsentable();
+    await askFromInput("vault?");
+    $("#consent-allow-btn").click();
+    await vi.waitFor(() =>
+      expect($("#consent-status").textContent).toContain("granted for this session"),
+    );
+    // Simulate an app restart: a brand-new module session against a fresh
+    // DOM. The consent lives in memory only (never localStorage or any
+    // file), so the new session must start ungranted and ask again.
+    tauri.calls.length = 0;
+    vi.resetModules();
+    await boot();
+    await vi.waitFor(() =>
+      expect($("#consent-status").textContent).toContain("AI consent: not granted"),
+    );
+    expect(win.localStorage.getItem("aiConsentGranted")).toBe(null);
+  });
+
+  it("the local provider never prompts and never sends", async () => {
+    await bootConsentable();
+    input("#ask-provider").value = "local";
+    fireChange(input("#ask-provider"));
+    await askFromInput("vault?");
+    expect(askCalls()[0].args).toMatchObject({ provider: "local", consent: false });
+    expect($("#consent-prompt").hidden).toBe(true);
+  });
+
+  it("answer citations are clickable and open the source in thread context", async () => {
+    await bootConsentable();
+    await askFromInput("vault?");
+    $("#consent-allow-btn").click(); // consented ask → answer with [1]/[2]
+    await vi.waitFor(() => expect($("#answer").hidden).toBe(false));
+    const cites = [...win.document.querySelectorAll("#answer .citation")] as unknown as HTMLButtonElement[];
+    expect(cites.map((c) => c.dataset.cite)).toEqual(["1", "2"]);
+    // The answer text survives intact (buttons restate the markers).
+    expect($("#answer").textContent).toBe(ASK_OUTCOME.answer);
+    // Citation [2] → the second result row, the original archived message.
+    cites[1].click();
+    await vi.waitFor(() => expect(ctxCalls().length).toBeGreaterThan(0));
+    expect((ctxCalls()[0].args as { id: number }).id).toBe(22);
+    // ...opened in the reading pane with its conversation context.
+    await vi.waitFor(() =>
+      expect($("#detail").textContent).toContain("the syncing of the vault had problems"),
+    );
+    expect($("#detail").textContent).toContain("before current");
+  });
+
+  it("out-of-range citations stay plain text, never dead links", async () => {
+    tauri.handlers.set("llm_status", () => ({
+      enabled: true,
+      model: "glm-5",
+      host: "api.z.ai",
+      summarize_top: 8,
+      providers: [LOCAL_ITEM, ZAI_ITEM],
+      default_provider: "local",
+    }));
+    const hallucinated: AskOutcome = {
+      ...LOCAL_ASK_OUTCOME,
+      answer: "answered from [1] and [3].",
+    };
+    tauri.handlers.set("llm_ask", () => hallucinated);
+    await boot();
+    await askFromInput("vault?");
+    await vi.waitFor(() => expect($("#answer").hidden).toBe(false));
+    const cites = win.document.querySelectorAll("#answer .citation");
+    expect(
+      [...cites].map((c) => (c as unknown as HTMLElement).dataset.cite),
+    ).toEqual(["1"]); // [3] is not a link
+    expect($("#answer").textContent).toBe("answered from [1] and [3].");
+  });
+
+  it("citations beyond the summary window stay plain text, never dead links", async () => {
+    tauri.handlers.set("llm_status", () => ({
+      enabled: true,
+      model: "glm-5",
+      host: "api.z.ai",
+      summarize_top: 1,
+      providers: [LOCAL_ITEM, ZAI_ITEM],
+      default_provider: "local",
+    }));
+    const beyondWindow: AskOutcome = {
+      ...LOCAL_ASK_OUTCOME,
+      answer: "answered from [1] and [2].",
+    };
+    tauri.handlers.set("llm_ask", () => beyondWindow);
+    await boot();
+    await askFromInput("vault?");
+    await vi.waitFor(() => expect($("#answer").hidden).toBe(false));
+    const cites = win.document.querySelectorAll("#answer .citation");
+    expect(
+      [...cites].map((c) => (c as unknown as HTMLElement).dataset.cite),
+    ).toEqual(["1"]); // [2] sits past summarize_top=1 → not a link
+    expect($("#answer").textContent).toBe("answered from [1] and [2].");
+  });
+
+  it("answer source rows are numbered like citations and open in thread context", async () => {
+    await bootConsentable();
+    await askFromInput("vault?"); // local outcome still lists the sources
+    await vi.waitFor(() =>
+      expect(win.document.querySelectorAll("#ask-results .ask-source").length).toBe(2),
+    );
+    const rows = [...win.document.querySelectorAll("#ask-results .ask-source")] as unknown as HTMLButtonElement[];
+    const metaOf = (row: HTMLButtonElement): string =>
+      (row.querySelector(".meta") as HTMLElement | null)?.textContent ?? "";
+    expect(metaOf(rows[0]).startsWith("[1]")).toBe(true);
+    expect(metaOf(rows[1]).startsWith("[2]")).toBe(true);
+    rows[0].click();
+    await vi.waitFor(() => expect(ctxCalls().length).toBeGreaterThan(0));
+    expect((ctxCalls()[0].args as { id: number }).id).toBe(21);
+    await vi.waitFor(() =>
+      expect($("#detail").textContent).toContain("vault sync planning went fine"),
+    );
   });
 });
 
