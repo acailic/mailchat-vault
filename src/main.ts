@@ -252,13 +252,14 @@ function renderAskResults(list: HTMLUListElement, messages: Message[]): void {
 
 /** Render the answer with its citations `[n]` as clickable source links:
  * citation `n` opens result `n - 1` — the archived message the summary
- * was built from — in its conversation context. Out-of-range markers
- * (a model citing a row that is not in the results) stay plain text. */
-function renderAnswerLinked(answer: string, sources: Message[]): void {
+ * was built from — in its conversation context. Markers beyond `maxCite`
+ * (the summary window: the model never saw those rows) and out-of-range
+ * markers (a row not in the results) stay plain text. */
+function renderAnswerLinked(answer: string, sources: Message[], maxCite: number): void {
   answerBox.replaceChildren(
     ...splitCitations(answer).map((part) => {
       if (typeof part !== "string") {
-        const target = sources[part.cite - 1];
+        const target = part.cite <= maxCite ? sources[part.cite - 1] : undefined;
         if (!target) return document.createTextNode(`[${part.cite}]`);
         const cite = document.createElement("button");
         cite.type = "button";
@@ -277,7 +278,7 @@ function renderAnswerLinked(answer: string, sources: Message[]): void {
 function renderAsk(outcome: AskOutcome): void {
   const sources = outcome.results as Message[];
   if (outcome.answer) {
-    renderAnswerLinked(outcome.answer, sources);
+    renderAnswerLinked(outcome.answer, sources, llmStatus?.summarize_top ?? 8);
     answerBox.hidden = false;
   } else {
     answerBox.hidden = true;

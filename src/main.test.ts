@@ -2391,6 +2391,30 @@ describe("ask AI consent + evidence navigation", () => {
     expect($("#answer").textContent).toBe("answered from [1] and [3].");
   });
 
+  it("citations beyond the summary window stay plain text, never dead links", async () => {
+    tauri.handlers.set("llm_status", () => ({
+      enabled: true,
+      model: "glm-5",
+      host: "api.z.ai",
+      summarize_top: 1,
+      providers: [LOCAL_ITEM, ZAI_ITEM],
+      default_provider: "local",
+    }));
+    const beyondWindow: AskOutcome = {
+      ...LOCAL_ASK_OUTCOME,
+      answer: "answered from [1] and [2].",
+    };
+    tauri.handlers.set("llm_ask", () => beyondWindow);
+    await boot();
+    await askFromInput("vault?");
+    await vi.waitFor(() => expect($("#answer").hidden).toBe(false));
+    const cites = win.document.querySelectorAll("#answer .citation");
+    expect(
+      [...cites].map((c) => (c as unknown as HTMLElement).dataset.cite),
+    ).toEqual(["1"]); // [2] sits past summarize_top=1 → not a link
+    expect($("#answer").textContent).toBe("answered from [1] and [2].");
+  });
+
   it("answer source rows are numbered like citations and open in thread context", async () => {
     await bootConsentable();
     await askFromInput("vault?"); // local outcome still lists the sources
