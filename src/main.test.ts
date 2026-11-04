@@ -2291,6 +2291,31 @@ describe("ask AI consent + evidence navigation", () => {
     expect($("#consent-text").textContent).not.toContain("api.z.ai");
   });
 
+  it("a late consent-less outcome never overwrites the consented ask's answer", async () => {
+    await bootConsentable();
+    let releaseLocal!: () => void;
+    const localGate = new Promise<void>((r) => (releaseLocal = r));
+    tauri.handlers.set("llm_ask", (args: unknown) => {
+      const { consent } = args as { consent: boolean };
+      return consent
+        ? Promise.resolve(ASK_OUTCOME)
+        : localGate.then(() => LOCAL_ASK_OUTCOME);
+    });
+    await askFromInput("vault?");
+    expect($("#consent-prompt").hidden).toBe(false);
+    // Send & ask fires the consented ask while the consent-less one is
+    // still in flight; the consent-less response then lands last.
+    $("#consent-allow-btn").click();
+    await vi.waitFor(() => expect(askCalls().length).toBe(2));
+    await vi.waitFor(() => expect($("#answer").hidden).toBe(false));
+    releaseLocal();
+    await new Promise((r) => setTimeout(r, 0));
+    // The consented answer and its plan line survive the stale response.
+    expect($("#answer").textContent).toBe(ASK_OUTCOME.answer);
+    expect($("#ask-status").textContent).toContain("planned by LLM");
+    expect($("#ask-notes").textContent).not.toContain("AI consent not granted");
+  });
+
   it("Send & ask grants consent, re-asks with consent:true, and remembers it", async () => {
     await bootConsentable();
     await askFromInput("vault?");

@@ -203,6 +203,7 @@ const searchGuard = new SequenceGuard();
 const detailGuard = new SequenceGuard();
 const statsGuard = new SequenceGuard();
 const dashboardGuard = new SequenceGuard();
+const askGuard = new SequenceGuard();
 const embedGuard = new SequenceGuard();
 
 /** The last `llm_status` response: powers the Ask provider menu and the
@@ -321,6 +322,7 @@ function showConsentPrompt(item: ProviderMenuItem): void {
 /** Run one ask through the IPC boundary. `consent` is the M5 gate: the
  * backend refuses every network round trip without it. */
 async function doAsk(question: string, consent: boolean): Promise<void> {
+  const token = askGuard.next();
   askButton.disabled = true;
   askStatus.textContent = consent
     ? "Asking… (translate → search → summarize)"
@@ -328,12 +330,14 @@ async function doAsk(question: string, consent: boolean): Promise<void> {
   try {
     const provider = askProvider.value || null;
     const outcome = await ipc.llmAsk({ question, limit: 50, provider, consent });
+    if (!askGuard.isCurrent(token)) return;
     askStatus.textContent = describePlan(outcome);
     renderAsk(outcome);
   } catch (e) {
+    if (!askGuard.isCurrent(token)) return;
     askStatus.textContent = String(e);
   } finally {
-    askButton.disabled = false;
+    if (askGuard.isCurrent(token)) askButton.disabled = false;
   }
 }
 
