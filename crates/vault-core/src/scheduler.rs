@@ -333,10 +333,13 @@ fn run_loop(
     // Arm from the persisted schedule. A read failure leaves the
     // scheduler disabled — the vault itself is in trouble then, and a
     // periodic sync must not paper over it.
-    let persisted = pool.with_read(|s| s.sync_schedule()).unwrap_or_default();
+    let persisted = pool
+        .with_read(|s| s.sync_schedule())
+        .unwrap_or_default()
+        .normalized_within(config.min_interval_ms, config.max_interval_ms);
     let now = (config.clock)();
     let mut state = LoopState {
-        schedule: persisted.normalized_within(config.min_interval_ms, config.max_interval_ms),
+        schedule: persisted,
         deadline: persisted
             .enabled
             .then(|| now + Duration::from_millis(persisted.interval_ms)),

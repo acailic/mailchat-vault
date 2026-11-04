@@ -220,6 +220,43 @@ fn scheduler_clamps_interval_to_its_configured_bounds() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn persisted_schedule_arms_with_normalized_interval() {
+    for (stored_ms, expected_ms) in [(0, 1000), (10_000, 2000)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = pool(&tmp);
+        pool.submit_write(move |s| {
+            s.set_sync_schedule(SyncSchedule {
+                enabled: true,
+                interval_ms: stored_ms,
+            })
+        })
+        .unwrap();
+        let (tx, rx) = mpsc::channel();
+        let scheduler = SyncScheduler::spawn(
+            Arc::clone(&pool),
+            SchedulerConfig {
+                min_interval_ms: 1000,
+                max_interval_ms: 2000,
+                ..fast_config()
+            },
+            fast_round(Arc::new(Spy::default())),
+            move |status| {
+                let _ = tx.send(status.clone());
+            },
+        );
+        let status = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        scheduler.shutdown();
+        pool.shutdown();
+        assert_eq!(status.interval_ms, expected_ms);
+        assert_eq!(
+            status.next_due_in_secs,
+            Some(expected_ms / 1000),
+            "the initial deadline must use the normalized interval, stored {stored_ms}ms"
+        );
+    }
+}
+
+#[test]
 fn rounds_fire_per_interval_as_plain_jobs() {
     let tmp = tempfile::tempdir().unwrap();
     let pool = pool(&tmp);
