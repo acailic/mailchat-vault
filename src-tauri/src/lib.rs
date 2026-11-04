@@ -92,6 +92,7 @@ use vault_core::llm::{
 };
 use vault_core::mbox::MboxSource;
 use vault_core::oauth::{self, OAuthConfig};
+use vault_core::object_store::{ObjectStore, ReconcileReport};
 use vault_core::query::{ChatContext, SearchPage, SearchQuery};
 use vault_core::scheduler::{SyncSchedule as CoreSyncSchedule, SyncScheduler};
 use vault_core::search2::{
@@ -257,6 +258,35 @@ fn list_import_scopes_v2(state: State<AppState>) -> Result<Vec<ImportScope>, App
         .pool
         .with_read(|s| s.import_scopes())
         .map_err(AppError::from)
+}
+
+/// Reconcile the media object store against the archive (M4.1): every
+/// `raw_json` media reference must have its SHA-256 object in the app
+/// data `media/` store, and every object is checked against those
+/// references. The report names missing references (external damage —
+/// the stage → promote → reference lifecycle cannot produce them),
+/// unreferenced orphans, corrupt objects (content hash ≠ name digest,
+/// re-hashed with `verify`), staging litter from interrupted writes,
+/// and foreign files. Read-only: repairing litter is a separate
+/// explicit sweep (`ObjectStore::sweep_staging`), corruption recovery
+/// stays manual by design.
+#[tauri::command]
+async fn media_reconcile(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ReconcileReport, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let digests = state
+        .pool
+        .with_read(|s| s.media_digests())
+        .map_err(|e| e.to_string())?;
+    let verify = true; // maintenance call: pay the re-hash for certainty
+    tauri::async_runtime::spawn_blocking(move || {
+        ObjectStore::new(&data_dir).reconcile(&digests, verify)
+    })
+    .await
+    .map_err(|e| format!("reconcile task failed: {e}"))?
+    .map_err(|e| e.to_string())
 }
 
 /// Export an explicit selection of messages (the rows the user checked
@@ -1650,7 +1680,8 @@ pub fn run() {
             message_detail_v2,
             conversation_context_v2,
             list_import_scopes_v2,
-            export_messages_v2
+            export_messages_v2,
+            media_reconcile
         ])
         .run(tauri::generate_context!())
         .expect("error while running mailchat vault");

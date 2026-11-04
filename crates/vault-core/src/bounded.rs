@@ -69,6 +69,7 @@ use std::time::Instant;
 use crate::ingest::IngestSummary;
 use crate::media::MediaSummary;
 use crate::message::NewMessage;
+use crate::object_store::Capacity;
 use crate::storage::ImportIssueRecord;
 use crate::Result;
 
@@ -360,6 +361,7 @@ impl<'a> BoundedRun<'a> {
             import_id: &self.import_id,
             source_name: &source_name,
             media: self.media,
+            media_budget: Capacity::default(),
             summary: IngestSummary {
                 source: source_name.clone(),
                 seen: 0,
@@ -443,6 +445,10 @@ struct RunState<'a, 'b> {
     import_id: &'a str,
     source_name: &'a str,
     media: Option<(MediaKind, &'a Path, &'a Path)>,
+    /// The M4.1 media capacity budget for this run — shared across every
+    /// batch's media pass, so one import cannot store past its bounds;
+    /// dedup hits refund their charge (see [`crate::object_store`]).
+    media_budget: Capacity,
     summary: IngestSummary,
     media_summary: Option<MediaSummary>,
     batch: Vec<NewMessage>,
@@ -476,12 +482,14 @@ impl RunState<'_, '_> {
                         export_root,
                         data_dir,
                         summary,
+                        &mut self.media_budget,
                     )?,
                     MediaKind::WhatsApp => crate::media::extract_whatsapp(
                         &mut self.batch,
                         export_root,
                         data_dir,
                         summary,
+                        &mut self.media_budget,
                     )?,
                 }
             }

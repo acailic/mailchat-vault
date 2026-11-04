@@ -188,6 +188,7 @@ impl From<Error> for JobError {
             },
             Error::MailParse(_)
             | Error::ChatImport(_)
+            | Error::ImportBounds(_)
             | Error::InvalidQuery(_)
             | Error::InvalidDate(_)
             | Error::InvalidExport(_)
