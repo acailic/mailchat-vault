@@ -224,14 +224,17 @@ function Test-AppLaunch {
         Write-Log ("first launch created {0}" -f $script:DbPath)
     }
     Stop-Process -Id $proc.Id -Force
-    Wait-For { $proc.HasExited } 30 "app process would not die"
+    Wait-For { $proc.Refresh(); $proc.HasExited } 30 "app process would not die"
 }
 
 function Get-Digest {
     param([string] $Tag)
     Assert-True (Test-Path $InspectExe) "inspect tool not found: $InspectExe"
     Assert-True (Test-Path $script:DbPath) ("no vault.db to digest at {0}" -f $script:DbPath)
-    $json = & $InspectExe $script:DbPath
+    $json = (& $InspectExe $script:DbPath 2>&1) | Out-String -Width 4096
+    if ($LASTEXITCODE -ne 0) {
+        Fail ("smoke_inspect failed with exit {0}: {1}" -f $LASTEXITCODE, $json.Trim())
+    }
     $digest = $json | ConvertFrom-Json
     $digest | ConvertTo-Json -Compress | Set-Content (Join-Path $LogDir ("digest-{0}.json" -f $Tag))
     Write-Log ("digest {0}: {1}" -f $Tag, ($digest | ConvertTo-Json -Compress))
@@ -288,13 +291,29 @@ function Run-Phase {
         Write-Host ("!!!!! phase {0} FAILED: {1}" -f $Name, $_.Exception.Message) `
             -ForegroundColor Red
         Reset-DataDir
-        # Best-effort: a failed phase may leave an install behind, which
-        # would pollute later phases' exe discovery on a shared machine.
-        foreach ($root in @(
+        # Best-effort: run the real uninstallers first so product
+        # registration never outlives its files, then sweep the known
+        # install roots (the same list Get-AppExe covers) for leftovers.
+        $roots = @(
             (Join-Path $env:ProgramFiles $ProductName),
+            (Join-Path ${env:ProgramFiles(x86)} $ProductName),
             (Join-Path $env:LOCALAPPDATA $ProductName),
             (Join-Path $env:LOCALAPPDATA (Join-Path 'Programs' $ProductName))
-        )) {
+        )
+        try { Invoke-Msi '/x' $NewMsi ("cleanup-{0}.log" -f $Name) | Out-Null } catch { }
+        foreach ($root in $roots) {
+            if (Test-Path $root) {
+                $un = Join-Path $root 'uninstall.exe'
+                if (Test-Path $un) {
+                    try {
+                        Start-Process -FilePath $un -ArgumentList '/S' | Out-Null
+                        Wait-For { -not (Test-Path $root) } 120 `
+                            "cleanup uninstall of $root stalled"
+                    } catch { }
+                }
+            }
+        }
+        foreach ($root in $roots) {
             if (Test-Path $root) {
                 Write-Log ("cleanup: removing leftover install at {0}" -f $root)
                 Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
