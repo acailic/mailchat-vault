@@ -18,6 +18,9 @@ export interface WorkspaceController {
   readingOpened(): void;
   /** The reading pane closed; restore focus to the initiating result. */
   readingClosed(): void;
+  /** Arrow-walking inside the pane re-rendered it: focus the (new)
+   * current thread row wherever the destroyed row's focus fell. */
+  refocusCurrentThreadRow(): void;
   /** Whether the compact navigation drawer is open. */
   isNavOpen(): boolean;
   closeNav(): void;
@@ -149,12 +152,28 @@ export function initWorkspace(): WorkspaceController {
           heading.tabIndex = -1;
           heading.focus();
         }
-      } else if (!active || active === document.body) {
+      } else if (!active || active === document.body || !active.isConnected) {
+        // A re-render that destroyed the previously focused element (e.g.
+        // arrow-walking to a neighbour) can leave a DETACHED node as
+        // activeElement in real webviews — happy-dom resets to body, so
+        // cover both (same quirk readingClosed handles).
         const current = document.querySelector<HTMLElement>("#detail .thread-row.current");
         if (current) {
           current.tabIndex = -1;
           current.focus();
         }
+      }
+    },
+    refocusCurrentThreadRow() {
+      // Arrow-walking inside the reading pane re-renders it; the pane owns
+      // the interaction, so the (new) current row takes focus back no
+      // matter where the destroyed row's focus fell (body, the search
+      // input, or a rebuilt row — webviews differ; happy-dom resets to
+      // body, which is why the unit tests never saw this).
+      const current = document.querySelector<HTMLElement>("#detail .thread-row.current");
+      if (current) {
+        current.tabIndex = -1;
+        current.focus();
       }
     },
     readingClosed() {

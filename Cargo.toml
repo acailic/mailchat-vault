@@ -15,6 +15,7 @@ repository = "https://github.com/acailic/mailchat-vault"
 
 [workspace.dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10"
 imap = { version = "2.4", default-features = false }
 mailparse = "0.16"
 notify = "8"

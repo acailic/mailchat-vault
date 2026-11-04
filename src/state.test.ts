@@ -116,11 +116,17 @@ describe("WorkspaceStore", () => {
 describe("initialUiState", () => {
   it("boots empty with no selection", () => {
     const s = initialUiState();
-    expect(s.text).toBe("");
+    expect(s.filters.text).toBe("");
     expect(s.sources).toEqual([]);
     expect(s.hits).toEqual([]);
     expect(s.activeIndex).toBe(-1);
+    expect(s.selectedId).toBeNull();
+    expect(s.selection.size).toBe(0);
     expect(s.detail).toBeNull();
+    expect(s.detailEntries).toEqual([]);
+    expect(s.resultsSnapshot).toBeNull();
+    expect(s.pageRevision).toBeNull();
+    expect(s.refreshNeeded).toBe(false);
     expect(s.offset).toBe(0);
     expect(s.total).toBe(0);
   });

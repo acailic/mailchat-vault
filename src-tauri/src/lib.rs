@@ -94,6 +94,10 @@ use vault_core::mbox::MboxSource;
 use vault_core::oauth::{self, OAuthConfig};
 use vault_core::query::{ChatContext, SearchPage, SearchQuery};
 use vault_core::scheduler::{SyncSchedule as CoreSyncSchedule, SyncScheduler};
+use vault_core::search2::{
+    self, AppError, ConversationContext, ImportScope, MessageDetail, SearchArchivePage,
+    SearchArchiveRequest, SelectionExportSummary, SelectionFormat,
+};
 use vault_core::settings::{self, Options, Settings, SETTINGS_VERSION};
 use vault_core::stats::{ArchiveStats, DEFAULT_TOP};
 use vault_core::storage::{FailedItem, SourceInstance};
@@ -188,6 +192,108 @@ fn chat_context(
         .pool
         .with_read(|s| s.chat_context(id, radius.unwrap_or(8)))
         .map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// v2 search/detail/context (M3.2)
+// ---------------------------------------------------------------------------
+//
+// The v2 IPC surface reads the canonical store through `search2` and
+// returns summaries (bounded snippets, no full bodies) plus the archive
+// revision of the read snapshot; errors are structured `AppError`s
+// (code/message/field/retryable), not strings. The v1 commands above
+// stay as adapters until every caller migrates.
+
+/// Paged, filtered v2 search: flat stable ranking (relevance = rank then
+/// id; newest = instant desc, id desc, unknown last), bounded snippets,
+/// exact total from one read snapshot, and that snapshot's archive
+/// revision so the UI can offer a refresh instead of silently restarting
+/// pagination when the archive changes (A07).
+#[tauri::command]
+fn search_archive_v2(
+    state: State<AppState>,
+    request: SearchArchiveRequest,
+) -> Result<SearchArchivePage, AppError> {
+    state
+        .pool
+        .with_read(|s| s.search_archive(&request))
+        .map_err(AppError::from)
+}
+
+/// The full v2 reading payload for one message: body, metadata, time
+/// provenance, attachments, occurrences, and conflicting-revision links.
+#[tauri::command]
+fn message_detail_v2(state: State<AppState>, id: i64) -> Result<MessageDetail, AppError> {
+    state
+        .pool
+        .with_read(|s| s.message_detail(id))
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::not_found(format!("no message with id {id}")))
+}
+
+/// Chronological context around one message, paged by message-id cursors
+/// ("load earlier/later" without losing the anchor). Unverified legacy
+/// groupings return the anchor alone with `unverified_conversation` set.
+#[tauri::command]
+fn conversation_context_v2(
+    state: State<AppState>,
+    id: i64,
+    before_cursor: Option<i64>,
+    after_cursor: Option<i64>,
+    limit: Option<u32>,
+) -> Result<ConversationContext, AppError> {
+    state
+        .pool
+        .with_read(|s| s.conversation_context(id, before_cursor, after_cursor, limit))
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::not_found(format!("no message with id {id}")))
+}
+
+/// The import scopes available as a results filter ("View imported
+/// messages" after an import completes), newest first.
+#[tauri::command]
+fn list_import_scopes_v2(state: State<AppState>) -> Result<Vec<ImportScope>, AppError> {
+    state
+        .pool
+        .with_read(|s| s.import_scopes())
+        .map_err(AppError::from)
+}
+
+/// Export an explicit selection of messages (the rows the user checked
+/// in the results list, in that order) as UTF-8 text or JSON with
+/// provenance, to a natively-picked destination. Attachments are never
+/// implicitly included — they are a separate explicit export (M4).
+#[tauri::command]
+async fn export_messages_v2(
+    state: State<'_, AppState>,
+    ids: Vec<i64>,
+    format: String,
+    path: String,
+) -> Result<SelectionExportSummary, AppError> {
+    let format = SelectionFormat::parse(&format).map_err(AppError::from)?;
+    if ids.is_empty() {
+        return Err(AppError::invalid_input(
+            "selection export needs at least one message id",
+            Some("ids"),
+        ));
+    }
+    if ids.len() > 10_000 {
+        return Err(AppError::invalid_input(
+            "selection export is bounded to 10,000 messages per file",
+            Some("ids"),
+        ));
+    }
+    let pool = Arc::clone(&state.pool);
+    tauri::async_runtime::spawn_blocking(move || {
+        pool.with_read(|s| -> CoreResult<SelectionExportSummary> {
+            let file = std::fs::File::create(&path).map_err(Error::from)?;
+            let mut out = BufWriter::new(file);
+            search2::export_selection(s, &ids, format, &mut out)
+        })
+        .map_err(AppError::from)
+    })
+    .await
+    .map_err(|e| AppError::internal(format!("export task failed: {e}")))?
 }
 
 /// Natural-language search: translate the question into an FTS5 plan
@@ -1539,7 +1645,12 @@ pub fn run() {
             stats,
             archive_stats,
             export_search,
-            export_chat
+            export_chat,
+            search_archive_v2,
+            message_detail_v2,
+            conversation_context_v2,
+            list_import_scopes_v2,
+            export_messages_v2
         ])
         .run(tauri::generate_context!())
         .expect("error while running mailchat vault");

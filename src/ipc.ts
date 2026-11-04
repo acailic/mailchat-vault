@@ -14,12 +14,21 @@ import type {
   IngestSummary,
   JobEventsPage,
   SearchPage,
+  SourceInstance,
   Stats,
   SyncScheduleView,
   WatchSnapshot,
 } from "./types";
 import type { AskOutcome, LlmStatus } from "./llmview";
 import type { SaveSettingsPayload, SettingsView } from "./settings";
+import type {
+  ConversationContext,
+  ImportScope,
+  MessageDetail,
+  SearchArchivePage,
+  SearchArchiveRequest,
+  SelectionExportSummary,
+} from "./v2types";
 
 // ---------------------------------------------------------------------------
 // Wire types that only the IPC layer needs
@@ -67,6 +76,48 @@ export interface SearchQueryInput {
   to_date: string;
   limit: number;
   offset: number;
+}
+
+// ---------------------------------------------------------------------------
+// v2 search/detail/context (M3.2) — the canonical-store reading surface
+// ---------------------------------------------------------------------------
+
+export function searchArchiveV2(request: SearchArchiveRequest): Promise<SearchArchivePage> {
+  return invoke<SearchArchivePage>("search_archive_v2", { request });
+}
+
+export function messageDetailV2(id: number): Promise<MessageDetail> {
+  return invoke<MessageDetail>("message_detail_v2", { id });
+}
+
+export function conversationContextV2(args: {
+  id: number;
+  beforeCursor?: number | null;
+  afterCursor?: number | null;
+  limit?: number;
+}): Promise<ConversationContext> {
+  return invoke<ConversationContext>("conversation_context_v2", {
+    id: args.id,
+    beforeCursor: args.beforeCursor ?? null,
+    afterCursor: args.afterCursor ?? null,
+    limit: args.limit ?? null,
+  });
+}
+
+export function listImportScopesV2(): Promise<ImportScope[]> {
+  return invoke<ImportScope[]>("list_import_scopes_v2");
+}
+
+export function sourcesList(): Promise<SourceInstance[]> {
+  return invoke<SourceInstance[]>("sources_list");
+}
+
+export function exportMessagesV2(args: {
+  ids: number[];
+  format: string;
+  path: string;
+}): Promise<SelectionExportSummary> {
+  return invoke<SelectionExportSummary>("export_messages_v2", args);
 }
 
 // ---------------------------------------------------------------------------
