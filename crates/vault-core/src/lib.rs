@@ -31,6 +31,13 @@
 //!   (with media extraction) for picked files.
 //! - [`media`]: content-addressed media store and the extraction pass that
 //!   links export files to messages.
+//! - [`object_store`]: the M4.1 SHA-256 object store behind `media/` —
+//!   the stage → promote → reference lifecycle (no half-written object
+//!   is ever visible, references never dangle), the import capacity
+//!   budget, and the reconciliation/integrity tool.
+//! - [`import_bounds`]: the M4.1 import bounds — traversal/symlink-safe
+//!   path resolution, bounded directory walks, and bounded ZIP
+//!   expansion (every import tree goes through this fence).
 //! - [`jobs`]: the M2.1 database pool — a writer worker thread over a
 //!   bounded write queue plus two read connections — and background
 //!   jobs with typed states/errors and a seq-stamped event log with
@@ -66,6 +73,7 @@ pub mod discord;
 pub mod export;
 pub mod imap;
 pub mod imap_coordinator;
+pub mod import_bounds;
 pub mod ingest;
 pub mod jobs;
 pub mod llm;
@@ -74,6 +82,7 @@ pub mod mbox;
 pub mod media;
 pub mod message;
 pub mod oauth;
+pub mod object_store;
 pub mod query;
 pub mod safe_migration;
 pub mod scheduler;
@@ -107,6 +116,8 @@ pub enum Error {
     Llm(String),
     #[error("chat import error: {0}")]
     ChatImport(String),
+    #[error("import bounds exceeded: {0}")]
+    ImportBounds(String),
     #[error("settings error: {0}")]
     Settings(String),
     #[error("invalid date filter: {0}")]

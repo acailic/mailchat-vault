@@ -2341,6 +2341,29 @@ impl Storage {
         Ok(value.and_then(|v| v.parse().ok()).unwrap_or(0))
     }
 
+    /// Every distinct media digest the archive references — the
+    /// `sha256` of each `raw_json` `media` entry across all canonical
+    /// messages (M4.1: the reference side of the object-store
+    /// reconciliation; see [`crate::object_store::ObjectStore::reconcile`]).
+    pub fn media_digests(&self) -> Result<std::collections::HashSet<String>> {
+        let mut digests = std::collections::HashSet::new();
+        let mut stmt = self
+            .conn
+            .prepare("SELECT raw_json FROM archive_messages WHERE raw_json LIKE '%\"media\"%'")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let raw: String = row.get(0)?;
+            for entry in media_entries(&raw) {
+                if let Some(sha) = entry.get("sha256").and_then(|v| v.as_str()) {
+                    if !sha.is_empty() {
+                        digests.insert(sha.to_string());
+                    }
+                }
+            }
+        }
+        Ok(digests)
+    }
+
     /// Remember a watched folder (idempotent on the canonical path).
     /// See [`crate::watch`].
     pub fn add_watched_folder(&self, path: &str) -> Result<()> {
