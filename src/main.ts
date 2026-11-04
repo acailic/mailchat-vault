@@ -296,11 +296,15 @@ function selectedNetworkProvider(): ProviderMenuItem | null {
 }
 
 /** Update the always-visible consent state line and prompt visibility for
- * the current provider selection (called on every menu rebuild/change). */
+ * the current provider selection (called on every menu rebuild/change).
+ * An open prompt re-renders against the new selection, so the named
+ * model/host is always the one a consent click would actually send to. */
 function updateConsentUi(): void {
   consentStatus.textContent = consentStatusLine(aiConsentGranted);
   consentRevokeButton.hidden = !aiConsentGranted;
-  if (!selectedNetworkProvider()) hideConsentPrompt();
+  const network = selectedNetworkProvider();
+  if (!network) hideConsentPrompt();
+  else if (!consentPrompt.hidden) showConsentPrompt(network);
 }
 
 function hideConsentPrompt(): void {

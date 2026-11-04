@@ -2266,6 +2266,31 @@ describe("ask AI consent + evidence navigation", () => {
     expect($("#answer").hidden).toBe(true);
   });
 
+  it("an open prompt re-renders when the provider selection changes to another network provider", async () => {
+    tauri.handlers.set("llm_status", () => ({
+      enabled: true,
+      model: "glm-5",
+      host: "api.z.ai",
+      summarize_top: 8,
+      providers: [LOCAL_ITEM, ZAI_ITEM, { ...KEYLESS_ITEM, available: true }],
+      default_provider: "zai",
+    }));
+    tauri.handlers.set("llm_ask", () => LOCAL_ASK_OUTCOME);
+    await boot();
+    await vi.waitFor(() => expect(input("#ask-provider").value).toBe("zai"));
+    await askFromInput("vault?");
+    expect($("#consent-prompt").hidden).toBe(false);
+    expect($("#consent-text").textContent).toContain("glm-5 via api.z.ai");
+    // Switch to the second network provider while the prompt is open:
+    // the sentence must now name the destination a consent click would
+    // actually use.
+    input("#ask-provider").value = "mine";
+    fireChange(input("#ask-provider"));
+    expect($("#consent-prompt").hidden).toBe(false);
+    expect($("#consent-text").textContent).toContain("m via 127.0.0.1");
+    expect($("#consent-text").textContent).not.toContain("api.z.ai");
+  });
+
   it("Send & ask grants consent, re-asks with consent:true, and remembers it", async () => {
     await bootConsentable();
     await askFromInput("vault?");
