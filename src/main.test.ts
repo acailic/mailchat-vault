@@ -999,7 +999,7 @@ describe("selection export and copy actions", () => {
     ($("#export-selection-btn") as HTMLElement).click();
     await vi.waitFor(() => expect($("#selection-status").textContent).toBe("Exported 2 messages."));
     const call = tauri.calls.find((c) => c.cmd === "export_messages_v2");
-    expect(call?.args).toEqual({ ids: [3, 1], format: "text", path: "/tmp/selection.txt" });
+    expect(call?.args).toEqual({ ids: [1, 3], format: "text", path: "/tmp/selection.txt" });
   });
 
   it("exporting a selection built across pages exports every checked id", async () => {

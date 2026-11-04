@@ -36,6 +36,7 @@ import {
   parseMessageLink,
   restoreIndices,
   revisionChanged,
+  selectionIds,
   withoutChip,
   type FilterChip,
   type SearchFilters,
@@ -956,8 +957,12 @@ async function exportSelection(ids: number[]): Promise<void> {
 }
 
 function exportSelectionFromResults(): void {
-  // Every checked id exports — across pages too (M3.2 fix contract).
-  void exportSelection([...state.selection]);
+  // Every checked id exports — across pages too (M3.2 fix contract) —
+  // with the visible page's checked rows first, in results order, then
+  // the remaining checked ids in check order.
+  const visible = selectionIds(state.hits, state.selection);
+  const rest = [...state.selection].filter((id) => !visible.includes(id));
+  void exportSelection([...visible, ...rest]);
 }
 
 function exportSingleMessage(): void {
