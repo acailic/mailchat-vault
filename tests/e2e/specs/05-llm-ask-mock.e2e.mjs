@@ -3,9 +3,26 @@
 // summarize — plus the privacy promise (only matched rows are sent), the
 // M5 consent contract in the real app (nothing on the wire without the
 // session consent; the consented re-ask goes out), and the fail-safe
-// fallback when the LLM returns garbage.
+// fallback when the LLM returns garbage. A second session drives the M5
+// adversarial paths: prompt re-render on provider switch, Revoke, and
+// citations beyond the summary window staying plain text.
+
+import { mkdirSync } from "node:fs";
+import path from "node:path";
 
 export const name = "llm-ask-mock";
+
+/** Best-effort visual evidence for the M5 round (env-gated). */
+async function evidenceShot(browser, name) {
+  const dir = process.env.MAILCHAT_E2E_EVIDENCE_DIR;
+  if (!dir) return;
+  try {
+    mkdirSync(dir, { recursive: true });
+    await browser.saveScreenshot(path.join(dir, name));
+  } catch {
+    // Evidence, never a failure cause.
+  }
+}
 
 export async function run(ctx) {
   const { withSession, assert, ui, startMockLlm } = ctx;
@@ -186,5 +203,180 @@ export async function run(ctx) {
   );
   } finally {
     await mock.close();
+  }
+
+  // ---------------------------------------------------------------------
+  // Session 2 — M5 adversarial paths in the real app: an open consent
+  // prompt re-renders when the provider switches, Revoke returns the app
+  // to fully-local asks, and citations beyond the summary window never
+  // become links.
+  // ---------------------------------------------------------------------
+  const mockB = await startMockLlm([
+    translateMidnight,
+    "Answer from [1] and [2]; beyond the summary window [9].",
+  ]);
+  try {
+    await withSession(
+      {
+        env: {
+          ANTHROPIC_API_KEY: "e2e-key",
+          ANTHROPIC_BASE_URL: `http://127.0.0.1:${mockB.port}`,
+          MAILCHAT_LLM_MODEL: "model-alpha",
+        },
+      },
+      async (browser) => {
+        await ui.waitForApp(browser);
+
+        // Ask without consent: local plan + per-question prompt naming the
+        // env provider (model-alpha via the recorder).
+        await ui.importMbox(browser, ui.archiveMbox);
+        await ui.openView(browser, "workspace");
+        const askInput = await browser.$("#ask");
+        await askInput.click();
+        await askInput.setValue("what happened with the vault around midnight?");
+        await browser.execute(() => {
+          document.querySelector("#ask-status").textContent = "";
+        });
+        await browser.keys("Enter");
+        await ui.waitForText(browser, "#ask-status", "local full-text", {
+          timeoutMsg: "consent-less ask never settled",
+        });
+        assert.ok(
+          await (await browser.$("#consent-prompt")).isDisplayed(),
+          "consent prompt shown",
+        );
+        assert.includes(
+          await (await browser.$("#consent-text")).getText(),
+          "model-alpha via 127.0.0.1",
+          "prompt names the env provider",
+        );
+        assert.equal(mockB.requests.length, 0, "no network before consent");
+        await evidenceShot(browser, "05b-consent-prompt.png");
+
+        // Add a second network provider through the real Settings form
+        // (same recorder, different model name) while the prompt is open.
+        await ui.openView(browser, "settings");
+        await browser.execute(() => {
+          const el = document.querySelector("#add-kind");
+          el.value = "custom";
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        });
+        await browser.$("#add-provider-btn").click();
+        const row = await browser.$('.provider-row[data-id="custom"]');
+        await row.$(".prov-name").setValue("Mock Lab B");
+        await row.$(".prov-url").setValue(`http://127.0.0.1:${mockB.port}/api`);
+        await row.$(".prov-model").setValue("model-beta");
+        await row.$(".prov-key").setValue("beta-key");
+        await browser.$("#settings-save-btn").click();
+        await ui.waitForText(browser, "#settings-note", "Saved.");
+
+        // Back to the workspace: the prompt is still open and still names
+        // the selection in force (the env provider).
+        await ui.openView(browser, "workspace");
+        await browser.waitUntil(
+          async () => {
+            const values = await browser
+              .$$("#ask-provider option")
+              .map((o) => o.getValue());
+            return values.includes("custom");
+          },
+          { timeout: 10_000, timeoutMsg: "provider menu never gained the new provider" },
+        );
+        assert.includes(
+          await (await browser.$("#consent-text")).getText(),
+          "model-alpha",
+          "prompt still names the current selection after the menu rebuild",
+        );
+
+        // Switch to the second network provider while the prompt is open:
+        // the sentence must re-render to name the destination a consent
+        // click would actually use.
+        await browser.execute(
+          (value) => {
+            const el = document.querySelector("#ask-provider");
+            el.value = value;
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+          },
+          "custom",
+        );
+        const reRendered = await ui.waitForText(browser, "#consent-text", "model-beta", {
+          timeoutMsg: "prompt never re-rendered for the new provider",
+        });
+        assert.ok(
+          !reRendered.includes("model-alpha"),
+          "prompt no longer names the previous provider",
+        );
+        await evidenceShot(browser, "05b-consent-prompt-rerendered.png");
+
+        // Consent for the provider the prompt named: the re-ask goes out
+        // with that provider id and the recorder sees both round trips.
+        await (await browser.$("#consent-allow-btn")).click();
+        await ui.waitForText(browser, "#consent-status", "granted for this session");
+        const planB = await ui.waitForText(browser, "#ask-status", "planned by LLM", {
+          timeoutMsg: "consented ask never settled",
+        });
+        assert.includes(planB, 'FTS: "vault"', "consented ask planned by the LLM");
+        assert.equal(mockB.requests.length, 2, "consented ask made both round trips");
+        for (const [index, request] of mockB.requests.entries()) {
+          assert.equal(
+            request.body.model,
+            "model-beta",
+            `consented request ${index + 1} used the provider the prompt named`,
+          );
+        }
+
+        // Citations: [1]/[2] are links; [9] sits beyond the summary window
+        // (summarize_top 8) and must stay plain text — never a dead link.
+        const answerB = await browser.$("#answer");
+        assert.ok(await answerB.isDisplayed(), "consented answer visible");
+        const expectedAnswer = "Answer from [1] and [2]; beyond the summary window [9].";
+        assert.equal(await answerB.getText(), expectedAnswer, "answer text verbatim");
+        const citesB = await browser.$$("#answer .citation");
+        const citeAttrs = await browser.execute(() =>
+          [...document.querySelectorAll("#answer .citation")].map((c) =>
+            c.getAttribute("data-cite"),
+          ),
+        );
+        assert.equal(
+          JSON.stringify(citeAttrs),
+          JSON.stringify(["1", "2"]),
+          "only in-window citations are clickable",
+        );
+        await evidenceShot(browser, "05b-answer-with-citations.png");
+
+        // Citation [2] opens its source message in thread context.
+        await citesB[1].click();
+        await ui.waitForText(browser, "#detail", "midnight");
+        await evidenceShot(browser, "05b-detail-from-citation.png");
+
+        // Revoke mid-session: asks go back to fully local, nothing on the
+        // wire.
+        await (await browser.$("#consent-revoke-btn")).click();
+        await ui.waitForText(browser, "#consent-status", "not granted");
+        assert.ok(
+          !(await (await browser.$("#consent-revoke-btn")).isDisplayed()),
+          "revoke button hidden after revoking",
+        );
+
+        await askInput.click();
+        await askInput.setValue("ledger november?");
+        await browser.execute(() => {
+          document.querySelector("#ask-status").textContent = "";
+          document.querySelector("#ask-notes").textContent = "";
+        });
+        await browser.keys("Enter");
+        await ui.waitForText(browser, "#ask-notes", "AI consent not granted", {
+          timeoutMsg: "post-revoke ask never settled",
+        });
+        assert.equal(
+          mockB.requests.length,
+          2,
+          "post-revoke ask sent nothing to the provider",
+        );
+        await evidenceShot(browser, "05b-revoked-local-ask.png");
+      },
+    );
+  } finally {
+    await mockB.close();
   }
 }

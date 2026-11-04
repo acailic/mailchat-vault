@@ -90,7 +90,7 @@ Every network ask passes an **explicit consent gate**, enforced in the backend (
 
 - **Per-question agreement**: the first ask of a session with a network provider selected runs locally and shows a consent prompt stating exactly what would be sent (the question, then the top-8 results, bodies truncated) and to whom (model via host), with **Send & ask for this session** / **Keep asking locally** choices. Agreeing immediately re-asks the same question with the network leg enabled.
 - **Per session, never forever**: consent lives in memory only — it resets on every app start and is never written to any file or storage. The always-visible status line shows the current state (`AI consent: granted for this session …` / `not granted — asks run fully locally`), and **Revoke** resets it mid-session; the next ask then asks anew.
-- **Answers carry their evidence**: citations `[1]`, `[2]` in the answer are rendered as clickable links, and the numbered source rows beneath the answer match those numbers — either opens the original archived message in its conversation context in the reading pane. Out-of-range citations stay plain text, never dead links.
+- **Answers carry their evidence**: citations `[1]`, `[2]` in the answer are rendered as clickable links, and the numbered source rows beneath the answer match those numbers — either opens the original archived message in its conversation context in the reading pane. Citations beyond the summarized top-8 window (the model never saw those rows) and out-of-range citations stay plain text, never dead links.
 
 ### Configuration (Settings UI, or environment variables)
 
