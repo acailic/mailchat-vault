@@ -9,7 +9,15 @@ import "./styles/app.css";
 
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { formatSentAt, snippet } from "./format";
-import { describePlan, privacyNoteFor, type AskOutcome, type LlmStatus } from "./llmview";
+import {
+  consentPromptText,
+  consentStatusLine,
+  describePlan,
+  privacyNoteFor,
+  splitCitations,
+  type AskOutcome,
+  type LlmStatus,
+} from "./llmview";
 import {
   renderDashboard,
   renderPagination,
@@ -163,6 +171,12 @@ let importScopes: ImportScope[] = [];
 const exportButton = document.querySelector<HTMLButtonElement>("#export-btn")!;
 const exportStatus = document.querySelector<HTMLElement>("#export-status")!;
 const askProvider = document.querySelector<HTMLSelectElement>("#ask-provider")!;
+const consentStatus = document.querySelector<HTMLElement>("#consent-status")!;
+const consentRevokeButton = document.querySelector<HTMLButtonElement>("#consent-revoke-btn")!;
+const consentPrompt = document.querySelector<HTMLElement>("#consent-prompt")!;
+const consentText = document.querySelector<HTMLElement>("#consent-text")!;
+const consentAllowButton = document.querySelector<HTMLButtonElement>("#consent-allow-btn")!;
+const consentLocalButton = document.querySelector<HTMLButtonElement>("#consent-local-btn")!;
 const settingsNote = document.querySelector<HTMLElement>("#settings-note")!;
 const envInfo = document.querySelector<HTMLElement>("#env-info")!;
 const providerRows = document.querySelector<HTMLElement>("#provider-rows")!;
@@ -189,11 +203,19 @@ const searchGuard = new SequenceGuard();
 const detailGuard = new SequenceGuard();
 const statsGuard = new SequenceGuard();
 const dashboardGuard = new SequenceGuard();
+const askGuard = new SequenceGuard();
 const embedGuard = new SequenceGuard();
 
 /** The last `llm_status` response: powers the Ask provider menu and the
  * privacy note for the current selection. */
 let llmStatus: LlmStatus | null = null;
+
+/** M5 AI consent — session-scoped, deliberately in-memory only: it starts
+ * `false` on every app start (a new session asks anew) and is never written
+ * to any persistent storage, so consent is remembered per session, not
+ * forever. Once granted, asks with a network provider go out; `Revoke`
+ * resets it at any time. The state is always visible in the UI. */
+let aiConsentGranted = false;
 
 // ---------------------------------------------------------------------------
 // Rendering glue
@@ -204,20 +226,136 @@ function setStatus(text: string, isError = false): void {
   statusLine.classList.toggle("error", isError);
 }
 
+/** Render one ask result row: numbered like the answer's citations
+ * ([1], [2], …) and clickable — the evidence trail opens the original
+ * message in its conversation context in the reading pane. */
 function renderAskResults(list: HTMLUListElement, messages: Message[]): void {
   list.replaceChildren(
-    ...messages.map((m) => {
+    ...messages.map((m, i) => {
       const li = document.createElement("li");
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "ask-source";
+      open.title = "Open this message in its conversation context";
       const meta = document.createElement("div");
       meta.className = "meta";
-      meta.textContent = `${m.author || "unknown"} · ${formatSentAt(m.sent_at)} · ${m.source}/${m.channel}${m.chat_id ? "/" + m.chat_id : ""}`;
+      meta.textContent = `[${i + 1}] ${m.author || "unknown"} · ${formatSentAt(m.sent_at)} · ${m.source}/${m.channel}${m.chat_id ? "/" + m.chat_id : ""}`;
       const body = document.createElement("div");
       body.className = "body";
       body.textContent = snippet(m.body);
-      li.append(meta, body);
+      open.append(meta, body);
+      open.addEventListener("click", () => void openDetail(m.id));
+      li.append(open);
       return li;
     }),
   );
+}
+
+/** Render the answer with its citations `[n]` as clickable source links:
+ * citation `n` opens result `n - 1` — the archived message the summary
+ * was built from — in its conversation context. Markers beyond `maxCite`
+ * (the summary window: the model never saw those rows) and out-of-range
+ * markers (a row not in the results) stay plain text. */
+function renderAnswerLinked(answer: string, sources: Message[], maxCite: number): void {
+  answerBox.replaceChildren(
+    ...splitCitations(answer).map((part) => {
+      if (typeof part !== "string") {
+        const target = part.cite <= maxCite ? sources[part.cite - 1] : undefined;
+        if (!target) return document.createTextNode(`[${part.cite}]`);
+        const cite = document.createElement("button");
+        cite.type = "button";
+        cite.className = "citation";
+        cite.dataset.cite = String(part.cite);
+        cite.title = `Open source [${part.cite}] — ${target.author || "unknown"} — in its conversation context`;
+        cite.textContent = `[${part.cite}]`;
+        cite.addEventListener("click", () => void openDetail(target.id));
+        return cite;
+      }
+      return document.createTextNode(part);
+    }),
+  );
+}
+
+function renderAsk(outcome: AskOutcome): void {
+  const sources = outcome.results as Message[];
+  if (outcome.answer) {
+    renderAnswerLinked(outcome.answer, sources, llmStatus?.summarize_top ?? 8);
+    answerBox.hidden = false;
+  } else {
+    answerBox.hidden = true;
+  }
+  askNotes.textContent = outcome.notes.join(" · ");
+  askNotes.hidden = outcome.notes.length === 0;
+  renderAskResults(askResults, sources);
+}
+
+/** The menu entry an ask with the current selection would use, when it
+ * is an *available network* provider (the only case needing consent). */
+function selectedNetworkProvider(): ProviderMenuItem | null {
+  const item = llmStatus?.providers.find((p) => p.id === askProvider.value) ?? null;
+  return item && item.available && item.id !== LOCAL_ID ? item : null;
+}
+
+/** Update the always-visible consent state line and prompt visibility for
+ * the current provider selection (called on every menu rebuild/change).
+ * An open prompt re-renders against the new selection, so the named
+ * model/host is always the one a consent click would actually send to. */
+function updateConsentUi(): void {
+  consentStatus.textContent = consentStatusLine(aiConsentGranted);
+  consentRevokeButton.hidden = !aiConsentGranted;
+  const network = selectedNetworkProvider();
+  if (!network) hideConsentPrompt();
+  else if (!consentPrompt.hidden) showConsentPrompt(network);
+}
+
+function hideConsentPrompt(): void {
+  consentPrompt.hidden = true;
+}
+
+/** Show the per-question consent prompt for a network ask without
+ * consent: states exactly what would leave the machine. */
+function showConsentPrompt(item: ProviderMenuItem): void {
+  consentText.textContent = consentPromptText(item, llmStatus?.summarize_top ?? 8);
+  consentPrompt.hidden = false;
+}
+
+/** Run one ask through the IPC boundary. `consent` is the M5 gate: the
+ * backend refuses every network round trip without it. */
+async function doAsk(question: string, consent: boolean): Promise<void> {
+  const token = askGuard.next();
+  askButton.disabled = true;
+  askStatus.textContent = consent
+    ? "Asking… (translate → search → summarize)"
+    : "Asking locally…";
+  try {
+    const provider = askProvider.value || null;
+    const outcome = await ipc.llmAsk({ question, limit: 50, provider, consent });
+    if (!askGuard.isCurrent(token)) return;
+    askStatus.textContent = describePlan(outcome);
+    renderAsk(outcome);
+  } catch (e) {
+    if (!askGuard.isCurrent(token)) return;
+    askStatus.textContent = String(e);
+  } finally {
+    if (askGuard.isCurrent(token)) askButton.disabled = false;
+  }
+}
+
+async function runAsk(): Promise<void> {
+  const question = askInput.value.trim();
+  if (!question) {
+    askStatus.textContent = "Ask a question first.";
+    return;
+  }
+  const network = selectedNetworkProvider();
+  if (network && !aiConsentGranted) {
+    // Explicit consent first: this ask runs fully locally (nothing sent),
+    // and the prompt offers to send this same question out on agreement.
+    showConsentPrompt(network);
+    await doAsk(question, false);
+    return;
+  }
+  await doAsk(question, network !== null && aiConsentGranted);
 }
 
 function renderAll(): void {
@@ -313,39 +451,6 @@ async function refreshImportScopes(): Promise<void> {
   fillImportScopes(importScopeSelect, importScopes, state.filters.importJobId);
 }
 
-function renderAsk(outcome: AskOutcome): void {
-  if (outcome.answer) {
-    answerBox.textContent = outcome.answer;
-    answerBox.hidden = false;
-  } else {
-    answerBox.hidden = true;
-  }
-  askNotes.textContent = outcome.notes.join(" · ");
-  askNotes.hidden = outcome.notes.length === 0;
-  const shown = outcome.results as Message[];
-  renderAskResults(askResults, shown);
-}
-
-async function runAsk(): Promise<void> {
-  const question = askInput.value.trim();
-  if (!question) {
-    askStatus.textContent = "Ask a question first.";
-    return;
-  }
-  askButton.disabled = true;
-  askStatus.textContent = "Asking… (translate → search → summarize)";
-  try {
-    const provider = askProvider.value || null;
-    const outcome = await ipc.llmAsk({ question, limit: 50, provider });
-    askStatus.textContent = describePlan(outcome);
-    renderAsk(outcome);
-  } catch (e) {
-    askStatus.textContent = String(e);
-  } finally {
-    askButton.disabled = false;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Provider menu (multi-provider Ask UI)
 // ---------------------------------------------------------------------------
@@ -379,12 +484,14 @@ function buildProviderMenu(status: LlmStatus, keepPrevious: boolean): void {
   updateLlmNote();
 }
 
-/** Privacy note for the currently selected provider. */
+/** Privacy note for the currently selected provider, plus the consent
+ * state line (both follow every provider-menu change/rebuild). */
 function updateLlmNote(): void {
   const item = selectedMenuItem();
   llmNote.textContent = item
     ? privacyNoteFor(item, llmStatus?.summarize_top ?? 8)
     : "";
+  updateConsentUi();
 }
 
 async function refreshLlm(): Promise<void> {
@@ -395,6 +502,7 @@ async function refreshLlm(): Promise<void> {
   } catch {
     llmStatus = null;
     llmNote.textContent = "";
+    updateConsentUi(); // the consent state line stays meaningful without a menu
   }
 }
 
@@ -1573,6 +1681,21 @@ askInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") void runAsk();
 });
 askProvider.addEventListener("change", updateLlmNote);
+// M5 consent wiring: allow grants session consent and immediately re-asks
+// the pending question with the network leg enabled; keep-local and revoke
+// keep everything on the fully local path.
+consentAllowButton.addEventListener("click", () => {
+  aiConsentGranted = true;
+  updateConsentUi();
+  hideConsentPrompt();
+  const question = askInput.value.trim();
+  if (question) void doAsk(question, true);
+});
+consentLocalButton.addEventListener("click", hideConsentPrompt);
+consentRevokeButton.addEventListener("click", () => {
+  aiConsentGranted = false;
+  updateConsentUi();
+});
 authorInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") void runSearch(0);
 });

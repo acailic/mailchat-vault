@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  consentPromptText,
+  consentStatusLine,
   describePlan,
   privacyNote,
   privacyNoteFor,
+  splitCitations,
   type AskOutcome,
   type LlmStatus,
 } from "./llmview";
@@ -154,5 +157,62 @@ describe("privacyNote", () => {
   it("describes local mode when nothing is configured", () => {
     expect(privacyNote(disabled)).toBe(privacyNoteFor(localItem, 8));
     expect(privacyNote(disabled)).toContain("nothing leaves this machine");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M5: AI consent + source-linked answers
+// ---------------------------------------------------------------------------
+
+describe("consentStatusLine", () => {
+  it("states both session states distinctly", () => {
+    const granted = consentStatusLine(true);
+    const notGranted = consentStatusLine(false);
+    expect(granted).toContain("granted for this session");
+    expect(notGranted).toContain("not granted");
+    expect(notGranted).toContain("fully locally");
+    expect(granted).not.toBe(notGranted);
+  });
+});
+
+describe("consentPromptText", () => {
+  it("names the provider, model, and exactly what would leave", () => {
+    const text = consentPromptText(zaiItem, 8);
+    expect(text).toContain("glm-5 via api.z.ai");
+    expect(text).toContain("top 8 matching messages");
+    expect(text).toContain("truncated to 500 chars");
+    expect(text).toContain("for this session");
+  });
+});
+
+describe("splitCitations", () => {
+  it("splits an answer into text runs and citation markers", () => {
+    expect(splitCitations("October covered sync [1] and problems [2].")).toEqual([
+      "October covered sync ",
+      { cite: 1 },
+      " and problems ",
+      { cite: 2 },
+      ".",
+    ]);
+  });
+
+  it("keeps leading, trailing, adjacent, and bracket-free text intact", () => {
+    expect(splitCitations("[1] all of it")).toEqual([{ cite: 1 }, " all of it"]);
+    expect(splitCitations("no citations here")).toEqual(["no citations here"]);
+    expect(splitCitations("adjacent [1][2] markers")).toEqual([
+      "adjacent ",
+      { cite: 1 },
+      { cite: 2 },
+      " markers",
+    ]);
+    expect(splitCitations("")).toEqual([]);
+  });
+
+  it("leaves non-citation brackets alone", () => {
+    expect(splitCitations("a [not a number] b [10] c")).toEqual([
+      "a [not a number] b ",
+      { cite: 10 },
+      " c",
+    ]);
   });
 });

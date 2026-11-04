@@ -338,12 +338,18 @@ async fn export_messages_v2(
 /// profile id, `env` (the environment fallback), or `local` (plain local
 /// search, nothing sent anywhere). `None` uses the default selection
 /// (settings default → env fallback → local-only).
+///
+/// `consent` is the M5 **AI-consent gate**: an ask may contact a network
+/// provider only when it is explicitly `true`. Without consent (the
+/// default, `None`/`false`) a network selection is downgraded to a fully
+/// local ask before any LLM object exists — see [`run_ask`].
 #[tauri::command]
 fn llm_ask(
     state: State<AppState>,
     question: String,
     limit: Option<u32>,
     provider: Option<String>,
+    consent: Option<bool>,
 ) -> Result<AskOutcome, String> {
     let question = question.trim();
     if question.is_empty() {
@@ -357,34 +363,77 @@ fn llm_ask(
 
     // Resolve the backend without holding the registry lock across any
     // network round trip: the selection clones its LlmConfig out.
-    let backend: Option<AnthropicLlm>;
-    let mut local_source: Option<PlanSource> = None;
-    let mut local_note: Option<String> = None;
     let summarize_top: usize;
+    let selection: Selection;
     {
         let registry = state
             .registry
             .lock()
             .map_err(|e| format!("registry lock poisoned: {e}"))?;
         summarize_top = registry.settings().options.summarize_top as usize;
-        match registry.select(provider.as_deref()) {
-            Selection::Provider { config, .. } => backend = Some(AnthropicLlm::new(config)),
-            Selection::Local { reason } => {
-                backend = None;
-                // An explicitly requested (but unusable) provider is local
-                // mode with a note; no selection at all with nothing
-                // configured stays the classic no-LLM mode.
-                local_source = Some(if provider.is_some() {
+        selection = registry.select(provider.as_deref());
+    }
+    run_ask(
+        &state.pool,
+        &state.embedder,
+        selection,
+        provider.is_some(),
+        question,
+        limit,
+        summarize_top,
+        today,
+        consent.unwrap_or(false),
+    )
+}
+
+/// The ask pipeline after provider selection: the M5 **AI-consent gate**,
+/// then translate → validate → run + hybrid-rank → summarize.
+///
+/// The gate is absolute and sits *before* anything network-shaped exists:
+/// a [`Selection::Provider`] without explicit consent (`consent != true`)
+/// is downgraded to a fully local ask with a visible note — the network
+/// backend is never constructed, so no translate or summarize round trip
+/// can go out and nothing leaves the machine without the user's agreement.
+/// A free function (not a command) so tests can drive it against a mock
+/// endpoint and prove the no-consent case makes zero network calls.
+#[allow(clippy::too_many_arguments)] // mirrors vault_core::llm::ask's step list
+fn run_ask(
+    pool: &DbPool,
+    embedder: &HashEmbedder,
+    selection: Selection,
+    provider_requested: bool,
+    question: &str,
+    limit: u32,
+    summarize_top: usize,
+    today: chrono::NaiveDate,
+    consent: bool,
+) -> Result<AskOutcome, String> {
+    // AI-consent gate: without explicit consent a network selection
+    // becomes local-only. (A local selection was already local; its note
+    // explains why, unchanged from pre-M5 behavior.)
+    let (backend, local_source, local_notes): (Option<AnthropicLlm>, PlanSource, Vec<String>) =
+        match selection {
+            Selection::Provider { .. } if !consent => (
+                None,
+                PlanSource::Local,
+                vec![
+                    "AI consent not granted — this ask ran fully locally; nothing was sent to any provider"
+                        .into(),
+                ],
+            ),
+            Selection::Provider { config, .. } => {
+                (Some(AnthropicLlm::new(config)), PlanSource::Llm, Vec::new())
+            }
+            Selection::Local { reason } => (
+                None,
+                if provider_requested {
                     PlanSource::Local
                 } else {
                     PlanSource::NoLlm
-                });
-                if !reason.is_empty() {
-                    local_note = Some(reason);
-                }
-            }
-        }
-    }
+                },
+                if reason.is_empty() { Vec::new() } else { vec![reason] },
+            ),
+        };
 
     // Same steps as [`vault_core::llm::ask`], composed so that each read
     // is short-lived: translate (network, no storage) → validate (read) →
@@ -392,26 +441,20 @@ fn llm_ask(
     let planned = match &backend {
         None => PlannedQuery {
             plan: QueryPlan::plain(question),
-            source: local_source.expect("local selection always sets a source"),
-            notes: local_note.into_iter().collect(),
+            source: local_source,
+            notes: local_notes,
         },
         Some(backend) => {
             let candidate = llm::translate(backend, question, today);
-            state
-                .pool
-                .with_read(|s| llm::validate(s, question, candidate))
+            pool.with_read(|s| llm::validate(s, question, candidate))
         }
     };
     let (results, ranking) = {
-        let fts_results = state
-            .pool
+        let fts_results = pool
             .with_read(|s| llm::run_plan(s, &planned, limit))
             .map_err(|e| e.to_string())?;
-        let hybrid = state
-            .pool
-            .with_read(|s| {
-                llm::rank_hybrid(s, &state.embedder, question, &planned, &fts_results, limit)
-            })
+        let hybrid = pool
+            .with_read(|s| llm::rank_hybrid(s, embedder, question, &planned, &fts_results, limit))
             .map_err(|e| e.to_string())?;
         (hybrid.results, hybrid.ranking)
     };
@@ -1922,5 +1965,254 @@ mod tests {
             JobSpec::parse("imap_sync_all", &serde_json::json!({ "host": "x" })).unwrap(),
             JobSpec::ImapSyncAll
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // M5: AI consent gate (evidence: a local TCP recorder plays the
+    // provider endpoint — "mock network" — so the tests can prove which
+    // asks produced network traffic)
+    // -----------------------------------------------------------------------
+
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    use vault_core::jobs::PoolConfig;
+    use vault_core::vector::HashEmbedder;
+
+    /// Read one HTTP/1.1 request (headers + Content-Length body) and return
+    /// its body (what would leave the machine).
+    fn read_recorded_body(stream: &mut std::net::TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let header_end = loop {
+            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos + 4;
+            }
+            let n = stream.read(&mut chunk).expect("read request");
+            assert!(n > 0, "connection closed before headers ended");
+            buf.extend_from_slice(&chunk[..n]);
+        };
+        let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+        let content_length: usize = head
+            .to_ascii_lowercase()
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length:"))
+            .map(|v| v.trim().parse().expect("content-length"))
+            .unwrap_or(0);
+        while buf.len() < header_end + content_length {
+            let n = stream.read(&mut chunk).expect("read body");
+            assert!(n > 0, "connection closed before body ended");
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        String::from_utf8_lossy(&buf[header_end..header_end + content_length]).to_string()
+    }
+
+    /// A local recorder standing in for the LLM provider endpoint: every
+    /// accepted connection is answered Anthropic-style with the next entry
+    /// of `replies`, and the accept loop stops when `stop` is set — so a
+    /// test can prove that *no* request ever arrived by setting `stop`
+    /// after the ask returned and collecting an empty request list.
+    fn spawn_llm_recorder(
+        replies: Vec<String>,
+        stop: Arc<AtomicBool>,
+    ) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local LLM recorder");
+        let addr = listener.local_addr().unwrap();
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let handle = std::thread::spawn(move || {
+            let mut bodies = Vec::new();
+            while !stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).expect("blocking stream");
+                        let body = read_recorded_body(&mut stream);
+                        let reply = replies
+                            .get(bodies.len())
+                            .cloned()
+                            .unwrap_or_else(|| "{}".into());
+                        let payload = serde_json::json!({
+                            "content": [{ "type": "text", "text": reply }]
+                        })
+                        .to_string();
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            payload.len(),
+                            payload
+                        );
+                        stream.write_all(response.as_bytes()).expect("write reply");
+                        bodies.push(body);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(_) => break,
+                }
+            }
+            bodies
+        });
+        (format!("http://{addr}/"), handle)
+    }
+
+    /// A pool over a throwaway vault seeded with `rows` matching messages.
+    fn ask_pool(rows: usize) -> (tempfile::TempDir, Arc<DbPool>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool =
+            DbPool::spawn(tmp.path().join("vault.db"), PoolConfig::default(), |_| {}).unwrap();
+        pool.submit_write(move |s| {
+            for i in 0..rows {
+                s.insert_message(&vault_core::message::NewMessage::new(
+                    "test",
+                    format!("m{i}"),
+                    format!("Author {i:02}"),
+                    format!("2026-10-{:02}T12:00:00Z", i % 28 + 1),
+                    format!("consent marker {i:02} about vault topics"),
+                ))?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        (tmp, pool)
+    }
+
+    fn recorder_selection(base_url: String) -> Selection {
+        Selection::Provider {
+            id: "recorder".into(),
+            name: "Recorder".into(),
+            config: LlmConfig {
+                base_url,
+                api_key: "consent-test-key".into(),
+                model: "consent-test-model".into(),
+            },
+        }
+    }
+
+    fn ask_today() -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap()
+    }
+
+    #[test]
+    fn ask_without_consent_makes_zero_network_calls() {
+        // AC 1 of the M5 consent contract: with a fully usable network
+        // provider selected but no explicit consent, not a single request
+        // may leave the machine — the ask still answers, purely locally.
+        let (_tmp, pool) = ask_pool(6);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (base_url, server) = spawn_llm_recorder(
+            vec![
+                // Translate + summarize replies the pipeline must never use.
+                "{\"match\": \"\\\"consent\\\"\", \"date_from\": null, \"date_to\": null}".into(),
+                "the summarize reply no consent-less ask may fetch".into(),
+            ],
+            Arc::clone(&stop),
+        );
+
+        let outcome = run_ask(
+            &pool,
+            &HashEmbedder::new(),
+            recorder_selection(base_url),
+            true,
+            "consent marker vault?",
+            50,
+            8,
+            ask_today(),
+            false,
+        )
+        .unwrap();
+
+        // The ask degraded to fully local mode with the visible note.
+        assert_eq!(outcome.plan_source, PlanSource::Local);
+        assert!(
+            outcome.answer.is_none(),
+            "no answer without a network round trip"
+        );
+        assert!(outcome
+            .notes
+            .iter()
+            .any(|n| n.contains("AI consent not granted")));
+        assert_eq!(outcome.results.len(), 6, "the local search still answers");
+
+        // Stop the recorder and prove nothing ever arrived (AC 1).
+        stop.store(true, Ordering::SeqCst);
+        let requests = server.join().expect("recorder thread");
+        assert!(
+            requests.is_empty(),
+            "without consent no network call may go out, got {}",
+            requests.len()
+        );
+        pool.shutdown();
+    }
+
+    #[test]
+    fn ask_with_consent_uses_the_provider_end_to_end() {
+        // With explicit consent the same selection goes out: exactly the
+        // translate + summarize round trips reach the provider.
+        let (_tmp, pool) = ask_pool(6);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (base_url, server) = spawn_llm_recorder(
+            vec![
+                "{\"match\": \"\\\"consent\\\"\", \"date_from\": null, \"date_to\": null}".into(),
+                "served consent summary [1].".into(),
+            ],
+            Arc::clone(&stop),
+        );
+
+        let outcome = run_ask(
+            &pool,
+            &HashEmbedder::new(),
+            recorder_selection(base_url),
+            true,
+            "consent marker vault?",
+            50,
+            8,
+            ask_today(),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.plan_source, PlanSource::Llm);
+        assert_eq!(
+            outcome.answer.as_deref(),
+            Some("served consent summary [1].")
+        );
+        assert_eq!(outcome.results.len(), 6);
+
+        stop.store(true, Ordering::SeqCst);
+        let requests = server.join().expect("recorder thread");
+        assert_eq!(requests.len(), 2, "translate + summarize round trips");
+        // The results are source-linked evidence: every message carries its
+        // archive row id, so the UI can open each source in thread context.
+        assert!(outcome.results.iter().all(|m| m.id > 0));
+        pool.shutdown();
+    }
+
+    #[test]
+    fn ask_without_a_key_falls_back_to_local_exactly_like_before() {
+        // AC 4: consent changes nothing about the no-key fallback — a
+        // selection without a usable provider (no key stored) still
+        // answers locally, whatever consent says.
+        let (_tmp, pool) = ask_pool(4);
+        let selection = Selection::Local {
+            reason: "provider “z.ai GLM” has no API key stored — set one in Settings".into(),
+        };
+        let outcome = run_ask(
+            &pool,
+            &HashEmbedder::new(),
+            selection,
+            true,
+            "consent marker vault",
+            50,
+            8,
+            ask_today(),
+            true, // consent granted — but there is nothing to send to
+        )
+        .unwrap();
+        assert_eq!(outcome.plan_source, PlanSource::Local);
+        assert_eq!(outcome.answer, None);
+        assert_eq!(outcome.results.len(), 4);
+        assert!(outcome.notes[0].contains("no API key"));
+        pool.shutdown();
     }
 }

@@ -135,10 +135,23 @@
                   <span id="embed-status" class="meta" style="min-height: 1em" role="status"></span>
                 </div>
                 <div id="llm-note" class="meta" role="status"></div>
+                <!-- M5: explicit, session-scoped AI consent. The status line
+                     always shows the current state; the prompt (with what
+                     exactly would leave the machine) appears when an ask
+                     wants the network without consent yet granted. -->
+                <div id="consent-row" class="row" style="margin-top: 6px">
+                  <span id="consent-status" class="meta" role="status"></span>
+                  <button id="consent-revoke-btn" type="button" hidden title="Revoke this session's AI consent; asks run fully locally again">Revoke</button>
+                </div>
+                <div id="consent-prompt" class="row" style="margin-top: 6px" hidden>
+                  <span id="consent-text" class="meta"></span>
+                  <button id="consent-allow-btn" type="button" title="Allow sending your question and the top results to the selected provider for this session only">Send &amp; ask for this session</button>
+                  <button id="consent-local-btn" type="button" title="Keep asking fully locally; nothing leaves this machine">Keep asking locally</button>
+                </div>
                 <div id="ask-status" class="meta" style="margin-top: 6px; min-height: 1em" role="status"></div>
                 <div id="answer" hidden></div>
                 <div id="ask-notes" hidden></div>
-                <ul id="ask-results"></ul>
+                <ul id="ask-results" aria-label="Answer sources (each opens in thread context)"></ul>
               </section>
             </div>
 

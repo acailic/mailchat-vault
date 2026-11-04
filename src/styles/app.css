@@ -372,6 +372,35 @@ mark.hit {
   border-radius: var(--radius-m);
   background: var(--panel);
 }
+/* M5: clickable citations inside the answer jump to the source message. */
+#answer .citation {
+  font: inherit;
+  color: var(--accent);
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+/* M5: answer source rows — numbered like the citations, clickable into
+ * the reading pane (thread context). */
+#ask-results li .ask-source {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  border-radius: var(--radius-m);
+  padding: 3px 4px;
+  cursor: pointer;
+}
+#ask-results li .ask-source:hover, #ask-results li .ask-source:focus-visible {
+  background: var(--selection);
+}
+#ask-results li .ask-source .meta::first-line { color: var(--accent); }
 #ask-notes { margin-top: var(--sp-1); font-size: var(--text-meta); color: var(--warning); }
 #ask-results, .watch-list, .jobs-list { list-style: none; margin: var(--sp-1) 0 0; padding: 0; font-size: var(--text-meta); }
 #ask-results li, .watch-list li, .jobs-list li { padding: 3px 0; }
