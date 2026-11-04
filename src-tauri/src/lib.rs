@@ -1493,7 +1493,7 @@ pub fn run() {
                     Arc::new(move |ctx: &JobContext| run_sync_all_round(ctx, ctx.pool(), &secrets))
                 },
                 move |status| {
-                    let _ = emit_handle.emit("scheduler-status", status);
+                    let _ = emit_handle.emit("scheduler-status", SyncScheduleView::of(status));
                 },
             ));
             app.manage(AppState {

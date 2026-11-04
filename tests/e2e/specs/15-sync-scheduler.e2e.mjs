@@ -95,6 +95,18 @@ export async function run(ctx) {
       `0 minutes is refused with a clear error, got: ${tooSmall.err}`,
     );
 
+    // A command issued outside the UI must update the interval through
+    // scheduler-status alone; the command response is not rendered here.
+    await ipc(browser, "sync_schedule_set", { enabled: true, intervalMinutes: 60 });
+    await ui.waitForText(browser, "#auto-sync-status", (t) => t.includes("Auto-sync on"));
+    assert.equal(
+      await browser.execute(() => document.querySelector("#auto-sync-interval").value),
+      "60",
+      "scheduler events use the same minute-based view as command responses",
+    );
+    await ipc(browser, "sync_schedule_set", { enabled: false, intervalMinutes: 15 });
+    await ui.waitForText(browser, "#auto-sync-status", (t) => t.includes("Auto-sync off"));
+
     // 3. Opt in through the real UI: check the toggle at 30 minutes.
     await browser.execute(() => {
       document.querySelector("#auto-sync-interval").value = "30";

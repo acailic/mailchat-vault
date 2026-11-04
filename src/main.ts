@@ -1009,12 +1009,17 @@ async function syncImap(): Promise<void> {
 
 function renderAutoSync(view: SyncScheduleView): void {
   autoSyncToggle.checked = view.enabled;
-  // A configured interval outside the offered choices (set by an older
-  // build or directly in the vault) still displays; the select just
-  // keeps its current selection.
-  if (isIntervalChoice(view.interval_minutes)) {
-    autoSyncInterval.value = String(view.interval_minutes);
+  // Preserve valid intervals configured outside the standard choices so
+  // toggling the schedule cannot silently replace a saved interval.
+  autoSyncInterval.querySelectorAll("option[data-custom-interval]").forEach((o) => o.remove());
+  if (!isIntervalChoice(view.interval_minutes)) {
+    const option = document.createElement("option");
+    option.value = String(view.interval_minutes);
+    option.textContent = `${view.interval_minutes} min`;
+    option.dataset.customInterval = "true";
+    autoSyncInterval.append(option);
   }
+  autoSyncInterval.value = String(view.interval_minutes);
   autoSyncStatus.textContent = autoSyncStatusText(view);
 }
 
