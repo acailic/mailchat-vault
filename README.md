@@ -44,6 +44,7 @@ src-tauri/           # Tauri app shell: commands (search_messages, chat_context,
 
 src/                 # frontend (vanilla TS): workspace shell (src/workspace.ts + src/state.ts + src/ipc.ts — layout/view/reading state, typed IPC boundary) with design tokens and the bundled Source Sans 3 font (src/styles, src/assets/fonts), search + filters + pagination + detail view (with media links), ask UI with provider menu + embedding controls, settings screen, statistics dashboard (CSS bar charts, no chart library), import & IMAP sync controls (app password or Google sign-in), folder watching panel, background-jobs panel (v2 event/polling client), export controls
 index.html           # single-page workspace shell (navigation / results / reading)
+scripts/release/     # Linux release tooling (M6.3): container build of the AppImage + deb (build-linux.sh) and the automated deb/AppImage smoke suites run against clean ubuntu 22.04 and 24.04 containers (smoke-linux.sh — apt dependency resolution, .desktop + icon + MIME association, launcher-style launch without a terminal, self-contained AppImage)
 ```
 
 ## Prerequisites

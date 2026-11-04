@@ -22,15 +22,46 @@ publishes it. The bundles are also attached as workflow-run artifacts
 publishing. Version bump flow: raise `version` in `src-tauri/tauri.conf.json`
 and the workspace `Cargo.toml`, commit, tag `v<version>`, push the tag.
 
-The same packaging can be built locally with:
+The same packaging can be built locally without any host toolchain
+(besides docker) with:
 
 ```sh
-npm run tauri build                     # uses the default targets: appimage + deb
+scripts/release/build-linux.sh   # AppImage + deb in target/release/bundle
+```
+
+Bundles land in `target/release/bundle/` (workspace root).
+
+On macOS/Windows (or with the host toolchain installed), the same
+packaging builds directly:
+
+```sh
 npm run tauri build -- --bundles app,dmg    # e.g. on macOS
 npm run tauri build -- --bundles msi,nsis   # e.g. on Windows
 ```
 
-Bundles land in `src-tauri/target/release/bundle/`.
+### Desktop integration (Linux)
+
+Both Linux artifacts carry the freedesktop integration a launcher
+needs:
+
+- **deb** — `/usr/share/applications/mailchat-vault.desktop`
+  (`Type=Application`, `Terminal=false` → launches from the menu/dock
+  with no terminal), hicolor icons under
+  `/usr/share/icons/hicolor/<size>/apps/mailchat-vault.png`, and a
+  `MimeType=application/mbox` association: the package declares the
+  runtime `Depends` (`libwebkit2gtk-4.1-0`, `libgtk-3-0`, …) so
+  `apt install ./x.deb` resolves the full runtime itself, and its
+  `postinst` (from `src-tauri/packaging/deb-postinst`) refreshes the
+  desktop/MIME/icon databases.
+- **AppImage** — bundles the app *and* its runtime (webkit2gtk, GTK,
+  the WebKit helper processes): it runs on a clean Ubuntu with none of
+  those packages installed. The bundled `mailchat-vault.desktop`, icon
+  and `.DirIcon` carry the same launcher/MIME metadata for desktop
+  integration tools (e.g. AppImageLauncher).
+
+The `.mbox` association makes "open a mailbox archive" work from the
+file manager: `.mbox` files (`application/mbox`) offer Mailchat Vault
+as the handler (Viewer role; the app imports the file's mail).
 
 ## Code-signing status (this round: none)
 
@@ -68,10 +99,59 @@ committed set is what `bundle.icon` lists.)
 The basic contract: the package **installs**, the app **launches**, and the
 core v0 flow (demo data → search → open a message) **works**.
 
-### Linux `.deb`
+### Linux — automated smoke (22.04 + 24.04)
+
+The Linux acceptance gate is automated (M6.3); on any machine with
+docker:
 
 ```sh
-# install (apt resolves libwebkit2gtk-4.1 runtime automatically)
+scripts/release/build-linux.sh    # if bundles are not built yet
+scripts/release/smoke-linux.sh    # deb + AppImage on clean 22.04 and 24.04
+```
+
+Each suite runs in a pristine `ubuntu:22.04` / `ubuntu:24.04`
+container that ships **none of the application libraries** (no
+webkit2gtk, no GTK). What is verified per artifact:
+
+- **deb** — `apt install ./x.deb` resolves the declared runtime by
+  itself; `dpkg` status installed; `/usr/bin/mailchat-vault` present;
+  desktop file valid (`desktop-file-validate`) with
+  `Type=Application`/`Terminal=false`, owned by the package; hicolor
+  icons installed and owned by the package; `MimeType=application/mbox`
+  declared **and** registered in `mimeinfo.cache` by postinst;
+  `xdg-mime query default application/mbox` resolves to
+  `mailchat-vault.desktop`; the app launched the way a launcher does
+  (Exec line, no terminal, under X) maps a window and stays alive;
+  `apt remove` takes the desktop file, icons and binary with it.
+- **AppImage** — extracts (`--appimage-extract`) with the desktop
+  entry (same fields), icon, `.DirIcon` and the WebKit helper processes
+  inside the bundle; runs via `--appimage-extract-and-run` under Xvfb
+  and stays alive **with zero app packages on the system** — the
+  AppImage is self-contained (that is the "clean 22.04" acceptance:
+  nothing beyond what a desktop session itself provides).
+
+The smoke containers only add the pieces a real desktop always has
+(X display via Xvfb, GL software rendering, freedesktop tools) — see
+`scripts/release/Dockerfile.smoke`. They run with
+`--security-opt seccomp=unconfined` because Ubuntu 24.04's WebKitGTK
+uses a bubblewrap sandbox that needs unprivileged user namespaces,
+which docker's default seccomp profile blocks; this relaxes only the
+ephemeral test container.
+
+A per-suite PASS/FAIL summary prints at the end; logs land in
+`target/release/smoke-logs/`. The same script is wired into
+`.github/workflows/release.yml` (`smoke-linux` job) for when workflow
+runs are re-enabled; publish a release only with a green run (or a
+green local run of both suites on both versions).
+
+### Linux `.deb` (manual, on a real desktop)
+
+The automated smoke above covers install/launch/integration on clean
+containers; on a real desktop session you can additionally walk the UI
+checklist below. Manual install:
+
+```sh
+# install (apt resolves the declared runtime: libwebkit2gtk-4.1 etc.)
 sudo apt install ./mailchat-vault_0.1.0_amd64.deb
 dpkg -s mailchat-vault | grep Status        # → "install ok installed"
 command -v mailchat-vault                   # → /usr/bin/mailchat-vault
@@ -82,10 +162,11 @@ xvfb-run -a timeout 20s mailchat-vault; echo "exit=$?"
 # exit=124 (timeout had to kill it) == PASS; any other exit = crash
 ```
 
-Then in a desktop session walk the UI checklist below. Uninstall with
-`sudo apt remove mailchat-vault`.
+Then in a desktop session launch “Mailchat Vault” from the
+applications menu (no terminal) and walk the UI checklist below.
+Uninstall with `sudo apt remove mailchat-vault`.
 
-### Linux AppImage
+### Linux AppImage (manual)
 
 ```sh
 chmod +x mailchat-vault_0.1.0_amd64.AppImage
