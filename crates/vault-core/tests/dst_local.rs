@@ -15,7 +15,11 @@ use vault_core::storage::Storage;
 
 #[test]
 fn historical_dst_day_filters_by_its_own_offset() {
-    std::env::set_var("TZ", "Europe/Zagreb");
+    // POSIX TZ string encodes the same Central-European DST rules inline
+    // (CET +01:00, CEST +02:00, last Sun Mar → last Sun Oct at 03:00 local),
+    // so the test needs no /usr/share/zoneinfo: IANA names silently fall
+    // back to UTC in bare containers without tzdata.
+    std::env::set_var("TZ", "CET-1CEST,M3.5.0,M10.5.0/3");
     let _ = chrono::Local::now(); // resolve with the pinned TZ
 
     let s = Storage::open_in_memory().unwrap();
