@@ -380,7 +380,7 @@ same webview reason; the formats themselves are round-trip tested in
 multi-account UI, push notifications. The media-extraction layer is source-generic: when further chat sources land, their exports plug into the same hash-named `media/` store and `raw_json` convention.
 ## Installers & releases
 
-Pushing a version tag (`v*`) builds distributable installers — Linux AppImage + `.deb` (defaults of the enabled Tauri bundling), plus macOS `.dmg` and Windows `.msi`/NSIS `.exe` from the release workflow — as a **draft GitHub Release**. Artifacts are **unsigned** in this round (no code signing; Gatekeeper/SmartScreen caveats apply on macOS/Windows). The app ships with a full icon set (Linux/mac/win) generated from `src-tauri/icons/source.png`. See [docs/release.md](docs/release.md) for the install smoke-test checklist, local build commands, and how to regenerate the icons.
+Pushing a version tag (`v*`) builds distributable installers — Linux AppImage + `.deb` (defaults of the enabled Tauri bundling), plus macOS `.dmg` and Windows `.msi`/NSIS `.exe` from the release workflow — as a **draft GitHub Release**. Artifacts are **unsigned** in this round (no code signing; Gatekeeper/SmartScreen caveats apply on macOS/Windows — exact click paths in [docs/release.md](docs/release.md)). The Windows side has an automated install/launch/uninstall **+ upgrade-from-previous-release** smoke workflow (`tests/windows-smoke/`), dispatched manually before publishing a draft. The app ships with a full icon set (Linux/mac/win) generated from `src-tauri/icons/source.png`. See [docs/release.md](docs/release.md) for the install smoke-test checklist, local build commands, and how to regenerate the icons.
 
 ## Notes on chat import details
 

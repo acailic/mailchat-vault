@@ -9,4 +9,6 @@ src-tauri/gen/
 *.db-wal
 *.db-shm
 *.sqlite*
+# ...except the frozen Windows-upgrade smoke fixture (committed content)
+!tests/windows-smoke/fixtures/*.db
 .omc/
