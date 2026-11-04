@@ -16,6 +16,7 @@ use crate::bounded::{
 use crate::discord::{
     is_discord_export, is_discord_export_dir, is_discord_export_reader, DiscordSource,
 };
+use crate::import_bounds::{expand_zip_bounded, ImportBounds};
 use crate::ingest::IngestSummary;
 use crate::media::MediaSummary;
 use crate::signal::{is_signal_export, is_signal_export_reader, SignalSource};
@@ -102,18 +103,76 @@ impl From<BoundedOutcome> for ChatImportOutcome {
 
 /// Resolve the picked path to the export file: `result.json` inside a
 /// picked directory, the picked directory itself when it is a Discord
-/// Data Package, or the picked file itself.
+/// Data Package, or the picked file itself. A directory whose immediate
+/// entries hold no export may descend a single subdirectory chain
+/// (exports are commonly wrapped — `ChatExport…/result.json` inside a
+/// Telegram ZIP), and a directory holding exactly one recognizable
+/// export file next to media folders resolves to that file (a WhatsApp
+/// ZIP: the `.txt` plus `photos/`…). Hidden entries (`.`-prefixed,
+/// `__MACOSX/`, AppleDouble `._*`) never count.
 fn resolve_export_file(picked: &Path) -> Result<PathBuf> {
     if picked.is_dir() {
-        let result_json = picked.join("result.json");
-        if result_json.is_file() {
-            return Ok(result_json);
-        }
-        if is_discord_export_dir(picked) {
-            return Ok(picked.to_path_buf());
+        let mut dir = picked.to_path_buf();
+        // Wrapped exports nest a couple of levels at most; a hard cap
+        // keeps even a pathological self-referencing tree finite.
+        for _ in 0..16 {
+            let result_json = dir.join("result.json");
+            if result_json.is_file() {
+                return Ok(result_json);
+            }
+            if is_discord_export_dir(&dir) {
+                return Ok(dir);
+            }
+            let Ok(entries) = fs::read_dir(&dir) else {
+                return Err(Error::ChatImport(format!(
+                    "unreadable chat export directory: {}",
+                    dir.display()
+                )));
+            };
+            let mut subdirs = Vec::new();
+            let mut export_files = Vec::new();
+            let mut other_files = 0usize;
+            for entry in entries.flatten() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') || name == "__MACOSX" || name.starts_with("._") {
+                    continue; // hidden / macOS archive junk
+                }
+                if file_type.is_dir() {
+                    subdirs.push(entry.path());
+                } else if file_type.is_file() {
+                    match detect_chat_format_reader(&entry.path()) {
+                        Ok(Some(_)) => export_files.push(entry.path()),
+                        _ => other_files += 1,
+                    }
+                }
+            }
+            // A single detectable export file wins (its sibling folders
+            // are media, not competing exports).
+            if export_files.len() == 1 {
+                return Ok(export_files.remove(0));
+            }
+            if export_files.len() > 1 {
+                return Err(Error::ChatImport(format!(
+                    "directory holds {} export files; pick one file explicitly",
+                    export_files.len()
+                )));
+            }
+            // No export file here: descend when exactly one plain
+            // subdirectory exists (the wrapped-export shape).
+            if subdirs.len() == 1 && other_files == 0 {
+                dir = subdirs.remove(0);
+                continue;
+            }
+            return Err(Error::ChatImport(format!(
+                "unrecognized chat export format: {} (expected a directory containing a Telegram result.json, a Discord Data Package, or a single export file)",
+                picked.display()
+            )));
         }
         return Err(Error::ChatImport(format!(
-            "unrecognized chat export format: {} (expected a directory containing a Telegram result.json or a Discord Data Package)",
+            "unrecognized chat export format: {} (directory nests too deeply)",
             picked.display()
         )));
     }
@@ -157,6 +216,12 @@ pub fn resolve_stream_source(
 /// Media extraction runs per batch on the caller's thread (file copies
 /// stay outside every storage lock); Signal and Discord record
 /// attachments in `raw_json` only, as in [`import`].
+///
+/// A picked `.zip` (M4.1) is expanded first — through the shared
+/// traversal/symlink/capacity fence ([`expand_zip_bounded`]) into an
+/// OS-temp directory that lives exactly as long as the import — and the
+/// extracted tree is then resolved like a directory pick. A malicious
+/// or oversized archive is refused before any message is stored.
 pub fn import_bounded(
     sink: &mut dyn IngestSink,
     picked: &Path,
@@ -165,7 +230,24 @@ pub fn import_bounded(
     is_cancelled: &dyn Fn() -> bool,
     progress: &mut dyn FnMut(u64, u64, &str),
 ) -> Result<BoundedOutcome> {
-    let (format, file, source) = resolve_stream_source(picked)?;
+    // A ZIP pick expands to a temp tree; the guard keeps it alive for
+    // the whole run (batches read media files out of it) and cleans it
+    // up — including on error — when the run ends.
+    let _zip_guard;
+    let effective: std::borrow::Cow<'_, Path> = if picked.is_file()
+        && picked
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+    {
+        let extracted = tempfile::tempdir().map_err(Error::from)?;
+        expand_zip_bounded(picked, extracted.path(), &ImportBounds::default())?;
+        let root = extracted.path().to_path_buf();
+        _zip_guard = extracted;
+        std::borrow::Cow::Owned(root)
+    } else {
+        std::borrow::Cow::Borrowed(picked)
+    };
+    let (format, file, source) = resolve_stream_source(&effective)?;
     let mut run = BoundedRun::new(import_id_for("chat-import", &file));
     let export_root = file
         .parent()
