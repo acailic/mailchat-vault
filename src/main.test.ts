@@ -3,8 +3,8 @@
 // markup is booted against a mocked Tauri IPC bridge and driven with real
 // DOM events (key presses, clicks, changes). Covers search triggering and
 // the empty-query guard, loading/empty/error states, filter interactions,
-// result grouping, pagination (including the stale-response guard), the
-// detail view (open/close/thread walking), and keyboard navigation.
+// flat results, pagination (including the stale-response guard), the
+// detail view (open/close/context walking), and keyboard navigation.
 import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";

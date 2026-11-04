@@ -103,8 +103,8 @@ xvfb-run -a timeout 20s ./mailchat-vault_0.1.0_amd64.AppImage --appimage-extract
 1. Launch the app → the “Mailchat Vault” window opens with the icon in the
    taskbar/dock.
 2. Click **Load demo** → the stats line shows demo messages.
-3. Search `vault` → results appear with highlighted matches, grouped by chat.
-4. Click a result → the detail pane opens; `↑`/`↓` walk thread neighbors; `Esc` closes.
+3. Search `vault` → results appear with highlighted matches in a flat list.
+4. Click a result → the detail pane opens; `↑`/`↓` walk the conversation context; `Esc` closes.
 5. Quit normally (window close) → no error dialogs.
 
 ### macOS
