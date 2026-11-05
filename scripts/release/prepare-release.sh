@@ -174,8 +174,8 @@ assemble_stage() {
   #    unsigned-artifacts disclosure (same facts the release workflow's
   #    RELEASE_BODY carries, kept in one place here)
   awk -v ver="$VERSION" '
-    $0 == "## [" ver "]" || index($0, "## [" ver "] ") == 1 { on=1; next }
     on && /^## \[/ { exit }
+    $0 == "## [" ver "]" || index($0, "## [" ver "] ") == 1 { on=1 }
     on { print }
   ' "$repo/CHANGELOG.md" > "$DRAFT_DIR/RELEASE-NOTES.md"
   [[ -s "$DRAFT_DIR/RELEASE-NOTES.md" ]] || fail "could not extract the [$VERSION] section from CHANGELOG.md"
