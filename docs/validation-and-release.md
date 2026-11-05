@@ -95,6 +95,39 @@ Recorded so far (M6, 2026-11-05 — the [M6 progress record](implementation-road
 
 Keep the app identifier/data location stable. Uninstall retains user data unless the user explicitly selects removal; reinstall reuses it. Older binaries refuse newer schemas. Recovery instructions restore a verified prior snapshot rather than trying a database downgrade. Release notes describe schema changes, backup format compatibility, copied-media behavior, privacy limits, and source limitations.
 
+### Release validation matrix (M6.4)
+
+The M6 exit names this matrix. One command per platform now runs its entire column — the full test suite (frontend + workspace), the packaged release bundles, and the smoke gates against those bundles — so "the matrix passes" is a reproducible run, not an assembled-by-hand claim:
+
+| Column | One command | Runs on |
+| --- | --- | --- |
+| Linux | `scripts/release/matrix-linux.sh` | any machine with docker (every leg pinned in its own container; no host toolchain beyond docker is trusted) |
+| macOS | `scripts/release/matrix-macos.sh` | a real macOS host (node 22 + rust stable + Xcode CLT; the script refuses to run elsewhere) |
+| Windows | `pwsh scripts/release/matrix-windows.ps1` | a real Windows host (node 22 + rust stable + WebView2; the script refuses to run elsewhere) |
+
+Legs per column (skips are reported as SKIPPED and never count as green):
+
+| Leg | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| `npm ci` → `npm run check` → `npm test` → `npm run build` | suite container (`Dockerfile.suite`, ubuntu 24.04 — mirrors the CI `test` runner) | host toolchain | host toolchain |
+| `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` | suite container | host | host |
+| `cargo test --workspace` | suite container | host | host |
+| `cargo build -p mailchat-vault --features tauri/custom-protocol` | suite container (feeds the e2e leg) | host | host |
+| Desktop e2e (`tests/e2e`) | e2e container (`Dockerfile.e2e`: xvfb + WebKitWebDriver + tauri-driver, pinned 24.04) | not applicable — the WebDriver route is the Linux-validated one ([its README](../tests/e2e/README.md)); the column records this rather than silently greening it | not applicable — same reason |
+| Release bundles | `build-linux.sh` (pinned 22.04 toolchain → AppImage + deb) | universal dmg exactly as the release workflow builds it | msi + NSIS exe exactly as the release workflow builds them |
+| Packaged smoke | deb + AppImage suites on clean 22.04 **and** 24.04 | `scripts/dmg-smoke-test.sh` (mount, copy, universal binary, headless `--version`/`--help`) plus the launch-stays-alive `smoke-macos.sh` once the release-fix tooling is on the branch (reported WAITING until then) | `scripts/windows-smoke.ps1` fresh phases against the built installers (upgrade phases with `-OldMsi`/`-OldExe`), or the published-release route via the release-fix `windows-smoke-from-release.ps1` (`-Published -Tag …`) once that tooling is on the branch |
+
+Recorded status of the three columns (updated as runs land; keep honest):
+
+| Column | Status | Evidence |
+| --- | --- | --- |
+| Linux | green — full column | one-command run 2026-11-05T11:35–11:55Z at the M6.4 landing tree on the fleet Linux worker (docker host): suite (vitest 353/353, fmt/clippy clean, cargo 596/596), e2e (30 passed + foreign-root pass 1/1, three by-design visible skips), bundles, and deb/AppImage smoke 19/19 on clean 22.04 **and** 24.04 — all four legs PASS; detail in the [M6.4 record](implementation-roadmap.md#completion-tracking) |
+| macOS | harness ready, **not run** | needs a macOS host; mac bundles cannot be built from the Linux worker and repo Actions are disabled by decision — the open captain decision below owns this |
+| Windows | harness ready, **not run** | needs a Windows host for the real installer smoke (the fake-installer drive of #52 proved the script logic only); same captain decision |
+
+The macOS/Windows columns wait on one captain decision, kept visible here rather than resolved by the matrix itself: **(a)** keep the published `v0.1.0` with its honest record and checksums and defer the next tagged candidate until Actions return; **(b)** provide real macOS/Windows machines and run `matrix-macos.sh` / `matrix-windows.ps1` on them (mac/win bundles are then built locally per platform); **(c)** approve temporary Actions for release tags, where `ci.yml` already carries the macOS dmg-smoke and e2e jobs and `release.yml` the three build jobs. Whichever option is chosen, these one-command columns produce the evidence the matrix needs; nothing here presumes the answer.
+
+
 ## Troubleshooting and observability
 
 Support views show job stage, source label, safe error code, retry action, and issue counts. Diagnostic export is explicit and excludes content, passwords, full account addresses, arbitrary raw server output, and local paths by default. No automatic telemetry is added.
