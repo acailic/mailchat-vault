@@ -558,7 +558,10 @@ fn whatsapp_rekey_hash_matches_live_import_on_non_utc_zone() {
     // local zone — here pinned to a non-UTC summer zone (+02:00) — so a
     // migrated row's content_hash must equal what a live import of the
     // same export hashes: the same resolution over the same wall time.
-    let _tz_guard = TzGuard::pin("Europe/Paris");
+    // POSIX TZ string (Europe/Paris rules: CET +01:00, CEST +02:00, EU DST
+    // transitions) parses in-memory with no /usr/share/zoneinfo, unlike an
+    // IANA name which silently falls back to UTC in bare containers.
+    let _tz_guard = TzGuard::pin("CET-1CEST,M3.5.0,M10.5.0/3");
     let dir = scratch_dir();
     let db = dir.path().join("wa-zone.db");
     v2_db(&db);

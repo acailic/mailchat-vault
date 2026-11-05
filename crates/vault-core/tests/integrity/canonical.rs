@@ -296,9 +296,12 @@ fn count(db: &std::path::Path, sql: &str) -> i64 {
 #[test]
 fn old_schema_fixture_migrates_without_loss() {
     // Migration 7 re-resolves the legacy WhatsApp stamps in the machine's
-    // local zone; pin it (Europe/Paris: both fixture dates are winter
-    // CET, +01:00) so the expectations below hold on any machine.
-    let _tz = crate::util::TzGuard::pin("Europe/Paris");
+    // local zone; pin it (Europe/Paris rules: both fixture dates are winter
+    // CET, +01:00) so the expectations below hold on any machine. The POSIX
+    // TZ string encodes the same CET/CEST EU DST rules inline, so it parses
+    // in-memory with no /usr/share/zoneinfo (an IANA name silently falls
+    // back to UTC in bare containers without tzdata).
+    let _tz = crate::util::TzGuard::pin("CET-1CEST,M3.5.0,M10.5.0/3");
 
     let dir = scratch_dir();
     let db = dir.path().join("v2.db");
