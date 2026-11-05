@@ -53,6 +53,7 @@ param(
     [string] $OldTag = '',
     [string] $BundlesDir = '',
     [string] $InspectExe = '',
+    [string] $FixtureDb = '',
     [switch] $BuildInspect,
     [switch] $AllowDataWipe
 )
@@ -70,7 +71,7 @@ if (-not $BundlesDir) {
 New-Item -ItemType Directory -Force -Path $BundlesDir | Out-Null
 
 Write-Host "== downloading published installers for $Tag"
-gh release download $Tag --repo (gh repo view --json nameWithOwner -q nameWithOwner) `
+gh release download $Tag --repo (gh repo view --json nameWithOwner -q .nameWithOwner) `
     --pattern '*_x64_en-US.msi' --pattern '*_x64-setup.exe' `
     --dir $BundlesDir --clobber
 
@@ -85,7 +86,7 @@ if ($OldTag) {
     $oldDir = Join-Path $repo ("target\release\verify\{0}" -f $OldTag)
     New-Item -ItemType Directory -Force -Path $oldDir | Out-Null
     Write-Host "== downloading OLD installers for upgrade phases ($OldTag)"
-    gh release download $OldTag --repo (gh repo view --json nameWithOwner -q nameWithOwner) `
+    gh release download $OldTag --repo (gh repo view --json nameWithOwner -q .nameWithOwner) `
         --pattern '*_x64_en-US.msi' --pattern '*_x64-setup.exe' `
         --dir $oldDir --clobber
     $oldMsi = Get-ChildItem "$oldDir\*_x64_en-US.msi" | Select-Object -First 1 -ExpandProperty FullName
@@ -98,6 +99,9 @@ if ($OldTag) {
         cargo build --release -p vault-core --example smoke_inspect
         $InspectExe = Join-Path $repo 'target\release\examples\smoke_inspect.exe'
     }
+    if (-not $FixtureDb) {
+        $FixtureDb = Join-Path $repo 'tests\windows-smoke\fixtures\vault-v0.1.0.db'
+    }
 }
 
 Write-Host "== running windows-smoke.ps1 against the published $Tag installers"
@@ -105,6 +109,7 @@ $smokeArgs = @{
     NewMsi = $newMsi; NewExe = $newExe
     OldMsi = $oldMsi;  OldExe = $oldExe
     InspectExe = $InspectExe
+    FixtureDb = $FixtureDb
     LogDir = (Join-Path $BundlesDir 'windows-smoke-logs')
 }
 if ($AllowDataWipe) { $smokeArgs.AllowDataWipe = $true }

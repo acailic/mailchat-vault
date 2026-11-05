@@ -103,7 +103,7 @@ sums="$DIR/SHA256SUMS"
   cd "$DIR"
   shopt -s nullglob
   files=( *.AppImage *.deb *.dmg *.msi *.exe *.app.tar.gz )
-  [[ "${#files[@]}" -gt 0 ]] && hash256 "${files[@]}"
+  [[ "${#files[@]}" -gt 0 ]] && hash256 "${files[@]}" || :
 ) > "$sums"
 [[ -s "$sums" ]] || { echo "error: no release assets found in $DIR" >&2; exit 1; }
 echo "== wrote $sums:"
