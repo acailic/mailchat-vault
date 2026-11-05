@@ -37,6 +37,8 @@ export interface SettingsView {
   default_provider: string | null;
   theme: Theme;
   summarize_top: number;
+  /** Desktop notifications for new mail after sync/watch cycles. */
+  notifications: boolean;
   env: EnvProviderView | null;
   env_error: string | null;
   settings_error: string | null;
@@ -49,6 +51,8 @@ export interface SaveSettingsPayload {
   default_provider: string | null;
   theme: Theme;
   summarize_top: number;
+  /** Desktop notifications for new mail after sync/watch cycles. */
+  notifications: boolean;
   /** Non-empty key = store for that provider id; empty string = clear. */
   api_keys: Array<{ id: string; key: string }>;
 }

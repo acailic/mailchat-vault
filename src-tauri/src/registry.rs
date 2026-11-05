@@ -294,6 +294,8 @@ pub struct SettingsView {
     pub default_provider: Option<String>,
     pub theme: Theme,
     pub summarize_top: u32,
+    /// Desktop notifications for new mail after sync/watch cycles.
+    pub notifications: bool,
     /// The environment-fallback provider, when validly configured.
     pub env: Option<EnvProviderView>,
     /// Why the environment configuration was refused, if it was.
@@ -313,7 +315,16 @@ pub struct SaveSettingsPayload {
     pub default_provider: Option<String>,
     pub theme: Theme,
     pub summarize_top: u32,
+    /// Desktop notifications for new mail after sync/watch cycles.
+    /// Absent in older payloads → the option's enabled default.
+    #[serde(default = "default_true")]
+    pub notifications: bool,
     pub api_keys: Vec<ApiKeyUpdate>,
+}
+
+/// `SaveSettingsPayload::notifications` serde default.
+fn default_true() -> bool {
+    true
 }
 
 /// One API-key update inside [`SaveSettingsPayload`].
@@ -339,6 +350,7 @@ impl From<&LlmRegistry> for SettingsView {
             default_provider: registry.default_provider_id(),
             theme: settings.options.theme,
             summarize_top: settings.options.summarize_top,
+            notifications: settings.options.notifications,
             env: registry.env.as_ref().map(|e| EnvProviderView {
                 model: e.model.clone(),
                 host: e.host(),
@@ -580,6 +592,27 @@ mod tests {
             .contains("ANTHROPIC_BASE_URL"));
         assert_eq!(view.providers.len(), 0);
         assert_eq!(view.theme, Theme::System);
+        assert!(view.notifications);
+    }
+
+    #[test]
+    fn view_carries_notifications_and_old_payloads_default_enabled() {
+        let mut settings = Settings::default();
+        settings.options.notifications = false;
+        let r = registry(settings, &[], None);
+        assert!(!SettingsView::from(&r).notifications);
+        // A payload from a frontend older than the option (field absent)
+        // parses as the enabled default, never a silent opt-out.
+        let payload: SaveSettingsPayload = serde_json::from_str(
+            r#"{"providers":[],"default_provider":null,"theme":"system","summarize_top":8,"api_keys":[]}"#, 
+        )
+        .unwrap();
+        assert!(payload.notifications);
+        let explicit: SaveSettingsPayload = serde_json::from_str(
+            r#"{"providers":[],"default_provider":null,"theme":"system","summarize_top":8,"notifications":false,"api_keys":[]}"#, 
+        )
+        .unwrap();
+        assert!(!explicit.notifications);
     }
 
     #[test]

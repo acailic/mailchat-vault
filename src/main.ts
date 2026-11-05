@@ -60,6 +60,10 @@ import type {
   ImportScope,
 } from "./v2types";
 import {
+  createNewMailNotifier,
+  pluginNotifyChannel,
+} from "./notify";
+import {
   applyTheme,
   keyStoreNote,
   kindLabel,
@@ -194,6 +198,7 @@ const addKind = document.querySelector<HTMLSelectElement>("#add-kind")!;
 const addProviderButton = document.querySelector<HTMLButtonElement>("#add-provider-btn")!;
 const themeSelect = document.querySelector<HTMLSelectElement>("#theme")!;
 const summarizeTopInput = document.querySelector<HTMLInputElement>("#summarize-top")!;
+const notifyToggle = document.querySelector<HTMLInputElement>("#notify-toggle")!;
 const settingsSaveButton = document.querySelector<HTMLButtonElement>("#settings-save-btn")!;
 
 // ---------------------------------------------------------------------------
@@ -226,6 +231,22 @@ let llmStatus: LlmStatus | null = null;
  * forever. Once granted, asks with a network provider go out; `Revoke`
  * resets it at any time. The state is always visible in the UI. */
 let aiConsentGranted = false;
+
+/** Desktop notifications for new mail (roadmap): the saved Settings
+ * option, updated from every `settings_get`/`settings_save` response.
+ * Starts off: until the first settings load confirms the option is on,
+ * stay silent so a persisted opt-out is never violated (the job-event
+ * listener registers before settings round-trip back). */
+let notifyEnabled = false;
+
+/** The new-mail notifier: native OS notifications after sync/watch
+ * cycles store new messages, silent while this window is focused and
+ * when the option is off (see src/notify.ts for the full contract). */
+const notifier = createNewMailNotifier({
+  channel: pluginNotifyChannel(),
+  isFocused: () => document.hasFocus(),
+  isEnabled: () => notifyEnabled,
+});
 
 // ---------------------------------------------------------------------------
 // Rendering glue
@@ -644,6 +665,7 @@ function providerRow(
 /** Render the whole Settings form from a view (after boot and after every
  * successful save or key clear). */
 function renderSettings(view: SettingsView): void {
+  settingsRendered = true;
   providerRows.replaceChildren(
     ...view.providers.map((p) =>
       providerRow(p, p.has_key, view.default_provider === p.id),
@@ -657,6 +679,8 @@ function renderSettings(view: SettingsView): void {
       view.default_provider === null || view.default_provider === ENV_ID;
   themeSelect.value = view.theme;
   summarizeTopInput.value = String(view.summarize_top);
+  notifyToggle.checked = view.notifications;
+  notifyEnabled = view.notifications;
 
   const envLines: string[] = [];
   if (view.env) {
@@ -681,6 +705,11 @@ function parsedSummarizeTop(value: string): number {
   return Number.isNaN(n) ? 0 : n;
 }
 
+/** Whether the form has been rendered from a real settings view at least
+ * once; before that its values are HTML defaults that must not be saved
+ * back over the persisted ones. */
+let settingsRendered = false;
+
 /** Collect the form into a `settings_save` payload. */
 function collectSettings(): SaveSettingsPayload {
   const rows = [...providerRows.querySelectorAll<HTMLElement>(".provider-row")];
@@ -702,11 +731,20 @@ function collectSettings(): SaveSettingsPayload {
     default_provider: checked && checked.value ? checked.value : null,
     theme: themeSelect.value as SettingsView["theme"],
     summarize_top: parsedSummarizeTop(summarizeTopInput.value),
+    notifications: notifyToggle.checked,
     api_keys,
   };
 }
 
+// Enabling notifications is a user gesture, so it is the right moment to
+// ask the OS for notification permission (macOS prompts once; the toggle
+// itself takes effect on Save like every other option).
+notifyToggle.addEventListener("change", () => {
+  notifier.onSettingToggled(notifyToggle.checked);
+});
+
 async function saveSettings(): Promise<void> {
+  if (!settingsRendered) return;
   const payload = collectSettings();
   const previousDefault = llmStatus?.default_provider ?? null;
   settingsSaveButton.disabled = true;
@@ -1374,6 +1412,9 @@ async function syncImap(): Promise<void> {
     });
     renderImapSyncOutcome(outcome);
     imapPassInput.value = "";
+    // New mail from the manual sync also feeds the notification layer
+    // (silent while this window is focused, like every cycle).
+    notifier.onSyncOutcome(outcome.folders);
     await refreshStats();
     void refreshEmbedStatus();
     void refreshDashboard();
@@ -1528,6 +1569,7 @@ async function removeWatchFolder(path: string): Promise<void> {
 // "imported" event also refreshes the source chips/stats.
 void ipc.onEvent<WatchSnapshot>("watch-status", (payload) => {
   renderWatchStatus(payload);
+  notifier.onWatchSnapshot(payload.events);
   if (payload.events[0]?.kind === "imported") {
     void refreshStats();
   }
@@ -1587,6 +1629,9 @@ function refreshAfterJobEvent(event: JobEvent): void {
 
 void ipc.onEvent<JobEvent>("job-event", (payload) => {
   applyJobEvent(jobs, payload);
+  // After applyJobEvent the tracker knows the kind even for a job whose
+  // `submitted` event predates this listener (boot recovery).
+  notifier.onJobEvent(payload, jobs.records.get(payload.job)?.kind);
   refreshAfterJobEvent(payload);
   renderJobs();
   if (jobs.needsPoll) {
