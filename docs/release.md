@@ -86,7 +86,7 @@ Every release carries a `SHA256SUMS` asset: one `sha256sum -c`-compatible
 line per release artifact. Verify a download against it:
 
 ```sh
-curl -sSLO https://github.com/acailic/mailchat-vault/releases/download/v0.1.0/SHA256SUMS
+gh release download v0.1.0 -p SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS
 ```
 

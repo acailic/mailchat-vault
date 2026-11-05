@@ -88,8 +88,9 @@ echo "== macos suite: $(basename "$dmg") on $(sw_vers -productVersion) ($(uname 
 # ------------------------------------------------------------------- dmg
 mountpoint="$(mktemp -d)/dmg"
 check "dmg attaches read-only" hdiutil attach "$dmg" -mountpoint "$mountpoint" -readonly -nobrowse -quiet
+app_count="$(find "$mountpoint" -maxdepth 1 -name '*.app' | wc -l | tr -d ' ')"
+check "dmg contains exactly one .app bundle" test "$app_count" -eq 1 -a -d "$mountpoint"/*.app
 app_in_dmg="$(find "$mountpoint" -maxdepth 1 -name '*.app' | head -1)"
-check "dmg contains the .app bundle" test -n "$app_in_dmg" -a -d "$app_in_dmg"
 
 # ------------------------------------------------------------------- app
 APP="$app_in_dmg"
@@ -106,10 +107,10 @@ check "bundle executable exists and is executable" test -n "$exe_rel" -a -x "$ex
 check "universal binary: arm64 + x86_64 slices present" \
   bash -c "lipo -archs \"$exe\" | tr ' ' '\\n' | sort | tr '\\n' ' ' | grep -q 'arm64 x86_64'"
 
-# Unsigned-by-design round: assert an ad-hoc signature exists (the app
+# Unsigned-by-design round: assert the signature is ad-hoc (the app
 # would be killed by the kernel without one), NOT a Developer ID.
 sig="$(codesign -dv "$APP" 2>&1 | grep -m1 'Signature=')"
-check "code signature present (ad-hoc expected this round)" test -n "$sig"
+check "code signature is ad-hoc" bash -c 'grep -q "Signature=adhoc" <<< "$1"' bash "$sig"
 echo "     (signature: ${sig:-none})"
 
 # --------------------------------------------------------------- launch
@@ -121,11 +122,23 @@ run_dir="$(mktemp -d)"
 cp -R "$APP" "$run_dir/"
 xattr -cr "$run_dir/$(basename "$APP")" 2>/dev/null || true
 
-launch_rc=0
-timeout $((ALIVE_SECONDS + 15))s "$run_dir/$(basename "$APP")/Contents/MacOS/$exe_rel" >/dev/null 2>&1 || launch_rc=$?
-# exit 124 == timeout had to kill it == it stayed alive the whole window
-check "app launches and stays alive ${ALIVE_SECONDS}s (exit 124 expected)" \
-  test "$launch_rc" -eq 124
+"$run_dir/$(basename "$APP")/Contents/MacOS/$exe_rel" >/dev/null 2>&1 &
+app_pid=$!
+alive=1
+for i in $(seq "$ALIVE_SECONDS"); do
+  sleep 1
+  if ! kill -0 "$app_pid" 2>/dev/null; then
+    wait "$app_pid" 2>/dev/null
+    echo "app exited early with status $? after <${i}s"
+    alive=0
+    break
+  fi
+done
+if [[ "$alive" -eq 1 ]]; then
+  kill "$app_pid" 2>/dev/null
+  wait "$app_pid" 2>/dev/null
+fi
+check "app launches and stays alive ${ALIVE_SECONDS}s" test "$alive" -eq 1
 
 check "dmg detaches cleanly" hdiutil detach "$mountpoint" -quiet
 
