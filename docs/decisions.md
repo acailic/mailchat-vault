@@ -1,6 +1,6 @@
 # Architecture decisions
 
-Status: **accepted design direction**. D03, D04, D08, D10, and D12 are implemented and verified (D03/D12 with M1, D04/D10 with M2, D08's workspace/search halves with M3.1/M3.2 — 2026-11-05, see the [roadmap's completion records](implementation-roadmap.md#completion-tracking)); the rest remain planning defaults until their slices land. These records describe the agreed direction, not completed code unless the amendment says otherwise. Scope changes belong in the [product plan](product-plan.md); wire/schema details belong in [contracts](data-and-api-contracts.md).
+Status: **accepted design direction**. D03, D04, D08, D10, and D12 are implemented and verified (D03/D12 with M1, D04/D10 with M2, D08's workspace/search halves with M3.1/M3.2 — 2026-11-05, see the [roadmap's completion records](implementation-roadmap.md#completion-tracking)); D09's consent/citation halves are implemented and recorded with M5; the rest remain planning defaults until their slices land. These records describe the agreed direction, not completed code unless the amendment says otherwise. Scope changes belong in the [product plan](product-plan.md); wire/schema details belong in [contracts](data-and-api-contracts.md).
 
 ## D01: Personal local archive
 
@@ -43,6 +43,8 @@ Use source navigation, flat search results, and a reading pane. Setup, activity 
 ## D09: AI is optional and payload approval is explicit
 
 AI defaults off regardless of environment keys. Each question has an explicit translation send action; synthesis requires a preview/approval of the exact bounded context. Bind approval to endpoint, configuration and snapshot. Reuse the existing compatible-provider integration and fallback; attachments and arbitrary tools remain outside the pipeline. This adds one deliberate step but makes network disclosure concrete and keeps retrieval useful without AI.
+
+*Amendment (2026-11-05): the consent/citation halves are implemented with M5 and recorded — AI stays off regardless of environment keys, now enforced in the backend: without an explicit, per-session consent a network provider selection is downgraded to a fully local ask before any provider client exists (zero wire requests without consent, proven by mock-endpoint tests), the first network ask of a session shows a per-question disclosure of exactly what would leave, citations `[n]` and the numbered source rows open the original archived message in thread context through the v2 reading pane, and provider failure leaves local results usable. Honest deviations from this decision's text: consent is session-scoped and in-memory only (no persistent switch — resets every app start), the approval is one per-session grant after the first per-question prompt rather than a per-question translation send plus a separate digest-bound approval of the exact preview, and asks do not yet intersect active filters — those remain the M5.1/M5.2 remainder. Details and evidence: [Architecture: optional AI ask layer](architecture.md#optional-ai-ask-layer), [M5 record](implementation-roadmap.md#completion-tracking).*
 
 ## D10: Read-only mail ingestion and opt-in scheduling
 
