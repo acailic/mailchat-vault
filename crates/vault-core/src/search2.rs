@@ -563,7 +563,7 @@ pub fn attachment_summaries(raw_json: &str) -> Vec<AttachmentSummary> {
         if let Some(Value::Object(item)) = map.get(key) {
             let mut names: Vec<String> = ["file_name", "file_name_unique"]
                 .iter()
-                .filter_map(|n| str_of(item, n))
+                .filter_map(|n| str_of(&map, n).or_else(|| str_of(item, n)))
                 .map(str::to_string)
                 .collect();
             for nested in ["file", "photo"] {

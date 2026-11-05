@@ -718,11 +718,11 @@ fn unlinked_export_files_are_stored_and_registered() {
     .unwrap();
     fs::write(sb.export_dir().join("files/extra.txt"), b"stray notes").unwrap();
     fs::write(
-        sb.export_dir().join("pages.html"),
+        sb.export_dir().join("export_results.html"),
         b"<html>export page</html>",
     )
     .unwrap();
-    fs::write(sb.export_dir().join("contacts.json"), b"[]").unwrap();
+    fs::write(sb.export_dir().join("users.html"), b"[]").unwrap();
     let mut storage = Storage::open_in_memory().unwrap();
 
     let outcome = sb.import_with_media(&mut storage);

@@ -507,16 +507,42 @@ fn file_display_name(rel: &str) -> String {
     rel.rsplit(['/', '\\']).next().unwrap_or(rel).to_string()
 }
 
-/// Export-artifact files the unlinked pass never stores: HTML/JSON
-/// sidecars the exporter itself writes (pages, contact tables), which
-/// are not user media.
+/// Export-artifact files the unlinked pass never stores: the known
+/// sidecar files the exporters themselves write — Telegram's JSON
+/// result, its HTML export's index, contact list, and per-chat pages —
+/// plus OS metadata junk. Unreferenced user files (whatever their
+/// extension) are stored, not skipped.
 fn is_export_artifact(name: &str) -> bool {
     let lowered = name.to_ascii_lowercase();
-    lowered.ends_with(".html")
-        || lowered.ends_with(".htm")
-        || lowered.ends_with(".json")
-        || lowered == "desktop.ini"
+    lowered == "desktop.ini"
         || lowered == "thumbs.db"
+        || lowered == "result.json"
+        || lowered == "export_results.html"
+        || lowered == "lists.html"
+        || lowered == "users.html"
+        || is_telegram_page(&lowered)
+}
+
+/// Telegram's HTML export names its conversation pages `messages.html`,
+/// `messages1.html`, `messages2-part1.html`, … — page bodies embed the
+/// messages, never user media.
+fn is_telegram_page(lowered: &str) -> bool {
+    let Some(stem) = lowered
+        .strip_suffix(".html")
+        .and_then(|s| s.strip_prefix("messages"))
+    else {
+        return false;
+    };
+    match stem.split_once('-') {
+        None => stem.is_empty() || is_digits(stem),
+        Some((num, part)) => {
+            is_digits(num) && part.strip_prefix("part").is_some_and(is_digits)
+        }
+    }
+}
+
+fn is_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Store the export tree's **unlinked** files (M4.2): everything under
