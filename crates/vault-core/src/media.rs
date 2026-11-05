@@ -46,7 +46,7 @@ use serde_json::{Map, Value};
 use crate::import_bounds::{safe_child, walk_bounded, ImportBounds};
 use crate::message::NewMessage;
 use crate::object_store::{Capacity, ObjectStore};
-use crate::Result;
+use crate::{Error, Result};
 
 /// Why a referenced file was not preserved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +56,9 @@ pub enum MissingReason {
     NotInExport,
     /// The file exists but its bytes could not be read or staged.
     Unreadable,
+    /// The file exists and is readable, but the import's media budget
+    /// ran out before it could be staged.
+    Budget,
 }
 
 impl MissingReason {
@@ -63,7 +66,17 @@ impl MissingReason {
         match self {
             MissingReason::NotInExport => "not-in-export",
             MissingReason::Unreadable => "unreadable",
+            MissingReason::Budget => "budget-exceeded",
         }
+    }
+}
+
+/// The honest missing reason for a failed store: a budget-bound refusal
+/// is not unreadability.
+fn missing_reason(err: &Error) -> MissingReason {
+    match err {
+        Error::ImportBounds(_) => MissingReason::Budget,
+        _ => MissingReason::Unreadable,
     }
 }
 
@@ -280,9 +293,9 @@ pub fn extract_telegram(
                         entries.push(serde_json::to_value(&entry)?);
                     }
                     // Unreadable file: keep importing, record why.
-                    Err(_) => {
+                    Err(e) => {
                         summary.missing += 1;
-                        entries.push(missing_entry_value(&name, &kind, MissingReason::Unreadable));
+                        entries.push(missing_entry_value(&name, &kind, missing_reason(&e)));
                     }
                 },
                 None => {
@@ -450,9 +463,9 @@ pub fn extract_whatsapp(
                 obj.insert("media".to_string(), serde_json::to_value(&[entry])?);
                 msg.raw_json = raw.to_string();
             }
-            Err(_) => {
+            Err(e) => {
                 summary.missing += 1;
-                let entry = missing_entry_value(name, &kind, MissingReason::Unreadable);
+                let entry = missing_entry_value(name, &kind, missing_reason(&e));
                 let media = obj
                     .entry("media".to_string())
                     .or_insert_with(|| Value::Array(Vec::new()));
@@ -530,7 +543,10 @@ pub fn extract_unlinked(
     if !export_root.is_dir() {
         return Ok(records);
     }
-    for file in walk_bounded(export_root, &ImportBounds::default())? {
+    let Ok(files) = walk_bounded(export_root, &ImportBounds::default()) else {
+        return Ok(records);
+    };
+    for file in files {
         if file.path.is_dir() {
             continue;
         }
@@ -641,14 +657,14 @@ impl<'a> MailMedia<'a> {
                     }
                     let _ = serde_json::to_value(&entry).map(|v| push_media_entry(msg, v));
                 }
-                Err(_) => {
+                Err(e) => {
                     self.missing += 1;
                     push_media_entry(
                         msg,
                         missing_entry_value(
                             &attachment.name,
                             &attachment.kind,
-                            MissingReason::Unreadable,
+                            missing_reason(&e),
                         ),
                     );
                 }

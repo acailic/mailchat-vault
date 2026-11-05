@@ -258,6 +258,9 @@ pub fn import_bounded(
                 .extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("zip")));
     let (format, file, source) = resolve_stream_source(&effective)?;
+    // Media-pass path comparisons (consumed paths, the walked tree) are
+    // canonical; the export file itself must be in that same form.
+    let export_file = file.canonicalize()?;
     let mut run = BoundedRun::new(import_id_for("chat-import", &file));
     let export_root = file
         .parent()
@@ -276,7 +279,7 @@ pub fn import_bounded(
                 run.media = Some(MediaPass {
                     kind,
                     export_root: export_root.as_path(),
-                    export_file: Some(file.as_path()),
+                    export_file: Some(export_file.as_path()),
                     data_dir,
                     unlinked: tree_pick,
                 });

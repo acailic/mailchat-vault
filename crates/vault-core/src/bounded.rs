@@ -538,7 +538,7 @@ impl RunState<'_, '_> {
         let Some(summary) = self.media_summary.as_mut() else {
             return Ok(());
         };
-        let linked = self.sink.linked_media_digests().unwrap_or_default();
+        let linked = self.sink.linked_media_digests()?;
         let records = crate::media::extract_unlinked(
             pass.export_root,
             pass.export_file,

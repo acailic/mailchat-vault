@@ -554,22 +554,42 @@ pub fn attachment_summaries(raw_json: &str) -> Vec<AttachmentSummary> {
             });
         }
     }
-    // Telegram exports keep the original objects verbatim.
+    // Telegram exports keep the original objects verbatim. The media
+    // pass names the stored entry by the export's `file_name` (top-level
+    // or inside the object) or the nested path's basename — the row must
+    // answer for the same names that pass resolves, or a stored file
+    // also renders as an unavailable phantom.
     for key in ["photo", "file"] {
         if let Some(Value::Object(item)) = map.get(key) {
-            let name = str_of(item, "file_name")
-                .or_else(|| str_of(item, "file_name_unique"))
+            let mut names: Vec<String> = ["file_name", "file_name_unique"]
+                .iter()
+                .filter_map(|n| str_of(item, n))
                 .map(str::to_string)
-                .unwrap_or_else(|| key.to_string());
-            if !media_names.contains(&name) {
-                out.push(AttachmentSummary {
-                    name,
-                    kind: key.to_string(),
-                    size: 0,
-                    available: false,
-                    path: None,
-                });
+                .collect();
+            for nested in ["file", "photo"] {
+                if let Some(path) = str_of(item, nested).filter(|p| !p.is_empty()) {
+                    names.push(
+                        path.rsplit(['/', '\\'])
+                            .next()
+                            .unwrap_or(path)
+                            .to_string(),
+                    );
+                }
             }
+            if names.iter().any(|n| media_names.contains(n)) {
+                continue;
+            }
+            let name = names
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| key.to_string());
+            out.push(AttachmentSummary {
+                name,
+                kind: key.to_string(),
+                size: 0,
+                available: false,
+                path: None,
+            });
         }
     }
     out
