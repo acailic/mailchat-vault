@@ -623,20 +623,12 @@ impl RunState<'_, '_> {
                 reason: &i.reason,
             })
             .collect();
-        // The final commit carries the unlinked registry rows (an
-        // interrupted run simply re-derives them on resume; the objects
-        // dedup and the registry upserts).
-        let media_objects = if completes {
-            std::mem::take(&mut self.unlinked_objects)
-        } else {
-            Vec::new()
-        };
         let counts = self.sink.commit_batch(
             self.import_id,
             self.source_name,
             &self.batch,
             &records,
-            &media_objects,
+            &[],
             self.committed_items + (self.batch.len() + self.issues.len()) as u64,
             completes,
         )?;
