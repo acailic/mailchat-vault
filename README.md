@@ -238,7 +238,7 @@ The **Settings screen** is where LLM providers are configured — one place, no 
   - **Custom** — any Anthropic-compatible `/v1/messages` endpoint, base URL and model fully explicit.
   A profile that violates its pairing rule is **refused with a clear error before anything is saved** — the same policy the environment configuration enforces.
 - **Default provider**: which backend an Ask uses. None selected = automatic (the environment fallback when valid, else local-only mode).
-- **Options**: UI theme (system / light / dark) and how many top results feed the RAG summary (1–50, default 8).
+- **Options**: UI theme (system / light / dark), how many top results feed the RAG summary (1–50, default 8), and the **Desktop notifications** toggle (on by default — see [above](#what-v0-does) for its contract).
 
 ### Where values live
 
