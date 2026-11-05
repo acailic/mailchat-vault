@@ -12,6 +12,8 @@
 #
 # Checks (per artifact):
 #   dmg   mounts read-only; contains exactly the .app; unmounts clean
+#   tgz   validates as gzip tar; contains a .app/Contents/Info.plist
+#           whose CFBundleShortVersionString matches the artifact name
 #   app   Info.plist bundle id/name/version sane; executable present
 #         universal binary (arm64 + x86_64) via lipo
 #         ad-hoc code signature present (codesign -v) — this release
@@ -87,10 +89,24 @@ echo "== macos suite: $(basename "$dmg") on $(sw_vers -productVersion) ($(uname 
 
 # ------------------------------------------------------------------- dmg
 mountpoint="$(mktemp -d)/dmg"
+mkdir -p "$mountpoint"
 check "dmg attaches read-only" hdiutil attach "$dmg" -mountpoint "$mountpoint" -readonly -nobrowse -quiet
 app_count="$(find "$mountpoint" -maxdepth 1 -name '*.app' | wc -l | tr -d ' ')"
 check "dmg contains exactly one .app bundle" test "$app_count" -eq 1 -a -d "$mountpoint"/*.app
 app_in_dmg="$(find "$mountpoint" -maxdepth 1 -name '*.app' | head -1)"
+
+# --------------------------------------------------------------- updater
+# The .app.tar.gz is the updater artifact — a published release asset,
+# so the smoke verifies it too: archive valid, .app structure present,
+# and its bundled version matches the artifact name.
+app_tgz="$(find "$DIR" -name '*.app.tar.gz' 2>/dev/null | head -1)"
+[[ -n "$app_tgz" ]] || { echo "error: no .app.tar.gz found under $DIR" >&2; exit 2; }
+check "updater archive is a valid gzip tar" tar -tzf "$app_tgz" >/dev/null
+plist_member="$(tar -tzf "$app_tgz" | grep -m1 '\.app/Contents/Info\.plist$')"
+check "updater archive contains a .app/Contents/Info.plist" test -n "$plist_member"
+tar_version="$(tar -xOzf "$app_tgz" "$plist_member" 2>/dev/null | plutil -extract CFBundleShortVersionString raw - 2>/dev/null)"
+check "updater version matches its artifact name" \
+  bash -c "[[ -n \"$tar_version\" && \"$app_tgz\" == *\"$tar_version\"* ]]"
 
 # ------------------------------------------------------------------- app
 APP="$app_in_dmg"
@@ -99,7 +115,7 @@ check "Info.plist exists" test -f "$plist"
 check "bundle identifier is $APP_ID" \
   bash -c "plutil -extract CFBundleIdentifier raw \"$plist\" | grep -qx '$APP_ID'"
 check "bundle version matches the artifact name" \
-  bash -c "v=\"\$(plutil -extract CFBundleShortVersionString raw \"$plist\")\"; [[ \"$dmg\" == *\"\${v}\"* ]]"
+  bash -c "v=\"\$(plutil -extract CFBundleShortVersionString raw \"$plist\")\"; [[ -n \"\$v\" && \"$dmg\" == *\"\${v}\"* ]]"
 exe_rel="$(plutil -extract CFBundleExecutable raw "$plist" 2>/dev/null)"
 exe="$APP/Contents/MacOS/$exe_rel"
 check "bundle executable exists and is executable" test -n "$exe_rel" -a -x "$exe"
