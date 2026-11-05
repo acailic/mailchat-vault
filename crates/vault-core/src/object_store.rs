@@ -620,6 +620,86 @@ impl Capacity {
     }
 }
 
+/// Disk-usage accounting for the object store (M4.3): what the store
+/// holds, what the archive references, and how the bytes split.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaUsage {
+    /// Objects in the store (valid `<sha256>.<ext>` names).
+    pub objects: u64,
+    /// Total bytes of all objects.
+    pub total_bytes: u64,
+    /// Distinct digests the archive references.
+    pub referenced: usize,
+    /// Bytes of objects the archive references.
+    pub referenced_bytes: u64,
+    /// Objects nothing references (stored, dedup-ready, invisible to
+    /// the archive).
+    pub orphan_objects: u64,
+    /// Bytes of unreferenced objects.
+    pub orphan_bytes: u64,
+    /// Per-extension split, largest byte total first.
+    pub by_extension: Vec<ExtUsage>,
+    /// The largest objects (top 10 by size), biggest first — the
+    /// "what is eating my disk" answer.
+    pub largest: Vec<StoreObject>,
+}
+
+/// One per-extension row of the usage report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtUsage {
+    /// Lowercase extension as stored (`jpg`, `mp4`, `bin`, …).
+    pub ext: String,
+    pub objects: u64,
+    pub bytes: u64,
+}
+
+impl ObjectStore {
+    /// The disk-usage report over the store's objects, split against
+    /// `referenced` (the digests the archive references, see
+    /// [`crate::storage::Storage::media_digests`]). Read-only; derived
+    /// from enumeration exactly like [`ObjectStore::reconcile`], so the
+    /// two always agree on what counts as an object.
+    pub fn usage(&self, referenced: &HashSet<String>) -> MediaUsage {
+        let objects = self.enumerate();
+        let mut usage = MediaUsage {
+            objects: objects.len() as u64,
+            referenced: referenced.len(),
+            ..MediaUsage::default()
+        };
+        let mut by_ext: std::collections::HashMap<String, ExtUsage> =
+            std::collections::HashMap::new();
+        for object in &objects {
+            usage.total_bytes += object.size;
+            if referenced.contains(&object.sha256) {
+                usage.referenced_bytes += object.size;
+            } else {
+                usage.orphan_objects += 1;
+                usage.orphan_bytes += object.size;
+            }
+            let ext = object
+                .path
+                .rsplit_once('.')
+                .map(|(_, e)| e.to_string())
+                .unwrap_or_else(|| "bin".to_string());
+            let row = by_ext.entry(ext.clone()).or_insert(ExtUsage {
+                ext,
+                objects: 0,
+                bytes: 0,
+            });
+            row.objects += 1;
+            row.bytes += object.size;
+        }
+        usage.by_extension = by_ext.into_values().collect();
+        usage
+            .by_extension
+            .sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.ext.cmp(&b.ext)));
+        let mut largest = objects;
+        largest.sort_by(|a, b| b.size.cmp(&a.size).then(a.sha256.cmp(&b.sha256)));
+        usage.largest = largest.into_iter().take(10).collect();
+        usage
+    }
+}
+
 /// The digest of an object file name (`<64-hex>.<ext>`), or `None` for
 /// any other shape.
 fn object_digest(name: &str) -> Option<String> {
@@ -675,6 +755,15 @@ fn hash_file(path: &Path) -> Result<(String, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    fn tmpdir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("mcv-store-test-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     #[test]
     fn object_digest_parses_names() {
@@ -692,5 +781,84 @@ mod tests {
         assert_eq!(sanitize_ext("JPG"), "jpg");
         assert_eq!(sanitize_ext(""), "bin");
         assert_eq!(sanitize_ext("a.very/long"), "bin");
+    }
+
+    fn seed_store(dir: &Path) {
+        let store = ObjectStore::new(dir);
+        let mut budget = Capacity::default();
+        for (name, bytes) in [
+            ("a.jpg", vec![1u8; 40]),
+            ("b.jpg", vec![2u8; 10]),
+            ("c.mp4", vec![3u8; 100]),
+            ("d.bin", vec![4u8; 7]),
+        ] {
+            let src = dir.join(name);
+            fs::write(&src, &bytes).unwrap();
+            let staged = store
+                .stage(&src, name.rsplit('.').next().unwrap(), &mut budget)
+                .unwrap();
+            store.promote(staged, &mut budget).unwrap();
+        }
+    }
+
+    fn sha_of(dir: &Path, name: &str) -> String {
+        let (hash, _) = hash_file(&dir.join(name)).unwrap();
+        hash
+    }
+
+    #[test]
+    fn usage_splits_referenced_orphaned_and_by_extension() {
+        let dir = tmpdir("usage");
+        seed_store(&dir);
+        // Reference two of the four objects (a.jpg and c.mp4).
+        let a_sha = sha_of(&dir, "a.jpg");
+        let c_sha = sha_of(&dir, "c.mp4");
+        let referenced: HashSet<String> = [a_sha.clone(), c_sha].into_iter().collect();
+        let report = ObjectStore::new(&dir).usage(&referenced);
+        assert_eq!(report.objects, 4);
+        assert_eq!(report.total_bytes, 157);
+        assert_eq!(report.referenced, 2);
+        assert_eq!(report.referenced_bytes, 140);
+        assert_eq!(report.orphan_objects, 2);
+        assert_eq!(report.orphan_bytes, 17);
+        // By extension: mp4 (100) first, then jpg (50), then bin (7).
+        let exts: Vec<(&str, u64, u64)> = report
+            .by_extension
+            .iter()
+            .map(|e| (e.ext.as_str(), e.objects, e.bytes))
+            .collect();
+        assert_eq!(exts, [("mp4", 1, 100), ("jpg", 2, 50), ("bin", 1, 7)]);
+        // Largest first: c.mp4 (100), a.jpg (40), b.jpg (10), d.bin (7).
+        let largest: Vec<u64> = report.largest.iter().map(|o| o.size).collect();
+        assert_eq!(largest, [100, 40, 10, 7]);
+        assert!(report.largest[0].path.ends_with(".mp4"));
+        assert_eq!(report.largest[0].sha256, sha_of(&dir, "c.mp4"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn usage_caps_largest_at_ten_and_handles_empty_store() {
+        let dir = tmpdir("usage-cap");
+        let empty = ObjectStore::new(&dir).usage(&HashSet::new());
+        assert_eq!(empty.objects, 0);
+        assert_eq!(empty.total_bytes, 0);
+        assert!(empty.by_extension.is_empty());
+        assert!(empty.largest.is_empty());
+
+        let store = ObjectStore::new(&dir);
+        let mut budget = Capacity::default();
+        for i in 0..12 {
+            let name = format!("f{i:02}.bin");
+            let src = dir.join(&name);
+            fs::write(&src, vec![0u8; i + 1]).unwrap();
+            let staged = store.stage(&src, "bin", &mut budget).unwrap();
+            store.promote(staged, &mut budget).unwrap();
+        }
+        let report = store.usage(&HashSet::new());
+        assert_eq!(report.objects, 12);
+        assert_eq!(report.largest.len(), 10, "largest is capped at 10");
+        assert_eq!(report.largest[0].size, 12);
+        assert_eq!(report.orphan_objects, 12, "nothing referenced: all orphans");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

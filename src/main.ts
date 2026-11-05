@@ -8,7 +8,12 @@ import "./styles/tokens.css";
 import "./styles/app.css";
 
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { formatSentAt, snippet } from "./format";
+import { formatSentAt, humanSize, snippet } from "./format";
+import {
+  objectNameOf,
+  renderMediaUsage,
+  type MediaUsageView,
+} from "./media";
 import {
   consentPromptText,
   consentStatusLine,
@@ -51,6 +56,7 @@ import {
 } from "./searchstate";
 import type {
   AppError,
+  AttachmentSummary,
   ImportScope,
 } from "./v2types";
 import {
@@ -178,6 +184,10 @@ const consentText = document.querySelector<HTMLElement>("#consent-text")!;
 const consentAllowButton = document.querySelector<HTMLButtonElement>("#consent-allow-btn")!;
 const consentLocalButton = document.querySelector<HTMLButtonElement>("#consent-local-btn")!;
 const settingsNote = document.querySelector<HTMLElement>("#settings-note")!;
+const mediaUsagePanel = document.querySelector<HTMLElement>("#media-usage")!;
+const mediaStoreStatus = document.querySelector<HTMLElement>("#media-store-status")!;
+const mediaRefreshButton = document.querySelector<HTMLButtonElement>("#media-refresh-btn")!;
+const mediaReconcileButton = document.querySelector<HTMLButtonElement>("#media-reconcile-btn")!;
 const envInfo = document.querySelector<HTMLElement>("#env-info")!;
 const providerRows = document.querySelector<HTMLElement>("#provider-rows")!;
 const addKind = document.querySelector<HTMLSelectElement>("#add-kind")!;
@@ -400,6 +410,8 @@ function renderAll(): void {
       onCopyLink: () => void copyLink(),
       onExport: () => void exportSingleMessage(),
       onExportChat: () => void exportChat(),
+      onExportMedia: (attachment) => void exportMedia(attachment),
+      onOpenExternalMedia: (attachment) => void openMediaExternal(attachment),
       onClose: closeDetail,
     });
     detailPanel.classList.add("open");
@@ -1218,6 +1230,7 @@ async function importChatExport(): Promise<void> {
     void refreshSources();
     void refreshEmbedStatus();
     void refreshDashboard();
+    if (outcome.media) void refreshMediaUsage(); // media landed in the store
   } catch (e) {
     importStatus.textContent = `Import failed: ${e}`;
   } finally {
@@ -1674,6 +1687,87 @@ async function exportChat(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Media objects (M4.3): explicit export / external open from the
+// reading pane, and the Settings media-store report
+// ---------------------------------------------------------------------------
+
+/** Save a byte-exact copy of one preserved media object at a
+ * user-picked path — explicit action, never bundled with a message
+ * export. */
+async function exportMedia(attachment: AttachmentSummary): Promise<void> {
+  const name = objectNameOf(attachment.path);
+  if (name === null) {
+    setStatus("This attachment is not preserved in the vault.", true);
+    return;
+  }
+  const ext = name.split(".").pop() ?? "bin";
+  const picked = await save({
+    title: "Save a copy of the media file",
+    defaultPath: attachment.name || name,
+    filters: [{ name: "Media file", extensions: [ext] }],
+  });
+  if (typeof picked !== "string") return; // cancelled
+  try {
+    const outcome = await ipc.mediaExport({ name, path: picked });
+    setStatus(`Saved a copy (${humanSize(outcome.size)}) to ${picked}.`);
+  } catch (e) {
+    setStatus(`Media export failed: ${e}`, true);
+  }
+}
+
+/** Open one preserved media object with the OS default application.
+ * The backend opens a disposable temp copy — the store is never handed
+ * to an external writer. */
+async function openMediaExternal(attachment: AttachmentSummary): Promise<void> {
+  const name = objectNameOf(attachment.path);
+  if (name === null) {
+    setStatus("This attachment is not preserved in the vault.", true);
+    return;
+  }
+  mediaStoreStatus.textContent = "";
+  try {
+    await ipc.mediaOpenExternal({ name, displayName: attachment.name });
+    setStatus(`Opening ${attachment.name || name} externally…`);
+  } catch (e) {
+    setStatus(`Open failed: ${e}`, true);
+  }
+}
+
+/** Load and render the media-store disk usage report (Settings). */
+async function refreshMediaUsage(): Promise<void> {
+  try {
+    const usage: MediaUsageView = await ipc.mediaUsage();
+    renderMediaUsage(mediaUsagePanel, usage);
+  } catch (e) {
+    mediaStoreStatus.textContent = `Media store report failed: ${e}`;
+  }
+}
+
+/** Run the M4.1 reconciliation (verify hashes) and summarize it. */
+async function reconcileMediaStore(): Promise<void> {
+  mediaReconcileButton.disabled = true;
+  mediaStoreStatus.textContent = "Reconciling (re-hashing every object)…";
+  try {
+    const report = await ipc.mediaReconcile();
+    const clean =
+      report.missing.length === 0 &&
+      report.orphans.length === 0 &&
+      report.corrupt.length === 0 &&
+      report.stale_staging.length === 0 &&
+      report.foreign.length === 0;
+    mediaStoreStatus.textContent = clean
+      ? `Store is clean: ${report.objects} objects match ${report.referenced} references.`
+      : `Reconcile: ${report.objects} objects · ${report.missing.length} missing · ` +
+        `${report.orphans.length} unreferenced · ${report.corrupt.length} corrupt · ` +
+        `${report.stale_staging.length} staging · ${report.foreign.length} foreign files.`;
+  } catch (e) {
+    mediaStoreStatus.textContent = `Reconcile failed: ${e}`;
+  } finally {
+    mediaReconcileButton.disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 
@@ -1732,6 +1826,13 @@ dashboardRefreshButton.addEventListener("click", () => void refreshDashboard());
 exportButton.addEventListener("click", () => void exportResults());
 addProviderButton.addEventListener("click", addProviderRow);
 settingsSaveButton.addEventListener("click", () => void saveSettings());
+mediaRefreshButton.addEventListener("click", () => void refreshMediaUsage());
+mediaReconcileButton.addEventListener("click", () => void reconcileMediaStore());
+// The media report loads when Settings is opened (and after imports that
+// extracted media) — not eagerly at startup.
+workspace.store.subscribe((current) => {
+  if (current.view === "settings") void refreshMediaUsage();
+});
 themeSelect.addEventListener("change", () => applyTheme(themeSelect.value as SettingsView["theme"]));
 providerRows.addEventListener("click", (event) => {
   const target = event.target as HTMLElement;

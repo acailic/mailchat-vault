@@ -3,7 +3,7 @@
 /// Pure builders like render.ts — every dynamic string goes through
 /// textContent, tested via happy-dom in render2.test.ts.
 
-import { formatSentAt, humanSize, snippet as truncateBody } from "./format";
+import { formatSentAt, snippet as truncateBody } from "./format";
 import {
   appendSegments,
 } from "./render";
@@ -17,7 +17,9 @@ import {
   parseSnippet,
   splitTerms,
 } from "./viewmodel";
+import { buildMediaItem } from "./media";
 import type {
+  AttachmentSummary,
   ConversationContext,
   ImportScope,
   MessageSummary,
@@ -248,6 +250,10 @@ export interface Detail2Options {
   onExport: () => void;
   /** Export the whole verified conversation thread (v1 export_chat). */
   onExportChat: () => void;
+  /** Save a byte-exact copy of one preserved media object (M4.3). */
+  onExportMedia: (attachment: AttachmentSummary) => void;
+  /** Open one preserved media object externally (M4.3). */
+  onOpenExternalMedia: (attachment: AttachmentSummary) => void;
   onClose: () => void;
 }
 
@@ -391,25 +397,12 @@ export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
     const list = document.createElement("ul");
     list.className = "media-list";
     for (const attachment of detail.attachments) {
-      const item = document.createElement("li");
-      item.className = "media-item" + (attachment.available ? "" : " unresolved");
-      const kind = document.createElement("span");
-      kind.className = "media-kind";
-      kind.textContent = attachment.kind;
-      const name = document.createElement("span");
-      name.className = "media-name";
-      name.textContent = attachment.name;
-      const size = document.createElement("span");
-      size.className = "meta";
-      // UX wording: a reference without preserved bytes reads as not
-      // included in the export (honest until M4 preserves it).
-      size.textContent = attachment.available
-        ? attachment.path
-          ? `${humanSize(attachment.size)} · ${attachment.path}`
-          : humanSize(attachment.size)
-        : "not in export";
-      item.append(kind, name, size);
-      list.append(item);
+      list.append(
+        buildMediaItem(attachment, {
+          onExport: opts.onExportMedia,
+          onOpenExternal: opts.onOpenExternalMedia,
+        }),
+      );
     }
     media.append(heading, list);
     sections.push(media);

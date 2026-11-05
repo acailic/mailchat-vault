@@ -5,6 +5,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { MediaUsageView } from "./media";
 import type {
   ArchiveStats,
   ChatContext,
@@ -118,6 +119,45 @@ export function exportMessagesV2(args: {
   path: string;
 }): Promise<SelectionExportSummary> {
   return invoke<SelectionExportSummary>("export_messages_v2", args);
+}
+
+// ---------------------------------------------------------------------------
+// Media objects (M4.3): read-only display protocol commands
+// ---------------------------------------------------------------------------
+
+export function mediaUsage(): Promise<MediaUsageView> {
+  return invoke<MediaUsageView>("media_usage");
+}
+
+export function mediaExport(args: {
+  name: string;
+  path: string;
+}): Promise<{ path: string; size: number }> {
+  return invoke<{ path: string; size: number }>("media_export", args);
+}
+
+export function mediaOpenExternal(args: {
+  name: string;
+  displayName: string | null;
+}): Promise<{ path: string; size: number }> {
+  return invoke<{ path: string; size: number }>("media_open_external", {
+    name: args.name,
+    displayName: args.displayName,
+  });
+}
+
+export interface ReconcileReportView {
+  objects: number;
+  referenced: number;
+  missing: string[];
+  orphans: string[];
+  corrupt: string[];
+  stale_staging: string[];
+  foreign: string[];
+}
+
+export function mediaReconcile(): Promise<ReconcileReportView> {
+  return invoke<ReconcileReportView>("media_reconcile");
 }
 
 // ---------------------------------------------------------------------------
