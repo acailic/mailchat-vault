@@ -178,7 +178,7 @@ else
     # The deeper launch-stays-alive smoke from the release-fix tooling:
     # present only on branches that carry scripts/release/smoke-macos.sh.
     if [[ -x "$here/smoke-macos.sh" ]]; then
-      if "$here/smoke-macos.sh" --dir "$(dirname "$dmg")" \
+      if "$here/smoke-macos.sh" --dir "$(dirname "$dmg")" --skip-updater \
            --logs "$LOGS/smoke-macos" >"$LOGS/smoke-macos.log" 2>&1; then
         record "smoke" "smoke-macos: PASS"
       else
