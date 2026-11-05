@@ -51,6 +51,15 @@ pub struct NewMessage {
     /// `sent_at` the way M1.1 did.
     #[serde(default)]
     pub time_confidence: String,
+    /// MIME attachments/inline parts decoded out of the raw mail by the
+    /// parser (M4.2). Transient by design: the media pass
+    /// ([`crate::media`]) stores the bytes into the content-addressed
+    /// object store and records the `media` entries in `raw_json` before
+    /// the batch commits, then the list is dropped — the persisted shape
+    /// is the `raw_json` link, never the bytes. Chat sources leave it
+    /// empty.
+    #[serde(default)]
+    pub attachments: Vec<NewAttachment>,
 }
 
 impl NewMessage {
@@ -77,8 +86,24 @@ impl NewMessage {
             original_timestamp: String::new(),
             timezone: String::new(),
             time_confidence: String::new(),
+            attachments: Vec::new(),
         }
     }
+}
+
+/// One decoded MIME part of a mail: display name, coarse kind, and the
+/// transfer-decoded bytes (base64/quoted-printable already undone).
+/// See [`crate::mail`] for which parts become attachments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewAttachment {
+    /// Display name: the part's `filename`/`name` parameter, its
+    /// `Content-ID`, or a generated `attachment-<n>` fallback.
+    pub name: String,
+    /// `image`, `video`, `audio`, `document`, `text` — the coarse kind
+    /// for the detail view.
+    pub kind: String,
+    /// The decoded bytes, exactly as the sender's part carried them.
+    pub bytes: Vec<u8>,
 }
 
 /// A stored message row, as returned by queries.

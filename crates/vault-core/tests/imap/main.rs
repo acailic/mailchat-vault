@@ -153,7 +153,7 @@ impl Account {
         let folders: Vec<String> = folders.iter().map(|f| f.to_string()).collect();
         let instance = crate::instance_of(storage, user);
         let mut session = self.session_as(user);
-        let summaries = vimap::sync_session(&mut session, storage, &instance, &folders);
+        let summaries = vimap::sync_session(&mut session, storage, &instance, &folders, None);
         let _ = session.logout();
         summaries
     }

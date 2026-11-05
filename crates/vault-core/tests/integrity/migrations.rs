@@ -14,7 +14,7 @@ use crate::util::{migrations_table, msg, raw, version1_db_with_data};
 
 /// The schema version this build knows; bump expectation when a migration
 /// is added (the assertions below are version-agnostic where possible).
-const KNOWN_VERSION: i64 = 12;
+const KNOWN_VERSION: i64 = 13;
 
 fn migrations_rows(db: &std::path::Path) -> Vec<i64> {
     let conn = raw(db);

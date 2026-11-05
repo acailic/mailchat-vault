@@ -145,10 +145,11 @@ pub fn sync_round(
     pool: &DbPool,
     resolve: impl Fn(&SourceInstance) -> Result<Option<ImapAuth>, String>,
     is_cancelled: impl Fn() -> bool,
+    media_data_dir: Option<&std::path::Path>,
 ) -> RoundSummary {
     // The production session builder: implicit-TLS connect + auth
     // (tests inject the plain-TCP mock path through [`sync_round_with`]).
-    sync_round_with(pool, resolve, is_cancelled, imap::connect)
+    sync_round_with(pool, resolve, is_cancelled, imap::connect, media_data_dir)
 }
 
 /// [`sync_round`] with the session builder injected — how the
@@ -159,6 +160,7 @@ pub fn sync_round_with<T: Read + Write>(
     resolve: impl Fn(&SourceInstance) -> Result<Option<ImapAuth>, String>,
     is_cancelled: impl Fn() -> bool,
     connect: impl Fn(&ImapConfig) -> crate::Result<Session<T>>,
+    media_data_dir: Option<&std::path::Path>,
 ) -> RoundSummary {
     let instances: Vec<SourceInstance> =
         pool.with_read(|s| s.list_source_instances().unwrap_or_default());
@@ -176,7 +178,13 @@ pub fn sync_round_with<T: Read + Write>(
         let stored = StoredImapConfig::of(&instance).expect("filtered above");
         let status = match resolve(&instance) {
             Ok(Some(auth)) => {
-                match sync_one(&stored.with_auth(auth), &sink, &instance.id, &connect) {
+                match sync_one(
+                    &stored.with_auth(auth),
+                    &sink,
+                    &instance.id,
+                    &connect,
+                    media_data_dir,
+                ) {
                     Ok(folders) => SourceSyncStatus::Synced { folders },
                     Err(e) => SourceSyncStatus::Failed {
                         error: e.to_string(),
@@ -207,6 +215,7 @@ fn sync_one<T: Read + Write, S: SyncStorage>(
     sink: &S,
     instance_id: &str,
     connect: &impl Fn(&ImapConfig) -> crate::Result<Session<T>>,
+    media_data_dir: Option<&std::path::Path>,
 ) -> crate::Result<Vec<imap::FolderSyncSummary>> {
     // The listed instance already exists; ensure refreshes its stored
     // configuration (label/folders) idempotently.
@@ -215,7 +224,11 @@ fn sync_one<T: Read + Write, S: SyncStorage>(
     sink.record_attempt(&instance)?;
     let mut session = connect(config)?;
     let folders = config.effective_folders();
-    let summaries = imap::sync_session(&mut session, sink, &instance, &folders);
+    // One media budget per source round (M4.2): attachment stores dedup
+    // against what earlier folders of the same account already stored.
+    let mut budget = crate::object_store::Capacity::default();
+    let mut media = media_data_dir.map(|dir| crate::media::MailMedia::new(dir, &mut budget));
+    let summaries = imap::sync_session(&mut session, sink, &instance, &folders, media.as_mut());
     // Best-effort logout; a failed logout must not mask a sync error.
     let _ = session.logout();
     sink.record_success(&instance)?;

@@ -311,3 +311,155 @@ Ključ na premijeri.
         assert!(!hits.is_empty(), "no hits for {term:?}");
     }
 }
+
+// ---------------------------------------------------------------------
+// M4.2: email MIME attachments through the bounded import
+// ---------------------------------------------------------------------
+
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use vault_core::bounded::{import_id_for, BoundedOutcome, BoundedRun, MediaKind, MediaPass};
+
+/// The mail-media wiring the production import builds (the same
+/// construction as the app's import command): mail pass, no export
+/// root, unlinked pass off.
+fn import_mbox_bounded(
+    storage: &mut Storage,
+    mbox: &Path,
+    data_dir: Option<&Path>,
+) -> vault_core::Result<BoundedOutcome> {
+    let source = MboxSource::new(mbox);
+    let mut run = BoundedRun::new(import_id_for("mbox-import", mbox));
+    if let Some(data_dir) = data_dir {
+        run.media = Some(MediaPass {
+            kind: MediaKind::Mail,
+            export_root: Path::new(""),
+            export_file: None,
+            data_dir,
+            unlinked: false,
+        });
+    }
+    run.run(&source, storage, &|| false, &mut |_, _, _| {})
+}
+
+fn tmpdir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("mcv-mbox-media-{}-{}", name, std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// A mail with one base64 attachment and one inline named image, plus a
+/// text body — the M4.2 wire shape `collect_attachments` handles.
+const ATTACHMENT_MAIL: &str = "\
+From alice@example.com Sat Nov  1 10:00:00 2026
+From: Alice Smith <alice@example.com>
+Subject: with media
+Date: Sat, 1 Nov 2026 10:00:00 +0100
+Message-ID: <with-media-1@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary=\"mix\"
+
+--mix
+Content-Type: text/plain; charset=utf-8
+
+vidi u prilogu
+--mix
+Content-Type: application/pdf
+Content-Disposition: attachment; filename=\"spec.pdf\"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQ=
+--mix
+Content-Type: image/png
+Content-Disposition: inline; filename=\"pic.png\"
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgo=
+--mix--
+";
+
+#[test]
+fn mbox_attachments_are_stored_and_linked() {
+    let dir = tmpdir("store");
+    let mbox = dir.join("in.mbox");
+    fs::write(&mbox, ATTACHMENT_MAIL).unwrap();
+    let data_dir = dir.join("data");
+
+    let mut storage = Storage::open_in_memory().unwrap();
+    let outcome = import_mbox_bounded(&mut storage, &mbox, Some(&data_dir)).unwrap();
+    assert_eq!(outcome.summary.inserted, 1);
+    let media = outcome.media.expect("mail media pass ran");
+    assert_eq!(media.stored, 2, "pdf attachment + inline image");
+    assert_eq!(media.deduped, 0);
+    assert_eq!(media.missing, 0);
+    assert_eq!(media.linked, 1);
+
+    // The store holds both objects, hash-named, byte-exact.
+    let store = data_dir.join("media");
+    let names: Vec<String> = fs::read_dir(&store)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names.len(), 2);
+    assert!(names.iter().any(|n| n.ends_with(".pdf")));
+    assert!(names.iter().any(|n| n.ends_with(".png")));
+
+    // The message links them with kind and size.
+    let hit = &search_hits(&storage, "prilogu")[0];
+    let raw: serde_json::Value = serde_json::from_str(&hit.message.raw_json).unwrap();
+    let entries = raw["media"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    let by_name = |n: &str| {
+        entries
+            .iter()
+            .find(|e| e["name"] == n)
+            .unwrap_or_else(|| panic!("no entry {n}: {entries:?}"))
+    };
+    assert_eq!(by_name("spec.pdf")["kind"], "document");
+    assert_eq!(by_name("spec.pdf")["size"], 8);
+    assert_eq!(by_name("pic.png")["kind"], "image");
+    // The parser's transient attachment list is dropped after the pass.
+    assert!(hit.message.raw_json.contains("\"media\""));
+}
+
+#[test]
+fn mbox_reimport_dedups_objects_and_links() {
+    let dir = tmpdir("reimport");
+    let mbox = dir.join("in.mbox");
+    fs::write(&mbox, format!("{ATTACHMENT_MAIL}{ATTACHMENT_MAIL}")).unwrap();
+    let data_dir = dir.join("data");
+    let mut storage = Storage::open_in_memory().unwrap();
+
+    let first = import_mbox_bounded(&mut storage, &mbox, Some(&data_dir)).unwrap();
+    assert_eq!(first.media.unwrap().stored, 2);
+    let before = search_hits(&storage, "prilogu")[0].message.raw_json.clone();
+
+    let second = import_mbox_bounded(&mut storage, &mbox, Some(&data_dir)).unwrap();
+    let media = second.media.unwrap();
+    assert_eq!(media.stored, 0, "no new objects");
+    assert_eq!(
+        media.deduped, 4,
+        "two mails x two attachments, all dedup hits"
+    );
+    assert_eq!(media.linked, 0, "links already present");
+    assert_eq!(search_hits(&storage, "prilogu")[0].message.raw_json, before);
+
+    // The identical attachment mailed twice is one object in the store.
+    let store = data_dir.join("media");
+    assert_eq!(fs::read_dir(&store).unwrap().count(), 2);
+}
+
+#[test]
+fn mbox_without_data_dir_is_text_only() {
+    let dir = tmpdir("text-only");
+    let mbox = dir.join("in.mbox");
+    fs::write(&mbox, ATTACHMENT_MAIL).unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
+    let outcome = import_mbox_bounded(&mut storage, &mbox, None).unwrap();
+    assert!(outcome.media.is_none());
+    // No store dir; the message body is still searchable.
+    assert!(!dir.join("data/media").exists());
+    assert_eq!(search_hits(&storage, "prilogu").len(), 1);
+}

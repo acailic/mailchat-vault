@@ -644,7 +644,7 @@ fn pool_imap_sync(
         .login(cfg.username.clone(), password)
         .map_err(|(e, _client)| e)?;
     let folders = cfg.effective_folders();
-    let summaries = vimap::sync_session(&mut session, &sink, &instance, &folders);
+    let summaries = vimap::sync_session(&mut session, &sink, &instance, &folders, None);
     let _ = session.logout();
     sink.record_success(&instance)?;
     Ok(summaries)
@@ -782,7 +782,7 @@ fn imap_pool_sync_matches_direct_sync_archive() {
             )
             .unwrap()
         };
-        let summaries = vimap::sync_session(&mut session, &direct, &instance, &folders);
+        let summaries = vimap::sync_session(&mut session, &direct, &instance, &folders, None);
         let _ = session.logout();
         summaries
     };

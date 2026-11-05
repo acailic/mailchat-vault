@@ -66,6 +66,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -475,12 +476,16 @@ impl SyncStorage for Storage {
 
 /// Sync every configured folder over an already-authenticated session.
 ///
-/// Generic over the stream so the production TLS path ([`sync`]) and the
-/// test path (plain TCP against a mock server) share one implementation,
-/// and over the storage sink ([`SyncStorage`]) so a sync can run against
-/// one connection or through the pool's write queue without changes.
-/// A failing folder never aborts the others: each folder reports its own
-/// outcome, with [`FolderSyncSummary::error`] set on failure.
+/// With `media`, each fetched mail's MIME attachments/inline parts are
+/// stored into the object store right after parsing (M4.2) — on this
+/// (the calling) thread, between network fetch and the batch commit,
+/// never inside a storage transaction. Generic over the stream so the
+/// production TLS path ([`sync`]) and the test path (plain TCP against a
+/// mock server) share one implementation, and over the storage sink
+/// ([`SyncStorage`]) so a sync can run against one connection or through
+/// the pool's write queue without changes. A failing folder never aborts
+/// the others: each folder reports its own outcome, with
+/// [`FolderSyncSummary::error`] set on failure.
 ///
 /// `instance_id` is the durable source instance (see
 /// [`ensure_source_instance`]); identities, occurrences, and cursors are
@@ -490,10 +495,11 @@ pub fn sync_session<T: Read + Write, S: SyncStorage>(
     storage: &S,
     instance_id: &str,
     folders: &[String],
+    mut media: Option<&mut crate::media::MailMedia<'_>>,
 ) -> Vec<FolderSyncSummary> {
     folders
         .iter()
-        .map(|folder| sync_folder(session, storage, instance_id, folder))
+        .map(|folder| sync_folder(session, storage, instance_id, folder, media.as_deref_mut()))
         .collect()
 }
 
@@ -502,11 +508,19 @@ pub fn sync_session<T: Read + Write, S: SyncStorage>(
 /// attempt/success is stamped on it, and the run reports per-folder
 /// summaries.
 ///
+/// `media_data_dir` (when set) enables the M4.2 attachment pass: every
+/// fetched mail's MIME parts are stored into the object store under that
+/// dir as the sync parses them.
+///
 /// Storage access runs on the caller's connection ([`SyncStorage` for
 /// `Storage`]); use [`sync_with`] to run the same flow against a pool
 /// adapter instead.
-pub fn sync(config: &ImapConfig, storage: &Storage) -> Result<Vec<FolderSyncSummary>> {
-    sync_with(config, storage)
+pub fn sync(
+    config: &ImapConfig,
+    storage: &Storage,
+    media_data_dir: Option<&Path>,
+) -> Result<Vec<FolderSyncSummary>> {
+    sync_with(config, storage, media_data_dir)
 }
 
 /// [`sync`] over any [`SyncStorage`] sink — e.g. the pool adapter
@@ -516,12 +530,15 @@ pub fn sync(config: &ImapConfig, storage: &Storage) -> Result<Vec<FolderSyncSumm
 pub fn sync_with<S: SyncStorage>(
     config: &ImapConfig,
     storage: &S,
+    media_data_dir: Option<&Path>,
 ) -> Result<Vec<FolderSyncSummary>> {
     let instance = storage.ensure_instance(config)?;
     storage.record_attempt(&instance)?;
     let mut session = connect(config)?;
     let folders = config.effective_folders();
-    let summaries = sync_session(&mut session, storage, &instance, &folders);
+    let mut budget = crate::object_store::Capacity::default();
+    let mut media = media_data_dir.map(|dir| crate::media::MailMedia::new(dir, &mut budget));
+    let summaries = sync_session(&mut session, storage, &instance, &folders, media.as_mut());
     // Best-effort logout; a failed logout must not mask a sync error.
     let _ = session.logout();
     storage.record_success(&instance)?;
@@ -546,6 +563,7 @@ pub fn sync_folder<T: Read + Write, S: SyncStorage>(
     storage: &S,
     instance_id: &str,
     folder: &str,
+    mut media: Option<&mut crate::media::MailMedia<'_>>,
 ) -> FolderSyncSummary {
     /// One fetch response turn: parsed mails (with their uids) and
     /// ledgered failures for the uids the turn accounted. Parsed values
@@ -558,18 +576,19 @@ pub fn sync_folder<T: Read + Write, S: SyncStorage>(
     }
 
     /// Consume one FETCH response into a [`FetchedTurn`]: every entry is
-    /// parsed or ledgered (`unparseable`), and body-less entries ledger
-    /// as `missing` (entries without even a uid stay uncountable — there
-    /// is no ledger key).
-    fn consume_fetches<'f, I>(
+    /// parsed or ledgered (`unparseable`), body-less entries ledger as
+    /// `missing` (entries without even a uid stay uncountable — there
+    /// is no ledger key). With `media`, each parsed mail's attachments
+    /// are stored into the object store here — on the sync thread, after
+    /// the parse and before the commit (the M4.1 lifecycle makes
+    /// promote-before-reference safe).
+    fn consume_fetches<'f, I: Iterator<Item = &'f imap::types::Fetch>>(
         fetches: I,
         instance_id: &str,
         folder: &str,
         uidvalidity: u32,
-    ) -> FetchedTurn
-    where
-        I: Iterator<Item = &'f imap::types::Fetch>,
-    {
+        media: &mut Option<&mut crate::media::MailMedia<'_>>,
+    ) -> FetchedTurn {
         let mut turn = FetchedTurn::default();
         for fetch in fetches {
             let (uid, raw) = match (fetch.uid, fetch.body()) {
@@ -586,6 +605,9 @@ pub fn sync_folder<T: Read + Write, S: SyncStorage>(
             match parse_raw_mail_canonical(raw, instance_id, "") {
                 Some(mut parsed) => {
                     apply_folder_fields(&mut parsed.message, folder, uid, uidvalidity);
+                    if let Some(media) = media.as_deref_mut() {
+                        media.store_message(&mut parsed.message);
+                    }
                     turn.mails.push((uid, parsed));
                 }
                 None => turn.failures.push(BatchFailure {
@@ -643,6 +665,7 @@ pub fn sync_folder<T: Read + Write, S: SyncStorage>(
         instance_id: &str,
         folder: &str,
         summary: &mut FolderSyncSummary,
+        media: &mut Option<&mut crate::media::MailMedia<'_>>,
     ) -> Result<()> {
         // EXAMINE (read-only SELECT): fetching must never set \Seen or other
         // flags on the user's mailbox.
@@ -693,7 +716,7 @@ pub fn sync_folder<T: Read + Write, S: SyncStorage>(
                 .join(",");
             let fetches = session.uid_fetch(set, "RFC822")?;
             let batch_uids: Vec<u32> = batch.to_vec();
-            let turn = consume_fetches(fetches.iter(), instance_id, folder, uidvalidity);
+            let turn = consume_fetches(fetches.iter(), instance_id, folder, uidvalidity, media);
             // Every uid the response accounted (parsed or already
             // ledgered); only the truly absent are missing fetches.
             let returned: HashSet<u32> = turn
@@ -747,7 +770,7 @@ pub fn sync_folder<T: Read + Write, S: SyncStorage>(
                 .collect::<Vec<_>>()
                 .join(",");
             let fetches = session.uid_fetch(set, "RFC822")?;
-            let turn = consume_fetches(fetches.iter(), instance_id, folder, uidvalidity);
+            let turn = consume_fetches(fetches.iter(), instance_id, folder, uidvalidity, media);
             // Every uid the response accounted (parsed or already
             // ledgered); only the truly absent are missing fetches.
             let returned: HashSet<u32> = turn
@@ -806,7 +829,14 @@ pub fn sync_folder<T: Read + Write, S: SyncStorage>(
         conflicting_revisions: 0,
         error: None,
     };
-    if let Err(e) = run(session, storage, instance_id, folder, &mut summary) {
+    if let Err(e) = run(
+        session,
+        storage,
+        instance_id,
+        folder,
+        &mut summary,
+        &mut media,
+    ) {
         summary.error = Some(e.to_string());
     }
     summary

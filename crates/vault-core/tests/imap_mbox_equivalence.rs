@@ -151,7 +151,7 @@ fn mbox_fixture_and_imap_sync_produce_equivalent_archives() {
             .map_err(|(e, _)| e)
             .unwrap()
     };
-    let summaries = vimap::sync_session(&mut s, &imap_storage, &instance, &folders);
+    let summaries = vimap::sync_session(&mut s, &imap_storage, &instance, &folders, None);
     let _ = s.logout();
     assert_eq!(summaries.len(), 1);
     assert_eq!(summaries[0].inserted, 3);
