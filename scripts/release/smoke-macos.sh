@@ -90,7 +90,6 @@ echo "== macos suite: $(basename "$dmg") on $(sw_vers -productVersion) ($(uname 
 # ------------------------------------------------------------------- dmg
 mountpoint="$(mktemp -d)/dmg"
 mkdir -p "$mountpoint"
-check "dmg attaches read-only" hdiutil attach "$dmg" -mountpoint "$mountpoint" -readonly -nobrowse -quiet
 cleanup_mount() {
   if [[ -d "$mountpoint" ]]; then
     hdiutil detach "$mountpoint" -quiet 2>/dev/null || :
@@ -99,6 +98,7 @@ cleanup_mount() {
 trap cleanup_mount EXIT
 trap 'cleanup_mount; exit 130' INT
 trap 'cleanup_mount; exit 143' TERM
+check "dmg attaches read-only" hdiutil attach "$dmg" -mountpoint "$mountpoint" -readonly -nobrowse -quiet
 app_count="$(find "$mountpoint" -maxdepth 1 -name '*.app' | wc -l | tr -d ' ')"
 check "dmg contains exactly one .app bundle" test "$app_count" -eq 1 -a -d "$mountpoint"/*.app
 app_in_dmg="$(find "$mountpoint" -maxdepth 1 -name '*.app' | head -1)"
