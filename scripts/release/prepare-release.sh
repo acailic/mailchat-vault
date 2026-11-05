@@ -33,8 +33,8 @@
 #   --skip-matrix    do not run the validation matrix (iteration only —
 #                    a release candidate is never certified without it)
 #   --skip-bundles   do not build bundles; assemble notes/checksums from
-#                    the bundles already in target/release/bundle/ (they
-#                    must exist and match the version)
+#                    the bundles already in any target/*/release/bundle/
+#                    (they must exist and match the version)
 #
 # Requires: git, jq, sha256sum, and — unless both skips are passed —
 # docker (the matrix and bundle legs run in pinned containers).
@@ -57,6 +57,25 @@ while [[ $# -gt 0 ]]; do
 done
 
 fail() { echo "error: $*" >&2; exit 1; }
+
+# Every bundle root the platform builds actually write: build-linux.sh
+# and the Windows matrix write target/release/bundle/, the macOS matrix
+# builds the universal dmg under the per-target
+# target/universal-apple-darwin/release/bundle/.
+find_bundles() {
+  local -a roots=("$repo/target/release/bundle")
+  local d
+  for d in "$repo"/target/*/release/bundle; do
+    [[ -d "$d" ]] && roots+=("$d")
+  done
+  find "${roots[@]}" \
+    \( -name "mailchat-vault_${VERSION}_*.AppImage" \
+    -o -name "mailchat-vault_${VERSION}_*.deb" \
+    -o -name "mailchat-vault_${VERSION}_*.dmg" \
+    -o -name "mailchat-vault_${VERSION}_*.app.tar.gz" \
+    -o -name "mailchat-vault_${VERSION}_*.msi" \
+    -o -name "mailchat-vault_${VERSION}_*-setup.exe" \) -print0 2>/dev/null
+}
 
 # --- version resolution -----------------------------------------------------
 # The version lives in four places that must always agree:
@@ -120,15 +139,8 @@ matrix_stage() {
 
 bundles_stage() {
   echo "== bundles: Linux release bundles =="
-  if [[ "$SKIP_BUNDLES" == 1 ]]; then
-    ls "$repo"/target/release/bundle/appimage/mailchat-vault_"$VERSION"_*.AppImage \
-       "$repo"/target/release/bundle/deb/mailchat-vault_"$VERSION"_*.deb >/dev/null \
-      || fail "--skip-bundles passed but no v$VERSION bundles in target/release/bundle/"
-    echo "  reusing existing v$VERSION bundles in target/release/bundle/"
-  else
-    echo "  building via scripts/release/build-linux.sh (pinned 22.04 toolchain container)"
-    "$repo/scripts/release/build-linux.sh"
-  fi
+  echo "  building via scripts/release/build-linux.sh (pinned 22.04 toolchain container)"
+  "$repo/scripts/release/build-linux.sh"
 }
 
 assemble_stage() {
@@ -145,16 +157,9 @@ assemble_stage() {
 
   # 1. copy the bundles
   local -a found=()
-  while IFS= read -r -d '' f; do found+=("$f"); done < <(
-    find "$repo/target/release/bundle" \
-      \( -name "mailchat-vault_${VERSION}_*.AppImage" \
-      -o -name "mailchat-vault_${VERSION}_*.deb" \
-      -o -name "mailchat-vault_${VERSION}_*.dmg" \
-      -o -name "mailchat-vault_${VERSION}_*.app.tar.gz" \
-      -o -name "mailchat-vault_${VERSION}_*.msi" \
-      -o -name "mailchat-vault_${VERSION}_*-setup.exe" \) -print0 2>/dev/null)
+  while IFS= read -r -d '' f; do found+=("$f"); done < <(find_bundles)
   if [[ ${#found[@]} -eq 0 ]]; then
-    fail "no v$VERSION bundles found under target/release/bundle/ — run without --skip-bundles first (or build the platform bundles on their host)"
+    fail "no v$VERSION bundles found in any target/*/release/bundle/ — run without --skip-bundles first (or build the platform bundles on their host)"
   fi
   for f in "${found[@]}"; do
     cp "$f" "$DRAFT_DIR/"
@@ -208,10 +213,12 @@ dispatched. Publishing requires the maintainer decision recorded in
   candidate stays warm until Actions return. Nothing to run.
 - **(b) real hosts** — run \`scripts/release/matrix-macos.sh\` on a real
   macOS host and \`pwsh scripts/release/matrix-windows.ps1\` on a real
-  Windows host; their bundle legs produce the dmg/msi/exe into
-  \`target/release/bundle/\`. Re-run this script on each host (or copy
-  the bundles here) so every asset lands in this directory with one
-  combined \`SHA256SUMS\`.
+  Windows host; the macOS bundle leg produces the dmg under
+  \`target/universal-apple-darwin/release/bundle/\`, the Windows leg the
+  msi/exe under \`target/release/bundle/\`. This script scans every
+  \`target/*/release/bundle/\` root, so re-running it on each host (or
+  copying the bundles here) makes every asset land in this directory
+  with one combined \`SHA256SUMS\`.
 - **(c) temporary Actions** — with release tags approved, pushing the
   tag triggers \`.github/workflows/release.yml\`, which drafts the
   release and builds all six assets itself; then dispatch the Windows

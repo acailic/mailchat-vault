@@ -245,7 +245,9 @@ runs this platform's full validation matrix column, builds the Linux
 bundles, and writes into `target/release/draft-release/v<version>/`:
 
 - the release assets it could build on this host,
-- `SHA256SUMS` over exactly those assets,
+- `SHA256SUMS` over all matching-version assets in the draft dir,
+  including assets copied in from other hosts under the real-hosts
+  flow,
 - `RELEASE-NOTES.md` — the version's [`CHANGELOG.md`](../CHANGELOG.md)
   section plus the standing unsigned-artifacts disclosure,
 - `PUBLISH-CHECKLIST.md` — the remaining tag/publish/smoke steps in
