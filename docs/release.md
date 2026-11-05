@@ -234,6 +234,35 @@ nuances: [`tests/windows-smoke/README.md`](../tests/windows-smoke/README.md).
 Publish a release only when this workflow is green on the tag being
 released (in addition to the manual Linux smoke below).
 
+## Preparing a release (local draft — nothing published)
+
+`scripts/release/prepare-release.sh` assembles the complete local
+draft-release candidate for the version named in
+`src-tauri/tauri.conf.json` (or `--version X.Y.Z`): it verifies the
+version is bumped consistently (tauri.conf.json, workspace `Cargo.toml`,
+`package.json`, `Cargo.lock`) and that no `v<version>` tag exists yet,
+runs this platform's full validation matrix column, builds the Linux
+bundles, and writes into `target/release/draft-release/v<version>/`:
+
+- the release assets it could build on this host,
+- `SHA256SUMS` over all matching-version assets in the draft dir,
+  including assets copied in from other hosts under the real-hosts
+  flow,
+- `RELEASE-NOTES.md` — the version's [`CHANGELOG.md`](../CHANGELOG.md)
+  section plus the standing unsigned-artifacts disclosure,
+- `PUBLISH-CHECKLIST.md` — the remaining tag/publish/smoke steps in
+  gate order, waiting on the maintainer's host/Actions decision.
+
+It never tags, never calls `gh release`, and never touches Actions:
+publishing stays a separate human decision by design. `--skip-matrix`
+and `--skip-bundles` exist for iteration only — a candidate is never
+certified from a run that used them.
+
+Version bump flow: raise `version` in `src-tauri/tauri.conf.json` and
+the workspace `Cargo.toml` (both crates and `Cargo.lock` follow),
+matching `package.json`, add the `CHANGELOG.md` section, then run the
+prep script; tag `v<version>` and push only at the publish gate.
+
 ## App icon
 
 The icon set (`src-tauri/icons/`: PNGs for Linux, `icon.icns` for macOS,
