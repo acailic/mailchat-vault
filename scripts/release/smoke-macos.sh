@@ -9,6 +9,8 @@
 #
 #   scripts/release/smoke-macos.sh --dir DIR          # artifacts on disk
 #   scripts/release/smoke-macos.sh --release v0.1.0   # download from GitHub
+#   --skip-updater  --dir mode with no updater .app.tar.gz on disk
+#                     (local built bundles ship none; --release requires it)
 #
 # Checks (per artifact):
 #   dmg   mounts read-only; contains exactly the .app; unmounts clean
@@ -40,6 +42,7 @@ RELEASE=""
 LOGS="$repo/target/release/smoke-logs"
 ALIVE_SECONDS=20
 APP_ID="com.acailic.mailchatvault"
+SKIP_UPDATER=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -47,6 +50,7 @@ while [[ $# -gt 0 ]]; do
     --release)      RELEASE="$2"; shift 2 ;;
     --logs)         LOGS="$2"; shift 2 ;;
     --alive)        ALIVE_SECONDS="$2"; shift 2 ;;
+    --skip-updater) SKIP_UPDATER=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -109,7 +113,13 @@ app_in_dmg="$(find "$mountpoint" -maxdepth 1 -name '*.app' | head -1)"
 # and its bundled version matches the release version (the tag, or the
 # version-bearing dmg name in --dir mode).
 app_tgz="$(find "$DIR" -name '*.app.tar.gz' 2>/dev/null | head -1)"
-[[ -n "$app_tgz" ]] || { echo "error: no .app.tar.gz found under $DIR" >&2; exit 2; }
+if [[ -z "$app_tgz" && "$SKIP_UPDATER" -eq 1 && -z "$RELEASE" ]]; then
+  echo "note: no .app.tar.gz under $DIR — skipping the updater-archive checks (--skip-updater)"
+elif [[ -z "$app_tgz" ]]; then
+  echo "error: no .app.tar.gz found under $DIR" >&2
+  echo "  (pass --skip-updater only when smoking local built bundles that ship no updater artifact)" >&2
+  exit 2
+else
 check "updater archive is a valid gzip tar" tar -tzf "$app_tgz"
 plist_member="$(tar -tzf "$app_tgz" | grep -m1 '\.app/Contents/Info\.plist$')"
 check "updater archive contains a .app/Contents/Info.plist" test -n "$plist_member"
@@ -118,6 +128,7 @@ expected_version="${RELEASE#v}"
 [[ -n "$expected_version" ]] || expected_version="$(basename "$dmg")"
 check "updater version matches the release version" \
   bash -c '[[ -n "$1" && "$2" == *"$1"* ]]' bash "$tar_version" "$expected_version"
+fi
 
 # ------------------------------------------------------------------- app
 APP="$app_in_dmg"
