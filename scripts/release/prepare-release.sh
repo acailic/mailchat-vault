@@ -29,7 +29,6 @@
 # Usage:
 #   scripts/release/prepare-release.sh [--version X.Y.Z]
 #                                      [--skip-matrix] [--skip-bundles]
-#                                      [--logs DIR]
 #
 #   --skip-matrix    do not run the validation matrix (iteration only —
 #                    a release candidate is never certified without it)
@@ -47,15 +46,13 @@ repo="$(git -C "$here" rev-parse --show-toplevel)"
 VERSION=""
 SKIP_MATRIX=0
 SKIP_BUNDLES=0
-LOGS=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version)      VERSION="$2"; shift 2 ;;
     --skip-matrix)  SKIP_MATRIX=1; shift ;;
     --skip-bundles) SKIP_BUNDLES=1; shift ;;
-    --logs)         LOGS="$2"; shift 2 ;;
-    *) echo "usage: $0 [--version X.Y.Z] [--skip-matrix] [--skip-bundles] [--logs DIR]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--version X.Y.Z] [--skip-matrix] [--skip-bundles]" >&2; exit 2 ;;
   esac
 done
 
@@ -105,30 +102,20 @@ verify_stage() {
 
 matrix_stage() {
   echo "== matrix: release validation column for this host =="
-  local os="$(uname -s)"
-  local matrix_out="$repo/target/release/.matrix-last-run.log"
-  case "$os" in
+  case "$(uname -s)" in
     Linux)
       echo "  running scripts/release/matrix-linux.sh (full Linux column)"
-      if [[ -n "$LOGS" ]]; then
-        "$repo/scripts/release/matrix-linux.sh" --logs "$LOGS" 2>&1 | tee "$matrix_out"
-      else
-        "$repo/scripts/release/matrix-linux.sh" 2>&1 | tee "$matrix_out"
-      fi
+      "$repo/scripts/release/matrix-linux.sh"
       ;;
     Darwin)
       echo "  running scripts/release/matrix-macos.sh (needs a real macOS host)"
-      "$repo/scripts/release/matrix-macos.sh" 2>&1 | tee "$matrix_out"
+      "$repo/scripts/release/matrix-macos.sh"
       ;;
     *)
-      fail "no matrix column for '$os' — run matrix-linux.sh on Linux or matrix-macos.sh/matrix-windows.ps1 on their hosts"
+      fail "no matrix column for '$(uname -s)' — run matrix-linux.sh on Linux or matrix-macos.sh/matrix-windows.ps1 on their hosts"
       ;;
   esac
   echo "  matrix PASSED — this platform's column is green for v$VERSION"
-  # remember which log dir this run produced so assemble_stage can
-  # embed the evidence pointer in the candidate
-  ls -dt "$repo"/target/release/matrix-logs/*/ 2>/dev/null | head -1 \
-    > "$repo/target/release/.matrix-last-run" || true
 }
 
 bundles_stage() {
@@ -146,8 +133,15 @@ bundles_stage() {
 
 assemble_stage() {
   echo "== assemble: local draft-release candidate =="
-  rm -rf "$DRAFT_DIR"
   mkdir -p "$DRAFT_DIR"
+  # drop this script's own generated artifacts, keep everything else —
+  # under the (b) flow, bundles copied here from other hosts must
+  # survive a re-run so one combined SHA256SUMS can be written
+  rm -f "$DRAFT_DIR"/SHA256SUMS "$DRAFT_DIR"/RELEASE-NOTES.md \
+        "$DRAFT_DIR"/PUBLISH-CHECKLIST.md "$DRAFT_DIR"/MATRIX-RUN.md
+  if compgen -G "$DRAFT_DIR/mailchat-vault_${VERSION}_*" >/dev/null; then
+    echo "  note: existing mailchat-vault_${VERSION}_* assets in the draft dir are kept and included in the combined checksums"
+  fi
 
   # 1. copy the bundles
   local -a found=()
@@ -170,27 +164,6 @@ assemble_stage() {
   # 2. checksums over exactly what this candidate ships
   ( cd "$DRAFT_DIR" && sha256sum mailchat-vault_"$VERSION"_* > SHA256SUMS )
   echo "  wrote SHA256SUMS ($(wc -l < "$DRAFT_DIR/SHA256SUMS") entries)"
-
-  # 2b. matrix evidence pointer: the run that certified this candidate
-  if [[ -s "$repo/target/release/.matrix-last-run" ]]; then
-    local matrix_dir matrix_out
-    matrix_dir="$(cat "$repo/target/release/.matrix-last-run")"
-    matrix_out="$repo/target/release/.matrix-last-run.log"
-    {
-      echo "# Matrix run behind this candidate"
-      echo
-      if [[ -d "$matrix_dir" ]]; then
-        echo "Per-leg logs: \`$matrix_dir\`"
-      fi
-      if [[ -s "$matrix_out" ]]; then
-        echo
-        echo '```'
-        sed -n '/matrix summary/,/^logs:/p' "$matrix_out" || true
-        echo '```'
-      fi
-    } > "$DRAFT_DIR/MATRIX-RUN.md"
-    echo "  wrote MATRIX-RUN.md"
-  fi
 
   # 3. release notes: the version's changelog section + the standing
   #    unsigned-artifacts disclosure (same facts the release workflow's
@@ -252,8 +225,9 @@ Whichever path is chosen, the gate order below is the same.
    \`CHANGELOG.md\`'s \`## [$VERSION]\` heading with the release date,
    commit, and re-run \`scripts/release/prepare-release.sh --version $VERSION\`
    so RELEASE-NOTES.md carries it.
-2. **Confirm the matrix** — this candidate's matrix run is recorded
-   in \`MATRIX-RUN.md\`; under (b), both additional platform columns
+2. **Confirm the matrix** — the matrix run's per-leg logs live in the
+   \`target/release/matrix-logs/\` directory the matrix script prints
+   when it finishes; under (b), both additional platform columns
    must be green before their assets ship; under (c), the workflow's
    own smoke jobs (macOS dmg smoke, Linux smoke) must be green on the
    tag.

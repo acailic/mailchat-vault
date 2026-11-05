@@ -104,6 +104,8 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
 - **No backup/restore yet** — the versioned backup feature is planned
   but not shipped in 0.2.0; copy the data directory manually if you
   need a snapshot.
+- **No multi-account yet** — the multi-account accounts panel (PR #53)
+  is open and unmerged, so 0.2.0 still holds one account per vault.
 - **No auto-update** — new releases are a fresh download; there is no
   in-app updater.
 
