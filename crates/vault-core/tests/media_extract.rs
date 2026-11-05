@@ -925,3 +925,37 @@ fn unlinked_budget_exhaustion_is_counted_not_silent() {
         let _ = fs::set_permissions(&secret, fs::Permissions::from_mode(0o644));
     }
 }
+
+#[test]
+fn unlinked_walk_failure_is_counted_not_silent() {
+    use std::collections::HashSet;
+
+    use vault_core::media::{extract_unlinked, MediaSummary};
+    use vault_core::object_store::Capacity;
+
+    // A tree nesting past the walk's depth bound: the unlinked pass
+    // aborts on the walk error, and the summary must say so instead of
+    // reporting an empty, clean pass.
+    let sb = Sandbox::new("unlinked-walk");
+    let export = sb.export_dir();
+    fs::write(export.join("shallow.txt"), b"shallow").unwrap();
+    let deep = export.join("d1/d2/d3/d4/d5/d6/d7/deep.txt");
+    fs::create_dir_all(deep.parent().unwrap()).unwrap();
+    fs::write(&deep, b"deep").unwrap();
+
+    let mut summary = MediaSummary::default();
+    let mut budget = Capacity::new(1024, 10);
+    let records = extract_unlinked(
+        &export,
+        None,
+        &sb.data_dir(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &mut summary,
+        &mut budget,
+    )
+    .unwrap();
+    assert!(records.is_empty(), "the walk aborted, nothing registered");
+    assert_eq!(summary.unlinked, 0);
+    assert_eq!(summary.unlinked_walk_failed, 1, "the failure is counted");
+}

@@ -108,6 +108,11 @@ pub struct MediaSummary {
     /// stores them).
     #[serde(default)]
     pub unlinked_dropped: u64,
+    /// 1 when the unlinked pass's tree walk failed (import bounds or
+    /// I/O): the tree was not fully walked, so the unlinked counts
+    /// understate the export and a re-import may still find files.
+    #[serde(default)]
+    pub unlinked_walk_failed: u64,
 }
 
 /// The `raw_json` `media` array element (also the IPC shape the frontend
@@ -578,6 +583,10 @@ pub fn extract_unlinked(
         return Ok(records);
     }
     let Ok(files) = walk_bounded(export_root, &ImportBounds::default()) else {
+        // The walk refused or failed: nothing past this point can be
+        // examined, and the import must not fail over export litter —
+        // but the summary must not pretend the tree was fully walked.
+        summary.unlinked_walk_failed += 1;
         return Ok(records);
     };
     for file in files {
