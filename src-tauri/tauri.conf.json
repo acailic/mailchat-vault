@@ -42,6 +42,7 @@
     ],
     "linux": {
       "deb": {
+        "desktopTemplate": "packaging/mailchat-vault.desktop",
         "postInstallScript": "packaging/deb-postinst",
         "postRemoveScript": "packaging/deb-postrm"
       }
