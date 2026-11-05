@@ -27,6 +27,14 @@ are also attached as workflow-run artifacts (`linux-bundles`,
 Version bump flow: raise `version` in `src-tauri/tauri.conf.json` and the
 workspace `Cargo.toml`, commit, tag `v<version>`, push the tag.
 
+> **Actions are currently disabled by decision** (pushes skip CI), so the
+> workflow above is the documented path *for when workflows are re-enabled*;
+> the operative route today is the local one: build per platform
+> (`scripts/release/build-linux.sh` on Linux; `npm run tauri build --
+> --bundles app,dmg` on macOS; `npm run tauri build -- --bundles msi,nsis` on
+> Windows), publish with `gh release create/upload`, and gate the publish on
+> the local smoke suites + checksums below.
+
 The same packaging can be built locally without any host toolchain
 (besides docker) with:
 
@@ -71,6 +79,30 @@ needs:
 The `.mbox` association makes "open a mailbox archive" work from the
 file manager: `.mbox` files (`application/mbox`) offer Mailchat Vault
 as the handler (Viewer role; the app imports the file's mail).
+
+## Checksums & verifying a published release
+
+Every release carries a `SHA256SUMS` asset: one `sha256sum -c`-compatible
+line per release artifact. Verify a download against it:
+
+```sh
+curl -sSLO https://github.com/acailic/mailchat-vault/releases/download/v0.1.0/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
+```
+
+To verify (and optionally checksum/smoke) a **whole published release** in
+one command — downloading every asset, checking each file's sha256 against
+GitHub's own server-side asset digests so a tampered download cannot pass:
+
+```sh
+scripts/release/release-verify.sh v0.1.0              # download + verify
+scripts/release/release-verify.sh v0.1.0 --attach --smoke  # + publish SHA256SUMS, run Linux smoke
+```
+
+`--attach` uploads the generated `SHA256SUMS` to the release (idempotent,
+`--clobber`). Publishing rule: **no release is complete without its
+SHA256SUMS asset** (v0.1.0 originally shipped without one; it was attached
+retroactively — see the roadmap M6 record).
 
 ## Code-signing status (this round: none)
 
@@ -146,6 +178,12 @@ It runs in two places automatically:
 - the `build-macos` job of `release.yml` runs it on the freshly built dmg
   **before** attaching it to the draft release — an unverified dmg never
   reaches a release.
+
+A second, complementary gate covers the *published* artifact end-to-end:
+`scripts/release/smoke-macos.sh --release v0.1.0` (or `--dir <dir-with-dmg>`)
+mounts the published dmg, checks bundle id/version/universal slices/ad-hoc
+signature, copies the app out, clears quarantine and requires the app to
+stay alive — see the macOS step of the install smoke test below.
 
 Walk the [UI checklist](#ui-checklist-any-platform-2-minutes) manually
 once per release on top of that.
@@ -233,6 +271,20 @@ nuances: [`tests/windows-smoke/README.md`](../tests/windows-smoke/README.md).
 
 Publish a release only when this workflow is green on the tag being
 released (in addition to the manual Linux smoke below).
+
+**Local route (no CI needed):** on any Windows box with `gh` authenticated
+and the WebView2 runtime, the same gate runs against the *published*
+installers in one command:
+
+```pwsh
+pwsh scripts/release/windows-smoke-from-release.ps1 -Tag v0.1.0 -AllowDataWipe
+# upgrade phases (needs cargo for the digest tool):
+pwsh scripts/release/windows-smoke-from-release.ps1 -Tag v0.1.1 -OldTag v0.1.0 -BuildInspect -AllowDataWipe
+```
+
+It downloads the release's `.msi`/`.exe` and drives
+`scripts/windows-smoke.ps1` (fresh install → launch → vault.db → uninstall
+carries the archive) against exactly the bytes users download.
 
 ## Preparing a release (local draft — nothing published)
 
@@ -394,16 +446,24 @@ xvfb-run -a timeout 20s ./mailchat-vault_0.1.0_amd64.AppImage --appimage-extract
 
 ### macOS
 
-Run the automated smoke test on the dmg (see
-[macOS → Automated dmg smoke test](#automated-dmg-smoke-test)):
+Automated gates — two complementary scripts, run on a macOS machine:
 
-```sh
-scripts/dmg-smoke-test.sh ~/Downloads/mailchat-vault_0.1.0_universal.dmg
-```
+- `scripts/dmg-smoke-test.sh <dmg>` — headless CLI-answer checks: mount,
+  copy the `.app` out, verify the universal slices, then `--version` and
+  `--help` with exit codes and output (see
+  [macOS → Automated dmg smoke test](#automated-dmg-smoke-test)); runs
+  automatically in CI and in the release workflow before attaching the dmg.
+- `scripts/release/smoke-macos.sh --release v0.1.0   # or --dir <dir-with-dmg>` —
+  the published-artifact gate (M6.2 macOS half): mounts the **published**
+  `.dmg`, checks the `.app` (bundle id, version, universal arm64+x86_64
+  slices, ad-hoc signature present), copies it out the way a user does,
+  clears the quarantine attribute (`xattr -cr` — the documented Gatekeeper
+  path), launches it and requires it to stay alive. Honest record: not yet
+  executed — no macOS host this round.
 
-Then open the `.dmg`, drag the app to `/Applications`, clear the quarantine
-attribute (`xattr -cr` above, or right-click → *Open* once), then run the UI
-checklist.
+Manual route: open the `.dmg`, drag the app to `/Applications`, clear the
+quarantine attribute (`xattr -cr` above, or right-click → *Open* once), then
+run the UI checklist.
 
 ### Windows
 
