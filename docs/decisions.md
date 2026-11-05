@@ -1,6 +1,6 @@
 # Architecture decisions
 
-Status: **accepted design direction**. D03, D04, D10, and D12 are implemented and verified (M1/M2, 2026-11-05 — see the [roadmap's completion records](implementation-roadmap.md#completion-tracking)); the rest remain planning defaults until their slices land. These records describe the agreed direction, not completed code unless the amendment says otherwise. Scope changes belong in the [product plan](product-plan.md); wire/schema details belong in [contracts](data-and-api-contracts.md).
+Status: **accepted design direction**. D03, D04, D08, D10, and D12 are implemented and verified (D03/D12 with M1, D04/D10 with M2, D08's workspace/search halves with M3.1/M3.2 — 2026-11-05, see the [roadmap's completion records](implementation-roadmap.md#completion-tracking)); the rest remain planning defaults until their slices land. These records describe the agreed direction, not completed code unless the amendment says otherwise. Scope changes belong in the [product plan](product-plan.md); wire/schema details belong in [contracts](data-and-api-contracts.md).
 
 ## D01: Personal local archive
 
@@ -37,6 +37,8 @@ Rely on OS account/disk protection and owner-only permissions where supported. S
 ## D08: Archive workspace over competing feature panels
 
 Use source navigation, flat search results, and a reading pane. Setup, activity and maintenance have dedicated views. Keep ranking stable and display human labels before technical metadata. Adapt to narrow windows with back navigation. This preserves familiarity and reading context while avoiding competing Search/Ask/import/server sections on one page. The [UX specification](ux-specification.md) owns breakpoints and keyboard rules.
+
+*Amendment (2026-11-05): the workspace/search halves are implemented as M3.1/M3.2 and recorded — the three-area shell with navigation destinations (All messages / Add source / Activity / Settings) and per-source scope chips, design tokens with light/dark/System themes and the bundled Source Sans 3, wide/medium/compact layouts with a 200%-zoom ≡ compact equivalence, the typed IPC boundary and centralized stale-response guard, and the flat stable v2 ranking (rank/id and instant/id orders, unknown times last) with filter chips, honest unknown-time and unverified-grouping presentation, deep links, and selection/scroll restore. Honest deviations: per-source status text and account pages await M3.4, the import surface keeps its interim pre-preview flow until M3.3, and the v1 render module stays active for unmigrated panels until the M3-exit cleanup. Details and evidence: [UX specification](ux-specification.md#workspace-and-navigation), [M3 progress record](implementation-roadmap.md#completion-tracking).*
 
 ## D09: AI is optional and payload approval is explicit
 
