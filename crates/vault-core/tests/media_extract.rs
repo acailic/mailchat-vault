@@ -723,25 +723,41 @@ fn unlinked_export_files_are_stored_and_registered() {
     )
     .unwrap();
     fs::write(sb.export_dir().join("users.html"), b"[]").unwrap();
+    // A user's own unreferenced .html/.json files are export content,
+    // not exporter sidecars: they are stored like any other stray file.
+    fs::write(
+        sb.export_dir().join("notes.html"),
+        b"<html>my notes</html>",
+    )
+    .unwrap();
+    fs::write(sb.export_dir().join("rules.json"), b"{}").unwrap();
+    // The exporter's conversation pages (messages.html, numbered and
+    // -part variants) are sidecars and stay out of the store.
+    fs::write(
+        sb.export_dir().join("messages.html"),
+        b"<html>messages page</html>",
+    )
+    .unwrap();
     let mut storage = Storage::open_in_memory().unwrap();
 
     let outcome = sb.import_with_media(&mut storage);
     let media = outcome.media.unwrap();
     assert_eq!(media.stored, 3, "the three referenced files");
-    assert_eq!(media.unlinked, 2, "the two stray files");
+    assert_eq!(media.unlinked, 4, "the four stray files");
     assert_eq!(media.unlinked_deduped, 0);
-    // Store: 3 linked + 2 unlinked; the json/html artifacts never land.
-    assert_eq!(fs::read_dir(sb.store_dir()).unwrap().count(), 5);
+    // Store: 3 linked + 4 unlinked; the sidecars never land.
+    assert_eq!(fs::read_dir(sb.store_dir()).unwrap().count(), 7);
 
     // Registered: reconciliation counts them as referenced (a clean
     // import with unlinked files stays clean).
     let digests = storage.media_digests().unwrap();
-    assert_eq!(digests.len(), 5);
+    assert_eq!(digests.len(), 7);
     let objects = storage.unlinked_media_objects().unwrap();
-    assert_eq!(objects.len(), 2);
+    assert_eq!(objects.len(), 4);
     assert!(objects.iter().all(|o| o.origin == "unlinked"));
     let names: Vec<&str> = objects.iter().map(|o| o.name.as_str()).collect();
     assert!(names.contains(&"orphan.png") && names.contains(&"extra.txt"));
+    assert!(names.contains(&"notes.html") && names.contains(&"rules.json"));
     let report = vault_core::object_store::ObjectStore::new(&sb.data_dir())
         .reconcile(&digests, false)
         .unwrap();
@@ -754,12 +770,12 @@ fn unlinked_export_files_are_stored_and_registered() {
     assert_eq!(media.stored, 0);
     assert_eq!(media.deduped, 3);
     assert_eq!(media.unlinked, 0);
-    assert_eq!(media.unlinked_deduped, 2);
+    assert_eq!(media.unlinked_deduped, 4);
     assert_eq!(media.linked, 0);
-    assert_eq!(fs::read_dir(sb.store_dir()).unwrap().count(), 5);
-    assert_eq!(storage.unlinked_media_objects().unwrap().len(), 2);
+    assert_eq!(fs::read_dir(sb.store_dir()).unwrap().count(), 7);
+    assert_eq!(storage.unlinked_media_objects().unwrap().len(), 4);
     let digests = storage.media_digests().unwrap();
-    assert_eq!(digests.len(), 5);
+    assert_eq!(digests.len(), 7);
 }
 
 #[test]

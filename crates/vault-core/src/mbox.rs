@@ -9,10 +9,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use crate::bounded::{
-    import_id_for, BoundedOutcome, BoundedRun, EntryOutcome, Flow, IngestSink, MediaKind,
-    MediaPass, StreamItem, StreamSource,
-};
+use crate::bounded::{EntryOutcome, Flow, StreamItem, StreamSource};
 use crate::ingest::{Collected, Source};
 use crate::mail::parse_raw_mail;
 use crate::Result;
@@ -46,35 +43,6 @@ impl Source for MboxSource {
             .unwrap_or_default();
         parse_mbox(&bytes, &chat_id)
     }
-}
-
-/// The bounded production import for `.mbox` files (M4.2 adds the mail
-/// media pass): streams the file one message at a time, and — with a
-/// `data_dir` — stores each mail's MIME attachments/inline parts into
-/// the content-addressed object store and links them from `raw_json`
-/// before every batch commit. Without a `data_dir` the import is
-/// text-only (attachment references stay recorded in `raw_json` only).
-/// Dedup and resume semantics are the shared bounded contract
-/// (see [`crate::bounded`]).
-pub fn import_mbox_bounded(
-    sink: &mut dyn IngestSink,
-    path: &Path,
-    data_dir: Option<&Path>,
-    is_cancelled: &dyn Fn() -> bool,
-    progress: &mut dyn FnMut(u64, u64, &str),
-) -> Result<BoundedOutcome> {
-    let source = MboxSource::new(path);
-    let mut run = BoundedRun::new(import_id_for("mbox-import", path));
-    if let Some(data_dir) = data_dir {
-        run.media = Some(MediaPass {
-            kind: MediaKind::Mail,
-            export_root: Path::new(""),
-            export_file: None,
-            data_dir,
-            unlinked: false,
-        });
-    }
-    run.run(&source, sink, is_cancelled, progress)
 }
 
 /// The bounded streaming path (M2.2): the file is walked line by line,

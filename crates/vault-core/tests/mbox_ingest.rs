@@ -317,7 +317,31 @@ Ključ na premijeri.
 // ---------------------------------------------------------------------
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use vault_core::bounded::{import_id_for, BoundedOutcome, BoundedRun, MediaKind, MediaPass};
+
+/// The mail-media wiring the production import builds (the same
+/// construction as the app's import command): mail pass, no export
+/// root, unlinked pass off.
+fn import_mbox_bounded(
+    storage: &mut Storage,
+    mbox: &Path,
+    data_dir: Option<&Path>,
+) -> vault_core::Result<BoundedOutcome> {
+    let source = MboxSource::new(mbox);
+    let mut run = BoundedRun::new(import_id_for("mbox-import", mbox));
+    if let Some(data_dir) = data_dir {
+        run.media = Some(MediaPass {
+            kind: MediaKind::Mail,
+            export_root: Path::new(""),
+            export_file: None,
+            data_dir,
+            unlinked: false,
+        });
+    }
+    run.run(&source, storage, &|| false, &mut |_, _, _| {})
+}
 
 fn tmpdir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("mcv-mbox-media-{}-{}", name, std::process::id()));
@@ -364,12 +388,10 @@ fn mbox_attachments_are_stored_and_linked() {
     let data_dir = dir.join("data");
 
     let mut storage = Storage::open_in_memory().unwrap();
-    let outcome = vault_core::mbox::import_mbox_bounded(
+    let outcome = import_mbox_bounded(
         &mut storage,
         &mbox,
         Some(&data_dir),
-        &|| false,
-        &mut |_, _, _| {},
     )
     .unwrap();
     assert_eq!(outcome.summary.inserted, 1);
@@ -415,23 +437,19 @@ fn mbox_reimport_dedups_objects_and_links() {
     let data_dir = dir.join("data");
     let mut storage = Storage::open_in_memory().unwrap();
 
-    let first = vault_core::mbox::import_mbox_bounded(
+    let first = import_mbox_bounded(
         &mut storage,
         &mbox,
         Some(&data_dir),
-        &|| false,
-        &mut |_, _, _| {},
     )
     .unwrap();
     assert_eq!(first.media.unwrap().stored, 2);
     let before = search_hits(&storage, "prilogu")[0].message.raw_json.clone();
 
-    let second = vault_core::mbox::import_mbox_bounded(
+    let second = import_mbox_bounded(
         &mut storage,
         &mbox,
         Some(&data_dir),
-        &|| false,
-        &mut |_, _, _| {},
     )
     .unwrap();
     let media = second.media.unwrap();
@@ -454,12 +472,10 @@ fn mbox_without_data_dir_is_text_only() {
     let mbox = dir.join("in.mbox");
     fs::write(&mbox, ATTACHMENT_MAIL).unwrap();
     let mut storage = Storage::open_in_memory().unwrap();
-    let outcome = vault_core::mbox::import_mbox_bounded(
+    let outcome = import_mbox_bounded(
         &mut storage,
         &mbox,
         None,
-        &|| false,
-        &mut |_, _, _| {},
     )
     .unwrap();
     assert!(outcome.media.is_none());
