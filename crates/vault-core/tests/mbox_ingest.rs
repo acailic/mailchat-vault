@@ -388,12 +388,7 @@ fn mbox_attachments_are_stored_and_linked() {
     let data_dir = dir.join("data");
 
     let mut storage = Storage::open_in_memory().unwrap();
-    let outcome = import_mbox_bounded(
-        &mut storage,
-        &mbox,
-        Some(&data_dir),
-    )
-    .unwrap();
+    let outcome = import_mbox_bounded(&mut storage, &mbox, Some(&data_dir)).unwrap();
     assert_eq!(outcome.summary.inserted, 1);
     let media = outcome.media.expect("mail media pass ran");
     assert_eq!(media.stored, 2, "pdf attachment + inline image");
@@ -437,21 +432,11 @@ fn mbox_reimport_dedups_objects_and_links() {
     let data_dir = dir.join("data");
     let mut storage = Storage::open_in_memory().unwrap();
 
-    let first = import_mbox_bounded(
-        &mut storage,
-        &mbox,
-        Some(&data_dir),
-    )
-    .unwrap();
+    let first = import_mbox_bounded(&mut storage, &mbox, Some(&data_dir)).unwrap();
     assert_eq!(first.media.unwrap().stored, 2);
     let before = search_hits(&storage, "prilogu")[0].message.raw_json.clone();
 
-    let second = import_mbox_bounded(
-        &mut storage,
-        &mbox,
-        Some(&data_dir),
-    )
-    .unwrap();
+    let second = import_mbox_bounded(&mut storage, &mbox, Some(&data_dir)).unwrap();
     let media = second.media.unwrap();
     assert_eq!(media.stored, 0, "no new objects");
     assert_eq!(
@@ -472,12 +457,7 @@ fn mbox_without_data_dir_is_text_only() {
     let mbox = dir.join("in.mbox");
     fs::write(&mbox, ATTACHMENT_MAIL).unwrap();
     let mut storage = Storage::open_in_memory().unwrap();
-    let outcome = import_mbox_bounded(
-        &mut storage,
-        &mbox,
-        None,
-    )
-    .unwrap();
+    let outcome = import_mbox_bounded(&mut storage, &mbox, None).unwrap();
     assert!(outcome.media.is_none());
     // No store dir; the message body is still searchable.
     assert!(!dir.join("data/media").exists());

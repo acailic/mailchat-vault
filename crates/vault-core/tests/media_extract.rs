@@ -725,11 +725,7 @@ fn unlinked_export_files_are_stored_and_registered() {
     fs::write(sb.export_dir().join("users.html"), b"[]").unwrap();
     // A user's own unreferenced .html/.json files are export content,
     // not exporter sidecars: they are stored like any other stray file.
-    fs::write(
-        sb.export_dir().join("notes.html"),
-        b"<html>my notes</html>",
-    )
-    .unwrap();
+    fs::write(sb.export_dir().join("notes.html"), b"<html>my notes</html>").unwrap();
     fs::write(sb.export_dir().join("rules.json"), b"{}").unwrap();
     // The exporter's conversation pages (messages.html, numbered and
     // -part variants) are sidecars and stay out of the store.

@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::bounded::{EntryOutcome, Flow, StreamItem, StreamSource};
 use crate::ingest::{Collected, Source};

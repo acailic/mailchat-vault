@@ -568,21 +568,13 @@ pub fn attachment_summaries(raw_json: &str) -> Vec<AttachmentSummary> {
                 .collect();
             for nested in ["file", "photo"] {
                 if let Some(path) = str_of(item, nested).filter(|p| !p.is_empty()) {
-                    names.push(
-                        path.rsplit(['/', '\\'])
-                            .next()
-                            .unwrap_or(path)
-                            .to_string(),
-                    );
+                    names.push(path.rsplit(['/', '\\']).next().unwrap_or(path).to_string());
                 }
             }
             if names.iter().any(|n| media_names.contains(n)) {
                 continue;
             }
-            let name = names
-                .into_iter()
-                .next()
-                .unwrap_or_else(|| key.to_string());
+            let name = names.into_iter().next().unwrap_or_else(|| key.to_string());
             out.push(AttachmentSummary {
                 name,
                 kind: key.to_string(),

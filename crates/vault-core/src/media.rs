@@ -548,9 +548,7 @@ fn is_telegram_page(lowered: &str) -> bool {
     };
     match stem.split_once('-') {
         None => stem.is_empty() || is_digits(stem),
-        Some((num, part)) => {
-            is_digits(num) && part.strip_prefix("part").is_some_and(is_digits)
-        }
+        Some((num, part)) => is_digits(num) && part.strip_prefix("part").is_some_and(is_digits),
     }
 }
 
@@ -710,11 +708,7 @@ impl<'a> MailMedia<'a> {
                     self.missing += 1;
                     push_media_entry(
                         msg,
-                        missing_entry_value(
-                            &attachment.name,
-                            &attachment.kind,
-                            missing_reason(&e),
-                        ),
+                        missing_entry_value(&attachment.name, &attachment.kind, missing_reason(&e)),
                     );
                 }
             }

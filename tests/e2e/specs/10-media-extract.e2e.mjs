@@ -249,8 +249,11 @@ export async function run(ctx) {
     const wa = await invoke(browser, "import_chat_export", { path: chat, extractMedia: true });
     assert.ok(wa.ok, `whatsapp import succeeded: ${wa.error ?? ""}`);
     const wm = wa.value.media;
+    // M4.2 records the missing reference as an explicit missing media
+    // entry on its message, so the plan.pdf message's media array is
+    // written too — linked counts both messages, not just the stored one.
     assert.ok(
-      wm.referenced === 2 && wm.missing === 1 && wm.deduped === 1 && wm.linked === 1,
+      wm.referenced === 2 && wm.missing === 1 && wm.deduped === 1 && wm.linked === 2,
       "plan.pdf.bak not linked (missing=1); IMG-1.jpg matched IMG-1.jpeg by stem, stored bytes " +
         "dedup onto the existing photo copy (got " + JSON.stringify(wm) + ")",
     );
