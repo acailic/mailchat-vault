@@ -91,6 +91,7 @@ echo "== macos suite: $(basename "$dmg") on $(sw_vers -productVersion) ($(uname 
 mountpoint="$(mktemp -d)/dmg"
 mkdir -p "$mountpoint"
 check "dmg attaches read-only" hdiutil attach "$dmg" -mountpoint "$mountpoint" -readonly -nobrowse -quiet
+trap 'hdiutil detach "$mountpoint" -quiet 2>/dev/null || :' EXIT
 app_count="$(find "$mountpoint" -maxdepth 1 -name '*.app' | wc -l | tr -d ' ')"
 check "dmg contains exactly one .app bundle" test "$app_count" -eq 1 -a -d "$mountpoint"/*.app
 app_in_dmg="$(find "$mountpoint" -maxdepth 1 -name '*.app' | head -1)"
