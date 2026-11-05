@@ -62,14 +62,22 @@
 //!   `job_cancel` — the v2 background-job protocol (see above); progress
 //!   and state changes stream to the UI as `job-event` window events.
 //!   Kinds: `seed_demo`, `import_mbox`, `import_chat_export`,
-//!   `embed_messages`, `imap_sync` (one named account), and
-//!   `imap_sync_all` (the M2.3 coordinator round over every configured,
-//!   non-excluded IMAP source, credentials resolved per source from the
-//!   keyring).
+//!   `embed_messages`, `imap_sync` (one named account), `imap_sync_all`
+//!   (the M2.3 coordinator round over every configured, non-excluded
+//!   IMAP source, credentials resolved per source from the keyring),
+//!   `backup_create` and `restore_preview` (M4.4: the versioned backup
+//!   container writer and the staged, journaled restore validation).
 //! - `seed_demo` — insert the built-in sample messages (idempotent).
 //! - `stats` — archive counts per source (drives the source filter chips).
 //! - `archive_stats` — dashboard aggregates: totals, date range, counts by
 //!   source/day, top chats and top authors.
+//! - `backup_inspect` / `restore_commit` / `recovery_status` /
+//!   `recovery_forget` / `return_to_previous_vault` — the M4.4
+//!   backup/restore surface: quick container inspection, the commit
+//!   step of a staged validated restore (stops jobs, closes the pool,
+//!   switches through the recoverable journal — a restart is required
+//!   afterwards), and the previous-vault recovery surface. Startup
+//!   resolves an interrupted switch before anything opens the vault.
 //! - `export_search` — write the current search results (all pages, under
 //!   the active filters) to a user-chosen file as CSV, JSON Lines or MBOX.
 //! - `export_chat` — write the whole chat thread of one message to a
@@ -108,6 +116,7 @@ use vault_core::llm::{
 };
 use vault_core::mbox::MboxSource;
 use vault_core::oauth::{self, OAuthConfig};
+use vault_core::backup::{self, BackupManifest, RecoveryStatus, RestoreOutcome};
 use vault_core::object_store::{MediaUsage, ObjectStore, ReconcileReport};
 use vault_core::query::{ChatContext, SearchPage, SearchQuery};
 use vault_core::scheduler::{SyncSchedule as CoreSyncSchedule, SyncScheduler};
@@ -147,6 +156,9 @@ struct AppState {
     embedder: HashEmbedder,
     watcher: FolderWatcher,
     scheduler: Arc<SyncScheduler>,
+    /// The vault root (app data dir): `vault.db`, `media/`,
+    /// `settings.json` — what the M4.4 backup containers capture.
+    data_dir: PathBuf,
 }
 
 /// Result of an IMAP sync: per-folder summaries plus where an entered
@@ -478,6 +490,112 @@ async fn media_open_external(
     })
     .await
     .map_err(|e| format!("open task failed: {e}"))?
+}
+
+// ---------------------------------------------------------------------------
+// Backup & restore (M4.4)
+// ---------------------------------------------------------------------------
+//
+// The long halves run as jobs (`backup_create`, `restore_preview` —
+// progress streams through the job-event protocol); these commands are
+// the quick, synchronous surfaces: inspecting a container, committing
+// a validated restore (which stops the app's own access and requires a
+// restart), and the previous-vault recovery surface.
+
+/// Read a container's manifest without hashing its entries — the
+/// pre-restore summary (versions, counts, created-at) the UI shows
+/// before validating.
+#[tauri::command]
+async fn backup_inspect(archive: String) -> Result<BackupManifest, String> {
+    tauri::async_runtime::spawn_blocking(move || backup::read_manifest(Path::new(&archive)))
+        .await
+        .map_err(|e| format!("inspect task failed: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Commit a staged, validated restore. Stops the scheduler, watcher,
+/// and the database pool first — the switch moves `vault.db` itself —
+/// then replaces the vault payload through the recoverable switch
+/// journal. On success the app must be restarted to reopen the vault;
+/// the caller shows that state. Credentials are never restored:
+/// `sources_needing_reauth` is the count the UI warns with.
+#[tauri::command]
+async fn restore_commit(
+    state: State<'_, AppState>,
+    preview_id: String,
+) -> Result<RestoreOutcome, String> {
+    let scheduler = Arc::clone(&state.scheduler);
+    let pool = Arc::clone(&state.pool);
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<RestoreOutcome, String> {
+        // The active vault must be exactly what the preview validated.
+        let fingerprint = pool
+            .with_read(|s| s.vault_fingerprint())
+            .map_err(|e| e.to_string())?;
+        // Stop scheduled rounds and watched-folder imports before the
+        // switch (their writes would fail on the drained pool anyway,
+        // but disabling is the honest stop).
+        let _ = scheduler.set(vault_core::scheduler::SyncSchedule {
+            enabled: false,
+            interval_ms: 0,
+        });
+        pool.shutdown();
+        backup::commit_restore(
+            &data_dir,
+            &preview_id,
+            &fingerprint,
+            &|_| {},
+            &backup::RestoreOptions::default(),
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("restore task failed: {e}"))?
+}
+
+/// The recovery state: the switch journal, a staged (validated,
+/// uncommitted) restore, and the recorded previous-vault slots.
+#[tauri::command]
+async fn recovery_status(state: State<'_, AppState>) -> Result<RecoveryStatus, String> {
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || backup::recovery_status(&data_dir))
+        .await
+        .map_err(|e| format!("status task failed: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Explicitly forget one previous-vault slot (releases its disk).
+#[tauri::command]
+async fn recovery_forget(state: State<'_, AppState>, slot_id: String) -> Result<(), String> {
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || backup::recovery_forget(&data_dir, &slot_id))
+        .await
+        .map_err(|e| format!("forget task failed: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+/// Switch the active vault back to a recorded previous vault through
+/// the same validated switch process. Like `restore_commit` this
+/// stops the app's access and requires a restart.
+#[tauri::command]
+async fn return_to_previous_vault(
+    state: State<'_, AppState>,
+    slot_id: String,
+) -> Result<RestoreOutcome, String> {
+    let scheduler = Arc::clone(&state.scheduler);
+    let pool = Arc::clone(&state.pool);
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<RestoreOutcome, String> {
+        let _ = scheduler.set(vault_core::scheduler::SyncSchedule {
+            enabled: false,
+            interval_ms: 0,
+        });
+        pool.shutdown();
+        backup::return_to_previous_vault(&data_dir, &slot_id, &|_| {})
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("return task failed: {e}"))?
 }
 
 /// Export an explicit selection of messages (the rows the user checked
@@ -1197,6 +1315,17 @@ enum JobSpec {
         folders: Vec<String>,
     },
     ImapSyncAll,
+    /// M4.4: write a versioned backup container of the whole vault to
+    /// a native-picked destination (long-running: reports progress).
+    BackupCreate {
+        dest: String,
+    },
+    /// M4.4: validate a picked backup container and stage it for a
+    /// journaled restore (long-running: reports progress). Committing
+    /// is the separate `restore_commit` command.
+    RestorePreview {
+        archive: String,
+    },
 }
 
 impl JobSpec {
@@ -1209,6 +1338,8 @@ impl JobSpec {
             JobSpec::EmbedMessages => "embed_messages",
             JobSpec::ImapSync { .. } => "imap_sync",
             JobSpec::ImapSyncAll => "imap_sync_all",
+            JobSpec::BackupCreate { .. } => "backup_create",
+            JobSpec::RestorePreview { .. } => "restore_preview",
         }
     }
 
@@ -1278,9 +1409,16 @@ impl JobSpec {
             // The coordinator round: no parameters — it syncs every
             // configured, non-excluded IMAP source (M2.3).
             "imap_sync_all" => Ok(JobSpec::ImapSyncAll),
+            "backup_create" => Ok(JobSpec::BackupCreate {
+                dest: string_field("dest")?,
+            }),
+            "restore_preview" => Ok(JobSpec::RestorePreview {
+                archive: string_field("archive")?,
+            }),
             other => Err(format!(
                 "unknown job kind “{other}” (supported: seed_demo, import_mbox, \
-                 import_chat_export, embed_messages, imap_sync, imap_sync_all)"
+                 import_chat_export, embed_messages, imap_sync, imap_sync_all, \
+                 backup_create, restore_preview)"
             )),
         }
     }
@@ -1470,7 +1608,96 @@ fn run_job_spec(
             Ok(serde_json::to_value(&summaries).unwrap_or(Value::Null))
         }
         JobSpec::ImapSyncAll => run_sync_all_round(ctx, pool, secrets, data_dir),
+        JobSpec::BackupCreate { dest } => run_backup_create(ctx, data_dir, Path::new(dest)),
+        JobSpec::RestorePreview { archive } => {
+            run_restore_preview(ctx, data_dir, Path::new(archive))
+        }
     }
+}
+
+/// The `backup_create` job body: a versioned container of the whole
+/// vault (SQLite snapshot + settings + referenced objects) written to
+/// a native-picked destination, verified before it is published.
+/// The snapshot runs under the write queue (new writes pause behind it
+/// — "backup pauses new writes after current batches finish"); the
+/// long container copy then runs on the job runner with progress and
+/// cooperative cancellation while search keeps serving.
+fn run_backup_create(
+    ctx: &JobContext,
+    data_dir: &Path,
+    dest: &Path,
+) -> std::result::Result<Value, JobError> {
+    if ctx.is_cancelled() {
+        return Err(JobError::Cancelled);
+    }
+    ctx.progress(0, 0, "taking a consistent database snapshot");
+    let dest_parent = dest.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let stem = dest
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "backup".to_string());
+    let snapshot_tmp = dest_parent.join(format!(".{stem}-snapshot-{}", std::process::id()));
+    let plan = ctx
+        .write({
+            let data_dir = data_dir.to_path_buf();
+            let snapshot_tmp = snapshot_tmp.clone();
+            move |s| backup::snapshot_for_backup(&data_dir, s.connection(), &snapshot_tmp)
+        })
+        .map_err(backup_job_error)?;
+    let summary = backup::write_backup_container(
+        data_dir,
+        &plan,
+        dest,
+        &|note| {
+            ctx.progress(note.done, note.total, note.phase);
+        },
+        &|| ctx.is_cancelled(),
+        &backup::BackupOptions::default(),
+    )
+    .map_err(backup_job_error)?;
+    // The snapshot temp is consumed once the container is verified.
+    let _ = std::fs::remove_file(&plan.snapshot);
+    ctx.progress(1, 1, "backup verified");
+    Ok(serde_json::to_value(&summary).unwrap_or(Value::Null))
+}
+
+/// The `restore_preview` job body: validate the picked container and
+/// stage it under the recovery directory. Nothing in the active vault
+/// changes; the returned preview id commits through `restore_commit`.
+fn run_restore_preview(
+    ctx: &JobContext,
+    data_dir: &Path,
+    archive: &Path,
+) -> std::result::Result<Value, JobError> {
+    if ctx.is_cancelled() {
+        return Err(JobError::Cancelled);
+    }
+    let fingerprint = ctx
+        .read(|s| s.vault_fingerprint())
+        .map_err(backup_job_error)?;
+    let preview = backup::stage_restore(
+        data_dir,
+        archive,
+        &fingerprint,
+        &|note| {
+            ctx.progress(note.done, note.total, note.phase);
+        },
+        &backup::RestoreOptions::default(),
+    )
+    .map_err(backup_job_error)?;
+    ctx.progress(1, 1, "restore validated — review it in Settings");
+    Ok(serde_json::to_value(&preview).unwrap_or(Value::Null))
+}
+
+/// Map core backup errors into job errors (a cooperative cancellation
+/// surfaces as `JobError::Cancelled`, everything else as storage).
+fn backup_job_error(e: Error) -> JobError {
+    if let Error::Backup(message) = &e {
+        if message == "cancelled" {
+            return JobError::Cancelled;
+        }
+    }
+    JobError::from(e)
 }
 
 /// One coordinator round over every configured IMAP source (M2.3) —
@@ -2182,6 +2409,13 @@ pub fn run() {
             // Copies left behind by a previous session's external opens
             // never outlive this one's first open.
             purge_media_open_copies();
+            // M4.4: resolve an interrupted restore/return switch before
+            // anything opens the vault — `switching` rolls back to the
+            // intact previous vault, `staged` rolls forward to the new
+            // one; either way this app start opens one verified vault.
+            if let Err(e) = backup::recover_interrupted_switch(&data_dir) {
+                eprintln!("Switch recovery failed: {e}");
+            }
             // M2.1: one pool over the vault file — writer worker + two
             // read connections. Job events stream to the UI; the same
             // events are recoverable by polling `job_events_since`.
@@ -2247,6 +2481,7 @@ pub fn run() {
                 embedder: HashEmbedder::new(),
                 watcher,
                 scheduler,
+                data_dir,
             });
             app.manage(Arc::clone(&secrets));
             Ok(())
@@ -2294,7 +2529,12 @@ pub fn run() {
             media_reconcile,
             media_usage,
             media_export,
-            media_open_external
+            media_open_external,
+            backup_inspect,
+            restore_commit,
+            recovery_status,
+            recovery_forget,
+            return_to_previous_vault
         ])
         .run(tauri::generate_context!())
         .expect("error while running mailchat vault");

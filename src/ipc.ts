@@ -5,6 +5,11 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type {
+  BackupManifest,
+  RecoveryStatusView,
+  RestoreOutcomeView,
+} from "./backupview";
 import type { MediaUsageView } from "./media";
 import type {
   AccountView,
@@ -180,6 +185,44 @@ export interface ReconcileReportView {
 
 export function mediaReconcile(): Promise<ReconcileReportView> {
   return invoke<ReconcileReportView>("media_reconcile");
+}
+
+// ---------------------------------------------------------------------------
+// Backup & restore (M4.4)
+// ---------------------------------------------------------------------------
+
+export type {
+  BackupManifest,
+  BackupSummaryView,
+  RecoveryStatusView,
+  RestoreOutcomeView,
+  RestorePreviewView,
+} from "./backupview";
+
+/** Quick manifest read of a picked container (pre-restore summary). */
+export function backupInspect(archive: string): Promise<BackupManifest> {
+  return invoke<BackupManifest>("backup_inspect", { archive });
+}
+
+/** Commit a staged, validated restore. Stops the app's vault access;
+ * the UI must ask for a restart on success. */
+export function restoreCommit(previewId: string): Promise<RestoreOutcomeView> {
+  return invoke<RestoreOutcomeView>("restore_commit", { previewId });
+}
+
+/** The recovery state: journal, staged preview, previous-vault slots. */
+export function recoveryStatus(): Promise<RecoveryStatusView> {
+  return invoke<RecoveryStatusView>("recovery_status");
+}
+
+/** Explicitly forget one previous-vault slot. */
+export function recoveryForget(slotId: string): Promise<void> {
+  return invoke<void>("recovery_forget", { slotId });
+}
+
+/** Switch back to a previous vault (validated switch; restart after). */
+export function returnToPreviousVault(slotId: string): Promise<RestoreOutcomeView> {
+  return invoke<RestoreOutcomeView>("return_to_previous_vault", { slotId });
 }
 
 // ---------------------------------------------------------------------------
