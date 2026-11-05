@@ -48,7 +48,7 @@ trap cleanup EXIT
 if ! MOUNT_INFO="$(hdiutil attach -nobrowse -readonly "$DMG" 2>&1)"; then
     fail "hdiutil attach failed: $MOUNT_INFO"
 fi
-MOUNT_POINT="$(printf '%s\n' "$MOUNT_INFO" | grep '/Volumes/' | tail -n1 | awk -F'\t' '{print $NF}')"
+MOUNT_POINT="$(printf '%s\n' "$MOUNT_INFO" | grep '/Volumes/' | tail -n1 | awk -F'\t' '{print $NF}' || true)"
 [ -n "$MOUNT_POINT" ] && [ -d "$MOUNT_POINT" ] \
     || fail "could not locate the mounted volume in: $MOUNT_INFO"
 
