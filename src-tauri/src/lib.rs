@@ -67,6 +67,13 @@
 //!   the active filters) to a user-chosen file as CSV, JSON Lines or MBOX.
 //! - `export_chat` — write the whole chat thread of one message to a
 //!   user-chosen file in the same formats.
+//!
+//! Desktop notifications for new mail (the Tauri notification plugin,
+//! registered here, drives macOS/Windows/Linux natively) live in the
+//! frontend: `src/notify.ts` derives a "new mail" digest from succeeded
+//! sync jobs, v1 sync outcomes, and watch snapshots, and stays silent
+//! while the window is focused, when the Settings option is off, or when
+//! the OS denies permission — see that module for the contract.
 
 use std::collections::HashSet;
 use std::io::{BufWriter, Write};
@@ -694,6 +701,7 @@ fn settings_save(
         options: Options {
             theme: payload.theme,
             summarize_top: payload.summarize_top,
+            notifications: payload.notifications,
         },
     };
     settings.normalize();
@@ -1888,6 +1896,7 @@ fn serve_media_object(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         // M4.3: the read-only media protocol. Registered asynchronously
         // and served on the blocking pool so no media read — full or
         // ranged — can stall the UI thread; range requests answer with

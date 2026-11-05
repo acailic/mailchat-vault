@@ -64,6 +64,26 @@ vi.mock("@tauri-apps/api/event", () => ({
     return Promise.resolve(() => tauriEvents.listeners.delete(name));
   },}));
 
+// Desktop notifications: the plugin surface is faked per test (sent
+// titles/bodies land in `notifications.sent`); permission defaults to
+// granted so tests exercise the decision layer, not the OS.
+const notifications = vi.hoisted(() => ({
+  granted: true,
+  requested: 0,
+  requestAnswer: true as boolean,
+  sent: [] as Array<{ title: string; body: string }>,
+}));
+vi.mock("@tauri-apps/plugin-notification", () => ({
+  isPermissionGranted: () => notifications.granted,
+  requestPermission: () => {
+    notifications.requested += 1;
+    return Promise.resolve(notifications.requestAnswer ? "granted" : "denied");
+  },
+  sendNotification: (options: { title: string; body?: string }) => {
+    notifications.sent.push({ title: options.title, body: options.body ?? "" });
+  },
+}));
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
@@ -320,7 +340,11 @@ beforeEach(() => {
   ]);
   tauriEvents.listeners.clear();
   dialog.open.mockReset();
-  dialog.savedPath = null;});
+  dialog.savedPath = null;
+  notifications.granted = true;
+  notifications.requested = 0;
+  notifications.requestAnswer = true;
+  notifications.sent.length = 0;});
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -2519,6 +2543,7 @@ function viewWith(mutate: (v: Record<string, unknown>) => void = () => {}): Reco
     default_provider: "zai",
     theme: "system",
     summarize_top: 8,
+    notifications: true,
     env: null,
     env_error: null,
     settings_error: null,
@@ -2643,6 +2668,7 @@ describe("settings screen", () => {
       default_provider: "zai",
       theme: "light",
       summarize_top: 20,
+      notifications: true,
       api_keys: [
         { id: "zai", key: "secret-1" }, // trimmed
         { id: "custom", key: "secret-2" },
@@ -2808,6 +2834,240 @@ describe("auto-sync", () => {
     await flush();
     expect(tauri.calls.some((c) => c.cmd === "sync_schedule_set")).toBe(false);
     expect(input("#auto-sync-interval").value).toBe("60");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Desktop notifications for new mail (sync/watch cycles)
+// ---------------------------------------------------------------------------
+
+describe("desktop notifications", () => {
+  const emitJob = (payload: unknown) =>
+    tauriEvents.listeners.get("job-event")!({ payload });
+
+  /** happy-dom windows report focus by default; notifications only fire
+   * for background arrivals, so tests that expect a notification unhook
+   * focus first. */
+  let focusSpy: ReturnType<typeof vi.spyOn> | null = null;
+  function blur(): void {
+    focusSpy = vi.spyOn(win.document, "hasFocus").mockReturnValue(false);
+  }
+
+  afterEach(() => {
+    focusSpy?.mockRestore();
+    focusSpy = null;
+  });
+
+  function bootWithJobs(): Promise<void> {
+    tauri.handlers.set(
+      "job_events_since",
+      () => ({ events: [], latest_seq: 0, oldest_kept: 1, trimmed: false, jobs: [] }),
+    );
+    return boot();
+  }
+
+  it("notifies a succeeded sync round that stored new mail while unfocused", async () => {
+    await bootWithJobs();
+    blur();
+    emitJob({ seq: 1, at: "t", job: 5, type: "submitted", kind: "imap_sync_all" });
+    emitJob({ seq: 2, at: "t", job: 5, type: "started" });
+    emitJob({
+      seq: 3,
+      at: "t",
+      job: 5,
+      type: "succeeded",
+      result: {
+        outcomes: [
+          {
+            instance_id: "i1",
+            label: "imap:mail.example.com:993:me@example.com",
+            status: {
+              status: "synced",
+              folders: [
+                { folder: "INBOX", inserted: 2, skipped: 1, failed: 0 },
+                { folder: "Sent", inserted: 0, skipped: 3, failed: 0 },
+              ],
+            },
+          },
+        ],
+        excluded: [],
+      },
+    });
+    await vi.waitFor(() => expect(notifications.sent.length).toBe(1));
+    expect(notifications.sent[0]).toEqual({
+      title: "2 new messages",
+      body: "INBOX",
+    });
+  });
+
+  it("stays silent while the app window is focused (the user is reading)", async () => {
+    await bootWithJobs();
+    // happy-dom's default hasFocus() is true — no spy needed.
+    emitJob({ seq: 1, at: "t", job: 5, type: "submitted", kind: "imap_sync" });
+    emitJob({
+      seq: 2,
+      at: "t",
+      job: 5,
+      type: "succeeded",
+      result: [{ folder: "INBOX", inserted: 3 }],
+    });
+    emitWatch({
+      ...EMPTY_WATCH,
+      events: [
+        {
+          kind: "imported",
+          path: "/home/me/exports/mail.mbox",
+          summary: { source: "mbox", seen: 3, inserted: 2, skipped: 1, failed: 0 },
+        },
+      ],
+    });
+    await flush();
+    expect(notifications.sent).toEqual([]);
+  });
+
+  it("notifies a watched import once, without re-notifying replayed snapshots", async () => {
+    await bootWithJobs();
+    blur();
+    const snapshot: WatchSnapshot = {
+      ...EMPTY_WATCH,
+      events: [
+        {
+          kind: "imported",
+          path: "/home/me/exports/chat.txt",
+          summary: { source: "whatsapp", seen: 4, inserted: 4, skipped: 0, failed: 0 },
+        },
+      ],
+    };
+    emitWatch(snapshot);
+    await vi.waitFor(() => expect(notifications.sent.length).toBe(1));
+    expect(notifications.sent[0]).toEqual({
+      title: "4 new messages",
+      body: "imported from chat.txt",
+    });
+    // The watcher pushes a fresh snapshot per change; the same newest
+    // event keeps arriving — one notification, not a stream.
+    emitWatch(snapshot);
+    emitWatch(snapshot);
+    await flush();
+    expect(notifications.sent.length).toBe(1);
+  });
+
+  it("stays silent for cycles with no new mail and for failed jobs", async () => {
+    await bootWithJobs();
+    blur();
+    emitJob({ seq: 1, at: "t", job: 5, type: "submitted", kind: "imap_sync_all" });
+    emitJob({
+      seq: 2,
+      at: "t",
+      job: 5,
+      type: "succeeded",
+      result: { outcomes: [], excluded: [] },
+    });
+    emitJob({ seq: 3, at: "t", job: 6, type: "submitted", kind: "imap_sync" });
+    emitJob({
+      seq: 4,
+      at: "t",
+      job: 6,
+      type: "failed",
+      error: { kind: "network", message: "unreachable" },
+    });
+    await flush();
+    expect(notifications.sent).toEqual([]);
+  });
+
+  it("the Settings option turns notifications off and back on", async () => {
+    tauri.handlers.set("settings_get", () => viewWith((v) => (v.notifications = false)));
+    await bootWithJobs();
+    blur();
+    expect(input("#notify-toggle").checked).toBe(false);
+    emitJob({ seq: 1, at: "t", job: 5, type: "submitted", kind: "imap_sync" });
+    emitJob({
+      seq: 2,
+      at: "t",
+      job: 5,
+      type: "succeeded",
+      result: [{ folder: "INBOX", inserted: 3 }],
+    });
+    await flush();
+    expect(notifications.sent).toEqual([]);
+
+    // Turning the option back on re-enables notifications for the next
+    // cycle (and the toggle itself asks the OS for permission — a user
+    // gesture).
+    notifications.granted = false; // ask on the gesture
+    let savedView = viewWith();
+    tauri.handlers.set("settings_save", (args: unknown) => {
+      const payload = (args as { payload: Record<string, unknown> }).payload;
+      savedView = viewWith((v) => (v.notifications = payload.notifications === true));
+      return savedView;
+    });
+    input("#notify-toggle").checked = true;
+    fireChange(input("#notify-toggle"));
+    await vi.waitFor(() => expect(notifications.requested).toBe(1));
+    $("#settings-save-btn").click();
+    await vi.waitFor(() => expect($("#settings-note").textContent).toContain("Saved."));
+    const save = tauri.calls.find((c) => c.cmd === "settings_save");
+    expect((save!.args as { payload: { notifications: boolean } }).payload.notifications).toBe(
+      true,
+    );
+    emitJob({ seq: 3, at: "t", job: 7, type: "submitted", kind: "imap_sync" });
+    emitJob({
+      seq: 4,
+      at: "t",
+      job: 7,
+      type: "succeeded",
+      result: [{ folder: "INBOX", inserted: 1 }],
+    });
+    await vi.waitFor(() => expect(notifications.sent.length).toBe(1));
+  });
+
+  it("asks for permission when not yet granted, and stays silent when denied", async () => {
+    await bootWithJobs();
+    blur();
+    notifications.granted = false;
+    notifications.requestAnswer = false; // the OS prompt is refused
+    emitJob({ seq: 1, at: "t", job: 5, type: "submitted", kind: "imap_sync" });
+    emitJob({
+      seq: 2,
+      at: "t",
+      job: 5,
+      type: "succeeded",
+      result: [{ folder: "INBOX", inserted: 3 }],
+    });
+    await vi.waitFor(() => expect(notifications.requested).toBe(1));
+    await flush();
+    expect(notifications.sent).toEqual([]);
+  });
+
+  it("the manual Sync button's result also feeds the notification layer", async () => {
+    await bootWithJobs();
+    blur();
+    tauri.handlers.set("sync_imap", () => ({
+      folders: [
+        {
+          folder: "INBOX",
+          uidvalidity: 1,
+          reset: false,
+          seen: 5,
+          inserted: 2,
+          skipped: 3,
+          failed: 0,
+          resolved_failures: 0,
+          conflicting_revisions: 0,
+          error: null,
+        },
+      ],
+      saved_to: null,
+    }));
+    input("#imap-host").value = "mail.example.com";
+    input("#imap-user").value = "me@example.com";
+    input("#imap-pass").value = "secret";
+    $("#imap-sync-btn").click();
+    await vi.waitFor(() => expect(notifications.sent.length).toBe(1));
+    expect(notifications.sent[0]).toEqual({
+      title: "2 new messages",
+      body: "INBOX",
+    });
   });
 });
 

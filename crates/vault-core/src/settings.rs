@@ -86,6 +86,17 @@ pub struct Options {
     pub theme: Theme,
     /// How many top results feed the RAG summary (1..=MAX_SUMMARIZE_TOP).
     pub summarize_top: u32,
+    /// Desktop notifications for new mail after a sync/watch cycle
+    /// (cross-platform native notifications; silent while the app window
+    /// is focused). Older settings files without the field default to
+    /// enabled.
+    #[serde(default = "default_notifications")]
+    pub notifications: bool,
+}
+
+/// `Options::notifications` serde default (see the field docs).
+fn default_notifications() -> bool {
+    true
 }
 
 impl Default for Options {
@@ -93,6 +104,7 @@ impl Default for Options {
         Self {
             theme: Theme::System,
             summarize_top: crate::llm::DEFAULT_SUMMARIZE_TOP as u32,
+            notifications: default_notifications(),
         }
     }
 }
@@ -545,6 +557,7 @@ mod tests {
         assert!(Settings::load(&path).unwrap().is_none());
         assert_eq!(Settings::default().options.summarize_top, 8);
         assert_eq!(Settings::default().options.theme, Theme::System);
+        assert!(Settings::default().options.notifications);
     }
 
     #[test]
@@ -577,6 +590,36 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&future).unwrap()).unwrap();
         let err = Settings::load(&path).unwrap_err().to_string();
         assert!(err.contains("version 99"), "got: {err}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn notifications_option_round_trips_and_backfills() {
+        let dir = std::env::temp_dir().join(format!("mcv-settings-ntf-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        // A file written before the option existed: the field is absent
+        // and must backfill to the enabled default, not refuse to load.
+        let older = serde_json::json!({
+            "version": SETTINGS_VERSION,
+            "providers": [],
+            "default_provider": null,
+            "options": {"theme": "system", "summarize_top": 8}
+        });
+        fs::write(&path, serde_json::to_vec(&older).unwrap()).unwrap();
+        let loaded = Settings::load(&path).unwrap().expect("file exists");
+        assert!(loaded.options.notifications);
+        // An explicit opt-out survives a save/load round trip.
+        let mut s = loaded;
+        s.options.notifications = false;
+        s.save(&path).unwrap();
+        assert!(
+            !Settings::load(&path)
+                .unwrap()
+                .unwrap()
+                .options
+                .notifications
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
