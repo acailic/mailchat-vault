@@ -165,15 +165,17 @@ export async function run(ctx) {
           ),
         );
         assert.ok(names.includes("plan.pdf"), "media name shown");
+        // M4.3: the row shows the humanized size; the store path lives
+        // in the mcmedia:// URL (checked by the media-display spec) and
+        // the raw JSON, no longer in the row text.
         const metas = await browser.execute(() =>
-          Array.from(document.querySelectorAll("#detail .detail-media .meta")).map(
-            (el) => el.textContent + "|" + (el.title ?? ""),
+          Array.from(document.querySelectorAll("#detail .detail-media .media-head .meta")).map(
+            (el) => el.textContent,
           ),
         );
-        const planSha = await sha256Hex(plan);
         assert.ok(
-          metas.some((m) => m.includes("media/" + planSha.slice(0, 8))),
-          "meta shows the store path (got " + JSON.stringify(metas) + ")",
+          metas.some((m) => /^\d+(\.\d+)? (B|KB|MB|GB)$/.test(m)),
+          "meta shows the humanized size (got " + JSON.stringify(metas) + ")",
         );
       }
       await browser.execute(() => {
