@@ -856,3 +856,72 @@ fn object_shaped_refs_with_missing_files_record_missing_entries() {
     assert_eq!(raw["media"][0]["name"], "lost.pdf");
     assert_eq!(raw["media"][0]["missing"], true);
 }
+
+#[test]
+fn unlinked_budget_exhaustion_is_counted_not_silent() {
+    use std::collections::HashSet;
+
+    use vault_core::media::{extract_unlinked, MediaSummary};
+    use vault_core::object_store::Capacity;
+
+    // Four 10-byte strays; the media budget fits exactly one, so the
+    // other three are dropped by budget — counted, not silent.
+    let sb = Sandbox::new("unlinked-budget");
+    let export = sb.export_dir();
+    for name in ["a.bin", "b.bin", "c.bin", "d.bin"] {
+        fs::write(export.join(name), b"0123456789").unwrap();
+    }
+    let mut summary = MediaSummary::default();
+    let mut budget = Capacity::new(15, 100);
+    let records = extract_unlinked(
+        &export,
+        None,
+        &sb.data_dir(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &mut summary,
+        &mut budget,
+    )
+    .unwrap();
+    assert_eq!(summary.unlinked, 1, "the first file fits the budget");
+    assert_eq!(summary.unlinked_dropped, 3, "the rest are budget-drops");
+    assert_eq!(records.len(), 1);
+
+    // A non-budget store failure (an unreadable file) is skipped the
+    // ordinary way and must not be counted as a budget drop.
+    let sb2 = Sandbox::new("unlinked-nonbudget");
+    let export2 = sb2.export_dir();
+    let secret = export2.join("secret.bin");
+    fs::write(&secret, b"x").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    let blocks_read = fs::read(&secret).is_err();
+    let mut summary = MediaSummary::default();
+    let mut budget = Capacity::new(1024, 10);
+    let records = extract_unlinked(
+        &export2,
+        None,
+        &sb2.data_dir(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &mut summary,
+        &mut budget,
+    )
+    .unwrap();
+    if blocks_read {
+        assert!(records.is_empty());
+        assert_eq!(summary.unlinked, 0);
+        assert_eq!(
+            summary.unlinked_dropped, 0,
+            "a non-budget failure is not a budget drop"
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&secret, fs::Permissions::from_mode(0o644));
+    }
+}
