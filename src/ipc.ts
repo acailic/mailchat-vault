@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { MediaUsageView } from "./media";
 import type {
+  AccountView,
   ArchiveStats,
   ChatContext,
   ChatImportOutcome,
@@ -112,6 +113,27 @@ export function listImportScopesV2(): Promise<ImportScope[]> {
 export function sourcesList(): Promise<SourceInstance[]> {
   return invoke<SourceInstance[]>("sources_list");
 }
+
+// ---------------------------------------------------------------------------
+// Multi-account surface (roadmap: the accounts panel)
+// ---------------------------------------------------------------------------
+
+export function accountsList(): Promise<AccountView[]> {
+  return invoke<AccountView[]>("accounts_list");
+}
+
+/** Forget one IMAP account's credentials (keyring + session memory).
+ * Returns whether anything was stored; the archive stays untouched. */
+export function accountForgetCredentials(sourceId: string): Promise<boolean> {
+  return invoke<boolean>("account_forget_credentials", { sourceId });
+}
+
+/** Pause/resume one source (per-source exclusion: coordinator rounds skip
+ * excluded sources while keeping archive and cursors). */
+export function sourceSetExcluded(sourceId: string, excluded: boolean): Promise<void> {
+  return invoke<void>("source_set_excluded", { sourceId, excluded });
+}
+
 
 export function exportMessagesV2(args: {
   ids: number[];

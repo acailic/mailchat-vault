@@ -1818,6 +1818,33 @@ impl Storage {
         Ok(Stats { total, by_source })
     }
 
+    /// Per-account overview counts for the multi-account UI (roadmap: the
+    /// accounts panel): one row per durable source instance — the
+    /// archived-message count and the open failed-item ledger rows — so
+    /// several IMAP/chat/import accounts answer in one bounded call.
+    ///
+    /// The message counts read the trigger-maintained `stats_source`
+    /// counter table (migration 6) — O(number of accounts), never a scan
+    /// over the archive — and the failure counts group the ledger over its
+    /// `(source_instance_id, …)` primary-key prefix. Accounts with zero
+    /// messages are included (a connected but empty mailbox is still an
+    /// account), ordered heaviest first like the source chips.
+    pub fn account_counts(&self) -> Result<Vec<AccountCounts>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT si.id, COALESCE(ss.n, 0), COALESCE(f.failed, 0)\n             FROM source_instances AS si\n             LEFT JOIN stats_source AS ss ON ss.source = si.id\n             LEFT JOIN (\n                 SELECT source_instance_id, COUNT(*) AS failed\n                 FROM sync_failed_items GROUP BY source_instance_id\n             ) AS f ON f.source_instance_id = si.id\n             ORDER BY COALESCE(ss.n, 0) DESC, si.id",
+        )?;
+        let counts = stmt
+            .query_map([], |row| {
+                Ok(AccountCounts {
+                    source_id: row.get(0)?,
+                    messages: row.get::<_, i64>(1)?.max(0) as u64,
+                    failed_items: row.get::<_, i64>(2)?.max(0) as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(counts)
+    }
+
     /// Full dashboard statistics (see [`crate::stats::ArchiveStats`]):
     /// total, date range, per-source counts, the per-day histogram, and
     /// the heaviest chats and authors, all in one call.
@@ -3141,6 +3168,21 @@ pub struct FailedItem {
     pub attempts: u32,
     pub first_failed_at: String,
     pub last_failed_at: String,
+}
+
+/// One account's overview counts for the multi-account UI (roadmap: the
+/// accounts panel): the archived-message count of one durable source
+/// instance plus its open rows in the failed-item ledger (see
+/// [`Storage::account_counts`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountCounts {
+    /// The durable source instance id (same ids as
+    /// [`Storage::list_source_instances`]).
+    pub source_id: String,
+    /// Archived messages of the account (trigger-maintained counter).
+    pub messages: u64,
+    /// Open rows in the IMAP failed-item ledger (0 for import accounts).
+    pub failed_items: u64,
 }
 
 /// A recorded observation of one archived message

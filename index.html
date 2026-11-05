@@ -24,6 +24,9 @@
             <button type="button" class="nav-view-btn" data-view-target="sources">Add source</button>
           </li>
           <li>
+            <button type="button" class="nav-view-btn" data-view-target="accounts">Accounts</button>
+          </li>
+          <li>
             <button type="button" class="nav-view-btn" data-view-target="activity">Activity</button>
           </li>
           <li>
@@ -246,6 +249,29 @@
                 New or modified .mbox, WhatsApp .txt, and Telegram / Signal .json files in watched
                 folders are imported automatically (debounced; re-imports never duplicate).
                 Unrecognized files are skipped and reported above.
+              </p>
+            </section>
+          </section>
+
+          <!-- Accounts: the multi-account overview (IMAP accounts, imports)
+               with per-account stats, sync state, and management. -->
+          <section id="view-accounts" class="view" aria-label="Accounts">
+            <h2 class="view-heading">Accounts</h2>
+            <section aria-label="Configured accounts">
+              <h2>Configured accounts</h2>
+              <div class="row">
+                <span id="accounts-status" class="meta" style="flex: 1" role="status">…</span>
+                <div class="spacer"></div>
+                <button id="accounts-refresh" type="button">Refresh</button>
+                <button id="accounts-add" type="button" title="Open Add source to connect an email account or run an import">Add account…</button>
+              </div>
+              <ul id="accounts-list" class="accounts-list" tabindex="-1" aria-label="Accounts"></ul>
+              <p id="accounts-hint" class="meta" style="margin: 6px 0 0">
+                Every configured account in one place — email (IMAP) accounts and file imports
+                (mbox / chat exports). Sync now reuses the account's stored credentials; Pause
+                skips it in auto-sync rounds (its archive and cursors are kept); Forget
+                credentials removes the stored password / Google sign-in from the OS keyring —
+                the archive always stays.
               </p>
             </section>
           </section>
