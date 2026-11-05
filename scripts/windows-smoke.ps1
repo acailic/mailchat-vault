@@ -63,6 +63,13 @@
     Where install logs, app stdout/stderr and digests are written.
     Defaults to %RUNNER_TEMP%\windows-smoke (or %TEMP%).
 
+.PARAMETER AllowDataWipe
+    Consent to delete %APPDATA%\<AppId> (the script wipes it before
+    every phase and at the end). Without this switch the script refuses
+    to start when vault.db already exists there, because on a developer
+    machine that may be your real archive. CI passes this switch — its
+    runner is disposable.
+
 .NOTES
     Exit code 0 = every phase passed; 1 = at least one failed (per-phase
     results are printed and written to summary.txt). Requires no
@@ -81,7 +88,8 @@ param(
     [string] $ProductName = 'mailchat-vault',
     [string] $AppId = 'com.acailic.mailchatvault',
     [int] $AliveSeconds = 20,
-    [string] $LogDir = ''
+    [string] $LogDir = '',
+    [switch] $AllowDataWipe
 )
 
 $ErrorActionPreference = 'Stop'
@@ -300,7 +308,10 @@ function Run-Phase {
             (Join-Path $env:LOCALAPPDATA $ProductName),
             (Join-Path $env:LOCALAPPDATA (Join-Path 'Programs' $ProductName))
         )
-        try { Invoke-Msi '/x' $NewMsi ("cleanup-{0}.log" -f $Name) | Out-Null } catch { }
+        try { Invoke-Msi '/x' $NewMsi ("cleanup-{0}-new.log" -f $Name) | Out-Null } catch { }
+        if ($OldMsi) {
+            try { Invoke-Msi '/x' $OldMsi ("cleanup-{0}-old.log" -f $Name) | Out-Null } catch { }
+        }
         foreach ($root in $roots) {
             if (Test-Path $root) {
                 $un = Join-Path $root 'uninstall.exe'
@@ -326,6 +337,11 @@ function Run-Phase {
 
 foreach ($f in @($NewMsi, $NewExe)) {
     Assert-True (Test-Path $f) "required bundle not found: $f"
+}
+if ((Test-Path $script:DbPath) -and -not $AllowDataWipe) {
+    Fail ("{0} already exists and may be your real archive. The smoke test " +
+        "deletes {1} before every phase and at the end; rerun with " +
+        "-AllowDataWipe to consent to that." -f $script:DbPath, $script:DataDir)
 }
 $upgradeReady = ($OldMsi -ne '' -and $OldExe -ne '' -and
     $FixtureDb -ne '' -and $InspectExe -ne '')

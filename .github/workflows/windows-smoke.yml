@@ -137,7 +137,7 @@ jobs:
           & scripts\windows-smoke.ps1 `
             -NewMsi $newMsi -NewExe $newExe `
             -OldMsi $oldMsi -OldExe $oldExe -OldLabel $env:OLD_TAG `
-            -FixtureDb $fixture -InspectExe $inspect
+            -FixtureDb $fixture -InspectExe $inspect -AllowDataWipe
 
       - name: Upload smoke logs
         if: ${{ always() }}

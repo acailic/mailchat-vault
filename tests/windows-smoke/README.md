@@ -52,7 +52,8 @@ cargo build --release -p vault-core --example smoke_inspect
   -OldExe C:\downloads\mailchat-vault_0.1.0_x64-setup.exe `
   -OldLabel v0.1.0 `
   -FixtureDb tests\windows-smoke\fixtures\vault-v0.1.0.db `
-  -InspectExe target\release\examples\smoke_inspect.exe
+  -InspectExe target\release\examples\smoke_inspect.exe `
+  -AllowDataWipe
 ```
 
 On GitHub: *Actions → Windows smoke → Run workflow*, pick the ref to
@@ -62,6 +63,11 @@ test-only `version_override`. The run uploads `windows-smoke-logs`
 
 ## Notes & known nuances
 
+- **The script deletes `%APPDATA%\com.acailic.mailchatvault`** before
+  every phase and at the end. It refuses to start when `vault.db`
+  already exists there unless you pass `-AllowDataWipe`, so a local run
+  cannot silently destroy your real archive; CI passes the switch
+  because its runner is disposable.
 - **Same-version MSI upgrade (exit 1638)**: WiX refuses to install the
   same product version over itself; the script detects msiexec's 1638
   and falls back to uninstall-then-install, logging a **REINSTALL**
