@@ -1,6 +1,6 @@
 # Architecture decisions
 
-Status: **accepted design direction**. D03, D04, D08, D10, and D12 are implemented and verified (D03/D12 with M1, D04/D10 with M2, D08's workspace/search halves with M3.1/M3.2 — 2026-11-05, see the [roadmap's completion records](implementation-roadmap.md#completion-tracking)); the rest remain planning defaults until their slices land. These records describe the agreed direction, not completed code unless the amendment says otherwise. Scope changes belong in the [product plan](product-plan.md); wire/schema details belong in [contracts](data-and-api-contracts.md).
+Status: **accepted design direction**. D03, D04, D08, D10, and D12 are implemented and verified (D03/D12 with M1, D04/D10 with M2, D08's workspace/search halves with M3.1/M3.2 — 2026-11-05, see the [roadmap's completion records](implementation-roadmap.md#completion-tracking)); D05's object-store half is implemented and verified (M4.1, 2026-11-05 — see its amendment); the rest remain planning defaults until their slices land. These records describe the agreed direction, not completed code unless the amendment says otherwise. Scope changes belong in the [product plan](product-plan.md); wire/schema details belong in [contracts](data-and-api-contracts.md).
 
 ## D01: Personal local archive
 
@@ -25,6 +25,8 @@ Use one writer worker, two read connections, WAL and bounded producer queues. Ne
 ## D05: Preserve originals and available media locally
 
 Copy source originals and available regular media into SHA-256-addressed storage; keep metadata/relationships in SQLite. Do not rely on external export paths remaining present. Shared bytes are deduplicated, while message revisions/provenance remain separate. Missing/unmatched files stay explicit. Complete available media preservation increases release work and disk requirements; it was expressly selected instead of a text-only release.
+
+*Amendment (2026-11-05): the object-store half is implemented as M4.1 and verified — SHA-256-addressed `media/` storage with the stage→promote→reference lifecycle (no half-written object ever visible, no dangling reference reachable), byte-exact copies with the original name/kind/size kept on every reference, content dedup across names, messages, and imports, traversal/symlink/capacity-fenced ZIP and directory picks, Telegram/WhatsApp media extraction with missing files counted in the import summary, reimport backfill of media links, and store-vs-archive reconciliation (`media_reconcile`). Still open under this decision: mail MIME attachments and preserved raw message bytes, unlinked source files, per-message missing/failed states (M4.2) — so “missing files stay explicit” is today a summary count, not yet per-reference rows — plus safe open/export surfaces (M4.3) and backup/restore of object bytes (M4.4). Signal and Discord attachments remain `raw_json` records only. Details: [Architecture: originals and media](architecture.md#originals-media-and-object-lifecycle), [contracts: media and capacity](data-and-api-contracts.md#media-and-capacity).*
 
 ## D06: Consistent, verified backup and staged restore
 
