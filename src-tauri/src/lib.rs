@@ -1964,7 +1964,12 @@ pub fn run() {
     // Headless CLI flags: handle them before any GUI/window-server work
     // so the packaged binary answers `--version`/`--help` anywhere,
     // including a CI runner with no display.
-    if let Some(text) = cli_flag_response(&std::env::args().skip(1).collect::<Vec<_>>()) {
+    if let Some(text) = cli_flag_response(
+        &std::env::args_os()
+            .skip(1)
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+    ) {
         print!("{text}");
         return;
     }

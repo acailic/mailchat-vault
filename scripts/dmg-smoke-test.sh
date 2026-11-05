@@ -70,10 +70,6 @@ BIN="$APP_COPY/Contents/MacOS/mailchat-vault"
 
 ARCHS="$(lipo -archs "$BIN")"
 case "$ARCHS" in
-    *arm64* | *x86_64*) ;;
-    *) fail "binary is not universal (lipo -archs said: $ARCHS)" ;;
-esac
-case "$ARCHS" in
     *arm64*) ;;
     *) fail "universal binary lacks arm64 (lipo -archs said: $ARCHS)" ;;
 esac
