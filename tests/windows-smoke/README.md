@@ -20,8 +20,9 @@ decision, so start it from the *Actions* tab) and is driven by
 | `msi-upgrade` | Installing the **old** release (default: the published `v0.1.0`), seeding its data dir with the frozen fixture archive, then installing the **new** `.msi` over it: the app upgrades in place, opens the archive (running any pending schema migration), and the content is byte-for-byte the same corpus — message counts, conversation counts, FTS documents and a `'vault'` full-text query must all be identical before and after; only the schema version may advance. Uninstalling afterwards still leaves the archive. |
 | `nsis-upgrade` | The same upgrade contract through the NSIS installer. |
 
-"Archive intact" is asserted with the read-only digest tool
-[`crates/vault-core/examples/smoke_inspect.rs`](../../crates/vault-core/examples/smoke_inspect.rs):
+"Archive intact" is asserted with the digest tool
+[`crates/vault-core/examples/smoke_inspect.rs`](../../crates/vault-core/examples/smoke_inspect.rs)
+(read-only by default; see its header for the WAL-recovery fallback):
 `messages`, `identities`, `occurrences`, `conversations`,
 `source_instances`, `body_bytes`, `fts_docs` and `fts_vault_hits` must be
 identical across the upgrade, and `fts_vault_hits > 0` proves the

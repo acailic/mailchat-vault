@@ -59,10 +59,12 @@ fn recover_wal(path: &str) -> rusqlite::Result<()> {
 }
 
 fn recover_then_reopen(path: &str) -> rusqlite::Connection {
-    recover_wal(path)
-        .unwrap_or_else(|e| die(&format!("WAL recovery on {path} failed: {e}")));
-    open_read_only(path)
-        .unwrap_or_else(|e| die(&format!("cannot reopen {path} read-only after recovery: {e}")))
+    recover_wal(path).unwrap_or_else(|e| die(&format!("WAL recovery on {path} failed: {e}")));
+    open_read_only(path).unwrap_or_else(|e| {
+        die(&format!(
+            "cannot reopen {path} read-only after recovery: {e}"
+        ))
+    })
 }
 
 fn take_digest(conn: &rusqlite::Connection) -> rusqlite::Result<BTreeMap<String, i64>> {
