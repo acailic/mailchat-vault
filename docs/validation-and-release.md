@@ -55,7 +55,7 @@ Run the five-user task sessions defined in [Product success criteria](product-pl
 
 ## Performance and capacity
 
-The existing [performance baseline](../tests/perf/BASELINE.md) measures historical `search_filtered` behavior. Preserve it and append new measurements for `search_page`/v2 including exact COUNT, snippets, filters, ordering, and canonical FTS. Add end-to-end IPC/display timing and search during network stalls/active ingestion. A `LIMIT` alone does not cap the cost of ranking/counting every matching row.
+The [performance baseline](../tests/perf/BASELINE.md) now (M2.4) times the real paginated path — `search_page` with exact COUNT, snippets, filters, ordering, and canonical FTS — at 100k (gated) and 1M (informational), beside IPC-shaped round trips (pool read hop + JSON page serialization), search while a bounded import commits through the write lane, and startup including `DbPool::spawn`; the historical `search_filtered` tables are preserved verbatim below the current results. Still to add: end-to-end IPC/display timing through the webview, percentiles for the v2 command surface, and timed search-under-stalled-network numbers (non-blocking is already proven by tests). A `LIMIT` alone does not cap the cost of ranking/counting every matching row.
 
 Use deterministic synthetic 100k-message fixtures for correctness/regression gates and 1M for informational capacity trends. Include common/frequent/rare terms, author/filename matches, combined source/date filters, no matches, browse, deep pagination, revisions and long bodies. Generate sparse/streamed large files; do not commit giant binaries. Report database/object sizes, import throughput, resident-memory peaks, startup, query timing, and cancellation delay separately.
 
@@ -71,7 +71,7 @@ Initial product targets on the recorded reference desktop:
 | Cancel acknowledged | Within 200ms; final cancellation after current bounded I/O/atomic batch, with stage shown |
 | Warm startup to usable workspace at 100k | ≤ 2s on the recorded reference desktop |
 
-These are proposed targets, not measured results. Record hardware/OS/build flags, warmup, iterations, dataset seed, concurrent workload, and distribution before claiming them. Retain existing CI per-query budgets until new-path runner measurements justify replacements; do not impose desktop timings blindly on shared runners. An unexplained regression greater than 20% on the same controlled machine requires investigation before release. Keep 1M tests informational until an explicit capacity target is adopted.
+These are proposed targets, not measured results. The M2.4 baseline already records core-path actuals with headroom against several of them (100k frequent-term p95 26.8 ms against the ≤ 200 ms usual-search target; the ubiquitous worst case at 155.5 ms against ≤ 1 s; ingest memory proven bounded by the heavy suite test), but the IPC-to-display composition, cancellation acknowledgment, and stalled-network timing targets remain unmeasured. Record hardware/OS/build flags, warmup, iterations, dataset seed, concurrent workload, and distribution before claiming them. Retain existing CI per-query budgets until new-path runner measurements justify replacements; do not impose desktop timings blindly on shared runners. An unexplained regression greater than 20% on the same controlled machine requires investigation before release. Keep 1M tests informational until an explicit capacity target is adopted.
 
 ## Platform and release matrix
 
@@ -116,6 +116,12 @@ Landing on `main` (2026-11-05, baseline `57f40c8`, M1 documentation update):
 - Re-verified all relative file/heading links across the ten Markdown files (nine docs + root README link); headings referenced by other documents were preserved during the rewrite.
 - M1 evidence suites rerun green on this machine (see the [M1 completion record](implementation-roadmap.md#completion-tracking) for counts and the A01–A04/A12 mapping).
 - No application/config changes in this delivery; `git diff --check` clean.
+
+Landing on `main` (2026-11-05, M2 code at `57f40c8`, spec tree at `1115eac`, M2 documentation update):
+
+- The M2-owned sections are grounded in the implemented code and marked **current**: [Architecture: jobs and database access](architecture.md#jobs-and-database-access) (including IMAP correctness), the persistence-table rows and migration-ledger attribution for migrations 9–11 in [contracts](data-and-api-contracts.md#domain-and-persistence-model), and the job-protocol half of [errors and events](data-and-api-contracts.md#errors-and-events). The roadmap's M2 checkbox completed with the full record (A05/A06/A11 mapping, migration/recovery evidence, limitations); the assessment re-grounded (F01/F05/F10, remaining gaps, verification record); decisions D04/D10 amended; this file's performance paragraph grounded to the M2.4 baseline.
+- M2 evidence suites rerun green on this machine — `jobs` 13, `bounded_ingest` 21 + the ignored heavy memory-budget test passed separately, `imap_coordinator` 10, `imap_sync` 14, `scheduler` 12 — see the [M2 completion record](implementation-roadmap.md#completion-tracking).
+- Documentation-only checks: relative file/heading links re-verified across the touched files (all referenced headings preserved), final newlines/whitespace checked, no merge-conflict markers, no application/config changes; `git diff --check` clean.
 
 ## Maintenance
 
