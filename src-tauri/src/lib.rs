@@ -384,16 +384,28 @@ fn purge_media_open_copies() {
 }
 
 /// Restrict a freshly created preview directory (0o700) or file
-/// (0o600) to the current user on Unix; a no-op elsewhere.
+/// (0o600) to the current user on Unix, verifying the mode actually
+/// landed on a regular (non-symlink) entry; a no-op elsewhere.
 #[cfg(unix)]
-fn restrict_preview_permissions(path: &Path, dir: bool) {
+fn restrict_preview_permissions(path: &Path, dir: bool) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mode = if dir { 0o700 } else { 0o600 };
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    let meta = std::fs::symlink_metadata(path)?;
+    let right_kind = if dir { meta.is_dir() } else { meta.is_file() };
+    if !right_kind || meta.permissions().mode() & 0o777 != mode {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "preview entry is not a private regular directory or file",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn restrict_preview_permissions(_path: &Path, _dir: bool) {}
+fn restrict_preview_permissions(_path: &Path, _dir: bool) -> std::io::Result<()> {
+    Ok(())
+}
 
 /// Open one preserved media object with the OS default application
 /// (M4.3) — always an explicit user action. The object is first copied
@@ -429,14 +441,17 @@ async fn media_open_external(
         purge_media_open_copies();
         std::fs::create_dir_all(&preview_root)
             .map_err(|e| format!("cannot prepare preview dir: {e}"))?;
-        restrict_preview_permissions(&preview_root, true);
+        restrict_preview_permissions(&preview_root, true)
+            .map_err(|e| format!("cannot enforce preview permissions: {e}"))?;
         std::fs::create_dir_all(&tmp_dir)
             .map_err(|e| format!("cannot prepare preview dir: {e}"))?;
-        restrict_preview_permissions(&tmp_dir, true);
+        restrict_preview_permissions(&tmp_dir, true)
+            .map_err(|e| format!("cannot enforce preview permissions: {e}"))?;
         let file_name = media_proto::safe_display_name(&display, &name);
         let dest = tmp_dir.join(&file_name);
         let size = std::fs::copy(&src, &dest).map_err(|e| format!("preview copy failed: {e}"))?;
-        restrict_preview_permissions(&dest, false);
+        restrict_preview_permissions(&dest, false)
+            .map_err(|e| format!("cannot enforce preview permissions: {e}"))?;
         let url = tauri::Url::from_file_path(&dest)
             .map_err(|_| "preview path is not a valid file URL".to_string())?;
         webbrowser::open(url.as_str()).map_err(|e| format!("cannot open externally: {e}"))?;
