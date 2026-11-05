@@ -110,7 +110,7 @@ app_in_dmg="$(find "$mountpoint" -maxdepth 1 -name '*.app' | head -1)"
 # version-bearing dmg name in --dir mode).
 app_tgz="$(find "$DIR" -name '*.app.tar.gz' 2>/dev/null | head -1)"
 [[ -n "$app_tgz" ]] || { echo "error: no .app.tar.gz found under $DIR" >&2; exit 2; }
-check "updater archive is a valid gzip tar" tar -tzf "$app_tgz" >/dev/null
+check "updater archive is a valid gzip tar" tar -tzf "$app_tgz"
 plist_member="$(tar -tzf "$app_tgz" | grep -m1 '\.app/Contents/Info\.plist$')"
 check "updater archive contains a .app/Contents/Info.plist" test -n "$plist_member"
 tar_version="$(tar -xOzf "$app_tgz" "$plist_member" 2>/dev/null | plutil -extract CFBundleShortVersionString raw - 2>/dev/null)"
