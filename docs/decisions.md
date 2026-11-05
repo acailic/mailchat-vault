@@ -1,0 +1,59 @@
+# Architecture decisions
+
+Status: **accepted design direction**. D03 and D12 are implemented and verified (M1, 2026-11-05 — see the [roadmap's M1 completion record](implementation-roadmap.md#completion-tracking)); the rest remain planning defaults until their slices land. These records describe the agreed direction, not completed code unless the amendment says otherwise. Scope changes belong in the [product plan](product-plan.md); wire/schema details belong in [contracts](data-and-api-contracts.md).
+
+## D01: Personal local archive
+
+Choose a single-user desktop archive with optional remote ingestion and AI. Ordinary reading/search works offline. A unified inbox with sending, shared team permissions, and a hosted knowledge service are deferred because they change the product and trust model. Success is finding and preserving an original exchange, not maximizing connector count.
+
+## D02: Retain the current implementation stack
+
+Keep Tauri, Rust, SQLite/FTS5, TypeScript and Vite. Separate feature controllers, IPC, state, view models, rendering and styles as the UI grows. A frontend framework rewrite or backend service would add migration cost without addressing the demonstrated correctness gaps. Revisit only with measured complexity/performance evidence.
+
+## D03: Separate source, conversation, message, and occurrence identity
+
+Use opaque durable source/conversation IDs and preserve source-specific keys as aliases. Store folder/import occurrences separately from messages. Build email context from reply evidence, never folder/subject alone. Keep conflicting revisions and explicitly unresolved legacy records. Canonical v2 tables avoid the old source-string uniqueness constraint; preserve old IDs and retain legacy tables for recovery during this release. The cost is migration complexity and temporary disk duplication; silent identity loss is less acceptable.
+
+*Amendment (2026-11-05): implemented as M1.1–M1.4 and verified (canonical tables with frozen legacy snapshot, connector-scoped identities with semantic revision hashes, provider conversation keys with a one-hop email reply graph, multi-folder occurrences, explicit unresolved records, and the safe-migration snapshot/rollback path). Discord remains on legacy display grouping; user linking of legacy namespaces is designed but not implemented. Details and evidence: [contracts](data-and-api-contracts.md#identity-and-deduplication), [M1 record](implementation-roadmap.md#completion-tracking).*
+
+## D04: Serialized writes and independent readers
+
+Use one writer worker, two read connections, WAL and bounded producer queues. Network/parsing waits happen outside transactions. This directly addresses the current network-held shared mutex without adding a database server or unbounded pool. Checkpoint and result persistence are one transaction. Concurrency limits and initial batch sizes are owned by [Architecture](architecture.md#jobs-and-database-access), with measured validation before release.
+
+## D05: Preserve originals and available media locally
+
+Copy source originals and available regular media into SHA-256-addressed storage; keep metadata/relationships in SQLite. Do not rely on external export paths remaining present. Shared bytes are deduplicated, while message revisions/provenance remain separate. Missing/unmatched files stay explicit. Complete available media preservation increases release work and disk requirements; it was expressly selected instead of a text-only release.
+
+## D06: Consistent, verified backup and staged restore
+
+Use a versioned ZIP64 backup with a SQLite snapshot, objects, and checksum manifest. Pause writes during backup for the first release to simplify consistency while retaining read access. Validate restore in staging and retain the previous vault through a journaled switch. A live database-file copy and in-place unverified restore are rejected because WAL and interrupted writes can invalidate recovery.
+
+## D07: OS protection with explicit encryption limits
+
+Rely on OS account/disk protection and owner-only permissions where supported. Store credentials in the OS keychain with visible session-memory fallback. Database, objects and backups are not encrypted by the app. App-managed encryption and recovery-key UX are deferred by user choice; no branding or UI text may imply they already exist.
+
+## D08: Archive workspace over competing feature panels
+
+Use source navigation, flat search results, and a reading pane. Setup, activity and maintenance have dedicated views. Keep ranking stable and display human labels before technical metadata. Adapt to narrow windows with back navigation. This preserves familiarity and reading context while avoiding competing Search/Ask/import/server sections on one page. The [UX specification](ux-specification.md) owns breakpoints and keyboard rules.
+
+## D09: AI is optional and payload approval is explicit
+
+AI defaults off regardless of environment keys. Each question has an explicit translation send action; synthesis requires a preview/approval of the exact bounded context. Bind approval to endpoint, configuration and snapshot. Reuse the existing compatible-provider integration and fallback; attachments and arbitrary tools remain outside the pipeline. This adds one deliberate step but makes network disclosure concrete and keeps retrieval useful without AI.
+
+## D10: Read-only mail ingestion and opt-in scheduling
+
+Keep IMAP read-only and archive content independent of remote deletion. Default to manual sync; optionally enqueue one run every 15 minutes while open, without missed-run accumulation. Retain Gmail app-password support; OAuth is deferred. Source disconnection stops access/removes secrets but does not delete local history. This is an archive, not a bidirectional mailbox replica.
+
+## D11: Three-platform release with honest evidence
+
+Target Linux x64, Windows x64 and macOS arm64/x64 for the first polished release. Native compilation, packaging, credentials, upgrade and restore evidence are mandatory per target. Keep the current Linux automated E2E and add repeatable native checks where drivers differ. Signing/notarization are publication dependencies; unavailable credentials or hardware do not count as passing evidence. Automatic updates remain deferred.
+
+## D12: Dates retain provenance and uncertainty
+
+Store original timestamp text separately from a resolved UTC instant and confidence. Require user confirmation of naive import timezone/date order. Preserve legacy assumptions without silently reinterpreting them; date filters use workspace-local day boundaries. The additional metadata and occasional import question are preferable to presenting a false exact time as evidence.
+
+*Amendment (2026-11-05): implemented as M1.3 and verified (per-message instant + original text + zone + confidence; DST-aware exporter-local resolution with fold/gap handling; migration 7 resolves legacy blind-Z stamps without reinterpreting recorded text; v2 search interprets day bounds in a validated IANA zone). The user-confirmation half (`user_confirmed`) awaits the M3.3 import flow; legacy values keep `legacy_assumed` until then. Details: [time semantics](data-and-api-contracts.md#time-semantics).*
+
+## Changing a decision
+
+Add a dated amendment explaining the trigger, affected user behavior, alternatives, compatibility, validation and migration impact. Mark the old decision superseded and link its replacement. Update the owning specification and roadmap slices together; do not leave conflicting instructions for implementers.
