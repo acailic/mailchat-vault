@@ -173,16 +173,17 @@ function Uninstall-Nsis {
 
 # --- where the app landed -------------------------------------------------
 
+# The installers use Tauri defaults; cover every known root instead of
+# hardcoding one. Get-AppExe and the failure cleanup must agree on it.
+$script:InstallRoots = @(
+    (Join-Path $env:ProgramFiles $ProductName),
+    (Join-Path ${env:ProgramFiles(x86)} $ProductName),
+    (Join-Path $env:LOCALAPPDATA $ProductName),
+    (Join-Path $env:LOCALAPPDATA (Join-Path 'Programs' $ProductName))
+)
+
 function Get-AppExe {
-    # The installers use Tauri defaults; cover every known root instead
-    # of hardcoding one.
-    $roots = @(
-        (Join-Path $env:ProgramFiles $ProductName),
-        (Join-Path ${env:ProgramFiles(x86)} $ProductName),
-        (Join-Path $env:LOCALAPPDATA $ProductName),
-        (Join-Path $env:LOCALAPPDATA (Join-Path 'Programs' $ProductName))
-    )
-    foreach ($root in $roots) {
+    foreach ($root in $script:InstallRoots) {
         $exe = Join-Path $root "$ProductName.exe"
         if (Test-Path $exe) { return $exe }
     }
@@ -298,21 +299,16 @@ function Run-Phase {
         $script:Results[$Name] = "FAIL: $($_.Exception.Message)"
         Write-Host ("!!!!! phase {0} FAILED: {1}" -f $Name, $_.Exception.Message) `
             -ForegroundColor Red
-        Reset-DataDir
         # Best-effort: run the real uninstallers first so product
-        # registration never outlives its files, then sweep the known
-        # install roots (the same list Get-AppExe covers) for leftovers.
-        $roots = @(
-            (Join-Path $env:ProgramFiles $ProductName),
-            (Join-Path ${env:ProgramFiles(x86)} $ProductName),
-            (Join-Path $env:LOCALAPPDATA $ProductName),
-            (Join-Path $env:LOCALAPPDATA (Join-Path 'Programs' $ProductName))
-        )
+        # registration never outlives its files, then sweep every known
+        # install root for leftovers. Nothing here may throw out of the
+        # catch and skip the later steps.
+        try { Reset-DataDir } catch { }
         try { Invoke-Msi '/x' $NewMsi ("cleanup-{0}-new.log" -f $Name) | Out-Null } catch { }
         if ($OldMsi) {
             try { Invoke-Msi '/x' $OldMsi ("cleanup-{0}-old.log" -f $Name) | Out-Null } catch { }
         }
-        foreach ($root in $roots) {
+        foreach ($root in $script:InstallRoots) {
             if (Test-Path $root) {
                 $un = Join-Path $root 'uninstall.exe'
                 if (Test-Path $un) {
@@ -324,7 +320,7 @@ function Run-Phase {
                 }
             }
         }
-        foreach ($root in $roots) {
+        foreach ($root in $script:InstallRoots) {
             if (Test-Path $root) {
                 Write-Log ("cleanup: removing leftover install at {0}" -f $root)
                 Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
