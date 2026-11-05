@@ -1,0 +1,167 @@
+# Data and API contracts
+
+Status: **mixed**. This document owns identity, migration, persistence, and IPC semantics for [P01–P07](product-plan.md#functional-requirements). The sections marked **current** below (compatibility boundary, persistence model, identity, time, migration) document the implemented canonical store at `57f40c8`; the remaining sections are the reviewed **proposed** design for their owning slices. It is a design contract, not a generated schema; the SQL source of truth is [storage.rs](../crates/vault-core/src/storage.rs).
+
+## Current compatibility boundary
+
+**Current.** Frontend types are in [src/types.ts](../src/types.ts), Rust query types in [query.rs](../crates/vault-core/src/query.rs) / [search2.rs](../crates/vault-core/src/search2.rs), and commands in [the Tauri shell](../src-tauri/src/lib.rs). The legacy v1 command surface keeps its shapes and now runs entirely over the canonical tables — since M1.1 the core storage APIs read and write canonical tables only, so the existing IPC adapters followed without dual writes. A v2 IPC surface ships alongside: the background-job protocol (M2.1) and the v2 search/detail/context commands (M3.2), which return structured `AppError` results. Legacy message row IDs are stable and unchanged. Do not mix v1 and v2 result shapes under one command name; retire v1 commands only after every repository caller migrates. There are no documented external IPC clients.
+
+## Domain and persistence model
+
+**Current** (migration ledger at schema version 12; see [Migration and recovery](#migration-and-recovery)). UUID strings identify durable entities except messages, which keep plain SQLite integer rowids with no guard at JavaScript's 2^53 safe-integer boundary (proposed for the v2 IPC surface: new inserts reject numeric ID overflow rather than rounding it in IPC). Timestamps are stored as UTC instants when known, plus separate original-local/time-confidence metadata.
+
+The following are the logical table contracts as implemented; migrations and indexes live in the versioned ledger in [storage.rs](../crates/vault-core/src/storage.rs).
+
+| Entity | Stored information and invariants |
+| --- | --- |
+| `source_instances` | UUID; `kind`; user-facing `label`; non-secret `config_json`; `legacy_namespace` (the pre-canonical dedup namespace, e.g. `mbox`, `imap:user@example.com` — unique, NULL for connector-owned instances); `connector_key` (unique per kind, e.g. IMAP host/port/TLS/username — NULL for legacy instances, which never match a connector); `state` (connected/disconnected); `last_attempt_at` / `last_success_at`; credentials never stored here |
+| `conversations` | UUID; owning source instance; `legacy_chat_key` (pre-canonical grouping) and/or `provider_key` (stable provider identity, unique per instance — e.g. `telegram:chat:<id>`, `email:thread:<root-most ref>`); `label` (display name; follows the newest name for provider-keyed chats); `kind`; `confidence` in (`verified`, `user_linked`, `legacy_unresolved`) |
+| `archive_messages` | Stable integer ID (copied unchanged from legacy rows); source instance; optional conversation; `external_id`, `channel`, `chat_id`, `author`, `subject`, `body`, source-specific `raw_json` (verbatim legacy payload); time provenance: `sent_instant` (RFC 3339 UTC, NULL when unknown), `original_timestamp` (verbatim source text), `timezone` ('' = not recorded, else IANA name, numeric offset, or `UTC`), `time_confidence` in (`explicit_offset`, `user_confirmed`, `legacy_assumed`, `unresolved`, `missing`); `content_hash` (SHA-256 over the U+001F-joined canonical fields) |
+| `message_identities` | Source instance, `namespace` (`legacy` for migrated `(source, external_id)` aliases and the file-ingest path; `imap` for the connector), `external_key`, `revision_hash`; unique identity tuple → message; connector-scoped keys live beside, not instead of, legacy aliases |
+| `message_occurrences` | Message, `scope` (`legacy-import`, `import`, or a remote folder name), `provider_item_id` (UID for IMAP), `uidvalidity` where applicable, `observed_at`, `import_id` of the bounded import that first observed it; unique occurrence tuple prevents repeat provenance rows |
+| `sync_checkpoints` | Source instance, folder, `uidvalidity`, committed `last_uid`, updated time |
+| `objects` / `attachments` | **Proposed** (M4); the SHA-256 object store itself landed with M4.1 — see [Architecture](architecture.md#originals-media-and-object-lifecycle) and the object-store module for the current lifecycle |
+| `jobs` / `job_issues` / `import_checkpoints` / `import_issues` / `sync_failed_items` | Job rows and durable per-item issue ledgers landed with M2.1–M2.3; their contracts are owned by [Architecture: jobs](architecture.md#jobs-and-database-access) |
+| `settings` | **Proposed** versioned UI/timezone/capacity/scheduler/AI-consent configuration; the current settings file and scheduler singleton are described in the root README |
+| `archive_meta` | Small key/value table; `archive_revision` increments atomically inside every content-changing transaction so paged searches can detect archive changes under pagination |
+
+`archive_fts` is an external-content FTS5 index over message body, author, and subject, maintained by triggers on `archive_messages`. It is rebuilt after bulk enrichment (e.g. media backfills). Raw JSON, credentials, file bytes, and hidden source configuration are never indexed. Search-ordered indexes cover source/time/message ID and conversation/time/message ID; occurrence folder membership and identity lookups are indexed. Benchmark query plans instead of assuming indexes eliminate broad FTS ranking costs.
+
+The canonical v2 message table is new relative to the legacy `UNIQUE(source, external_id)` constraint: migration 4 copied existing IDs and payloads into `archive_messages` and retained the old `messages`, `messages_fts`, and `imap_sync_state` tables as an untouched legacy snapshot for this release. All application commands and core APIs use the canonical tables, with no dual writes. Old-schema-version tests remain; current-schema SQL assertions target the canonical store. The temporary disk duplication (old data, new data, FTS, pre-migration snapshot) belongs in capacity estimates. Removing the legacy snapshot is deferred until the recovery and upgrade experience justifies a separate migration.
+
+## Identity and deduplication
+
+**Current.**
+
+**Source instances.** A file import uses an explicitly chosen or created source collection (its source string is the legacy namespace). IMAP identity is a durable source instance keyed by a canonical connector key — kind, trimmed case-folded host, port, TLS mode, and the exact username (`imap\|host\|port\|tls\|username`). Hostnames are case-folded; usernames are not. The password is never part of the key or the stored config (it stays in the OS keyring), so reconfiguring credentials preserves source identity, and two accounts on different hosts remain distinct instances even with the same username. Legacy namespaces are never silently bound to a configured account: binding a legacy collection to a verified account is an explicit user action (**proposed**, the `user_linked` confidence exists in the schema for it).
+
+**Mail messages (connector-scoped).** Within a source instance, the normalized `Message-ID` (trimmed, angle brackets stripped) is the external key; without one, the SHA-256 of the raw message bytes is the fallback key. A semantic revision hash is computed over decoded content and stable headers (`Message-ID`, `Subject`, `From`, `To`, the original `Date` text, and the decoded body, U+001F-joined); transport-added headers and folder state never enter it, so the same mail re-fetched from another folder or re-encoded in transit hashes identically. The full identity tuple (instance, namespace, external key, revision hash) deduplicates: an exact repeat records only an occurrence (folder, UID, UIDVALIDITY); genuinely different decoded payloads sharing a `Message-ID` become distinct preserved revisions — both archived, both searchable, flagged at insert time (`FolderSyncSummary.conflicting_revisions`) and inspectable through `message_revisions` / `message_occurrences`. Cross-source automatic merging is not part of this release; a copied mail from another collection remains a separate archived record.
+
+**Telegram.** External id is `<chat-id>/<message-id>` when the export carries the provider chat id; within a source instance this identifies a message, and exact repeat imports dedup. Display names never determine identity — the conversation is keyed `telegram:chat:<id>`, so a re-export under a rename lands in the same conversation (the label follows the newest name) while different chats sharing a display name stay distinct. Exports without a stable chat id stay on the legacy display-name grouping (legacy-unresolved). **Proposed**: explicit user linking for such exports instead of automatic display-name matching.
+
+**Signal.** The provider-guaranteed conversation UUID is the stable identity: external id `<conversationId>/<id>`, conversation key `signal:chat:<uuid>`. Renamed export files re-dedup into the same conversation.
+
+**WhatsApp.** The format has no message ids. The conversation key is a SHA-256 over the sorted distinct authors plus the first authored message (length-prefixed field join), so the chat survives file renames and re-exports; when no authored message exists, no key can be derived and the legacy stem grouping applies. The external id is a content hash over the conversation key (or stem), author, naive timestamp text, and body, plus an occurrence counter — identical back-to-back messages in one export remain distinct rows, while re-importing the same export (under any name, when a key was derived) dedups everything. The stored identity never changes with timezone corrections: naive exporter-local stamps resolve DST-aware in the machine's IANA zone (ambiguous fold times take the first occurrence; gap wall-times stay unresolved with their original text). **Proposed**: cross-export ambiguity handling (“match existing” vs “keep additional copies”) through the import preview (M3.3).
+
+**Discord.** Dedup follows the stable channel id (fallback: the file stem); display grouping prefers guild/channel names. Provider conversation keys are not yet derived for Discord — grouping is the legacy chat grouping (see [assessment gaps](project-assessment.md)).
+
+**Conversations (email).** Email builds a source-scoped reply graph from `In-Reply-To` plus `References` (root-most first). Resolution is one hop at a time, never a traversal, so incomplete chains and reference cycles cannot loop: the first stored reference that already has a conversation wins (a reply cross-linking two threads lands in the first-seen root-most thread); otherwise the conversation is keyed `email:thread:<root-most ref>`. Stored messages referenced by later replies but still conversationless (a parent imported before M1.3, a root that arrived alone) are adopted into the resolved thread when a later reply reaches them. Never merge by subject alone; mail without reply evidence stays standalone. Referenced-but-absent parents are not fabricated.
+
+**Occurrences.** One mail message can have multiple folder occurrences (scope = folder, provider item = UID, UIDVALIDITY per epoch) and multiple import observations. Remote deletion marks an occurrence no longer observed only on explicit reconciliation; it never deletes archived content. A UIDVALIDITY reset starts a new epoch: the folder is rescanned and re-fetched messages dedup through the connector identity, so a reset never creates duplicate rows. Adding a missing attachment enriches a message without duplicating it. Conflicts and revisions remain inspectable; default search shows all preserved revisions with a conflict marker rather than silently choosing one.
+
+## Time semantics
+
+**Current** (storage and v2 search). Every message keeps the original timestamp text, the resolved UTC instant (`sent_instant`, NULL when unknown), the zone it was interpreted in, and a confidence label (`explicit_offset`, `user_confirmed`, `legacy_assumed`, `unresolved`, `missing`). Mail `Date` offsets, Telegram/Signal Unix epochs, and Telegram's naive `date`-string fallback (an exporter-UTC stamp, stored verbatim) resolve directly as `explicit_offset`. WhatsApp/Telegram-style naive local stamps resolve DST-aware in the machine's IANA zone: ambiguous fold times take the first occurrence, and gap wall-times stay `unresolved` with their original text preserved. Legacy pre-canonical values keep their text and carry `legacy_assumed`; migration 7 additionally resolves legacy WhatsApp blind-Z stamps to their machine-zone instants and re-keys the affected identities, without changing what the text says. Corrections are explicit, never a migration side effect; the `user_confirmed` label (**proposed**, M3.3 import confirmation) exists in the schema for user-verified interpretations.
+
+v2 search interprets day bounds in an explicit validated IANA timezone (empty = OS default): `from_date` is the local midnight of the from-day and `to_date` the exclusive local midnight of the following day, covering 23/25-hour DST days correctly; reversed bounds are rejected. Unresolved/missing instants are excluded from bounded searches and sort deterministically after dated messages (by ID) in unbounded browse. Paged results carry the `archive_revision` so the UI can offer refresh instead of silently restarting pagination. **Proposed**: persisting the workspace timezone as a setting and surfacing time-confidence indicators throughout the workspace UI.
+
+## Migration and recovery
+
+**Current.** The versioned ledger applies numbered migrations inside the safe-migration path below (never edit an applied version — add a new one). Relevant steps: 1–3 legacy schema (`messages`, `messages_fts`, `imap_sync_state`, embeddings); **4** canonical store — every legacy row copied with IDs unchanged into `source_instances` / `conversations` / `archive_messages` / `message_identities` / `message_occurrences` / `sync_checkpoints`, one unresolved legacy source instance per legacy namespace (including IMAP namespaces — a host is never invented from a username), one legacy-unresolved conversation per legacy chat group, an alias identity per legacy `(source, external_id)`, one `legacy-import` occurrence per message, embeddings re-bound to canonical IDs; 5 watched folders; 6 statistics counters; **7** conversation-key backfill — Telegram/Signal conversations re-group by the external-id chat prefix (merging renamed imports, splitting same-name chats), WhatsApp conversations derive the content key and every WhatsApp identity re-keys to the current hash formula so post-upgrade re-imports dedup, and unsafe shapes (id-less exports, author-less WhatsApp, pre-M1.3 mail without threading headers) stay `legacy_unresolved`; **8** durable source instances (connector key, state, attempt/success stamps); 9–12 are M2-era ledgers (failed items, import recovery, scheduler, `archive_meta`).
+
+Opening an existing database with pending migrations goes through the safe-migration path ([safe_migration.rs](../crates/vault-core/src/safe_migration.rs)):
+
+1. **Newer-schema refusal** — a database recording a schema version newer than this build is refused before anything on disk is touched.
+2. **Capacity preflight** — free space must cover the snapshot (main file + journal sidecars + slack); a refusal leaves the file byte-identical.
+3. **Pre-migration snapshot** — the WAL is checkpointed (TRUNCATE) so committed WAL-only rows are folded in, then the file is copied (fsynced temp + atomic rename) to `<db>.pre-migrate-v<from>.snapshot` next to the database.
+4. **Transactional conversion** — all pending migrations commit in one single SQLite transaction (all or nothing).
+5. **Validation** — `PRAGMA quick_check`, FTS document-count parity over the shadow `_docsize` tables (a `COUNT(*)` on an external-content FTS table would read the content table and hide drift), and the FTS5 integrity-check command, over both `archive_fts` and the frozen legacy `messages_fts`.
+6. **Rollback/reopen** — any failure after the snapshot exists closes the connection and restores the original file byte-for-byte from the kept snapshot; the next open retries the conversion on the intact original. A validated conversion deletes the snapshot. A failed *post-conversion validation* additionally records a durable `<db>.migration-failed` marker so later opens refuse with the recorded reason instead of retrying the same deterministic failure forever; recovery is manual by design (fix or restore, then remove the marker).
+
+Failure-injection tests at every stage (before/within/after conversion) prove the original archive is never stranded or modified. Migration preserves all information actually stored, not data the old importer already discarded: folder memberships or originals absent from the old database require resync/reimport, pre-M1.3 mail lacks reply evidence (reimport originals to enrich threads rather than infer), and reimport compatibility checks identity aliases before creating a new canonical record.
+
+## Proposed v2 IPC surface
+
+**Proposed** unless noted. Use snake_case JSON fields to match Rust serde. Every command returns `Result<T, AppError>`; job start commands return `{job_id}` immediately. A first subset has shipped: the background-job protocol (`job_submit`, `job_get`, `job_list`, `job_events_since`, `job_cancel`, M2.1) and the v2 reading surface (`search_archive_v2`, `message_detail_v2`, `conversation_context_v2`, `list_import_scopes_v2`, `export_messages_v2`, M3.2), inventoried in the root README; the remaining rows are the intended minimum contract for their owning slices.
+
+| Command | Input | Output / behavior |
+| --- | --- | --- |
+| `vault_status_v2` | none | Vault ID, schema, counts, readiness/recovery state; no secrets |
+| `list_sources_v2` | none | Source IDs, kind/label, health and latest job outcome |
+| `save_source_v2` | ID or new, kind, label, non-secret config | Source record; authentication supplied through a separate credential command |
+| `test_source_v2` | Config, optional transient secret | Job with connectivity result and folder list; does not replace saved credentials |
+| `set_source_secret_v2` | Source ID, secret | Validates connection first; reports `os_keyring` or `memory`; never returns the secret |
+| `disconnect_source_v2` | Source ID | Stops scheduled work and removes credentials; retains archive |
+| `delete_source_archive_v2` | Source ID, confirmed count/version token | Maintenance job deleting local records only; refuses stale confirmation or running source job |
+| `preview_import_v2` | Native-picked path, optional source ID | Job; completed result contains preview ID, samples, format/capacity warnings, date/identity questions |
+| `start_import_v2` | Preview ID, source/conversation choices, date/time choices, collision resolutions | Job; rejects changed/expired inputs and re-previews instead of importing different bytes |
+| `start_sync_v2` | Source ID | Job using stored configuration/secret |
+| `get_job_v2`, `list_jobs_v2` | Job ID or bounded pagination | Durable job status, counters and paged issue summaries |
+| `cancel_job_v2`, `retry_job_v2` | Job ID | Cancellation acknowledged or new retry job linked to the original |
+| `search_archive_v2` | Search request below | Bounded result page with summaries; no full bodies/raw JSON |
+| `get_message_v2` | Message ID | Full text, metadata, attachments, occurrences, time confidence, conflict/revision links |
+| `conversation_context_v2` | Message ID, before/after cursors, limit | Chronological context anchored on the message; aliases resolved; unresolved grouping returns anchor only |
+| `open_attachment_v2`, `export_attachment_v2` | Attachment ID; native destination for export | Validated local preview/open handle or export outcome, never unrestricted path access |
+| `export_messages_v2` | Explicit selected IDs, text/JSON format, native destination | Job, with provenance; attachments require explicit additional selection |
+| `get_settings_v2`, `update_settings_v2` | Versioned preferences | Settings, with secrets excluded; changes to provider/consent invalidate pending AI approvals |
+| `prepare_ask_v2` | Question, search filters, endpoint/config version | Job sending the disclosed question only after explicit action; returns local results and an exact bounded synthesis preview |
+| `generate_answer_v2` | Prepared request ID, payload digest | Job; sends only the approved snapshot, returns answer and citation-to-message map |
+| `start_backup_v2`, `preview_restore_v2` | Native destination/source | Job with backup or staged validation result |
+| `commit_restore_v2` | Validated preview ID, active vault/version confirmation | Recoverable switch; invalidated if staged bytes or active vault change |
+| `return_to_previous_vault_v2` | Previous-vault ID, confirmation | Same validated switch process; no merging of archives |
+
+Source kinds are connector-controlled enums; configuration is validated by that connector. Native dialog selections must still be checked in Rust. Bind preview IDs to canonical input roots, file fingerprints, capacity and identity choices; a preview is valid only for its application session and unchanged inputs. Store no arbitrary path authority in frontend preferences.
+
+### Search request and response
+
+```typescript
+type SearchArchiveRequest = {
+  text: string;
+  source_ids: string[];       // empty = all
+  conversation_id?: string;
+  import_job_id?: string;
+  author: string;             // Unicode case-folded substring
+  from_date?: string;         // YYYY-MM-DD in timezone below
+  to_date?: string;
+  timezone: string;           // validated IANA identifier
+  has_attachment?: boolean;
+  sort: "relevance" | "newest";
+  limit: number;              // default 50, clamp 1..200
+  offset: number;             // clamp 0..1,000,000
+};
+type MessageSummary = {
+  id: number;
+  source_id: string;
+  source_label: string;
+  conversation_id: string | null;
+  conversation_label: string | null;
+  author: string;
+  subject: string | null;
+  sent_at: string | null;     // resolved UTC instant only
+  time_confidence: "explicit_offset" | "user_confirmed" |
+    "legacy_assumed" | "unresolved" | "missing";
+  snippet: string;            // bounded to 500 characters plus hit markers
+  attachment_count: number;
+  available_attachment_count: number;
+  has_conflicting_revision: boolean;
+};
+type SearchArchivePage = {
+  hits: MessageSummary[];     // ID, source/conversation labels, metadata, snippet
+  total: number;
+  limit: number;
+  offset: number;
+  archive_revision: number;  // changes whenever a committed batch changes results
+};
+```
+
+Normalize free text using the safe term builder; keep all SQL values bound. Limit text to 2000 Unicode characters and reject invalid dates/reversed bounds. Empty text browses newest regardless of requested relevance sort. Text relevance sorts by rank then ID; newest sorts by resolved instant descending then ID descending, unresolved dates last. Counts and rows come from one read snapshot. Page grouping must not change this order. If the archive changes, report its revision and let the UI offer refresh; do not silently restart pagination.
+
+AI retrieval intersects active user filters with the validated planned date bounds. It never broadens source scope. Prepared synthesis context is limited to eight messages with 500 Unicode body characters each, author metadata capped at 200 characters, and timestamps; no filenames, raw JSON, or attachment bytes. The exact preview includes all metadata and the question/date context sent. Bind request ID and digest to endpoint, model, question, filters, result IDs/revisions, and payload bytes; expire on settings changes, changed referenced messages, cancellation, or app restart. Citations reference this fixed map, not whichever search results are currently on screen.
+
+## Errors and events
+
+**Proposed** naming; the shipped v2 search surface already returns structured `AppError` results (M3.2). `AppError` contains `code`, safe `message`, optional `field`, `retryable`, and optional `job_id`. Codes include `invalid_input`, `unsupported_format`, `ambiguous_identity`, `credentials_required`, `authentication_failed`, `network_unavailable`, `capacity_exceeded`, `disk_full`, `integrity_failed`, `conflict`, `cancelled`, `not_found`, `unsupported_version`, and `internal`. Never expose raw server responses containing credentials or filesystem internals by default.
+
+Jobs transition `queued → running → succeeded | partial | failed | cancelled`; `running → cancelling → cancelled` permits finishing the current atomic batch. Previously running jobs become `interrupted` on restart. Retry creates a linked job; it never rewrites the original outcome. Cancellation is cooperative between records/batches and may wait for the current bounded socket call; the UI must not promise instantaneous cancellation. No automatic retry for authentication failure; retry network failures on user action or the next scheduled run, without immediate retry storms.
+
+Emit `vault_job_v2` events containing job ID, source ID, state, stage, processed/new/existing/failed/service-skipped counts, copied bytes, optional totals, and monotonically increasing event sequence. Each discovered item receives one outcome; `processed = new + existing + failed + service_skipped`. Keep media item/byte counters separate. Unknown totals are null, never guessed percentages. Polling persisted status is authoritative after reconnect or a missed sequence.
+
+## Media and capacity
+
+**Proposed** (M4 slices; the M4.1 object store landed). Availability is `available`, `missing`, `unsupported`, or `failed`. Unsupported preview does not mean unpreserved bytes: use `available` with a separate `preview_supported=false` when copied successfully. `unsupported` means the importer cannot preserve the referenced item, with an explicit issue explaining why. Role is `attachment`, `inline`, `original`, or `unlinked`. Deleting a message removes references, not objects still used elsewhere or pinned by retained recovery manifests. Cleanup follows the object lifecycle in [Architecture](architecture.md#originals-media-and-object-lifecycle).
+
+Initial configurable safeguards: 2 GiB per individual file, 100 GiB expanded bytes per import, 100,000 ZIP entries, 1000:1 maximum compression expansion, and 1 GiB free-space reserve. Enforce actual streamed bytes as well as metadata. Hitting a limit is a visible partial/capacity result, never a silently missing file; show which files were not preserved. Users can raise limits in the import preview within available disk capacity. Text records larger than 8 MiB normalized text are preserved as originals and reported for explicit import override; do not truncate archived content to satisfy batching limits. These defaults require large-file fixtures, not giant committed binaries.
+
+## Maintenance
+
+Change Rust DTOs, TypeScript contracts, compatibility adapters, examples, and contract tests together. Keep wire fixtures for v2 success/error/events, time boundaries, legacy aliases, and prepared AI payloads. Any future incompatible schema or backup change needs a new version and a documented migration/recovery path.
