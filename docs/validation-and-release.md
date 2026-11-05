@@ -83,7 +83,7 @@ These are proposed targets, not measured results. The M2.4 baseline already reco
 | --- | --- | --- | --- |
 | Linux x64 | AppImage and Debian package | Core/frontend tests, native build, existing WebKit/Xvfb E2E | Install/run, dialogs, Secret Service available/unavailable, media, upgrade, restore |
 | Windows x64 | NSIS installer, signed public executable | Core/frontend tests, native build, supported driver automation where available | Credential Manager, file locks/path rules, install/uninstall retention, upgrade, restore, keyboard/screen reader |
-| macOS arm64 and x64 | App bundle/DMG; sign and notarize public builds | Core/frontend tests, native build per architecture | Keychain, permissions/dialogs, media codecs, upgrade/restore, VoiceOver; native or documented hardware evidence per architecture |
+| macOS arm64 and x64 | App bundle/DMG; sign and notarize public builds | Core/frontend tests, native build per architecture, packaged-dmg smoke (`scripts/dmg-smoke-test.sh`) | Keychain, permissions/dialogs, media codecs, upgrade/restore, VoiceOver; native or documented hardware evidence per architecture |
 
 Do not assume Linux E2E automation covers macOS/Windows or that cross-compilation proves native behavior. Where the current harness cannot automate a platform, use a repeatable manual checklist with artifact hash, OS/architecture, tester, and observed result. Native CI builds are required; missing native test equipment remains a visible release limitation.
 
