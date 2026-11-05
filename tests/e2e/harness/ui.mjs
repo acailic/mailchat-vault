@@ -20,16 +20,26 @@ export async function uiMode(browser) {
 }
 
 /** Wait until the app booted: the stats label replaced its placeholder. */
+/** Wait until the app booted: the stats label replaced its placeholder.
+ * Some WebKitWebDriver builds return an empty string from getText()
+ * for live-region elements even when the text is set, so the read
+ * falls back to the DOM textContent via execute — the assertion is
+ * unchanged: the label must actually hold the boot-time stats text. */
 export async function waitForApp(browser, { timeout = 30_000 } = {}) {
   const stats = await browser.$("#stats");
+  const read = async () => {
+    const text = await stats.getText().catch(() => "");
+    if (text !== "") return text;
+    return browser.execute(() => document.querySelector("#stats")?.textContent ?? "");
+  };
   await browser.waitUntil(
     async () => {
-      const text = await stats.getText().catch(() => "");
+      const text = await read();
       return text !== "" && text !== "…" && !text.startsWith("Loading");
     },
     { timeout, timeoutMsg: "app did not boot (stats label never filled in)" },
   );
-  return stats.getText();
+  return read();
 }
 
 /**

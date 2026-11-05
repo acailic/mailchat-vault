@@ -231,7 +231,7 @@ describe("reading pane", () => {
       timezone: "Europe/Zagreb",
       time_confidence: "legacy_assumed",
       attachments: [
-        { name: "spec.pdf", kind: "document", size: 2048, available: true },
+        { name: "spec.pdf", kind: "document", size: 2048, available: true, path: null },
         { name: "lost.jpg", kind: "image", size: 0, available: false },
       ],
       occurrences: [
@@ -284,6 +284,8 @@ describe("reading pane", () => {
       onCopyLink: () => {},
       onExport: () => {},
       onExportChat: () => {},
+      onExportMedia: () => {},
+      onOpenExternalMedia: () => {},
       onClose: () => {},
       ...over,
     });

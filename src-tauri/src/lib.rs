@@ -92,7 +92,7 @@ use vault_core::llm::{
 };
 use vault_core::mbox::MboxSource;
 use vault_core::oauth::{self, OAuthConfig};
-use vault_core::object_store::{ObjectStore, ReconcileReport};
+use vault_core::object_store::{MediaUsage, ObjectStore, ReconcileReport};
 use vault_core::query::{ChatContext, SearchPage, SearchQuery};
 use vault_core::scheduler::{SyncSchedule as CoreSyncSchedule, SyncScheduler};
 use vault_core::search2::{
@@ -108,6 +108,7 @@ use vault_core::vector::{
 use vault_core::watch::{FolderWatcher, WatchSnapshot};
 use vault_core::{demo, message, Error, Result as CoreResult};
 
+mod media_proto;
 mod registry;
 mod secrets;
 
@@ -287,6 +288,117 @@ async fn media_reconcile(
     .await
     .map_err(|e| format!("reconcile task failed: {e}"))?
     .map_err(|e| e.to_string())
+}
+
+/// Disk usage of the media object store (M4.3): object count, total
+/// bytes, the referenced/orphaned split, a per-extension breakdown,
+/// and the largest objects — the "what is eating my disk" report over
+/// the same enumeration `media_reconcile` sees.
+#[tauri::command]
+async fn media_usage(app: AppHandle, state: State<'_, AppState>) -> Result<MediaUsage, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let digests = state
+        .pool
+        .with_read(|s| s.media_digests())
+        .map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || Ok(ObjectStore::new(&data_dir).usage(&digests)))
+        .await
+        .map_err(|e| format!("usage task failed: {e}"))?
+}
+
+/// Summary of one explicit media export (M4.3): a byte-exact copy of
+/// the store object at the user-picked path.
+#[derive(Debug, Clone, Serialize)]
+struct MediaExportSummary {
+    path: String,
+    size: u64,
+}
+
+/// Summary of one explicit external open (M4.3): the disposable temp
+/// copy handed to the OS handler, and its size.
+#[derive(Debug, Clone, Serialize)]
+struct MediaOpenSummary {
+    path: String,
+    size: u64,
+}
+
+/// Validate an object name the frontend claims came from a
+/// `media/<sha256>.<ext>` path: the same strict single-component shape
+/// the `mcmedia://` handler serves, so no command can be steered
+/// outside the store by a crafted `raw_json`.
+fn validated_object_name(name: &str) -> Result<String, String> {
+    media_proto::object_name_of(&format!("/{name}"))
+        .ok_or_else(|| format!("not a media object name (expected <sha256>.<ext>): {name}"))
+}
+
+/// Export one preserved media object to a user-picked path (M4.3). The
+/// action is always explicit (the frontend only offers it from a
+/// button); the copy is byte-exact and the store object itself is
+/// never moved, linked, or mutated.
+#[tauri::command]
+async fn media_export(
+    app: AppHandle,
+    name: String,
+    path: String,
+) -> Result<MediaExportSummary, String> {
+    let name = validated_object_name(&name)?;
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let src = media_proto::store_path(&data_dir, &name);
+    tauri::async_runtime::spawn_blocking(move || {
+        let meta =
+            std::fs::metadata(&src).map_err(|_| format!("media object not found: {name}"))?;
+        if !meta.is_file() {
+            return Err(format!("media object not found: {name}"));
+        }
+        let size = std::fs::copy(&src, &path).map_err(|e| format!("export copy failed: {e}"))?;
+        Ok(MediaExportSummary { path, size })
+    })
+    .await
+    .map_err(|e| format!("export task failed: {e}"))?
+}
+
+/// Open one preserved media object with the OS default application
+/// (M4.3) — always an explicit user action. The object is first copied
+/// into a disposable per-digest temp preview file, so an external
+/// viewer that writes back can never touch the content-addressed
+/// store (integrity stays a `media_reconcile` call away).
+#[tauri::command]
+async fn media_open_external(
+    app: AppHandle,
+    name: String,
+    display_name: Option<String>,
+) -> Result<MediaOpenSummary, String> {
+    let name = validated_object_name(&name)?;
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let src = media_proto::store_path(&data_dir, &name);
+    let display = display_name.unwrap_or_else(|| name.clone());
+    tauri::async_runtime::spawn_blocking(move || -> Result<MediaOpenSummary, String> {
+        let meta =
+            std::fs::metadata(&src).map_err(|_| format!("media object not found: {name}"))?;
+        if !meta.is_file() {
+            return Err(format!("media object not found: {name}"));
+        }
+        // Per-digest temp directory: two objects sharing a display
+        // name never clobber each other.
+        let digest = name.split('.').next().unwrap_or("object").to_string();
+        let tmp_dir = std::env::temp_dir()
+            .join("mailchat-media-open")
+            .join(digest);
+        std::fs::create_dir_all(&tmp_dir)
+            .map_err(|e| format!("cannot prepare preview dir: {e}"))?;
+        let file_name = media_proto::safe_display_name(&display, &name);
+        let dest = tmp_dir.join(&file_name);
+        let size = std::fs::copy(&src, &dest).map_err(|e| format!("preview copy failed: {e}"))?;
+        let url = tauri::Url::from_file_path(&dest)
+            .map_err(|_| "preview path is not a valid file URL".to_string())?;
+        webbrowser::open(url.as_str()).map_err(|e| format!("cannot open externally: {e}"))?;
+        Ok(MediaOpenSummary {
+            path: dest.to_string_lossy().into_owned(),
+            size,
+        })
+    })
+    .await
+    .map_err(|e| format!("open task failed: {e}"))?
 }
 
 /// Export an explicit selection of messages (the rows the user checked
@@ -1614,9 +1726,135 @@ impl StreamSource for DemoSource {
     }
 }
 
+// ---------------------------------------------------------------------------
+// mcmedia:// read-only media protocol (M4.3)
+// ---------------------------------------------------------------------------
+
+/// Serve one media object request on the blocking pool: an exact-range
+/// slice (`206`), the whole object (`200`), `416` for unsatisfiable
+/// ranges, `404` for anything that is not a store object. Every
+/// response — error or data — carries the hard media CSP and
+/// `nosniff`, and no HTML content type is ever served (see
+/// [`media_proto::content_type_for`]).
+fn serve_media_object(
+    path: &Path,
+    name: &str,
+    range: Option<&str>,
+) -> tauri::http::Response<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let not_found = |status: u16, message: &str| {
+        tauri::http::Response::builder()
+            .status(status)
+            .header("Content-Type", "text/plain; charset=utf-8")
+            .header("Content-Security-Policy", media_proto::MEDIA_RESPONSE_CSP)
+            .header("X-Content-Type-Options", "nosniff")
+            .body(message.as_bytes().to_vec())
+            .expect("static media error response")
+    };
+    let Ok(meta) = std::fs::metadata(path) else {
+        return not_found(404, "no such media object");
+    };
+    if !meta.is_file() {
+        return not_found(404, "no such media object");
+    }
+    let len = meta.len();
+    let builder = tauri::http::Response::builder()
+        .header("Accept-Ranges", "bytes")
+        .header("Content-Type", media_proto::content_type_for(name))
+        .header("Content-Security-Policy", media_proto::MEDIA_RESPONSE_CSP)
+        .header("X-Content-Type-Options", "nosniff")
+        // Read-only local data: any same-page fetch (and the e2e range
+        // checks) may read it, including the headers that prove the
+        // serving contract (CSP, ranges, content type).
+        .header("Access-Control-Allow-Origin", "*")
+        .header(
+            "Access-Control-Expose-Headers",
+            "Accept-Ranges, Content-Length, Content-Type, Content-Range, \
+             Content-Security-Policy, X-Content-Type-Options",
+        );
+    let read_exact =
+        |file: &mut std::fs::File, start: u64, count: u64| -> std::io::Result<Vec<u8>> {
+            let mut buf = vec![0u8; count as usize];
+            file.seek(SeekFrom::Start(start))?;
+            let mut filled = 0usize;
+            while filled < buf.len() {
+                let n = file.read(&mut buf[filled..])?;
+                if n == 0 {
+                    break; // object shrank mid-read: serve what is there
+                }
+                filled += n;
+            }
+            buf.truncate(filled);
+            Ok(buf)
+        };
+    match media_proto::parse_range(range, len) {
+        media_proto::ByteRange::Unsatisfiable => builder
+            .status(416)
+            .header("Content-Range", format!("bytes */{len}"))
+            .body(Vec::new())
+            .unwrap_or_else(|_| not_found(500, "bad response")),
+        media_proto::ByteRange::Partial { start, end } => {
+            let Ok(mut file) = std::fs::File::open(path) else {
+                return not_found(404, "no such media object");
+            };
+            let count = end - start + 1;
+            match read_exact(&mut file, start, count) {
+                Ok(buf) => builder
+                    .status(206)
+                    .header("Content-Range", format!("bytes {start}-{end}/{len}"))
+                    .body(buf)
+                    .unwrap_or_else(|_| not_found(500, "bad response")),
+                Err(_) => not_found(500, "media read failed"),
+            }
+        }
+        media_proto::ByteRange::Full => {
+            let Ok(mut file) = std::fs::File::open(path) else {
+                return not_found(404, "no such media object");
+            };
+            match read_exact(&mut file, 0, len) {
+                Ok(buf) => builder
+                    .status(200)
+                    .body(buf)
+                    .unwrap_or_else(|_| not_found(500, "bad response")),
+                Err(_) => not_found(500, "media read failed"),
+            }
+        }
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // M4.3: the read-only media protocol. Registered asynchronously
+        // and served on the blocking pool so no media read — full or
+        // ranged — can stall the UI thread; range requests answer with
+        // an exact slice, so arbitrarily large objects stream on demand.
+        .register_asynchronous_uri_scheme_protocol("mcmedia", |ctx, request, responder| {
+            let data_dir = ctx.app_handle().path().app_data_dir().ok();
+            let range = request
+                .headers()
+                .get("Range")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            let name = media_proto::object_name_of(request.uri().path());
+            let (Some(data_dir), Some(name)) = (data_dir, name) else {
+                responder.respond(
+                    tauri::http::Response::builder()
+                        .status(404)
+                        .header("Content-Type", "text/plain; charset=utf-8")
+                        .header("Content-Security-Policy", media_proto::MEDIA_RESPONSE_CSP)
+                        .header("X-Content-Type-Options", "nosniff")
+                        .body(b"no such media object".to_vec())
+                        .expect("static media 404 response"),
+                );
+                return;
+            };
+            let path = media_proto::store_path(&data_dir, &name);
+            tauri::async_runtime::spawn_blocking(move || {
+                let response = serve_media_object(&path, &name, range.as_deref());
+                responder.respond(response);
+            });
+        })
         .setup(|app| {
             let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
             std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
@@ -1724,7 +1962,10 @@ pub fn run() {
             conversation_context_v2,
             list_import_scopes_v2,
             export_messages_v2,
-            media_reconcile
+            media_reconcile,
+            media_usage,
+            media_export,
+            media_open_external
         ])
         .run(tauri::generate_context!())
         .expect("error while running mailchat vault");
