@@ -1,0 +1,35 @@
+# E2E image for mailchat-vault (the e2e leg of the Linux release
+# validation matrix, scripts/release/matrix-linux.sh).
+#
+# Builds ON the suite image (mailchat-vault-suite:24.04, built from
+# Dockerfile.suite) and adds exactly the three things the WebDriver
+# route needs beyond a build environment — mirroring the CI e2e job on
+# ubuntu-24.04:
+#
+#   - webkit2gtk-driver (WebKitWebDriver — the WebDriver server
+#     tauri-driver talks to; on 26.04+ the package is renamed
+#     webkitgtk-webdriver, which is why this image pins 24.04),
+#   - xvfb + xauth (headless X display),
+#   - sqlite3 (direct-database assertions in specs),
+#   - python3 + Pillow (synthetic image fixtures for the media specs —
+#     the GitHub runner image ships Pillow; a bare container does not),
+#   - tauri-driver (cargo install --locked, cached in the image layer).
+#
+#   docker build -t mailchat-vault-e2e:24.04 -f Dockerfile.e2e .
+FROM mailchat-vault-suite:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 \
+      python3-pil \
+      sqlite3 \
+      webkit2gtk-driver \
+      xauth \
+      xvfb \
+    && rm -rf /var/lib/apt/lists/*
+
+# tauri-driver: fixed version (2.1.0 — the version the CI e2e job and
+# the recorded e2e evidence run), cached in the image; world-executable
+# so the matrix container can run as the invoking host user.
+RUN cargo install tauri-driver --version 2.1.0 --locked \
+    && chmod a+rx /usr/local/cargo/bin/tauri-driver

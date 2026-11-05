@@ -253,6 +253,27 @@ committed set is what `bundle.icon` lists.)
 The basic contract: the package **installs**, the app **launches**, and the
 core v0 flow (demo data → search → open a message) **works**.
 
+### One-command validation matrix (M6.4)
+
+The smoke sections below are the individual gates; the release
+validation matrix assembles the whole column per platform — full test
+suite, release bundles, and the smoke gates against those bundles —
+into one command each:
+
+```sh
+scripts/release/matrix-linux.sh              # Linux column (docker only)
+scripts/release/matrix-macos.sh               # on a real macOS host
+pwsh scripts/release/matrix-windows.ps1       # on a real Windows host
+```
+
+The Linux command is the complete, reproducible Linux column in one
+shot (suite/e2e/bundles/smoke legs, each pinned in its own container).
+The macOS/Windows commands are ready and waiting for their hosts — see
+[the matrix and its recorded status](validation-and-release.md#release-validation-matrix-m64).
+Run the matrix (or at minimum every gate below) on every candidate
+before publishing; a leg skipped with a `--skip-*`/`-Skip*` flag is
+never certification.
+
 ### Linux — automated smoke (22.04 + 24.04)
 
 The Linux acceptance gate is automated (M6.3); on any machine with

@@ -91,8 +91,14 @@ export async function run(ctx) {
       assert.ok(!!hit, "media item present for " + file);
       assert.ok(!hit.cls.includes("unresolved"), file + " is not unresolved");
       assert.equal(hit.kind, kind, file + " kind badge");
-      assert.ok(hit.meta.includes("media/" + digest.slice(0, 8)),
-        file + " meta shows the store path (got " + JSON.stringify(hit.meta) + ")");
+      // M4.3 media.ts contract: the meta line shows the humanized size
+      // (`103 B`) — the store path (media/<digest>) is an internal detail
+      // the UI never surfaces. Store linkage itself is proven above by the
+      // hash-named objects, their digests, and the archive rows.
+      assert.ok(/^\d+(\.\d+)? (B|KB|MB|GB|TB)$/.test(hit.meta),
+        file + " meta shows the humanized size (got " + JSON.stringify(hit.meta) + ")");
+      assert.ok(!hit.meta.includes("media/") && !hit.meta.includes(digest.slice(0, 8)),
+        file + " meta does not leak the store path (got " + JSON.stringify(hit.meta) + ")");
       await browser.execute(() => document.querySelector("#detail")?.classList.remove("open"));
     }
     // --- re-import is idempotent: nothing new stored, nothing re-linked
