@@ -77,12 +77,27 @@ export async function run(ctx) {
       false,
       "opt-out persisted to settings.json",
     );
-  });
+    // keepData: without it the harness deletes this shared data dir at
+    // session end, and boot 2 would restart over nothing — the backfill
+    // default would re-enable the option and the restart assert would
+    // read the shipped `checked` checkbox, not the persisted opt-out.
+  }, { keepData: true });
 
   // --- boot 2: the opt-out survives restart ------------------------------
   await withSession({ dataDir }, async (browser) => {
     await ui.waitForApp(browser);
     await ui.openView(browser, "settings");
+    // The checkbox ships `checked` in the HTML and is corrected only when
+    // the settings round-trip renders; wait for that render (the
+    // summarize-top input is empty until then) before reading the toggle,
+    // or the assert races the boot and flakes.
+    await browser.waitUntil(async () => {
+      try {
+        return (await (await browser.$("#summarize-top")).getValue()) !== "";
+      } catch {
+        return false;
+      }
+    }, { timeout: 15_000, timeoutMsg: "settings never rendered (summarize-top stayed empty)" });
     const toggle = await browser.$("#notify-toggle");
     assert.ok(
       !(await toggle.isSelected()),
