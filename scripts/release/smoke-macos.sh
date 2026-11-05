@@ -96,7 +96,9 @@ cleanup_mount() {
     hdiutil detach "$mountpoint" -quiet 2>/dev/null || :
   fi
 }
-trap cleanup_mount EXIT INT TERM
+trap cleanup_mount EXIT
+trap 'cleanup_mount; exit 130' INT
+trap 'cleanup_mount; exit 143' TERM
 app_count="$(find "$mountpoint" -maxdepth 1 -name '*.app' | wc -l | tr -d ' ')"
 check "dmg contains exactly one .app bundle" test "$app_count" -eq 1 -a -d "$mountpoint"/*.app
 app_in_dmg="$(find "$mountpoint" -maxdepth 1 -name '*.app' | head -1)"
