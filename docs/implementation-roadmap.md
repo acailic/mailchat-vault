@@ -91,7 +91,7 @@ M6 exit: [platform release matrix](validation-and-release.md#platform-and-releas
 - [x] M1: identity, provenance, time, migration — record below
 - [x] M2: jobs, responsiveness, resumability, performance evidence — record below (code: #40 M2.1, #41 M2.3, #42 M2.2, #43 M2.4, #50)
 - [ ] M3: workspace, imports, account management, accessibility (M3.1/M3.2 implemented and recorded below — #44/#46; M3.3/M3.4 and the UX/accessibility session evidence open)
-- [ ] M4: originals/media, storage, backup/restore (code landed: #49 M4.1; M4.2/M4.3/M4.4 open)
+- [ ] M4: originals/media, storage, backup/restore (code landed: #49 M4.1; M4.3 media display landed; M4.2/M4.4 open)
 - [ ] M5: explicit AI consent and evidence navigation (code landed: #48; consent-gate and citation evidence recorded below — the M5.1 persisted consent switch and M5.2 job-backed approval flow keep the box open)
 - [ ] M6: three-platform installation, upgrade, and release validation (code landed: #47 M6.3 Linux distributions, #17 bundling; M6.1/M6.2 open)
 

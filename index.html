@@ -313,6 +313,21 @@
                 Text is set in the bundled Source Sans 3 (SIL OFL 1.1), falling back to your system font.
               </p>
             </section>
+
+            <section id="media-store" aria-label="Media store">
+              <h2>Media store</h2>
+              <p class="meta">
+                Preserved attachments live in the app data dir, content-addressed by SHA-256 and served to
+                the reading pane read-only. Nothing is ever fetched remotely to display media.
+              </p>
+              <div class="row">
+                <span id="media-store-status" class="meta" style="flex: 1" role="status"></span>
+                <div class="spacer"></div>
+                <button id="media-refresh-btn" type="button">Refresh</button>
+                <button id="media-reconcile-btn" type="button" title="Verify every object's hash against its name and the archive's references">Reconcile…</button>
+              </div>
+              <div id="media-usage"></div>
+            </section>
           </section>
         </main>
       </div>
