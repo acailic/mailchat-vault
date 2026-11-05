@@ -302,6 +302,9 @@ beforeEach(() => {
   tauri.calls.length = 0;
   tauri.handlers.clear();
   tauri.handlers.set("stats", () => STATS);
+  // Notifications boot fail-closed (silent until settings load), so every
+  // notify test needs the settings round-trip to resolve.
+  tauri.handlers.set("settings_get", () => viewWith());
   // Canonical source instances (id ↔ display label) for the v2 source
   // filter; import scopes for the import-scope chip.
   tauri.handlers.set("sources_list", () => [
@@ -2614,6 +2617,12 @@ describe("settings screen", () => {
   });
 
   it("adds provider rows with unique ids and per-kind prefills", async () => {
+    tauri.handlers.set("settings_get", () =>
+      viewWith((v) => {
+        v.providers = [];
+        v.default_provider = null;
+      }),
+    );
     await boot();
     input("#add-kind").value = "anthropic";
     $("#add-provider-btn").click();
@@ -3037,6 +3046,41 @@ describe("desktop notifications", () => {
     await vi.waitFor(() => expect(notifications.requested).toBe(1));
     await flush();
     expect(notifications.sent).toEqual([]);
+  });
+
+  it("stays silent when a sync succeeds before the settings load resolves", async () => {
+    let releaseSettings: ((view: Record<string, unknown>) => void) | null = null;
+    tauri.handlers.set(
+      "settings_get",
+      () =>
+        new Promise((resolve) => {
+          releaseSettings = resolve;
+        }),
+    );
+    await bootWithJobs();
+    blur();
+    emitJob({ seq: 1, at: "t", job: 5, type: "submitted", kind: "imap_sync" });
+    emitJob({
+      seq: 2,
+      at: "t",
+      job: 5,
+      type: "succeeded",
+      result: [{ folder: "INBOX", inserted: 3 }],
+    });
+    await flush();
+    expect(notifications.sent).toEqual([]);
+    // Once settings prove the option is on, later cycles notify again.
+    releaseSettings!(viewWith());
+    await flush();
+    emitJob({ seq: 3, at: "t", job: 6, type: "submitted", kind: "imap_sync" });
+    emitJob({
+      seq: 4,
+      at: "t",
+      job: 6,
+      type: "succeeded",
+      result: [{ folder: "INBOX", inserted: 1 }],
+    });
+    await vi.waitFor(() => expect(notifications.sent.length).toBe(1));
   });
 
   it("the manual Sync button's result also feeds the notification layer", async () => {

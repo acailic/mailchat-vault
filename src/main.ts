@@ -234,9 +234,10 @@ let aiConsentGranted = false;
 
 /** Desktop notifications for new mail (roadmap): the saved Settings
  * option, updated from every `settings_get`/`settings_save` response.
- * Starts at the option's enabled default; the first settings load
- * corrects it if the user opted out. */
-let notifyEnabled = true;
+ * Starts off: until the first settings load confirms the option is on,
+ * stay silent so a persisted opt-out is never violated (the job-event
+ * listener registers before settings round-trip back). */
+let notifyEnabled = false;
 
 /** The new-mail notifier: native OS notifications after sync/watch
  * cycles store new messages, silent while this window is focused and
