@@ -109,22 +109,22 @@ tar_version="$(tar -xOzf "$app_tgz" "$plist_member" 2>/dev/null | plutil -extrac
 expected_version="${RELEASE#v}"
 [[ -n "$expected_version" ]] || expected_version="$(basename "$dmg")"
 check "updater version matches the release version" \
-  bash -c "[[ -n \"$tar_version\" && \"$expected_version\" == *\"$tar_version\"* ]]"
+  bash -c '[[ -n "$1" && "$2" == *"$1"* ]]' bash "$tar_version" "$expected_version"
 
 # ------------------------------------------------------------------- app
 APP="$app_in_dmg"
 plist="$APP/Contents/Info.plist"
 check "Info.plist exists" test -f "$plist"
 check "bundle identifier is $APP_ID" \
-  bash -c "plutil -extract CFBundleIdentifier raw \"$plist\" | grep -qx '$APP_ID'"
+  bash -c 'plutil -extract CFBundleIdentifier raw "$1" | grep -qx "$2"' bash "$plist" "$APP_ID"
 check "bundle version matches the artifact name" \
-  bash -c "v=\"\$(plutil -extract CFBundleShortVersionString raw \"$plist\")\"; [[ -n \"\$v\" && \"$dmg\" == *\"\${v}\"* ]]"
+  bash -c 'v="$(plutil -extract CFBundleShortVersionString raw "$1")"; [[ -n "$v" && "$2" == *"$v"* ]]' bash "$plist" "$dmg"
 exe_rel="$(plutil -extract CFBundleExecutable raw "$plist" 2>/dev/null)"
 exe="$APP/Contents/MacOS/$exe_rel"
 check "bundle executable exists and is executable" test -n "$exe_rel" -a -x "$exe"
 
 check "universal binary: arm64 + x86_64 slices present" \
-  bash -c "lipo -archs \"$exe\" | tr ' ' '\\n' | sort | tr '\\n' ' ' | grep -q 'arm64 x86_64'"
+  bash -c 'lipo -archs "$1" | tr " " "\n" | sort | tr "\n" " " | grep -q "arm64 x86_64"' bash "$exe"
 
 # Unsigned-by-design round: assert the signature is ad-hoc (the app
 # would be killed by the kernel without one), NOT a Developer ID.
