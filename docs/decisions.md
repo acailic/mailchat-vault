@@ -1,6 +1,6 @@
 # Architecture decisions
 
-Status: **accepted design direction**. D03 and D12 are implemented and verified (M1, 2026-11-05 — see the [roadmap's M1 completion record](implementation-roadmap.md#completion-tracking)); the rest remain planning defaults until their slices land. These records describe the agreed direction, not completed code unless the amendment says otherwise. Scope changes belong in the [product plan](product-plan.md); wire/schema details belong in [contracts](data-and-api-contracts.md).
+Status: **accepted design direction**. D03, D04, D10, and D12 are implemented and verified (M1/M2, 2026-11-05 — see the [roadmap's completion records](implementation-roadmap.md#completion-tracking)); the rest remain planning defaults until their slices land. These records describe the agreed direction, not completed code unless the amendment says otherwise. Scope changes belong in the [product plan](product-plan.md); wire/schema details belong in [contracts](data-and-api-contracts.md).
 
 ## D01: Personal local archive
 
@@ -19,6 +19,8 @@ Use opaque durable source/conversation IDs and preserve source-specific keys as 
 ## D04: Serialized writes and independent readers
 
 Use one writer worker, two read connections, WAL and bounded producer queues. Network/parsing waits happen outside transactions. This directly addresses the current network-held shared mutex without adding a database server or unbounded pool. Checkpoint and result persistence are one transaction. Concurrency limits and initial batch sizes are owned by [Architecture](architecture.md#jobs-and-database-access), with measured validation before release.
+
+*Amendment (2026-11-05): implemented as M2.1–M2.3 and verified — the `DbPool` writer worker + two read connections with per-connection initialization and bounded write/job queues; job bodies hold no connection (network waits never inside the writer, a lock, or a transaction, proven by stalled-network tests); imports and IMAP fetch batches commit atomically with their checkpoints and issue/failed-item ledgers. Measured validation landed with M2.4 (real-path paginated-search baselines, concurrent-ingest measurements; [BASELINE.md](../tests/perf/BASELINE.md)). Deviations recorded honestly: all background jobs serialize on one runner thread (stricter than proposed), the busy timeout is 5 s, and job records are per-process rather than persisted rows. Details: [Architecture: jobs](architecture.md#jobs-and-database-access), [M2 record](implementation-roadmap.md#completion-tracking).*
 
 ## D05: Preserve originals and available media locally
 
@@ -43,6 +45,8 @@ AI defaults off regardless of environment keys. Each question has an explicit tr
 ## D10: Read-only mail ingestion and opt-in scheduling
 
 Keep IMAP read-only and archive content independent of remote deletion. Default to manual sync; optionally enqueue one run every 15 minutes while open, without missed-run accumulation. Retain Gmail app-password support; OAuth is deferred. Source disconnection stops access/removes secrets but does not delete local history. This is an archive, not a bidirectional mailbox replica.
+
+*Amendment (2026-11-05): implemented as M2.3/M2.4 and verified — read-only `EXAMINE` access with atomic fetch-batch commits and the durable failed-item ledger; the opt-in scheduler persists its schedule in the vault, submits each round as an ordinary `imap_sync_all` job, never overlaps rounds, and collapses sleep/resume/offline gaps into one catch-up round (missed time cannot queue). One deviation grew beyond the original text: the Gmail browser OAuth2 flow (XOAUTH2) shipped alongside app passwords, so the “OAuth deferred” clause is superseded — both paths are supported, chosen in the UI. Details: [Architecture: IMAP correctness](architecture.md#imap-correctness), [M2 record](implementation-roadmap.md#completion-tracking).*
 
 ## D11: Three-platform release with honest evidence
 
