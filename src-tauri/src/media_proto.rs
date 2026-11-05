@@ -89,7 +89,7 @@ pub fn parse_range(header: Option<&str>, len: u64) -> ByteRange {
             let Ok(n) = last.trim().parse::<u64>() else {
                 return ByteRange::Full;
             };
-            if len == 0 {
+            if len == 0 || n == 0 {
                 return ByteRange::Unsatisfiable;
             }
             let n = n.min(len);
@@ -245,6 +245,11 @@ mod tests {
             parse_range(Some("bytes=-500"), len),
             Partial { start: 0, end: 99 },
             "oversized suffix clamps to whole body"
+        );
+        assert_eq!(
+            parse_range(Some("bytes=-0"), len),
+            Unsatisfiable,
+            "empty suffix range names no bytes"
         );
         assert_eq!(parse_range(Some("bytes=100-"), len), Unsatisfiable);
         assert_eq!(parse_range(Some("bytes=100-150"), len), Unsatisfiable);

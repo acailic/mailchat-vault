@@ -357,11 +357,38 @@ async fn media_export(
     .map_err(|e| format!("export task failed: {e}"))?
 }
 
+/// The per-digest preview tree under the system temp directory that
+/// `media_open_external` writes into and purges.
+fn media_open_root() -> PathBuf {
+    std::env::temp_dir().join("mailchat-media-open")
+}
+
+/// Best-effort removal of every prior `media_open_external` preview
+/// copy, so only the most recent open's copy ever survives. Also runs
+/// at app start to clear copies left behind by a previous session.
+fn purge_media_open_copies() {
+    let _ = std::fs::remove_dir_all(media_open_root());
+}
+
+/// Restrict a freshly created preview directory (0o700) or file
+/// (0o600) to the current user on Unix; a no-op elsewhere.
+#[cfg(unix)]
+fn restrict_preview_permissions(path: &Path, dir: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = if dir { 0o700 } else { 0o600 };
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+}
+
+#[cfg(not(unix))]
+fn restrict_preview_permissions(_path: &Path, _dir: bool) {}
+
 /// Open one preserved media object with the OS default application
 /// (M4.3) — always an explicit user action. The object is first copied
 /// into a disposable per-digest temp preview file, so an external
 /// viewer that writes back can never touch the content-addressed
-/// store (integrity stays a `media_reconcile` call away).
+/// store (integrity stays a `media_reconcile` call away). Every prior
+/// preview is purged before the new copy is written, and the preview
+/// tree is private to the user (0700 dirs / 0600 files).
 #[tauri::command]
 async fn media_open_external(
     app: AppHandle,
@@ -381,14 +408,17 @@ async fn media_open_external(
         // Per-digest temp directory: two objects sharing a display
         // name never clobber each other.
         let digest = name.split('.').next().unwrap_or("object").to_string();
-        let tmp_dir = std::env::temp_dir()
-            .join("mailchat-media-open")
-            .join(digest);
+        let preview_root = media_open_root();
+        let tmp_dir = preview_root.join(digest);
+        purge_media_open_copies();
         std::fs::create_dir_all(&tmp_dir)
             .map_err(|e| format!("cannot prepare preview dir: {e}"))?;
+        restrict_preview_permissions(&preview_root, true);
+        restrict_preview_permissions(&tmp_dir, true);
         let file_name = media_proto::safe_display_name(&display, &name);
         let dest = tmp_dir.join(&file_name);
         let size = std::fs::copy(&src, &dest).map_err(|e| format!("preview copy failed: {e}"))?;
+        restrict_preview_permissions(&dest, false);
         let url = tauri::Url::from_file_path(&dest)
             .map_err(|_| "preview path is not a valid file URL".to_string())?;
         webbrowser::open(url.as_str()).map_err(|e| format!("cannot open externally: {e}"))?;
@@ -1858,6 +1888,9 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
             std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+            // Copies left behind by a previous session's external opens
+            // never outlive this one's first open.
+            purge_media_open_copies();
             // M2.1: one pool over the vault file — writer worker + two
             // read connections. Job events stream to the UI; the same
             // events are recoverable by polling `job_events_since`.
