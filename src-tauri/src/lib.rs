@@ -363,11 +363,24 @@ fn media_open_root() -> PathBuf {
     std::env::temp_dir().join("mailchat-media-open")
 }
 
+/// Serializes `media_open_external` invocations so the
+/// keep-only-current-copy purge can never destroy an in-flight open.
+static MEDIA_OPEN_LOCK: Mutex<()> = Mutex::new(());
+
 /// Best-effort removal of every prior `media_open_external` preview
 /// copy, so only the most recent open's copy ever survives. Also runs
-/// at app start to clear copies left behind by a previous session.
+/// at app start to clear copies left behind by a previous session. An
+/// entry that is not the app's own directory — a symlink or a foreign
+/// file planted at the root path — is removed as the entry itself, so
+/// the copy never lands outside the app-owned tree.
 fn purge_media_open_copies() {
-    let _ = std::fs::remove_dir_all(media_open_root());
+    let root = media_open_root();
+    if let Ok(meta) = std::fs::symlink_metadata(&root) {
+        if !meta.is_dir() {
+            let _ = std::fs::remove_file(&root);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Restrict a freshly created preview directory (0o700) or file
@@ -405,15 +418,20 @@ async fn media_open_external(
         if !meta.is_file() {
             return Err(format!("media object not found: {name}"));
         }
+        let _guard = MEDIA_OPEN_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Per-digest temp directory: two objects sharing a display
         // name never clobber each other.
         let digest = name.split('.').next().unwrap_or("object").to_string();
         let preview_root = media_open_root();
         let tmp_dir = preview_root.join(digest);
         purge_media_open_copies();
-        std::fs::create_dir_all(&tmp_dir)
+        std::fs::create_dir_all(&preview_root)
             .map_err(|e| format!("cannot prepare preview dir: {e}"))?;
         restrict_preview_permissions(&preview_root, true);
+        std::fs::create_dir_all(&tmp_dir)
+            .map_err(|e| format!("cannot prepare preview dir: {e}"))?;
         restrict_preview_permissions(&tmp_dir, true);
         let file_name = media_proto::safe_display_name(&display, &name);
         let dest = tmp_dir.join(&file_name);
