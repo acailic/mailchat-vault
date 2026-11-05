@@ -80,6 +80,50 @@ workflow (`APPLE_CERTIFICATE` + `APPLE_CERTIFICATE_PASSWORD` +
 `APPLE_SIGNING_IDENTITY` for Developer ID notarization; an EV/code-signing
 certificate for Windows) — intentionally out of scope here.
 
+### SmartScreen on Windows — the full story
+
+The installers are unsigned, so Windows treats every downloaded copy as
+"unrecognized". What the user sees and exactly what to click:
+
+1. **Download** — the browser may warn first: *“mailchat-vault_…msi isn't
+   commonly downloaded”* (Edge) or a similar line in Chrome. Choose
+   **Keep** / **Keep anyway**. This is a browser reputation warning, not
+   SmartScreen itself.
+2. **Before the installer runs** — a blue full-screen dialog:
+   *“Windows protected your PC — Microsoft Defender SmartScreen prevented
+   an unrecognized app from starting.”* Click **More info** (the single
+   line under *Run anyway*'s place), which reveals **Run anyway**; click
+   it. For the `.msi` and the NSIS `.exe` the flow is identical.
+3. **If the dialog only offers *Don't run*** and no *More info* appears,
+   the file is fully blocked by policy — clear the Mark-of-the-Web first:
+   right-click the downloaded file → **Properties** → tick **Unblock** →
+   *OK* (or in PowerShell: `Unblock-File .\mailchat-vault_…_x64-setup.exe`),
+   then run it again.
+4. **After install** — the installed app itself is unsigned too, so the
+   *first launch* can raise the same SmartScreen dialog once more; same
+   answer (*More info* → *Run anyway*). Subsequent launches are quiet
+   once Windows records the choice.
+
+Why this happens: no code-signing certificate exists in this round, and
+SmartScreen additionally builds reputation per signed identity — an
+unsigned binary starts from zero either way. The long-term fix is wiring
+an EV certificate (or Azure Trusted Signing) into the release workflow;
+until then, the click path above is expected behavior, **not** a defect.
+
+## Automated Windows smoke (M6.2)
+
+Before publishing any release's Windows assets, run the **Windows smoke**
+workflow (Actions → *Windows smoke* → *Run workflow*): on a real
+`windows-latest` runner it installs through **both** installers (`.msi`
+and NSIS `.exe`), launches the app, uninstalls, and performs an
+**in-place upgrade from the previous release** seeded with a frozen
+archive fixture — asserting the archive survives the upgrade intact
+and the uninstallers never delete user data. Details, contract and
+nuances: [`tests/windows-smoke/README.md`](../tests/windows-smoke/README.md).
+
+Publish a release only when this workflow is green on the tag being
+released (in addition to the manual Linux smoke below).
+
 ## App icon
 
 The icon set (`src-tauri/icons/`: PNGs for Linux, `icon.icns` for macOS,
@@ -197,8 +241,16 @@ checklist.
 ### Windows
 
 Run the `.msi` (or the NSIS `.exe`) → *Next/Install* → launch “Mailchat
-Vault” from the Start menu (past the SmartScreen prompt) → run the UI
-checklist.
+Vault” from the Start menu (past the SmartScreen prompt — see the
+[SmartScreen section](#smartscreen-on-windows--the-full-story) for the
+exact click path) → run the UI checklist.
+
+For an automated run of the install → launch → uninstall cycle on a
+GitHub Windows runner — plus the upgrade-from-previous-release archive
+check — use the **Windows smoke** workflow instead; see
+[Automated Windows smoke](#automated-windows-smoke-m62) above.
 
 Publish the release only when the smoke test passed on at least the Linux
-artifacts (that is the platform this round was validated on).
+artifacts (that is the platform this round was validated on), and the
+**Windows smoke** workflow is green when the release ships Windows
+assets.
