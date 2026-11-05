@@ -27,6 +27,7 @@ fn put(s: &Storage, source: &str, id: &str, author: &str, sent_at: &str, chat_id
         original_timestamp: String::new(),
         timezone: String::new(),
         time_confidence: String::new(),
+        attachments: Vec::new(),
     })
     .unwrap();
 }

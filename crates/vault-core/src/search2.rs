@@ -488,10 +488,11 @@ impl From<Error> for AppError {
 // ---------------------------------------------------------------------------
 
 /// The attachment references a message records in its source-specific
-/// JSON (M3.2's honest read of what exists before M4's attachment
-/// tables): preserved `media` links are available; WhatsApp placeholder
-/// objects, Discord attachment metadata, and Telegram `photo`/`file`
-/// references without a linked media entry are unavailable references.
+/// JSON — M4.2's honest read of what the archive holds: preserved
+/// `media` links are available; **missing** entries (references whose
+/// file was not in the export, recorded by the media pass) and
+/// placeholder objects without a linked media entry are unavailable
+/// references, shown as such rather than hidden.
 pub fn attachment_summaries(raw_json: &str) -> Vec<AttachmentSummary> {
     let Ok(Value::Object(map)) = serde_json::from_str::<Value>(raw_json) else {
         return Vec::new();
@@ -506,12 +507,16 @@ pub fn attachment_summaries(raw_json: &str) -> Vec<AttachmentSummary> {
             let name = str_of(entry, "name").unwrap_or("media");
             let kind = str_of(entry, "kind").unwrap_or("file");
             let size = entry.get("size").and_then(Value::as_u64).unwrap_or(0);
+            let missing = entry.get("missing").and_then(Value::as_bool) == Some(true);
+            let stored = str_of(entry, "sha256")
+                .map(|s| !s.is_empty())
+                .unwrap_or(false);
             media_names.push(name.to_string());
             out.push(AttachmentSummary {
                 name: name.to_string(),
                 kind: kind.to_string(),
                 size,
-                available: true,
+                available: stored && !missing,
                 path: str_of(entry, "path").map(str::to_string),
             });
         }
@@ -1626,7 +1631,7 @@ mod tests {
                 .iter()
                 .map(|id| NewMessage::new("demo", id.to_string(), "Ana", "", format!("body {id}")))
                 .collect();
-            s.commit_import_batch(import_id, "demo", &messages, &[], 0, true)
+            s.commit_import_batch(import_id, "demo", &messages, &[], &[], 0, true)
                 .unwrap();
         };
         batch("imp-early", &["a", "b"]);
@@ -1888,7 +1893,7 @@ mod tests {
                 )
             })
             .collect();
-        s.commit_import_batch("imp-x", "demo", &messages, &[], 0, true)
+        s.commit_import_batch("imp-x", "demo", &messages, &[], &[], 0, true)
             .unwrap();
 
         let mut text = Vec::new();
@@ -1910,5 +1915,47 @@ mod tests {
         assert_eq!(parsed[0].body, "body of a");
         assert_eq!(parsed[0].occurrences.len(), 1);
         assert!(SelectionFormat::parse("csv").is_err());
+    }
+}
+
+#[cfg(test)]
+mod attachment_summary_tests {
+    //! M4.2: the missing-entry read of `attachment_summaries` — a stored
+    //! link is available; a missing marker is an honest unavailable row.
+
+    use super::attachment_summaries;
+
+    #[test]
+    fn missing_entries_read_as_unavailable() {
+        let raw = serde_json::json!({
+            "media": [
+                { "sha256": "a", "path": "media/a.jpg", "name": "kept.jpg", "kind": "image", "size": 9 },
+                { "name": "gone.jpg", "kind": "image", "missing": true, "reason": "not-in-export" }
+            ]
+        })
+        .to_string();
+        let summaries = attachment_summaries(&raw);
+        assert_eq!(summaries.len(), 2);
+        assert!(summaries[0].available);
+        assert_eq!(summaries[0].path.as_deref(), Some("media/a.jpg"));
+        assert!(!summaries[1].available);
+        assert_eq!(summaries[1].name, "gone.jpg");
+        assert_eq!(summaries[1].kind, "image");
+        assert!(summaries[1].path.is_none());
+    }
+
+    #[test]
+    fn a_missing_marker_suppresses_the_whatsapp_placeholder() {
+        // The media pass writes a missing entry for an unmatched name; the
+        // legacy `attachment` placeholder must not render a second row for
+        // the same name.
+        let raw = serde_json::json!({
+            "attachment": { "kind": "image", "name": "lost.jpg" },
+            "media": [ { "name": "lost.jpg", "kind": "image", "missing": true, "reason": "not-in-export" } ]
+        })
+        .to_string();
+        let summaries = attachment_summaries(&raw);
+        assert_eq!(summaries.len(), 1);
+        assert!(!summaries[0].available);
     }
 }

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::bounded::{
-    import_id_for, BoundedOutcome, BoundedRun, IngestSink, MediaKind, StreamSource,
+    import_id_for, BoundedOutcome, BoundedRun, IngestSink, MediaKind, MediaPass, StreamSource,
 };
 use crate::discord::{
     is_discord_export, is_discord_export_dir, is_discord_export_reader, DiscordSource,
@@ -247,6 +247,16 @@ pub fn import_bounded(
     } else {
         std::borrow::Cow::Borrowed(picked)
     };
+    // A whole-tree pick (a directory, or a `.zip` that expands into
+    // one) asserts that everything inside is export content: unlinked
+    // files — files no message references — are stored too (M4.2). A
+    // bare export file says nothing about its parent directory, so its
+    // import never reaches beyond the referenced files themselves.
+    let tree_pick = picked.is_dir()
+        || (picked.is_file()
+            && picked
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("zip")));
     let (format, file, source) = resolve_stream_source(&effective)?;
     let mut run = BoundedRun::new(import_id_for("chat-import", &file));
     let export_root = file
@@ -255,16 +265,21 @@ pub fn import_bounded(
         .unwrap_or_else(|| PathBuf::from("."));
     if extract_media {
         if let Some(data_dir) = data_dir {
-            match format {
-                ChatFormat::Telegram => {
-                    run.media = Some((MediaKind::Telegram, export_root.as_path(), data_dir))
-                }
-                ChatFormat::WhatsApp => {
-                    run.media = Some((MediaKind::WhatsApp, export_root.as_path(), data_dir))
-                }
-                // Signal and Discord attachments stay recorded in `raw_json`
-                // only — media extraction is not implemented for them yet.
-                ChatFormat::Signal | ChatFormat::Discord => {}
+            // Signal and Discord attachments stay recorded in `raw_json`
+            // only — media extraction is not implemented for them yet.
+            let kind = match format {
+                ChatFormat::Telegram => Some(MediaKind::Telegram),
+                ChatFormat::WhatsApp => Some(MediaKind::WhatsApp),
+                ChatFormat::Signal | ChatFormat::Discord => None,
+            };
+            if let Some(kind) = kind {
+                run.media = Some(MediaPass {
+                    kind,
+                    export_root: export_root.as_path(),
+                    export_file: Some(file.as_path()),
+                    data_dir,
+                    unlinked: tree_pick,
+                });
             }
         }
     }

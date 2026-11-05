@@ -76,7 +76,7 @@ fn sync_round(
     // The durable source instance the account syncs as (mock host): the
     // XOAUTH2 login changes the credentials, never the connector identity.
     let instance = crate::instance_of(storage, USER);
-    let summaries = vimap::sync_session(&mut session, storage, &instance, &folders);
+    let summaries = vimap::sync_session(&mut session, storage, &instance, &folders, None);
     let _ = session.logout();
     summaries
 }

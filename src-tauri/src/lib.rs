@@ -78,7 +78,9 @@ use chrono::Utc;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
-use vault_core::bounded::{import_id_for, BoundedRun, Flow, StreamItem, StreamSource};
+use vault_core::bounded::{
+    import_id_for, BoundedRun, Flow, MediaKind, MediaPass, StreamItem, StreamSource,
+};
 use vault_core::chat_export::{self, ChatImportOutcome};
 use vault_core::export::{self, ExportFormat, ExportSummary};
 use vault_core::imap::{self, FolderSyncSummary, ImapAuth, ImapConfig};
@@ -624,12 +626,28 @@ fn embed_status(state: State<AppState>) -> Result<EmbeddingStatus, String> {
 /// parsed one message at a time on this blocking task, and batches commit
 /// atomically through the pool's write queue with checkpoint advancement,
 /// so arbitrarily large files import under a bounded memory budget.
+/// M4.2: each mail's MIME attachments/inline parts are decoded by the
+/// parser and staged into the app data `media/` store, linked from the
+/// message's `media` entries — re-importing skips stored messages
+/// without re-storing their bytes.
 #[tauri::command]
-async fn import_mbox(state: State<'_, AppState>, path: String) -> Result<IngestSummary, String> {
+async fn import_mbox(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<IngestSummary, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let pool = Arc::clone(&state.pool);
     tauri::async_runtime::spawn_blocking(move || {
         let source = MboxSource::new(&path);
-        let run = BoundedRun::new(import_id_for("mbox-import", Path::new(&path)));
+        let mut run = BoundedRun::new(import_id_for("mbox-import", Path::new(&path)));
+        run.media = Some(MediaPass {
+            kind: MediaKind::Mail,
+            export_root: Path::new("."),
+            export_file: None,
+            data_dir: &data_dir,
+            unlinked: false,
+        });
         let mut sink = PoolSink(&pool);
         let mut no_progress = |_: u64, _: u64, _: &str| {};
         run.run(&source, &mut sink, &|| false, &mut no_progress)
@@ -713,11 +731,16 @@ async fn import_chat_export(
 /// pool's bounded write queue ([`PoolSync`]) — searches keep working
 /// during a sync, and no transaction ever spans a network read.
 ///
+/// M4.2: each fetched mail's MIME attachments/inline parts are stored
+/// into the app data `media/` object store as the sync parses them, on
+/// the sync thread between fetch and commit.
+///
 /// The flat argument list mirrors the sync form's fields, like every other
 /// Tauri command here.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn sync_imap(
+    app: AppHandle,
     state: State<'_, AppState>,
     secrets: State<'_, Arc<secrets::Secrets>>,
     host: String,
@@ -740,6 +763,7 @@ async fn sync_imap(
     let folders = folders.unwrap_or_default();
     let port = port.unwrap_or(imap::GMAIL_IMAP_PORT);
 
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let pool = Arc::clone(&state.pool);
     let secrets = Arc::clone(secrets.inner());
     // Secret resolution (keyring), token refresh (blocking HTTP), and the
@@ -803,7 +827,7 @@ async fn sync_imap(
             auth: imap_auth,
             folders,
         };
-        imap::sync_with(&config, &PoolSync(&pool))
+        imap::sync_with(&config, &PoolSync(&pool), Some(&data_dir))
             .map_err(|e| e.to_string())
             .map(|folders| (folders, saved_to))
     })
@@ -1192,7 +1216,14 @@ fn run_job_spec(
             }
             let source = MboxSource::new(path);
             let import_id = import_id_for("mbox-import", Path::new(path));
-            let outcome = run_bounded(ctx, pool, import_id, &source, None, path)?;
+            let media = MediaPass {
+                kind: MediaKind::Mail,
+                export_root: Path::new("."),
+                export_file: None,
+                data_dir,
+                unlinked: false,
+            };
+            let outcome = run_bounded(ctx, pool, import_id, &source, Some(media), path)?;
             Ok(serde_json::to_value(&outcome.summary).unwrap_or(Value::Null))
         }
         JobSpec::ImportChatExport {
@@ -1245,10 +1276,10 @@ fn run_job_spec(
             // Network on this thread; each storage call round-trips the
             // bounded write queue via the pool adapter.
             let sink = PoolSync(pool);
-            let summaries = imap::sync_with(&config, &sink)?;
+            let summaries = imap::sync_with(&config, &sink, Some(data_dir))?;
             Ok(serde_json::to_value(&summaries).unwrap_or(Value::Null))
         }
-        JobSpec::ImapSyncAll => run_sync_all_round(ctx, pool, secrets),
+        JobSpec::ImapSyncAll => run_sync_all_round(ctx, pool, secrets, data_dir),
     }
 }
 
@@ -1263,6 +1294,7 @@ fn run_sync_all_round(
     ctx: &JobContext,
     pool: &DbPool,
     secrets: &Arc<secrets::Secrets>,
+    data_dir: &Path,
 ) -> std::result::Result<Value, JobError> {
     let oauth = OAuthConfig::from_env().ok().flatten();
     let secrets = Arc::clone(secrets);
@@ -1274,6 +1306,7 @@ fn run_sync_all_round(
             None => Ok(None),
         },
         || ctx.is_cancelled(),
+        Some(data_dir),
     );
     ctx.progress(1, 1, "sources synced");
     Ok(serde_json::to_value(&round).unwrap_or(Value::Null))
@@ -1289,7 +1322,7 @@ fn run_bounded(
     pool: &DbPool,
     import_id: impl Into<String>,
     source: &dyn StreamSource,
-    media: Option<(vault_core::bounded::MediaKind, &Path, &Path)>,
+    media: Option<vault_core::bounded::MediaPass<'_>>,
     _label: &str,
 ) -> std::result::Result<vault_core::bounded::BoundedOutcome, JobError> {
     let run = BoundedRun {
@@ -1669,7 +1702,10 @@ pub fn run() {
                 vault_core::scheduler::SchedulerConfig::default(),
                 {
                     let secrets = Arc::clone(&secrets);
-                    Arc::new(move |ctx: &JobContext| run_sync_all_round(ctx, ctx.pool(), &secrets))
+                    let data_dir = data_dir.clone();
+                    Arc::new(move |ctx: &JobContext| {
+                        run_sync_all_round(ctx, ctx.pool(), &secrets, &data_dir)
+                    })
                 },
                 move |status| {
                     let _ = emit_handle.emit("scheduler-status", SyncScheduleView::of(status));

@@ -5,10 +5,10 @@
 //! ([`crate::imap`]).
 
 use chrono::{TimeZone, Utc};
-use mailparse::{parse_mail, MailHeaderMap, ParsedMail};
+use mailparse::{parse_mail, DispositionType, MailHeaderMap, ParsedMail};
 use serde_json::json;
 
-use crate::message::NewMessage;
+use crate::message::{NewAttachment, NewMessage};
 use crate::util::{fnv1a, sha256_hex};
 
 /// Maximum MIME multipart nesting accepted from one mail.
@@ -240,6 +240,7 @@ pub(crate) fn parse_raw_mail_canonical(
     message.original_timestamp = date_header;
     message.timezone = timezone;
     message.time_confidence = time_confidence;
+    message.attachments = collect_attachments(&mail);
     Some(ParsedRawMail {
         message,
         subject,
@@ -287,6 +288,165 @@ fn date_offset(date_header: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Collect a mail's attachment parts as decoded [`NewAttachment`]s
+/// (M4.2): every leaf that carries content beyond the message's text
+/// bodies becomes an attachment — a part with `Content-Disposition:
+/// attachment` (whatever its type), an inline part with a `filename`
+/// (or a `name` on its content type, or a `Content-ID` referencing it
+/// from the HTML), and any non-`text/*` leaf without either (an
+/// unnamed `image/png` inside `multipart/related`, a bare
+/// `application/pdf`). `text/plain` and `text/html` leaves stay out
+/// unless explicitly dispositioned or named — the text bodies are the
+/// message, not attachments. Transfer encodings (base64,
+/// quoted-printable) are undone by `get_body_raw`; a part whose body
+/// cannot be decoded is skipped (there are no honest bytes to store).
+fn collect_attachments(mail: &ParsedMail<'_>) -> Vec<NewAttachment> {
+    let mut out = Vec::new();
+    walk_part(mail, 0, &mut out);
+    out
+}
+
+/// The walker behind [`collect_attachments`]: descends multiparts
+/// in order, offering each leaf to the attachment rules. Returns the
+/// next unnamed-part sequence number so generated names stay
+/// deterministic across nesting levels.
+fn walk_part(part: &ParsedMail<'_>, unnamed_seq: usize, out: &mut Vec<NewAttachment>) -> usize {
+    if !part.subparts.is_empty() {
+        let mut seq = unnamed_seq;
+        for sub in &part.subparts {
+            seq = walk_part(sub, seq, out);
+        }
+        return seq;
+    }
+    let disposition = part.get_content_disposition();
+    let mime = part.ctype.mimetype.as_str();
+    let (type_, sub_type) = match mime.split_once('/') {
+        Some((t, s)) => (t, s),
+        None => (mime, ""),
+    };
+    let named = disposition
+        .params
+        .get("filename")
+        .or_else(|| part.ctype.params.get("name"))
+        .or_else(|| part.ctype.params.get("filename"))
+        .filter(|n| !n.trim().is_empty())
+        .cloned();
+    let content_id = part
+        .headers
+        .get_first_value("Content-ID")
+        .map(|v| v.trim().trim_matches(['<', '>']).to_string())
+        .filter(|v| !v.is_empty());
+    let dispositioned = matches!(disposition.disposition, DispositionType::Attachment);
+    // A text/* leaf without an attachment disposition or a name is the
+    // message's own body (plain or the HTML alternative), never an
+    // attachment — even when it carries a Content-ID.
+    if type_.eq_ignore_ascii_case("text") && !dispositioned && named.is_none() {
+        return unnamed_seq;
+    }
+    let Some(raw_body) = part.get_body_raw().ok() else {
+        return unnamed_seq; // undecodable: no honest bytes to store
+    };
+    if raw_body.is_empty() {
+        return unnamed_seq;
+    }
+    let (name, seq) = match named
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .or_else(|| content_id.clone())
+    {
+        Some(name) => (name, unnamed_seq),
+        None => {
+            let ext = mime_extension(sub_type);
+            let name = if ext.is_empty() {
+                format!("attachment-{}", unnamed_seq + 1)
+            } else {
+                format!("attachment-{}.{}", unnamed_seq + 1, ext)
+            };
+            (name, unnamed_seq + 1)
+        }
+    };
+    out.push(NewAttachment {
+        name,
+        kind: mail_kind(mime, type_),
+        bytes: raw_body,
+    });
+    seq
+}
+
+/// The coarse kind of a MIME type for the detail view.
+fn mail_kind(mime: &str, type_: &str) -> String {
+    match mime.to_ascii_lowercase().as_str() {
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "image/heic" | "image/heif"
+        | "image/bmp" | "image/tiff" | "image/svg+xml" => "image".into(),
+        "video/mp4" | "video/quicktime" | "video/webm" | "video/x-msvideo" | "video/3gpp" => {
+            "video".into()
+        }
+        "audio/mpeg" | "audio/mp4" | "audio/ogg" | "audio/wav" | "audio/webm" | "audio/aac"
+        | "audio/flac" | "audio/amr" => "audio".into(),
+        "application/pdf" => "document".into(),
+        "text/plain" | "text/html" | "text/csv" => "text".into(),
+        _ if type_.eq_ignore_ascii_case("image") => "image".into(),
+        _ if type_.eq_ignore_ascii_case("video") => "video".into(),
+        _ if type_.eq_ignore_ascii_case("audio") => "audio".into(),
+        _ if type_.eq_ignore_ascii_case("text") => "text".into(),
+        _ => "document".into(),
+    }
+}
+
+/// A sane file extension for a MIME subtype (lowercased; `""` for
+/// junk/obscure ones — the store's fallback extension applies then).
+fn mime_extension(sub_type: &str) -> String {
+    let lowered = sub_type.to_ascii_lowercase();
+    let simple = lowered.split(['+', ';', ' ']).next().unwrap_or("");
+    match simple {
+        "jpeg"
+        | "jpg"
+        | "png"
+        | "gif"
+        | "webp"
+        | "bmp"
+        | "tiff"
+        | "svg+xml"
+        | "heic"
+        | "heif"
+        | "pdf"
+        | "json"
+        | "xml"
+        | "zip"
+        | "gzip"
+        | "csv"
+        | "txt"
+        | "html"
+        | "mpeg"
+        | "mp3"
+        | "mp4"
+        | "quicktime"
+        | "mov"
+        | "webm"
+        | "x-msvideo"
+        | "avi"
+        | "3gpp"
+        | "ogg"
+        | "wav"
+        | "aac"
+        | "flac"
+        | "vnd.openxmlformats-officedocument"
+        | "msword"
+        | "vnd.ms-excel"
+        | "msword-legacy" => simple.to_string(),
+        "x-matroska" => "mkv".to_string(),
+        "plain" => "txt".to_string(),
+        "rtf" | "x-rtf" => "rtf".to_string(),
+        "x-zip-compressed" | "x-compressed-zip" => "zip".to_string(),
+        "msword5" | "vnd.ms-word" => "doc".to_string(),
+        "vnd.openxmlformats-officedocument.wordprocessingml" => "docx".to_string(),
+        "octet-stream" | "x-binary" | "x-executable" => "bin".to_string(),
+        _ => String::new(),
+    }
 }
 
 /// Amend a parsed message's `raw_json` extras with additional keys.
@@ -528,5 +688,75 @@ mod tests {
     fn moderate_nesting_still_parses() {
         let msg = parse_raw_mail(&nested_multipart(8), "mbox", "f").unwrap();
         assert_eq!(msg.body, "hi");
+    }
+
+    /// A multipart/mixed mail with a base64 attachment, an inline image
+    /// (named inline part), and both text bodies.
+    fn mail_with_attachments() -> Vec<u8> {
+        let png = "iVBORw0KGgo="; // 8 bytes once base64-decoded
+        format!(
+            "From: a@b.c\nSubject: with media\nDate: Mon, 2 Nov 2026 10:00:00 +0100\n\
+MIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=\"mix\"\n\n\
+--mix\nContent-Type: text/plain; charset=utf-8\n\ntelo pisma\n\
+--mix\nContent-Type: text/html\n\n<p>telo</p>\n\
+--mix\nContent-Type: application/pdf; name=\"spec.pdf\"\n\
+Content-Disposition: attachment; filename=\"spec.pdf\"\n\
+Content-Transfer-Encoding: base64\n\nJVBERi0xLjQ=\n\
+--mix\nContent-Type: image/png\nContent-Disposition: inline; filename=\"pic.png\"\n\
+Content-Transfer-Encoding: base64\n\n{png}\n\
+--mix--\n"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn attachments_and_inline_parts_are_collected() {
+        let parsed = parse_raw_mail_canonical(&mail_with_attachments(), "mbox", "f").unwrap();
+        assert_eq!(parsed.message.attachments.len(), 2);
+        let pdf = &parsed.message.attachments[0];
+        assert_eq!(pdf.name, "spec.pdf");
+        assert_eq!(pdf.kind, "document");
+        assert_eq!(pdf.bytes, b"%PDF-1.4"); // base64 decoded, trailing newline trimmed
+        let png = &parsed.message.attachments[1];
+        assert_eq!(png.name, "pic.png");
+        assert_eq!(png.kind, "image");
+        assert_eq!(png.bytes.len(), 8, "base64-decoded inline image bytes");
+    }
+
+    #[test]
+    fn text_bodies_are_never_attachments() {
+        let parsed = parse_raw_mail_canonical(&mail_with_attachments(), "mbox", "f").unwrap();
+        assert_eq!(parsed.message.body, "with media\n\ntelo pisma");
+        // The text/html alternative stays a body, not an attachment.
+        assert!(parsed.message.attachments.iter().all(|a| a.kind != "text"));
+    }
+
+    #[test]
+    fn unnamed_binary_leaf_and_content_id_get_generated_names() {
+        // A non-text leaf with no filename and no Content-ID gets a
+        // generated name; a Content-ID part keeps its id as the name.
+        let mail = b"From: a@b.c\nSubject: s\n\
+Content-Type: multipart/related; boundary=\"rel\"\n\n\
+--rel\nContent-Type: text/html\n\n<img src=\"cid:logo\">\n\
+--rel\nContent-Type: image/png\nContent-ID: <logo>\n\npngbytes\n\
+--rel\nContent-Type: application/pdf\n\n%PDF-raw\n\
+--rel--\n";
+        let parsed = parse_raw_mail_canonical(mail, "mbox", "f").unwrap();
+        let names: Vec<&str> = parsed
+            .message
+            .attachments
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["logo", "attachment-1.pdf"]);
+        assert_eq!(parsed.message.attachments[0].kind, "image");
+        assert_eq!(parsed.message.attachments[1].kind, "document");
+    }
+
+    #[test]
+    fn plain_text_mail_has_no_attachments() {
+        let parsed =
+            parse_raw_mail_canonical(b"From a@b.c\nSubject: s\n\nbody\n", "mbox", "f").unwrap();
+        assert!(parsed.message.attachments.is_empty());
     }
 }

@@ -138,6 +138,8 @@ pub enum Error {
     Jobs(String),
     #[error("invalid export: {0}")]
     InvalidExport(String),
+    #[error("media store error: {0}")]
+    Media(String),
     #[error("archive schema version {db} is newer than this build supports ({supported}); upgrade the app before opening it")]
     SchemaTooNew { db: i64, supported: i64 },
     #[error("unsafe to migrate: {0}")]

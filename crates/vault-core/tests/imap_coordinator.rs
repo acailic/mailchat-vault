@@ -100,7 +100,7 @@ fn password_for(_instance: &SourceInstance) -> Result<Option<ImapAuth>, String> 
 
 /// Run one round synchronously on this thread (no cancellation).
 fn run_round(pool: &Arc<DbPool>) -> RoundSummary {
-    sync_round_with(pool, password_for, || false, mock_connect)
+    sync_round_with(pool, password_for, || false, mock_connect, None)
 }
 
 /// The mock session builder: plain TCP to the mock server at the
@@ -256,7 +256,7 @@ fn a_source_without_credentials_is_reported_not_errored() {
     register_source(&pool, &config_for(USER, server.addr.port()));
 
     // The resolver has nothing stored (the keyring emptied).
-    let round = sync_round_with(&pool, |_| Ok(None), || false, mock_connect);
+    let round = sync_round_with(&pool, |_| Ok(None), || false, mock_connect, None);
     assert_eq!(round.outcomes.len(), 1);
     assert_eq!(round.outcomes[0].status, SourceSyncStatus::NoCredentials);
     assert_eq!(total(&pool), 0, "no credentials means no sync attempt");
@@ -291,6 +291,7 @@ fn a_failing_resolver_is_failed_not_no_credentials() {
         |_| Err("google token refresh failed: network down".into()),
         || false,
         mock_connect,
+        None,
     );
     assert_eq!(round.outcomes.len(), 1);
     let SourceSyncStatus::Failed { error } = &round.outcomes[0].status else {

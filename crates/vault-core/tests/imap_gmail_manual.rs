@@ -48,7 +48,7 @@ fn syncs_a_real_account_into_a_temp_archive() {
 
     let dir = tempfile::tempdir().unwrap();
     let storage = Storage::open(dir.path().join("vault.db")).unwrap();
-    let summaries = imap::sync(&config, &storage).unwrap();
+    let summaries = imap::sync(&config, &storage, None).unwrap();
     for s in &summaries {
         println!(
             "{s:?}: uidvalidity={}, reset={}, inserted={} skipped={} failed={}",

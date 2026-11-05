@@ -63,7 +63,8 @@
 //! The whole-archive [`crate::ingest::Source::collect`] helpers remain
 //! only as a convenience for small parser tests.
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::ingest::IngestSummary;
@@ -267,6 +268,30 @@ impl Default for StreamLimits {
 pub enum MediaKind {
     Telegram,
     WhatsApp,
+    /// Email (mbox): the parser decoded MIME attachment/inline parts into
+    /// [`NewMessage::attachments`]; the pass stages their bytes into the
+    /// object store and records `media` entries before the batch commits.
+    Mail,
+}
+
+/// The media pass configuration of one bounded run (M4.2): which
+/// extraction flavor runs, where the export tree and the vault's app
+/// data live, and whether unlinked export files are stored too.
+#[derive(Debug, Clone, Copy)]
+pub struct MediaPass<'a> {
+    pub kind: MediaKind,
+    /// The directory the export's media files live under (the export
+    /// file's parent for chat exports; unused for mail).
+    pub export_root: &'a Path,
+    /// The export file itself (never stored as an unlinked file).
+    pub export_file: Option<&'a Path>,
+    /// The vault's app-data dir (the object store lives under
+    /// `<data_dir>/media/`).
+    pub data_dir: &'a Path,
+    /// Store export-tree files no message references (M4.2) — enabled
+    /// only for imports that picked the whole tree (directory or `.zip`)
+    /// and only for the chat kinds that have a media pass.
+    pub unlinked: bool,
 }
 
 /// Storage access for [`BoundedRun`]: load a checkpoint, commit a batch.
@@ -281,18 +306,26 @@ pub trait IngestSink {
     /// none).
     fn checkpoint(&mut self, import_id: &str) -> Result<Option<u64>>;
     /// Commit one batch atomically: message rows (with dedup and media
-    /// backfill), issue records, and the checkpoint advance — or, when
-    /// `completes` is set, the checkpoint removal that finishes the
-    /// import.
+    /// backfill), issue records, unlinked-object registry rows, and the
+    /// checkpoint advance — or, when `completes` is set, the checkpoint
+    /// removal that finishes the import.
+    #[allow(clippy::too_many_arguments)]
     fn commit_batch(
         &mut self,
         import_id: &str,
         source: &str,
         messages: &[NewMessage],
         issues: &[ImportIssueRecord<'_>],
+        media_objects: &[crate::media::UnlinkedObject],
         committed_after: u64,
         completes: bool,
     ) -> Result<crate::storage::ImportBatchCounts>;
+
+    /// The digests every stored message references through its `raw_json`
+    /// `media` entries (the message-linked side of the reference set; the
+    /// M4.2 unlinked pass skips these files — they are already preserved
+    /// and reachable from their messages).
+    fn linked_media_digests(&mut self) -> Result<HashSet<String>>;
 }
 
 /// The outcome of one bounded import run.
@@ -327,7 +360,7 @@ pub struct BoundedRun<'a> {
     /// Run the media extraction pass for this export kind before each
     /// commit (file copies happen on the driver thread, outside every
     /// storage lock).
-    pub media: Option<(MediaKind, &'a Path, &'a Path)>,
+    pub media: Option<MediaPass<'a>>,
 }
 
 impl<'a> BoundedRun<'a> {
@@ -376,6 +409,8 @@ impl<'a> BoundedRun<'a> {
             committed_items: resumed_from,
             next_position: resumed_from,
             cancelled: false,
+            consumed_paths: HashSet::new(),
+            unlinked_objects: Vec::new(),
         };
         let started = Instant::now();
         let mut last_progress = None::<Instant>;
@@ -400,7 +435,12 @@ impl<'a> BoundedRun<'a> {
             run.next_position += 1;
             match item {
                 StreamItem::Message(msg) => {
-                    run.batch_text_bytes += msg.body.len();
+                    // Attachment bytes count against the batch budget
+                    // alongside body text, so a batch of media-heavy
+                    // mails flushes early instead of accumulating
+                    // (the same contract as text, same limits).
+                    run.batch_text_bytes += msg.body.len()
+                        + msg.attachments.iter().map(|a| a.bytes.len()).sum::<usize>();
                     run.batch.push(msg);
                 }
                 StreamItem::Failed {
@@ -429,9 +469,15 @@ impl<'a> BoundedRun<'a> {
             // committed position for the resume.
             return Ok(run.outcome(resumed_from));
         }
-        // Natural end: flush the remainder and mark the import complete
-        // (deletes the checkpoint in the same transaction).
+        // Natural end, in dependency order: first the final batch commits
+        // — running its message media pass, so every file a message
+        // claims is stored and marked consumed — then the M4.2 unlinked
+        // pass walks the tree (now every leftover file is genuinely
+        // unlinked), and a last completing commit registers the unlinked
+        // objects in the same transaction that finishes the import.
         run.commit_batch(true)?;
+        run.collect_unlinked()?;
+        run.commit_registry()?;
         emit_progress(run.committed_items, true);
         Ok(run.outcome(resumed_from))
     }
@@ -444,7 +490,7 @@ struct RunState<'a, 'b> {
     sink: &'b mut dyn IngestSink,
     import_id: &'a str,
     source_name: &'a str,
-    media: Option<(MediaKind, &'a Path, &'a Path)>,
+    media: Option<MediaPass<'a>>,
     /// The M4.1 media capacity budget for this run — shared across every
     /// batch's media pass, so one import cannot store past its bounds;
     /// dedup hits refund their charge (see [`crate::object_store`]).
@@ -457,6 +503,12 @@ struct RunState<'a, 'b> {
     committed_items: u64,
     next_position: u64,
     cancelled: bool,
+    /// Export files the message media passes stored — every file a
+    /// message claimed (M4.2; the unlinked pass stores everything else).
+    consumed_paths: HashSet<PathBuf>,
+    /// Unlinked objects staged for the `media_objects` registry, riding
+    /// the final batch's commit.
+    unlinked_objects: Vec<crate::media::UnlinkedObject>,
 }
 
 /// A parse failure accumulated for the next commit (owned; becomes a
@@ -468,29 +520,92 @@ struct PendingIssue {
 }
 
 impl RunState<'_, '_> {
+    /// The M4.2 unlinked pass: after the final batch committed, store
+    /// every export file no message claimed — skipping files this run
+    /// consumed, files whose content any stored message already links
+    /// (resume-safe: an interrupted run's earlier batches linked files
+    /// this run never re-walks), the export file itself, and exporter
+    /// artifacts — and collect them for the registry. Only chat passes
+    /// with the unlinked mode on run this (whole-tree picks: directory
+    /// or `.zip`).
+    fn collect_unlinked(&mut self) -> Result<()> {
+        let Some(pass) = self.media else {
+            return Ok(());
+        };
+        if !pass.unlinked {
+            return Ok(());
+        }
+        let Some(summary) = self.media_summary.as_mut() else {
+            return Ok(());
+        };
+        let linked = self.sink.linked_media_digests().unwrap_or_default();
+        let records = crate::media::extract_unlinked(
+            pass.export_root,
+            pass.export_file,
+            pass.data_dir,
+            &self.consumed_paths,
+            &linked,
+            summary,
+            &mut self.media_budget,
+        )?;
+        self.unlinked_objects.extend(records);
+        Ok(())
+    }
+
+    /// The completing registry commit: an empty batch that carries only
+    /// the unlinked objects. The checkpoint is already gone (the final
+    /// message batch deleted it); committing empty with `completes` is
+    /// idempotent, and the registry rows land atomically.
+    fn commit_registry(&mut self) -> Result<()> {
+        if self.unlinked_objects.is_empty() {
+            return Ok(());
+        }
+        self.sink.commit_batch(
+            self.import_id,
+            self.source_name,
+            &[],
+            &[],
+            &self.unlinked_objects,
+            self.committed_items,
+            true,
+        )?;
+        self.unlinked_objects.clear();
+        Ok(())
+    }
+
     /// Commit the accumulated batch (media pass first — file copies on
     /// this thread, outside the storage transaction), then reset it.
     /// `completes` marks the import finished.
     fn commit_batch(&mut self, completes: bool) -> Result<()> {
-        if let (Some((kind, export_root, data_dir)), Some(summary)) =
-            (self.media, self.media_summary.as_mut())
-        {
+        if let (Some(pass), Some(summary)) = (self.media, self.media_summary.as_mut()) {
             if !self.batch.is_empty() {
-                match kind {
+                match pass.kind {
                     MediaKind::Telegram => crate::media::extract_telegram(
                         &mut self.batch,
-                        export_root,
-                        data_dir,
+                        pass.export_root,
+                        pass.data_dir,
                         summary,
                         &mut self.media_budget,
+                        &mut self.consumed_paths,
                     )?,
                     MediaKind::WhatsApp => crate::media::extract_whatsapp(
                         &mut self.batch,
-                        export_root,
-                        data_dir,
+                        pass.export_root,
+                        pass.data_dir,
                         summary,
                         &mut self.media_budget,
+                        &mut self.consumed_paths,
                     )?,
+                    MediaKind::Mail => {
+                        let mut mail_media =
+                            crate::media::MailMedia::new(pass.data_dir, &mut self.media_budget);
+                        for msg in self.batch.iter_mut() {
+                            mail_media.store_message(msg);
+                        }
+                        summary.stored += mail_media.stored;
+                        summary.deduped += mail_media.deduped;
+                        summary.missing += mail_media.missing;
+                    }
                 }
             }
         }
@@ -503,11 +618,20 @@ impl RunState<'_, '_> {
                 reason: &i.reason,
             })
             .collect();
+        // The final commit carries the unlinked registry rows (an
+        // interrupted run simply re-derives them on resume; the objects
+        // dedup and the registry upserts).
+        let media_objects = if completes {
+            std::mem::take(&mut self.unlinked_objects)
+        } else {
+            Vec::new()
+        };
         let counts = self.sink.commit_batch(
             self.import_id,
             self.source_name,
             &self.batch,
             &records,
+            &media_objects,
             self.committed_items + (self.batch.len() + self.issues.len()) as u64,
             completes,
         )?;
@@ -551,6 +675,7 @@ impl IngestSink for crate::storage::Storage {
         source: &str,
         messages: &[NewMessage],
         issues: &[ImportIssueRecord<'_>],
+        media_objects: &[crate::media::UnlinkedObject],
         committed_after: u64,
         completes: bool,
     ) -> Result<crate::storage::ImportBatchCounts> {
@@ -560,9 +685,14 @@ impl IngestSink for crate::storage::Storage {
             source,
             messages,
             issues,
+            media_objects,
             committed_after,
             completes,
         )
+    }
+
+    fn linked_media_digests(&mut self) -> Result<HashSet<String>> {
+        crate::storage::Storage::message_media_digests(self)
     }
 }
 
