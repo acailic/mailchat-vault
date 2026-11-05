@@ -103,6 +103,11 @@ pub struct MediaSummary {
     /// Unlinked files whose content was already in the store.
     #[serde(default)]
     pub unlinked_deduped: u64,
+    /// Unlinked files skipped because the media budget ran out (their
+    /// bytes never entered the store; a re-import with fresh budget
+    /// stores them).
+    #[serde(default)]
+    pub unlinked_dropped: u64,
 }
 
 /// The `raw_json` `media` array element (also the IPC shape the frontend
@@ -122,8 +127,11 @@ pub struct MediaEntry {
 
 /// One unlinked object staged for the `media_objects` registry (M4.2):
 /// the digest and provenance of a file that sits in the export tree but
-/// belongs to no message. Registered in the same transaction as the
-/// import's final batch, so reconciliation counts it as referenced.
+/// belongs to no message. Registered by the registry commit that
+/// follows the import's final batch — its own transaction, so a crash
+/// between the two leaves stored but unregistered objects until a
+/// re-import re-registers them — and reconciliation counts it as
+/// referenced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnlinkedObject {
     pub sha256: String,
@@ -620,8 +628,14 @@ pub fn extract_unlinked(
             }
             // An unreadable stray file is skipped: there is no message
             // to record a missing entry on, and the import must not
-            // fail over export litter.
-            Err(_) => continue,
+            // fail over export litter. A budget refusal is counted, not
+            // silent: the summary says the tree was not fully stored.
+            Err(e) => {
+                if matches!(e, Error::ImportBounds(_)) {
+                    summary.unlinked_dropped += 1;
+                }
+                continue;
+            }
         }
     }
     Ok(records)

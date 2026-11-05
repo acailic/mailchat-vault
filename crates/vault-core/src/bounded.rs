@@ -471,10 +471,13 @@ impl<'a> BoundedRun<'a> {
         }
         // Natural end, in dependency order: first the final batch commits
         // — running its message media pass, so every file a message
-        // claims is stored and marked consumed — then the M4.2 unlinked
-        // pass walks the tree (now every leftover file is genuinely
-        // unlinked), and a last completing commit registers the unlinked
-        // objects in the same transaction that finishes the import.
+        // claims is stored and marked consumed — and finishes the import
+        // (the checkpoint goes with it). The M4.2 unlinked pass then
+        // walks the tree — now every leftover file is genuinely
+        // unlinked — and a separate registry commit registers the
+        // objects it found; a crash in between leaves stored but
+        // unregistered objects, which a re-import of the same tree
+        // re-registers.
         run.commit_batch(true)?;
         run.collect_unlinked()?;
         run.commit_registry()?;
@@ -552,10 +555,12 @@ impl RunState<'_, '_> {
         Ok(())
     }
 
-    /// The completing registry commit: an empty batch that carries only
-    /// the unlinked objects. The checkpoint is already gone (the final
+    /// The registry commit: an empty batch that carries only the
+    /// unlinked objects. The checkpoint is already gone (the final
     /// message batch deleted it); committing empty with `completes` is
-    /// idempotent, and the registry rows land atomically.
+    /// idempotent. This is its own transaction after the import
+    /// completed — a crash before it lands leaves stored but
+    /// unregistered objects, which a re-import re-registers.
     fn commit_registry(&mut self) -> Result<()> {
         if self.unlinked_objects.is_empty() {
             return Ok(());
