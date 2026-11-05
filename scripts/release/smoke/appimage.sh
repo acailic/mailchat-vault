@@ -50,13 +50,17 @@ appimage="$(find "$ARTIFACTS" -name '*.AppImage' 2>/dev/null | sort | head -1)"
 [[ -n "$appimage" ]] || fail_now "no .AppImage found under $ARTIFACTS"
 echo "== appimage suite: $(basename "$appimage") on $(. /etc/os-release && echo "$PRETTY_NAME")"
 
-# The artifact mount is read-only; the file is usually already
-# executable from the build (chmod is best-effort).
-chmod +x "$appimage" 2>/dev/null || true
+# The artifact mount is read-only and a DOWNLOADED artifact (gh release
+# download) carries no exec bit — chmod on the mount fails. Copy to the
+# writable workdir and operate on the copy, so the suite behaves the
+# same on freshly-built and published/downloaded artifacts.
+work="$(mktemp -d)"
+cp "$appimage" "$work/$(basename "$appimage")"
+appimage="$work/$(basename "$appimage")"
+chmod +x "$appimage"
 
 # --------------------------------------------- desktop integration payload
 
-work="$(mktemp -d)"
 ( cd "$work" && "$appimage" --appimage-extract >/dev/null 2>&1 )
 squashfs="$work/squashfs-root"   # AppImage type-2 extract dir name
 
@@ -92,8 +96,18 @@ done
 launch_rc=0
 rm -f /tmp/appimage-window-seen
 xvfb-run -a -s "-screen 0 1280x800x24" \
-  timeout $((LAUNCH_SECONDS + 45))s bash -c "
+  timeout $((LAUNCH_SECONDS + 75))s bash -c "
     setsid '$appimage' --appimage-extract-and-run </dev/null >/tmp/appimage-launch.log 2>&1 &
+    # grace window: --appimage-extract-and-run first unpacks the bundle
+    # (seconds, cold cache); only then does the app process appear. The
+    # process must appear within 30s and then stay alive the whole
+    # LAUNCH_SECONDS window — a crash after appearing still fails fast.
+    seen=0
+    for _ in \$(seq 1 30); do
+      sleep 1
+      if pgrep -x '$BIN' >/dev/null; then seen=1; break; fi
+    done
+    [[ \"\$seen\" -eq 1 ]] || exit 3          # never appeared -> dead
     for _ in \$(seq 1 $LAUNCH_SECONDS); do
       sleep 1
       if xwininfo -root -tree 2>/dev/null | grep -qi 'mailchat-vault'; then

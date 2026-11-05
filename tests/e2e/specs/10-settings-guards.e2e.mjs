@@ -85,15 +85,31 @@ export async function run(ctx) {
         await ui.waitForText(browser, "#llm-note", "LLM assist is on");
 
         // --- an ask through the provider makes exactly one LLM call --------
+        // (M5 consent gate: the session's first provider ask answers locally
+        //  and shows the consent prompt; granting consent re-asks through the
+        //  provider — same flow as 05-llm-ask-mock.)
         const ask = await browser.$("#ask");
         await ask.click();
         await ask.setValue("anything about the vault?");
         await browser.keys("Enter");
-        const plan = await ui.waitForText(
+        const consentless = await ui.waitForText(
           browser,
           "#ask-status",
           (t) => t !== "" && !t.startsWith("Asking"),
           { timeoutMsg: "provider ask never settled" },
+        );
+        assert.includes(
+          consentless,
+          "local full-text",
+          "first ask stays local without session consent (M5 gate)",
+        );
+        assert.equal(mock.requests.length, 0, "no request without session consent (M5 gate)");
+        await (await browser.$("#consent-allow-btn")).click();
+        const plan = await ui.waitForText(
+          browser,
+          "#ask-status",
+          "planned by LLM",
+          { timeoutMsg: "consented ask never went out" },
         );
         assert.includes(plan, "planned by LLM", "provider ask used the LLM");
         assert.equal(mock.requests.length, 1, "one translation call (no results → no summary)");

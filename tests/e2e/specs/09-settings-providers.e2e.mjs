@@ -118,15 +118,33 @@ export async function run(ctx) {
       assert.includes(note, "settings-model via 127.0.0.1", "note names model and host");
 
       // --- ask with the provider: exactly what leaves the machine ----------
+      // (M5 consent gate: the session's first provider ask answers locally
+      //  and shows the per-question consent prompt; granting consent re-asks
+      //  the same question through the provider — same flow as 05-llm-ask-mock.)
       const askInput = await browser.$("#ask");
       await askInput.click();
       await askInput.setValue("anything about the vault?");
       await browser.keys("Enter");
-      const plan = await ui.waitForText(
+      const consentless = await ui.waitForText(
         browser,
         "#ask-status",
         (text) => text !== "" && !text.startsWith("Asking"),
         { timeoutMsg: "settings-provider ask never settled" },
+      );
+      assert.includes(
+        consentless,
+        "local full-text",
+        "first ask stays local without session consent (M5 gate)",
+      );
+      assert.equal(mock.requests.length, 0, "no request without session consent (M5 gate)");
+      const prompt = await browser.$("#consent-prompt");
+      assert.ok(await prompt.isDisplayed(), "consent prompt shown");
+      await (await browser.$("#consent-allow-btn")).click();
+      const plan = await ui.waitForText(
+        browser,
+        "#ask-status",
+        "planned by LLM",
+        { timeoutMsg: "consented ask never went out" },
       );
       assert.includes(plan, "planned by LLM", "ask used the configured provider");
       assert.equal(mock.requests.length, 1, "one translation round trip, no results to summarize");

@@ -64,8 +64,18 @@ export async function run(ctx) {
 
     // The container planted a root-owned 0777 directory at the preview
     // root before this unprivileged run started; assert it is really
-    // the hostile state this scenario needs.
-    const hostile = await stat(previewRoot);
+    // the hostile state this scenario needs. When the plant is absent
+    // (a plain run of the suite: earlier media specs legitimately end
+    // with the preview root removed, and only a root actor can re-plant
+    // a foreign-owned directory) this spec skips — same pattern as the
+    // notify specs without their bus capture — and the matrix e2e leg
+    // runs it in a dedicated pass that plants the hostile root.
+    let hostile;
+    try {
+      hostile = await stat(previewRoot);
+    } catch {
+      ctx.skip("hostile preview root not planted — needs the e2e container pass that pre-creates a root-owned 0777 " + previewRoot);
+    }
     assert.ok(hostile.isDirectory(), "hostile preview root is a directory");
     assert.ok((hostile.mode & 0o777) === 0o777, "hostile preview root is 0777");
 
