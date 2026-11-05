@@ -1,6 +1,6 @@
 # UX specification
 
-Status: **proposed**. This is the interaction contract for [P02–P09](product-plan.md#functional-requirements). Existing behavior is assessed separately in [Project assessment](project-assessment.md).
+Status: **mixed**. This is the interaction contract for [P02–P09](product-plan.md#functional-requirements). The workspace/navigation and search/selection sections are **current**, grounded in the M3.1/M3.2 implementation (#44/#46, recorded in the [roadmap](implementation-roadmap.md#completion-tracking)); the import/first-success (M3.3), connected-email (M3.4), media/storage (M4), and optional-Ask sections remain the reviewed **proposed** design for their owning slices. Existing behavior is assessed separately in [Project assessment](project-assessment.md).
 
 ## Workspace and navigation
 
@@ -25,6 +25,8 @@ At 1100px and above use a 208px navigation column, a results area of at least 32
 
 From 800px to 1099px show navigation and results; opening a message replaces the results area with a reading view and a visible “Back to results” action. Below 800px show one content area and a labeled navigation toggle. Preserve query, filters, page, selection, and scroll when returning. All controls remain reachable at 200% zoom; a viewport narrower than the nominal minimum uses the compact layout rather than horizontal clipping.
 
+**Current (M3.1).** The three-area shell, the 1100px/800px breakpoints with independent per-area scrolling, the 1280×800 default window with a 640×480 minimum, the medium-layout Back-to-results swap, and the compact drawer (labeled toggle, `aria-expanded`, Escape close, removed from the accessibility tree when closed) are implemented in [workspace.ts](../src/workspace.ts)/[state.ts](../src/state.ts), with semantic design tokens ([tokens.css](../src/styles/tokens.css); light/dark/System via the theme setting) and the bundled Source Sans 3 (SIL OFL 1.1 license committed at [src/assets/fonts](../src/assets/fonts)); 1280px at 200% zoom resolves to the compact layout with no horizontal clipping. Navigation destinations are All messages, Add source, Activity, and Settings, with per-source scope chips in the navigation column; imports and IMAP configuration live in the Add source view and job progress in Activity, and a started job keeps running when navigating away. Not yet implemented: per-source status text ("Syncing"/"Needs sign-in"/"Last synced") on the chips (M3.4) and the Storage & backup settings group (M4.4); the Add source view still hosts the interim import/sync controls rather than the dedicated setup views below (M3.3/M3.4).
+
 ### Navigation rules
 
 - All messages browses newest first, including on first launch with an existing archive. An empty vault shows setup guidance instead.
@@ -45,9 +47,13 @@ Keep 50 results per page, exact count, and Previous/Next. Preserve existing stal
 
 Reading shows the full plain-text message first, then attachments and bounded chronological context. Email exposes From, To, Cc, subject, and reply relationships. Chat exposes participants, replies, and conversation name. Load earlier/later context in pages without losing the anchor. An unresolved legacy grouping shows “Conversation could not be verified” and the selected message alone, not guessed neighbors.
 
+**Current (M3.2).** Search/selection runs on the v2 reading surface (`search_archive_v2` / `message_detail_v2` / `conversation_context_v2` / `list_import_scopes_v2` / `export_messages_v2`): flat results with stable ranking, removable filter chips (source, author, dates, "has attachment", import scope) plus a sort choice, 50-per-page exact counts with Previous/Next, stale-response protection centralized in `SequenceGuard`/`Sequence`, the archive-revision "new data" notice with Refresh, backend hit-marker highlighting, "No date" for unknown instants, context pages by message-id cursor without losing the anchor, the honest unverified-grouping reading pane, copy message with provenance / copy `mailchat://message/<id>` link, pasted-locator deep links, and restorable selection and scroll on Back. Snippets are bounded to 500 Unicode characters including hit markers (a 240-character body prefix when browsing). Reversed day bounds are rejected inline before invocation. Selection export writes UTF-8 text or JSON with provenance for the checked rows in their order (bounded to 10,000 messages per file) to a native-picked destination; the reading pane shows provenance behind its expandable disclosure with raw JSON behind the "Technical details" fold. Not yet implemented: persisting the workspace timezone (each request defaults to the OS zone).
+
 Copy message includes readable text and provenance; Copy link uses an internal `mailchat://message/<id>` locator handled within the app. It is a vault-local reference, not a public URL and not a cross-vault identifier. Export selection offers UTF-8 text or JSON with provenance; attached files require a separate explicit export selection. Metadata disclosure includes original timestamp, source occurrence, import job, and legacy uncertainty; raw JSON stays behind “Technical details”.
 
 ## Import and first success
+
+**Proposed (M3.3)** — the current surface is the interim pre-preview flow: chat exports use the native picker, while the mbox field still accepts a typed path, and imports start immediately with job progress in Activity; there is no preview/confirmation step, sample vault, or capacity check yet.
 
 1. Empty vault presents “Add your first source”, a short local-storage explanation, and a secondary “Try a sample archive”. Sample data uses an isolated temporary vault; leaving it restores the personal vault without mixing demo rows into real data.
 2. Choose Import files. Native selection accepts mbox, chat TXT/JSON, a directory, or ZIP. Show source-specific export instructions locally; unsupported formats receive an actionable explanation.
@@ -61,6 +67,8 @@ Copy message includes readable text and provenance; Copy link uses an internal `
 Cancel file selection makes no changes. Cancelling preview discards temporary files. Cancelling a running import preserves committed records and files; the summary states that partial data remains. Retry targets the failed/unfinished work, not a duplicate source.
 
 ## Connected email
+
+**Proposed (M3.4)** — today the app-password/Google-sign-in IMAP controls live in the Add source view (sources panel) with no account page, credential-update flow, or disconnect/local-deletion separation yet.
 
 Choose Gmail preset or Custom IMAP. Keep host, port, and TLS details under Advanced for Gmail. Use visible labels for email/username and password; explain app-password requirements without promising OAuth. Validate host, port, and required values before testing the connection.
 
