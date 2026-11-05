@@ -287,8 +287,8 @@ mod tests {
     fn clear_account_forgets_both_secret_kinds() {
         let secrets = Secrets::new();
         let username = "forget@me.invalid";
-        secrets.save(HOST, username, "app-password");
-        secrets.save_refresh(HOST, username, "refresh-token");
+        secrets.save(HOST, username, "app-fixture");
+        secrets.save_refresh(HOST, username, "refresh-fixture");
         assert!(secrets.load(HOST, username).is_some());
         assert!(secrets.load_refresh(HOST, username).is_some());
 
@@ -310,7 +310,7 @@ mod tests {
         // Pre-upgrade save: keyed by the lowercased username, while the
         // account is forgotten under its exact configured casing.
         let username = "Ana@Example.invalid";
-        secrets.save(HOST, &username.to_lowercase(), "legacy-app-password");
+        secrets.save(HOST, &username.to_lowercase(), "legacy-fixture");
 
         assert!(
             secrets.clear_account(HOST, username),

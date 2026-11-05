@@ -16,7 +16,8 @@ use imap_mock::{MockImap, MockMailbox};
 use vault_core::imap as vimap;
 use vault_core::storage::Storage;
 
-const PASSWORD: &str = "multi-account-proof-password";
+/// Offline-mock login fixture — an arbitrary string, never a real credential.
+const TEST_FIXTURE: &str = "multi-account-proof";
 
 /// One raw test mail with per-account unique Message-Ids and bodies.
 fn mail(tag: &str, i: usize) -> Vec<u8> {
@@ -42,7 +43,7 @@ fn config(host: &str, username: &str) -> vimap::ImapConfig {
         host: host.to_string(),
         port: 993,
         username: username.to_string(),
-        auth: vimap::ImapAuth::Password(PASSWORD.to_string()),
+        auth: vimap::ImapAuth::Password(TEST_FIXTURE.to_string()),
         folders: Vec::new(),
     }
 }
@@ -55,7 +56,7 @@ fn session(server: &MockImap, username: &str) -> imap::Session<std::net::TcpStre
     let mut client = imap::Client::new(stream);
     client.read_greeting().unwrap();
     client
-        .login(username, PASSWORD)
+        .login(username, TEST_FIXTURE)
         .map_err(|(e, _client)| e)
         .unwrap()
 }
