@@ -69,7 +69,7 @@ fn sync(server: &MockImap, storage: &Storage, folders: &[&str]) -> Vec<vimap::Fo
     let folders: Vec<String> = folders.iter().map(|f| f.to_string()).collect();
     let instance = instance(storage);
     let mut s = session(server);
-    let summaries = vimap::sync_session(&mut s, storage, &instance, &folders);
+    let summaries = vimap::sync_session(&mut s, storage, &instance, &folders, None);
     let _ = s.logout();
     summaries
 }
@@ -118,7 +118,7 @@ fn password_auth_via_the_shared_authenticate_helper_logs_in() {
 
     let folders: Vec<String> = FOLDERS.iter().map(|f| f.to_string()).collect();
     let instance = instance(&storage);
-    let summaries = vimap::sync_session(&mut session, &storage, &instance, &folders);
+    let summaries = vimap::sync_session(&mut session, &storage, &instance, &folders, None);
     let _ = session.logout();
     assert_eq!(summaries[0].inserted, 1);
     assert!(server.log().logins.iter().any(|l| l.contains(USER)));
@@ -479,6 +479,7 @@ fn missing_folder_reports_error_without_breaking_others() {
             "NoSuch".to_string(),
             "Archive".to_string(),
         ],
+        None,
     );
     let _ = s.logout();
 
@@ -597,4 +598,142 @@ fn connect_to_blackholed_host_fails_within_the_connect_timeout() {
         elapsed < std::time::Duration::from_secs(90),
         "connect must be bounded (well under the OS default), took {elapsed:?}"
     );
+}
+
+// ---------------------------------------------------------------------
+// M4.2: IMAP attachment extraction (the same mail media pass as mbox,
+// run per fetched batch on the sync thread)
+// ---------------------------------------------------------------------
+
+#[test]
+fn imap_mail_attachments_are_stored_and_linked() {
+    let attachment_mail = String::from(
+        "From: Alice Smith <alice@example.com>\r\n\
+         To: Bob <bob@example.com>\r\n\
+         Subject: ugovor\r\n\
+         Message-ID: <with-attach@example.com>\r\n\
+         Date: Sat, 1 Nov 2026 10:00:00 +0100\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: multipart/mixed; boundary=\"mix\"\r\n\
+         \r\n\
+         --mix\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         \r\n\
+         potpisano u prilogu\r\n\
+         --mix\r\n\
+         Content-Type: application/pdf\r\n\
+         Content-Disposition: attachment; filename=\"ugovor.pdf\"\r\n\
+         Content-Transfer-Encoding: base64\r\n\
+         \r\n\
+         JVBERi0xLjQ=\r\n\
+         --mix--\r\n",
+    )
+    .into_bytes();
+
+    let server = MockImap::start();
+    server.set_mailbox("INBOX", MockMailbox::new(7, vec![attachment_mail]));
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("data");
+    let storage = Storage::open_in_memory().unwrap();
+    let instance = instance(&storage);
+
+    let mut s = session(&server);
+    let mut budget = vault_core::object_store::Capacity::default();
+    let mut media = vault_core::media::MailMedia::new(&data_dir, &mut budget);
+    let summaries = vimap::sync_session(
+        &mut s,
+        &storage,
+        &instance,
+        &["INBOX".to_string()],
+        Some(&mut media),
+    );
+    let _ = s.logout();
+    assert_eq!(summaries[0].inserted, 1);
+
+    // The attachment landed in the vault's store, hash-named.
+    let store = data_dir.join("media");
+    let names: Vec<String> = std::fs::read_dir(&store)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names.len(), 1);
+    assert!(names[0].ends_with(".pdf"));
+
+    // And is linked from the message with the original display name.
+    let hits = storage
+        .search_filtered(&build_match_query("ugovor"), None, None, 10)
+        .unwrap();
+    assert!(!hits.is_empty());
+    let raw: serde_json::Value = serde_json::from_str(&hits[0].raw_json).unwrap();
+    assert_eq!(raw["media"][0]["name"], "ugovor.pdf");
+    assert_eq!(raw["media"][0]["kind"], "document");
+    assert_eq!(raw["media"][0]["path"], format!("media/{}", names[0]));
+
+    // A second round delivers a *different* mail carrying the *same*
+    // attachment bytes: the mail is archived, the object is one — a
+    // content-addressed dedup across messages, exactly like chat media.
+    let second_mail = String::from(
+        "From: Carol Jones <carol@example.com>\r\n\
+         To: Bob <bob@example.com>\r\n\
+         Subject: Re: ugovor\r\n\
+         Message-ID: <with-attach-2@example.com>\r\n\
+         Date: Sat, 1 Nov 2026 12:00:00 +0100\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: multipart/mixed; boundary=\"mix\"\r\n\
+         \r\n\
+         --mix\r\n\
+         Content-Type: text/plain\r\n\
+         \r\n\
+         isti prilog\r\n\
+         --mix\r\n\
+         Content-Type: application/pdf\r\n\
+         Content-Disposition: attachment; filename=\"ugovor-kopija.pdf\"\r\n\
+         Content-Transfer-Encoding: base64\r\n\
+         \r\n\
+         JVBERi0xLjQ=\r\n\
+         --mix--\r\n",
+    )
+    .into_bytes();
+    let first_again = String::from(
+        "From: Alice Smith <alice@example.com>\r\n\
+         To: Bob <bob@example.com>\r\n\
+         Subject: ugovor\r\n\
+         Message-ID: <with-attach@example.com>\r\n\
+         Date: Sat, 1 Nov 2026 10:00:00 +0100\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: multipart/mixed; boundary=\"mix\"\r\n\
+         \r\n\
+         --mix\r\n\
+         Content-Type: text/plain\r\n\
+         \r\n\
+         potpisano u prilogu\r\n\
+         --mix\r\n\
+         Content-Type: application/pdf\r\n\
+         Content-Disposition: attachment; filename=\"ugovor.pdf\"\r\n\
+         Content-Transfer-Encoding: base64\r\n\
+         \r\n\
+         JVBERi0xLjQ=\r\n\
+         --mix--\r\n",
+    )
+    .into_bytes();
+    server.set_mailbox("INBOX", MockMailbox::new(7, vec![first_again, second_mail]));
+    let mut s2 = session(&server);
+    let mut budget2 = vault_core::object_store::Capacity::default();
+    let mut media2 = vault_core::media::MailMedia::new(&data_dir, &mut budget2);
+    let summaries = vimap::sync_session(
+        &mut s2,
+        &storage,
+        &instance,
+        &["INBOX".to_string()],
+        Some(&mut media2),
+    );
+    let _ = s2.logout();
+    assert_eq!(summaries[0].inserted, 1, "the new mail");
+    assert_eq!(summaries[0].skipped, 0);
+    assert_eq!(
+        std::fs::read_dir(&store).unwrap().count(),
+        1,
+        "identical attachment bytes stay one object"
+    );
+    assert_eq!(media2.deduped, 1, "the re-sent attachment deduped");
 }

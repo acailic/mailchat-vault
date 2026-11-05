@@ -1,0 +1,48 @@
+From ana@example.com Mon Nov  3 10:00:00 2025
+Message-ID: <att-m1@archive.local>
+From: Ana Sender <ana@example.com>
+To: team@example.com
+Subject: Design agenda with PDF attachment
+Date: Mon, 3 Nov 2025 10:00:00 +0000
+MIME-Version: 1.1
+Content-Type: multipart/mixed; boundary="att-bound-1"
+
+--att-bound-1
+Content-Type: text/plain; charset=utf-8
+
+Agenda inside. The plan deck is attached.
+
+--att-bound-1
+Content-Type: application/pdf; name="design-notes.pdf"
+Content-Disposition: attachment; filename="design-notes.pdf"
+Content-Transfer-Encoding: base64
+
+ZGVzaWduIG5vdGVzIHBheWxvYWQgdjEgLSBtYWlsY2hhdCBNNC4yIGF0dGFj
+aG1lbnQgY29udGVudCwgZGV0ZXJtaW5pc3RpYyBieXRlcyBmb3IgdGhlIGUy
+ZSBzdG9yZSBjaGVjaw==
+--att-bound-1--
+
+From ana@example.com Mon Nov  3 11:00:00 2025
+Message-ID: <att-m2@archive.local>
+From: Ana Sender <ana@example.com>
+To: team@example.com
+Subject: Budget CSV attachment
+Date: Mon, 3 Nov 2025 11:00:00 +0000
+MIME-Version: 1.1
+Content-Type: multipart/mixed; boundary="att-bound-2"
+
+--att-bound-2
+Content-Type: text/plain; charset=utf-8
+
+Budget figures travel in the CSV.
+
+--att-bound-2
+Content-Type: text/csv; name="budget.csv"
+Content-Disposition: attachment; filename="budget.csv"
+Content-Transfer-Encoding: quoted-printable
+
+quarter,amount
+Q1,3=2E140=2E00
+Q2,4=2E050=2E00
+--att-bound-2--
+

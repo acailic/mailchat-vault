@@ -192,6 +192,7 @@ impl From<Error> for JobError {
             | Error::InvalidQuery(_)
             | Error::InvalidDate(_)
             | Error::InvalidExport(_)
+            | Error::Media(_)
             | Error::Json(_) => JobError::Import {
                 message: e.to_string(),
             },
@@ -968,6 +969,7 @@ impl IngestSink for PoolSink<'_> {
         source: &str,
         messages: &[NewMessage],
         issues: &[ImportIssueRecord<'_>],
+        media_objects: &[crate::media::UnlinkedObject],
         committed_after: u64,
         completes: bool,
     ) -> Result<ImportBatchCounts> {
@@ -980,6 +982,7 @@ impl IngestSink for PoolSink<'_> {
             .iter()
             .map(|i| (i.position, i.external_ref.to_string(), i.reason.to_string()))
             .collect();
+        let media_objects: Vec<crate::media::UnlinkedObject> = media_objects.to_vec();
         self.0.submit_write(move |s| {
             let records: Vec<ImportIssueRecord<'_>> = issues
                 .iter()
@@ -994,10 +997,15 @@ impl IngestSink for PoolSink<'_> {
                 &source,
                 &messages,
                 &records,
+                &media_objects,
                 committed_after,
                 completes,
             )
         })
+    }
+
+    fn linked_media_digests(&mut self) -> Result<std::collections::HashSet<String>> {
+        self.0.with_read(|s| s.message_media_digests())
     }
 }
 

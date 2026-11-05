@@ -452,6 +452,45 @@ impl ObjectStore {
         existing_store_name(&self.store_dir, sha256).is_some()
     }
 
+    /// Resolve a store-relative reference (`media/<sha256>.<ext>`, the
+    /// `path` recorded in a message's `media` entries) to its absolute
+    /// path, refusing anything that is not exactly one store object:
+    /// no traversal, no sibling names, no missing file. This is the
+    /// one path the "open media" surface accepts — a stored digest
+    /// name, never an arbitrary filesystem path.
+    pub fn resolve_object(&self, store_rel: &str) -> Result<PathBuf> {
+        let Some(rest) = store_rel.strip_prefix("media/") else {
+            return Err(Error::Media(format!(
+                "not a media store reference: {store_rel}"
+            )));
+        };
+        let (stem, ext) = rest
+            .rsplit_once('.')
+            .ok_or_else(|| Error::Media(format!("not a media object name: {store_rel}")))?;
+        if rest.contains('/')
+            || rest.contains('\\')
+            || sanitize_ext(ext) != ext.to_ascii_lowercase()
+        {
+            return Err(Error::Media(format!(
+                "not a media object name: {store_rel}"
+            )));
+        }
+        if stem.len() != 64 || !stem.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(Error::Media(format!(
+                "not a media object name: {store_rel}"
+            )));
+        }
+        let path = self
+            .store_dir
+            .join(format!("{stem}.{}", ext.to_ascii_lowercase()));
+        if !path.is_file() {
+            return Err(Error::Media(format!(
+                "object not in the store: {store_rel}"
+            )));
+        }
+        Ok(path)
+    }
+
     /// Enumerate the visible objects: files named `<sha256>.<ext>`
     /// directly under the store directory. The staging directory and
     /// legacy `.tmp-*` files are never included — staged-but-unpromoted
@@ -859,6 +898,60 @@ mod tests {
         assert_eq!(report.largest.len(), 10, "largest is capped at 10");
         assert_eq!(report.largest[0].size, 12);
         assert_eq!(report.orphan_objects, 12, "nothing referenced: all orphans");
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod resolve_tests {
+    //! M4.2: `resolve_object` — the one path the "open media" surface
+    //! accepts: an exact store object name, never an arbitrary path.
+
+    use super::*;
+
+    fn tmpdir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("mcv-resolve-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn resolves_a_stored_object_and_refuses_everything_else() {
+        let dir = tmpdir("ok");
+        let src = dir.join("photo.jpg");
+        fs::write(&src, b"jpeg-bytes").unwrap();
+        let data_root = dir.join("root");
+        let object_store = ObjectStore::new(&data_root);
+        let staged = object_store
+            .stage(&src, "jpg", &mut Capacity::default())
+            .unwrap();
+        let object = object_store
+            .promote(staged, &mut Capacity::default())
+            .unwrap();
+
+        let resolved = object_store.resolve_object(&object.path).unwrap();
+        assert_eq!(
+            resolved,
+            data_root
+                .join("media")
+                .join(format!("{}.jpg", object.sha256))
+        );
+        assert!(resolved.is_file());
+
+        // Traversal, foreign names, and absent objects are refused.
+        let sha = "a".repeat(64);
+        for bad in [
+            "media/../../etc/passwd",
+            &format!("media/{sha}.jpg"),
+            &format!("media/{sha}"),
+            &format!("{sha}.jpg"),
+            "media/sub/../../x.jpg",
+            "media/notepad.txt",
+            "",
+        ] {
+            assert!(object_store.resolve_object(bad).is_err(), "{bad:?}");
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 }

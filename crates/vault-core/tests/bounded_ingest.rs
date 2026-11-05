@@ -430,12 +430,17 @@ impl IngestSink for RecordingSink {
         self.storage.import_checkpoint(import_id)
     }
 
+    fn linked_media_digests(&mut self) -> vault_core::Result<std::collections::HashSet<String>> {
+        self.storage.message_media_digests()
+    }
+
     fn commit_batch(
         &mut self,
         import_id: &str,
         source: &str,
         messages: &[vault_core::message::NewMessage],
         issues: &[ImportIssueRecord<'_>],
+        media_objects: &[vault_core::media::UnlinkedObject],
         committed_after: u64,
         completes: bool,
     ) -> vault_core::Result<ImportBatchCounts> {
@@ -454,6 +459,7 @@ impl IngestSink for RecordingSink {
             source,
             messages,
             issues,
+            media_objects,
             committed_after,
             completes,
         )
@@ -833,12 +839,17 @@ impl IngestSink for MediaCountingSink {
         self.storage.import_checkpoint(import_id)
     }
 
+    fn linked_media_digests(&mut self) -> vault_core::Result<std::collections::HashSet<String>> {
+        self.storage.message_media_digests()
+    }
+
     fn commit_batch(
         &mut self,
         import_id: &str,
         source: &str,
         messages: &[vault_core::message::NewMessage],
         issues: &[ImportIssueRecord<'_>],
+        media_objects: &[vault_core::media::UnlinkedObject],
         committed_after: u64,
         completes: bool,
     ) -> vault_core::Result<ImportBatchCounts> {
@@ -847,6 +858,7 @@ impl IngestSink for MediaCountingSink {
             source,
             messages,
             issues,
+            media_objects,
             committed_after,
             completes,
         )?;
@@ -884,7 +896,13 @@ fn media_linked_counts_reach_the_outcome_summary() {
         // outcome carries a media summary; the fixture references no
         // files, so the extraction pass itself is a no-op (its behavior
         // is media_extract.rs's domain).
-        media: Some((MediaKind::Telegram, dir.path(), dir.path())),
+        media: Some(vault_core::bounded::MediaPass {
+            kind: MediaKind::Telegram,
+            export_root: dir.path(),
+            export_file: None,
+            data_dir: dir.path(),
+            unlinked: false,
+        }),
     };
     let outcome = run
         .run(&source, &mut sink, &|| false, &mut |_, _, _| {})

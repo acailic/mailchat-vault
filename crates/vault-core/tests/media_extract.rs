@@ -382,10 +382,18 @@ fn text_only_export_counts_missing_and_imports_anyway() {
     assert_eq!(media.referenced, 1);
     assert_eq!(media.missing, 1);
     assert_eq!(media.stored, 0);
-    assert_eq!(media.linked, 0);
-    // No media array was added, and no store directory was created.
+    // The row gained the honest missing marker (a `media` entry with
+    // no digest — the reference is visible, not silently dropped).
+    assert_eq!(media.linked, 1);
     let raw: serde_json::Value = serde_json::from_str(&raw_json_of(&storage, "9/1")).unwrap();
-    assert!(raw.get("media").is_none());
+    let entry = &raw["media"][0];
+    assert_eq!(entry["name"], "missing.jpg");
+    assert_eq!(entry["kind"], "image");
+    assert_eq!(entry["missing"], true);
+    assert_eq!(entry["reason"], "not-in-export");
+    assert!(entry.get("sha256").is_none());
+    assert!(entry.get("path").is_none());
+    // No bytes were stored — no store directory was created.
     assert!(!sb.store_dir().exists());
 }
 
@@ -481,7 +489,7 @@ fn whatsapp_attachments_are_matched_by_name() {
     assert_eq!(media.referenced, 3);
     assert_eq!(media.stored, 2);
     assert_eq!(media.missing, 1);
-    assert_eq!(media.linked, 2);
+    assert_eq!(media.linked, 3, "two stored links + the missing marker");
 
     let photo_sha = sha256_hex(&fixture("photo.jpg"));
     assert!(sb.store_dir().join(format!("{photo_sha}.jpg")).is_file());
@@ -543,7 +551,13 @@ fn whatsapp_stem_match_never_shadowed_by_foreign_extension() {
         .search_filtered(&build_match_query("plan.pdf"), None, None, 10)
         .unwrap();
     let raw: serde_json::Value = serde_json::from_str(&hits[0].raw_json).unwrap();
-    assert!(raw.get("media").is_none(), "no link for the backup file");
+    // The absent plan.pdf is a missing entry — never linked to the
+    // backup file's bytes.
+    let media = raw["media"].as_array().unwrap();
+    assert_eq!(media.len(), 1);
+    assert_eq!(media[0]["name"], "plan.pdf");
+    assert_eq!(media[0]["missing"], true);
+    assert!(media[0].get("sha256").is_none());
 }
 
 #[test]
@@ -562,7 +576,13 @@ fn whatsapp_export_without_files_reports_missing_named_attachments() {
     let media = outcome.media.unwrap();
     assert_eq!(media.referenced, 1);
     assert_eq!(media.missing, 1);
-    assert_eq!(media.linked, 0);
+    // The missing reference is recorded on the message (one marker,
+    // no digest) — visible, honestly absent, re-import-stable.
+    assert_eq!(media.linked, 1);
+    let hits = storage
+        .search_filtered(&build_match_query("vidimo se"), None, None, 10)
+        .unwrap();
+    assert!(!hits.is_empty());
     assert!(!sb.store_dir().exists());
 }
 
@@ -632,4 +652,306 @@ fn media_files_never_match_the_export_text_or_json_by_accident() {
     assert_eq!(media.linked, 1);
     let sha = sha256_hex(&sb.export_dir().join("chat.txt"));
     assert!(sb.store_dir().join(format!("{sha}.txt")).is_file());
+}
+
+// ---------------------------------------------------------------------
+// M4.2: missing references, re-import enrichment, unlinked files
+// ---------------------------------------------------------------------
+
+#[test]
+fn missing_entries_survive_reimports_without_duplicating() {
+    // AC3 for the missing state: re-importing a text-only export never
+    // stacks a second marker, and neither objects nor entries duplicate.
+    let sb = Sandbox::new("tg-missing-reimport");
+    fs::write(
+        sb.export_dir().join("result.json"),
+        r#"{"name": "d", "id": 9, "messages": [
+  { "id": 1, "type": "message", "date_unixtime": "1698832800", "from": "A",
+    "photo": "photos/gone.jpg", "text": "samo tekst" }
+]}"#,
+    )
+    .unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
+    sb.import_with_media(&mut storage);
+    let first = raw_json_of(&storage, "9/1");
+
+    let outcome = sb.import_with_media(&mut storage);
+    assert_eq!(outcome.summary.skipped, 1);
+    assert_eq!(outcome.media.unwrap().linked, 0, "nothing new to record");
+    assert_eq!(raw_json_of(&storage, "9/1"), first, "raw_json untouched");
+
+    // A third import with the file present upgrades the marker in place.
+    sb.put("photos/gone.jpg", "photo.jpg");
+    let outcome = sb.import_with_media(&mut storage);
+    let media = outcome.media.unwrap();
+    assert_eq!(media.stored, 1);
+    assert_eq!(media.missing, 0);
+    assert_eq!(media.linked, 1, "the missing marker was upgraded");
+    let raw: serde_json::Value = serde_json::from_str(&raw_json_of(&storage, "9/1")).unwrap();
+    let entries = raw["media"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "upgrade replaces, not appends");
+    let photo_sha = sha256_hex(&fixture("photo.jpg"));
+    assert_eq!(entries[0]["sha256"], photo_sha);
+    assert!(entries[0].get("missing").is_none());
+    assert_eq!(entries[0]["name"], "gone.jpg");
+    // And stays stable on the next identical re-import.
+    let after_upgrade = raw_json_of(&storage, "9/1");
+    let outcome = sb.import_with_media(&mut storage);
+    assert_eq!(outcome.media.unwrap().linked, 0);
+    assert_eq!(raw_json_of(&storage, "9/1"), after_upgrade);
+}
+
+#[test]
+fn unlinked_export_files_are_stored_and_registered() {
+    // A directory pick: two stray files sit next to the export's
+    // referenced media; both are stored and registered, the referenced
+    // files are not double-counted, and the export's own json/html are
+    // left alone.
+    let sb = Sandbox::new("tg-unlinked");
+    write_telegram_export(&sb);
+    // Stray files with content no message references (distinct bytes,
+    // or the digest check would rightly treat them as linked copies).
+    fs::write(
+        sb.export_dir().join("photos/orphan.png"),
+        b"orphan-png-bytes",
+    )
+    .unwrap();
+    fs::write(sb.export_dir().join("files/extra.txt"), b"stray notes").unwrap();
+    fs::write(
+        sb.export_dir().join("export_results.html"),
+        b"<html>export page</html>",
+    )
+    .unwrap();
+    fs::write(sb.export_dir().join("users.html"), b"[]").unwrap();
+    // A user's own unreferenced .html/.json files are export content,
+    // not exporter sidecars: they are stored like any other stray file.
+    fs::write(sb.export_dir().join("notes.html"), b"<html>my notes</html>").unwrap();
+    fs::write(sb.export_dir().join("rules.json"), b"{}").unwrap();
+    // The exporter's conversation pages (messages.html, numbered and
+    // -part variants) are sidecars and stay out of the store.
+    fs::write(
+        sb.export_dir().join("messages.html"),
+        b"<html>messages page</html>",
+    )
+    .unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
+
+    let outcome = sb.import_with_media(&mut storage);
+    let media = outcome.media.unwrap();
+    assert_eq!(media.stored, 3, "the three referenced files");
+    assert_eq!(media.unlinked, 4, "the four stray files");
+    assert_eq!(media.unlinked_deduped, 0);
+    // Store: 3 linked + 4 unlinked; the sidecars never land.
+    assert_eq!(fs::read_dir(sb.store_dir()).unwrap().count(), 7);
+
+    // Registered: reconciliation counts them as referenced (a clean
+    // import with unlinked files stays clean).
+    let digests = storage.media_digests().unwrap();
+    assert_eq!(digests.len(), 7);
+    let objects = storage.unlinked_media_objects().unwrap();
+    assert_eq!(objects.len(), 4);
+    assert!(objects.iter().all(|o| o.origin == "unlinked"));
+    let names: Vec<&str> = objects.iter().map(|o| o.name.as_str()).collect();
+    assert!(names.contains(&"orphan.png") && names.contains(&"extra.txt"));
+    assert!(names.contains(&"notes.html") && names.contains(&"rules.json"));
+    let report = vault_core::object_store::ObjectStore::new(&sb.data_dir())
+        .reconcile(&digests, false)
+        .unwrap();
+    assert!(report.is_clean(), "{report:?}");
+
+    // AC3: re-import stores no new objects, registers no new rows,
+    // relinks nothing.
+    let outcome = sb.import_with_media(&mut storage);
+    let media = outcome.media.unwrap();
+    assert_eq!(media.stored, 0);
+    assert_eq!(media.deduped, 3);
+    assert_eq!(media.unlinked, 0);
+    assert_eq!(media.unlinked_deduped, 4);
+    assert_eq!(media.linked, 0);
+    assert_eq!(fs::read_dir(sb.store_dir()).unwrap().count(), 7);
+    assert_eq!(storage.unlinked_media_objects().unwrap().len(), 4);
+    let digests = storage.media_digests().unwrap();
+    assert_eq!(digests.len(), 7);
+}
+
+#[test]
+fn bare_file_picks_never_store_the_parent_directory() {
+    // The safety rule: a bare export file asserts nothing about its
+    // neighbors — stray files next to a picked .txt are NOT stored.
+    let sb = Sandbox::new("wa-no-unlinked");
+    let chat = sb.export_dir().join("WhatsApp Chat with Ana.txt");
+    fs::write(
+        &chat,
+        "[1.11.2026., 09:00:00] Marko: zdravo\n\
+         [1.11.2026., 09:01:00] Ana: IMG-20261101-WA0001.jpg (file attached)\n",
+    )
+    .unwrap();
+    sb.put("IMG-20261101-WA0001.jpg", "photo.jpg");
+    fs::copy(fixture("beep.wav"), sb.export_dir().join("vacation.wav")).unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
+
+    let outcome = sb.import_picked(&mut storage, &chat, true);
+    let media = outcome.media.unwrap();
+    assert_eq!(media.stored, 1, "only the referenced file");
+    assert_eq!(media.unlinked + media.unlinked_deduped, 0);
+    assert_eq!(fs::read_dir(sb.store_dir()).unwrap().count(), 1);
+    assert_eq!(storage.unlinked_media_objects().unwrap().len(), 0);
+}
+
+#[test]
+fn telegram_object_shaped_file_refs_are_extracted() {
+    // Newer exporters write photo/file as objects with a nested path
+    // and a file_name; both shapes are explicit references (M4.2).
+    let sb = Sandbox::new("tg-object-ref");
+    sb.put("photos/pic.jpg", "photo.jpg");
+    sb.put("files/report.pdf", "plan.pdf");
+    fs::write(
+        sb.export_dir().join("result.json"),
+        r#"{"name": "d", "id": 3, "messages": [
+  { "id": 1, "type": "message", "date_unixtime": "1698832800", "from": "A",
+    "photo": { "photo_id": 5, "file": "photos/pic.jpg", "width": 640, "height": 480 }, "text": "" },
+  { "id": 2, "type": "message", "date_unixtime": "1698832860", "from": "B",
+    "file": { "file_id": 7, "file": "files/report.pdf" }, "file_name": "Izve{0161}taj.pdf", "text": "" }
+]}"#,
+    )
+    .unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
+
+    let outcome = sb.import_with_media(&mut storage);
+    let media = outcome.media.unwrap();
+    assert_eq!(media.stored, 2);
+    assert_eq!(media.missing, 0);
+
+    let pic: serde_json::Value = serde_json::from_str(&raw_json_of(&storage, "3/1")).unwrap();
+    assert_eq!(pic["media"][0]["name"], "pic.jpg");
+    assert_eq!(pic["media"][0]["kind"], "image");
+    let doc: serde_json::Value = serde_json::from_str(&raw_json_of(&storage, "3/2")).unwrap();
+    assert_eq!(
+        doc["media"][0]["name"], "Izve{0161}taj.pdf",
+        "file_name wins"
+    );
+    assert_eq!(doc["media"][0]["kind"], "document");
+}
+
+#[test]
+fn object_shaped_refs_with_missing_files_record_missing_entries() {
+    let sb = Sandbox::new("tg-object-missing");
+    fs::write(
+        sb.export_dir().join("result.json"),
+        r#"{"name": "d", "id": 3, "messages": [
+  { "id": 1, "type": "message", "date_unixtime": "1698832800", "from": "A",
+    "file": { "file_id": 7, "file": "files/lost.pdf" }, "file_name": "lost.pdf", "text": "" }
+]}"#,
+    )
+    .unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
+    let outcome = sb.import_with_media(&mut storage);
+    let media = outcome.media.unwrap();
+    assert_eq!(media.missing, 1);
+    let raw: serde_json::Value = serde_json::from_str(&raw_json_of(&storage, "3/1")).unwrap();
+    assert_eq!(raw["media"][0]["name"], "lost.pdf");
+    assert_eq!(raw["media"][0]["missing"], true);
+}
+
+#[test]
+fn unlinked_budget_exhaustion_is_counted_not_silent() {
+    use std::collections::HashSet;
+
+    use vault_core::media::{extract_unlinked, MediaSummary};
+    use vault_core::object_store::Capacity;
+
+    // Four 10-byte strays; the media budget fits exactly one, so the
+    // other three are dropped by budget — counted, not silent.
+    let sb = Sandbox::new("unlinked-budget");
+    let export = sb.export_dir();
+    for name in ["a.bin", "b.bin", "c.bin", "d.bin"] {
+        fs::write(export.join(name), b"0123456789").unwrap();
+    }
+    let mut summary = MediaSummary::default();
+    let mut budget = Capacity::new(15, 100);
+    let records = extract_unlinked(
+        &export,
+        None,
+        &sb.data_dir(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &mut summary,
+        &mut budget,
+    )
+    .unwrap();
+    assert_eq!(summary.unlinked, 1, "the first file fits the budget");
+    assert_eq!(summary.unlinked_dropped, 3, "the rest are budget-drops");
+    assert_eq!(records.len(), 1);
+
+    // A non-budget store failure (an unreadable file) is skipped the
+    // ordinary way and must not be counted as a budget drop.
+    let sb2 = Sandbox::new("unlinked-nonbudget");
+    let export2 = sb2.export_dir();
+    let secret = export2.join("secret.bin");
+    fs::write(&secret, b"x").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    let blocks_read = fs::read(&secret).is_err();
+    let mut summary = MediaSummary::default();
+    let mut budget = Capacity::new(1024, 10);
+    let records = extract_unlinked(
+        &export2,
+        None,
+        &sb2.data_dir(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &mut summary,
+        &mut budget,
+    )
+    .unwrap();
+    if blocks_read {
+        assert!(records.is_empty());
+        assert_eq!(summary.unlinked, 0);
+        assert_eq!(
+            summary.unlinked_dropped, 0,
+            "a non-budget failure is not a budget drop"
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&secret, fs::Permissions::from_mode(0o644));
+    }
+}
+
+#[test]
+fn unlinked_walk_failure_is_counted_not_silent() {
+    use std::collections::HashSet;
+
+    use vault_core::media::{extract_unlinked, MediaSummary};
+    use vault_core::object_store::Capacity;
+
+    // A tree nesting past the walk's depth bound: the unlinked pass
+    // aborts on the walk error, and the summary must say so instead of
+    // reporting an empty, clean pass.
+    let sb = Sandbox::new("unlinked-walk");
+    let export = sb.export_dir();
+    fs::write(export.join("shallow.txt"), b"shallow").unwrap();
+    let deep = export.join("d1/d2/d3/d4/d5/d6/d7/deep.txt");
+    fs::create_dir_all(deep.parent().unwrap()).unwrap();
+    fs::write(&deep, b"deep").unwrap();
+
+    let mut summary = MediaSummary::default();
+    let mut budget = Capacity::new(1024, 10);
+    let records = extract_unlinked(
+        &export,
+        None,
+        &sb.data_dir(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &mut summary,
+        &mut budget,
+    )
+    .unwrap();
+    assert!(records.is_empty(), "the walk aborted, nothing registered");
+    assert_eq!(summary.unlinked, 0);
+    assert_eq!(summary.unlinked_walk_failed, 1, "the failure is counted");
 }

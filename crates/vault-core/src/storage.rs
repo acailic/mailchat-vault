@@ -622,6 +622,33 @@ const MIGRATIONS: &[(i64, &str)] = &[
             ON message_occurrences (import_id);
         "#,
     ),
+    (
+        13,
+        // The media object registry (M4.2). Message-linked objects are
+        // referenced by their `raw_json` `media` entries; unlinked export
+        // files — stored by whole-tree imports for files that belong to
+        // no message — have no message to reference them, so they get a
+        // registry row instead: their digest, size, and provenance.
+        // `media_digests` unions both sides, so reconciliation counts
+        // unlinked objects as referenced (a clean import with unlinked
+        // files stays reconciliation-clean), and the PRIMARY KEY makes
+        // re-registration idempotent: re-importing the same export
+        // stores no second object and no second row.
+        r#"
+        CREATE TABLE media_objects (
+            sha256     TEXT PRIMARY KEY,
+            size       INTEGER NOT NULL,
+            name       TEXT    NOT NULL DEFAULT '',
+            kind       TEXT    NOT NULL DEFAULT '',
+            -- How the object entered the vault ('unlinked' for M4.2
+            -- whole-tree imports; message-linked objects stay
+            -- unregistered — their messages are the reference).
+            origin     TEXT    NOT NULL DEFAULT '',
+            import_id  TEXT    NOT NULL DEFAULT '',
+            first_seen TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+        "#,
+    ),
 ];
 
 /// Rust halves of migrations, for backfill logic that SQL alone cannot
@@ -811,12 +838,14 @@ impl Storage {
     /// far); `completes` marks the import finished, deleting its
     /// checkpoint row in the same transaction (a completed import needs
     /// no resume point; re-running it starts fresh and dedups).
+    #[allow(clippy::too_many_arguments)]
     pub fn commit_import_batch(
         &self,
         import_id: &str,
         source: &str,
         messages: &[NewMessage],
         issues: &[ImportIssueRecord<'_>],
+        media_objects: &[crate::media::UnlinkedObject],
         committed_after: u64,
         completes: bool,
     ) -> Result<ImportBatchCounts> {
@@ -845,6 +874,24 @@ impl Storage {
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT (import_id, position) DO NOTHING",
                 params![import_id, issue.position, issue.external_ref, issue.reason],
+            )?;
+        }
+        // Unlinked objects (M4.2): registered idempotently on the digest —
+        // a re-import of the same tree registers nothing new, and an
+        // object some message also references keeps the registry row as
+        // redundant provenance (harmless: reconciliation unions sides).
+        for object in media_objects {
+            tx.execute(
+                "INSERT OR IGNORE INTO media_objects
+                     (sha256, size, name, kind, origin, import_id)
+                 VALUES (?1, ?2, ?3, ?4, 'unlinked', ?5)",
+                params![
+                    object.sha256,
+                    object.size,
+                    object.name,
+                    object.kind,
+                    import_id
+                ],
             )?;
         }
         if completes {
@@ -2343,25 +2390,69 @@ impl Storage {
 
     /// Every distinct media digest the archive references — the
     /// `sha256` of each `raw_json` `media` entry across all canonical
-    /// messages (M4.1: the reference side of the object-store
-    /// reconciliation; see [`crate::object_store::ObjectStore::reconcile`]).
+    /// messages **plus** every digest in the `media_objects` registry
+    /// (M4.2: unlinked export files are registered there, since no
+    /// message references them). This is the reference side of the
+    /// object-store reconciliation (see
+    /// [`crate::object_store::ObjectStore::reconcile`]).
     pub fn media_digests(&self) -> Result<std::collections::HashSet<String>> {
+        let mut digests = self.message_media_digests()?;
+        {
+            let mut stmt = self.conn.prepare("SELECT sha256 FROM media_objects")?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let sha: String = row.get(0)?;
+                if !sha.is_empty() {
+                    digests.insert(sha);
+                }
+            }
+        }
+        Ok(digests)
+    }
+
+    /// The digests referenced by stored messages only (the
+    /// message-linked side of the reference set — what the M4.2
+    /// unlinked pass skips as already reachable).
+    pub fn message_media_digests(&self) -> Result<std::collections::HashSet<String>> {
         let mut digests = std::collections::HashSet::new();
-        let mut stmt = self
-            .conn
-            .prepare("SELECT raw_json FROM archive_messages WHERE raw_json LIKE '%\"media\"%'")?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let raw: String = row.get(0)?;
-            for entry in media_entries(&raw) {
-                if let Some(sha) = entry.get("sha256").and_then(|v| v.as_str()) {
-                    if !sha.is_empty() {
-                        digests.insert(sha.to_string());
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT raw_json FROM archive_messages WHERE raw_json LIKE '%\"media\"%'",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let raw: String = row.get(0)?;
+                for entry in media_entries(&raw) {
+                    if let Some(sha) = entry.get("sha256").and_then(|v| v.as_str()) {
+                        if !sha.is_empty() {
+                            digests.insert(sha.to_string());
+                        }
                     }
                 }
             }
         }
         Ok(digests)
+    }
+
+    /// The media objects registered as unlinked (M4.2) — export files
+    /// stored without a message, with their provenance. Oldest first.
+    pub fn unlinked_media_objects(&self) -> Result<Vec<RegisteredMediaObject>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT sha256, size, name, kind, origin, import_id, first_seen
+             FROM media_objects ORDER BY first_seen, sha256",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(RegisteredMediaObject {
+                sha256: row.get(0)?,
+                size: row.get::<_, i64>(1)?.max(0) as u64,
+                name: row.get(2)?,
+                kind: row.get(3)?,
+                origin: row.get(4)?,
+                import_id: row.get(5)?,
+                first_seen: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Remember a watched folder (idempotent on the canonical path).
@@ -2529,6 +2620,19 @@ fn media_entries(raw_json: &str) -> Vec<serde_json::Value> {
 /// transaction (the shared body of [`Storage::attach_media`] and the
 /// duplicate path of [`Storage::commit_import_batch`]). Returns whether
 /// anything changed.
+///
+/// M4.2 merge rules — stored entries and missing entries coexist:
+/// - an incoming stored entry (with a digest) is skipped when its digest
+///   is already present;
+/// - an incoming stored entry **replaces** an existing missing entry of
+///   the same name (the re-import found the file; the reference is
+///   upgraded in place);
+/// - an incoming missing entry is skipped when any entry — stored or
+///   missing — already carries its name (a text-only re-import must not
+///   stack a second missing marker for the same file);
+/// - anything else appends.
+///
+/// An all-duplicates merge is a no-op, so re-imports stay idempotent.
 fn attach_media_in_tx(
     tx: &Transaction<'_>,
     id: i64,
@@ -2560,22 +2664,52 @@ fn attach_media_in_tx(
         *media = serde_json::Value::Array(Vec::new());
     }
     let array = media.as_array_mut().expect("just coerced to array");
-    let known: std::collections::HashSet<String> = array
+    let mut known: std::collections::HashSet<String> = array
         .iter()
         .filter_map(|e| {
             e.get("sha256")
                 .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .collect();
+    let known_names: std::collections::HashSet<String> = array
+        .iter()
+        .filter_map(|e| {
+            e.get("name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|n| !n.is_empty())
                 .map(str::to_string)
         })
         .collect();
     let mut changed = false;
     for entry in entries {
         let sha = entry.get("sha256").and_then(serde_json::Value::as_str);
-        if sha.is_none_or(str::is_empty) || sha.is_some_and(|s| known.contains(s)) {
-            continue;
+        let name = entry
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        if let Some(sha) = sha.filter(|s| !s.is_empty()) {
+            if known.contains(sha) {
+                continue;
+            }
+            // Upgrade: this name was recorded missing, and the bytes
+            // exist now — replace the missing marker with the real link.
+            array.retain(|e| {
+                !(e.get("missing").and_then(serde_json::Value::as_bool) == Some(true)
+                    && e.get("name").and_then(serde_json::Value::as_str) == Some(name))
+            });
+            array.push(entry.clone());
+            known.insert(sha.to_string());
+            changed = true;
+        } else {
+            // A missing entry: one marker per name is enough.
+            if known_names.contains(name) {
+                continue;
+            }
+            array.push(entry.clone());
+            changed = true;
         }
-        array.push(entry.clone());
-        changed = true;
     }
     if changed {
         tx.execute(
@@ -3094,6 +3228,22 @@ pub struct ImportBatchCounts {
     /// Messages whose media links were written or backfilled (inserts
     /// carrying a `media` array plus duplicates that gained entries).
     pub media_linked: u64,
+}
+
+/// One row of the `media_objects` registry (M4.2): an object stored
+/// without a message link — an export file that belonged to no message —
+/// with its provenance. Message-linked objects stay unregistered; their
+/// messages are their reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegisteredMediaObject {
+    pub sha256: String,
+    pub size: u64,
+    pub name: String,
+    pub kind: String,
+    /// How the object entered the vault (`"unlinked"`).
+    pub origin: String,
+    pub import_id: String,
+    pub first_seen: String,
 }
 
 /// Filter SQL fragments (`AND ...` clauses referencing table aliases `m`
@@ -3798,5 +3948,125 @@ mod tests {
             err.to_string().contains("archive_fts"),
             "error must name the corrupt index: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod media_merge_tests {
+    //! M4.2 unit coverage for the stored/missing media merge rules and
+    //! the `media_objects` reference union (integration coverage of the
+    //! import flows lives in `tests/media_extract.rs`).
+
+    use super::*;
+
+    fn msg_with_media(s: &Storage, id: &str, entries: serde_json::Value) -> i64 {
+        let mut m =
+            crate::message::NewMessage::new("telegram", id, "a", "2026-01-01T00:00:00Z", "b");
+        let mut raw = serde_json::json!({});
+        raw["media"] = entries;
+        m.raw_json = raw.to_string();
+        match s.insert_message(&m).unwrap() {
+            crate::message::InsertOutcome::Inserted(i) => i,
+            _ => panic!("insert failed"),
+        }
+    }
+
+    #[test]
+    fn stored_entry_replaces_missing_marker_of_the_same_name() {
+        let s = Storage::open_in_memory().unwrap();
+        {
+            let id = msg_with_media(
+                &s,
+                "1",
+                serde_json::json!([{ "name": "pic.jpg", "kind": "image", "missing": true, "reason": "not-in-export" }]),
+            );
+            let changed = s
+                .attach_media(
+                    id,
+                    &[serde_json::json!({
+                        "sha256": "a".repeat(64), "path": format!("media/{}.jpg", "a".repeat(64)),
+                        "name": "pic.jpg", "kind": "image", "size": 10,
+                    })],
+                )
+                .unwrap();
+            assert!(changed);
+            let raw: serde_json::Value = serde_json::from_str(&raw_json(&s, id)).unwrap();
+            let media = raw["media"].as_array().unwrap();
+            assert_eq!(media.len(), 1, "upgrade replaces, not appends");
+            assert_eq!(media[0]["sha256"], "a".repeat(64));
+            assert!(media[0].get("missing").is_none());
+        }
+    }
+
+    #[test]
+    fn missing_entry_is_not_duplicated_per_name() {
+        let s = Storage::open_in_memory().unwrap();
+        {
+            let marker = |name: &str, reason: &str| serde_json::json!({ "name": name, "kind": "document", "missing": true, "reason": reason });
+            let id = msg_with_media(
+                &s,
+                "2",
+                serde_json::json!([marker("gone.pdf", "not-in-export")]),
+            );
+            assert!(
+                !s.attach_media(id, &[marker("gone.pdf", "not-in-export")])
+                    .unwrap(),
+                "same marker again: no-op"
+            );
+            // A different reason for the same name still does not stack
+            // markers: one missing entry per name.
+            assert!(
+                !s.attach_media(id, &[marker("gone.pdf", "unreadable")])
+                    .unwrap(),
+                "one marker per name"
+            );
+            let second = marker("gone2.pdf", "not-in-export");
+            assert!(s.attach_media(id, &[second]).unwrap(), "a new name appends");
+            let raw: serde_json::Value = serde_json::from_str(&raw_json(&s, id)).unwrap();
+            assert_eq!(raw["media"].as_array().unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn media_digests_union_message_links_and_registry() {
+        let s = Storage::open_in_memory().unwrap();
+        {
+            let id = msg_with_media(
+                &s,
+                "3",
+                serde_json::json!([{ "sha256": "b".repeat(64), "path": "media/x.jpg", "name": "x.jpg", "kind": "image", "size": 1 }]),
+            );
+            let _ = id;
+            let registered = vec![crate::media::UnlinkedObject {
+                sha256: "c".repeat(64),
+                size: 2,
+                name: "stray.png".into(),
+                kind: "image".into(),
+            }];
+            s.commit_import_batch("imp", "telegram", &[], &[], &registered, 0, true)
+                .unwrap();
+            let digests = s.media_digests().unwrap();
+            assert!(digests.contains(&"b".repeat(64)), "message-linked");
+            assert!(digests.contains(&"c".repeat(64)), "registry row");
+            let message_only = s.message_media_digests().unwrap();
+            assert!(!message_only.contains(&"c".repeat(64)));
+            let objects = s.unlinked_media_objects().unwrap();
+            assert_eq!(objects.len(), 1);
+            assert_eq!(objects[0].origin, "unlinked");
+            // Re-registering the same digest is idempotent (AC3).
+            s.commit_import_batch("imp", "telegram", &[], &[], &registered, 0, true)
+                .unwrap();
+            assert_eq!(s.unlinked_media_objects().unwrap().len(), 1);
+        }
+    }
+
+    fn raw_json(s: &Storage, id: i64) -> String {
+        s.conn
+            .query_row(
+                "SELECT raw_json FROM archive_messages WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap()
     }
 }

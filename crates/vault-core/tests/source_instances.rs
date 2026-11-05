@@ -65,7 +65,7 @@ fn sync_round(
     let instance = vimap::ensure_source_instance(storage, cfg).unwrap();
     let folders: Vec<String> = folders.iter().map(|f| f.to_string()).collect();
     let mut s = session(server, &cfg.username);
-    let summaries = vimap::sync_session(&mut s, storage, &instance, &folders);
+    let summaries = vimap::sync_session(&mut s, storage, &instance, &folders, None);
     let _ = s.logout();
     summaries
 }

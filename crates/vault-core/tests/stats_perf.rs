@@ -90,6 +90,7 @@ fn fixture() -> Storage {
             original_timestamp: String::new(),
             timezone: String::new(),
             time_confidence: String::new(),
+            attachments: Vec::new(),
         });
     }
     for m in &msgs {

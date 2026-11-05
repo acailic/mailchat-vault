@@ -263,6 +263,7 @@ fn json_lines_round_trip_is_bit_identical_into_a_fresh_archive() {
             // fields stay empty so the re-import applies the same legacy
             // grouping as the original rows.
             conversation_key: String::new(),
+            attachments: Vec::new(),
             reply_refs: Vec::new(),
             original_timestamp: String::new(),
             timezone: String::new(),
