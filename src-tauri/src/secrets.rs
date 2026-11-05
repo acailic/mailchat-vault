@@ -128,10 +128,12 @@ impl Secrets {
     /// the vault's archive, cursors, and configuration stay untouched;
     /// only the secrets go. Returns whether anything was actually stored.
     pub fn clear_account(&self, host: &str, username: &str) -> bool {
-        let keys = [
-            Self::account_key(host, username),
-            format!("oauth:{}", Self::account_key(host, username)),
-        ];
+        let key = Self::account_key(host, username);
+        let mut keys = vec![key.clone(), format!("oauth:{key}")];
+        let legacy_key = Self::account_key(host, &username.to_lowercase());
+        if legacy_key != key {
+            keys.push(legacy_key);
+        }
         let mut removed = false;
         for key in keys {
             let in_memory = self
@@ -299,6 +301,26 @@ mod tests {
 
         // A second clear reports nothing-stored rather than pretending a
         // secret existed.
+        assert!(!secrets.clear_account(HOST, username));
+    }
+
+    #[test]
+    fn clear_account_also_forgets_pre_upgrade_legacy_key() {
+        let secrets = Secrets::new();
+        // Pre-upgrade save: keyed by the lowercased username, while the
+        // account is forgotten under its exact configured casing.
+        let username = "Ana@Example.invalid";
+        secrets.save(HOST, &username.to_lowercase(), "legacy-app-password");
+
+        assert!(
+            secrets.clear_account(HOST, username),
+            "the legacy entry counts as a stored secret"
+        );
+        assert_eq!(
+            secrets.load(HOST, username),
+            None,
+            "the legacy key must not resurrect a forgotten password"
+        );
         assert!(!secrets.clear_account(HOST, username));
     }
 
