@@ -58,8 +58,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-if ($BuildInspect -and -not $OldTag) {
-    throw "-BuildInspect requires -OldTag (the upgrade phases it supports are only run with -OldTag)"
+if (($BuildInspect -or $InspectExe) -and -not $OldTag) {
+    throw "-BuildInspect/-InspectExe require -OldTag (the upgrade phases that consume them only run with -OldTag)"
 }
 $repo = (Get-Item $PSScriptRoot).Parent.Parent.FullName
 $smoke = Join-Path $repo 'scripts\windows-smoke.ps1'

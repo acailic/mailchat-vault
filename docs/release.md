@@ -87,7 +87,7 @@ line per release artifact. Verify a download against it:
 
 ```sh
 gh release download v0.1.0 -p SHA256SUMS
-sha256sum -c --ignore-missing SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS   # macOS: shasum -a 256 -c SHA256SUMS
 ```
 
 To verify (and optionally checksum/smoke) a **whole published release** in

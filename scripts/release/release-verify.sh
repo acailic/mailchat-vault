@@ -25,8 +25,7 @@
 #   --smoke       also run scripts/release/smoke-linux.sh on the downloads
 #   --skip-download  verify files already present in --dir (sha256 only)
 #
-# Requires: gh (authenticated), sha256sum, curl. Exits non-zero on any
-# digest mismatch, missing asset, or (with --smoke) failing suite.
+# Requires: gh (authenticated), sha256sum (or shasum -a 256 on macOS).
 set -euo pipefail
 
 here="$(cd "$(dirname "$BASH_SOURCE")" && pwd)"
@@ -51,7 +50,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 command -v gh >/dev/null || { echo "error: gh not installed/authenticated" >&2; exit 2; }
-command -v sha256sum >/dev/null || { echo "error: sha256sum not found" >&2; exit 2; }
+if command -v sha256sum >/dev/null 2>&1; then
+  hash256() { sha256sum "$@"; }
+elif command -v shasum >/dev/null 2>&1; then
+  hash256() { shasum -a 256 "$@"; }
+else
+  echo "error: neither sha256sum nor shasum found" >&2
+  exit 2
+fi
 
 echo "== release-verify: $TAG (repo $(gh repo view --json nameWithOwner -q .nameWithOwner))"
 REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
@@ -68,24 +74,26 @@ echo "== fetching server-side digests from the Releases API"
 gh api "repos/$REPO/releases/tags/$TAG" \
   --jq '.assets[] | select(.name != "SHA256SUMS") | "\(.digest)\t\(.name)"' > "$DIR/.api-digests"
 
-mapfile -t lines < "$DIR/.api-digests"
-[[ "${#lines[@]}" -gt 0 ]] || { echo "error: no assets found on release $TAG" >&2; exit 1; }
-
+n=0
 fail=0
-for line in "${lines[@]}"; do
+while IFS= read -r line || [[ -n "$line" ]]; do
+  if [[ -z "$line" ]]; then continue; fi
+  n=$((n+1))
   want="${line%%$'\t'*}"; want="${want#sha256:}"
   name="${line##*$'\t'}"
   file="$DIR/$name"
   if [[ ! -f "$file" ]]; then
-    echo "FAIL: $name — not downloaded to $DIR"; fail=1; continue
-  fi
-  got="$(sha256sum "$file" | awk '{print $1}')"
-  if [[ "$got" == "$want" ]]; then
-    echo "PASS: $name (sha256 ${got:0:16}…)"
+    echo "FAIL: $name — not downloaded to $DIR"; fail=1
   else
-    echo "FAIL: $name — downloaded sha256 $got != server digest $want"; fail=1
+    got="$(hash256 "$file" | awk '{print $1}')"
+    if [[ "$got" == "$want" ]]; then
+      echo "PASS: $name (sha256 ${got:0:16}…)"
+    else
+      echo "FAIL: $name — downloaded sha256 $got != server digest $want"; fail=1
+    fi
   fi
-done
+done < "$DIR/.api-digests"
+[[ "$n" -gt 0 ]] || { echo "error: no assets found on release $TAG" >&2; exit 1; }
 [[ "$fail" -eq 0 ]] || { echo "error: digest verification failed" >&2; exit 1; }
 
 # ------------------------------------------------------------- SHA256SUMS
@@ -95,7 +103,7 @@ sums="$DIR/SHA256SUMS"
   cd "$DIR"
   shopt -s nullglob
   files=( *.AppImage *.deb *.dmg *.msi *.exe *.app.tar.gz )
-  [[ "${#files[@]}" -gt 0 ]] && sha256sum "${files[@]}"
+  [[ "${#files[@]}" -gt 0 ]] && hash256 "${files[@]}"
 ) > "$sums"
 [[ -s "$sums" ]] || { echo "error: no release assets found in $DIR" >&2; exit 1; }
 echo "== wrote $sums:"

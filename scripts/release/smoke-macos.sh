@@ -98,15 +98,18 @@ app_in_dmg="$(find "$mountpoint" -maxdepth 1 -name '*.app' | head -1)"
 # --------------------------------------------------------------- updater
 # The .app.tar.gz is the updater artifact — a published release asset,
 # so the smoke verifies it too: archive valid, .app structure present,
-# and its bundled version matches the artifact name.
+# and its bundled version matches the release version (the tag, or the
+# version-bearing dmg name in --dir mode).
 app_tgz="$(find "$DIR" -name '*.app.tar.gz' 2>/dev/null | head -1)"
 [[ -n "$app_tgz" ]] || { echo "error: no .app.tar.gz found under $DIR" >&2; exit 2; }
 check "updater archive is a valid gzip tar" tar -tzf "$app_tgz" >/dev/null
 plist_member="$(tar -tzf "$app_tgz" | grep -m1 '\.app/Contents/Info\.plist$')"
 check "updater archive contains a .app/Contents/Info.plist" test -n "$plist_member"
 tar_version="$(tar -xOzf "$app_tgz" "$plist_member" 2>/dev/null | plutil -extract CFBundleShortVersionString raw - 2>/dev/null)"
-check "updater version matches its artifact name" \
-  bash -c "[[ -n \"$tar_version\" && \"$app_tgz\" == *\"$tar_version\"* ]]"
+expected_version="${RELEASE#v}"
+[[ -n "$expected_version" ]] || expected_version="$(basename "$dmg")"
+check "updater version matches the release version" \
+  bash -c "[[ -n \"$tar_version\" && \"$expected_version\" == *\"$tar_version\"* ]]"
 
 # ------------------------------------------------------------------- app
 APP="$app_in_dmg"
@@ -141,7 +144,8 @@ xattr -cr "$run_dir/$(basename "$APP")" 2>/dev/null || true
 "$run_dir/$(basename "$APP")/Contents/MacOS/$exe_rel" >/dev/null 2>&1 &
 app_pid=$!
 alive=1
-for i in $(seq "$ALIVE_SECONDS"); do
+i=1
+while [ "$i" -le "$ALIVE_SECONDS" ]; do
   sleep 1
   if ! kill -0 "$app_pid" 2>/dev/null; then
     wait "$app_pid" 2>/dev/null
@@ -149,6 +153,7 @@ for i in $(seq "$ALIVE_SECONDS"); do
     alive=0
     break
   fi
+  i=$((i+1))
 done
 if [[ "$alive" -eq 1 ]]; then
   kill "$app_pid" 2>/dev/null
