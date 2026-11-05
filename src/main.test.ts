@@ -2705,6 +2705,37 @@ describe("settings screen", () => {
     expect(rowIds()).toEqual(["zai"]);
   });
 
+  it("a Save clicked before the settings render lands is ignored, then works after", async () => {
+    let releaseSettings: ((view: Record<string, unknown>) => void) | null = null;
+    tauri.handlers.set(
+      "settings_get",
+      () =>
+        new Promise((resolve) => {
+          releaseSettings = resolve;
+        }),
+    );
+    await boot();
+    tauri.handlers.set("settings_save", () => viewWith((v) => (v.notifications = true)));
+    input("#notify-toggle").checked = true; // HTML default, not persisted state
+    $("#settings-save-btn").click();
+    await flush();
+    expect(tauri.calls.some((c) => c.cmd === "settings_save")).toBe(false);
+
+    releaseSettings!(
+      viewWith((v) => {
+        v.notifications = false;
+      }),
+    );
+    await vi.waitFor(() => expect(input("#notify-toggle").checked).toBe(false));
+    input("#notify-toggle").checked = true;
+    $("#settings-save-btn").click();
+    await vi.waitFor(() => expect($("#settings-note").textContent).toContain("Saved."));
+    const save = tauri.calls.find((c) => c.cmd === "settings_save");
+    expect((save!.args as { payload: { notifications: boolean } }).payload.notifications).toBe(
+      true,
+    );
+  });
+
   it("remove drops a row from the form; clear-key asks the backend and re-renders", async () => {
     tauri.handlers.set("settings_get", () =>
       viewWith((v) => {

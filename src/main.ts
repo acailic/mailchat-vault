@@ -665,6 +665,7 @@ function providerRow(
 /** Render the whole Settings form from a view (after boot and after every
  * successful save or key clear). */
 function renderSettings(view: SettingsView): void {
+  settingsRendered = true;
   providerRows.replaceChildren(
     ...view.providers.map((p) =>
       providerRow(p, p.has_key, view.default_provider === p.id),
@@ -704,6 +705,11 @@ function parsedSummarizeTop(value: string): number {
   return Number.isNaN(n) ? 0 : n;
 }
 
+/** Whether the form has been rendered from a real settings view at least
+ * once; before that its values are HTML defaults that must not be saved
+ * back over the persisted ones. */
+let settingsRendered = false;
+
 /** Collect the form into a `settings_save` payload. */
 function collectSettings(): SaveSettingsPayload {
   const rows = [...providerRows.querySelectorAll<HTMLElement>(".provider-row")];
@@ -738,6 +744,7 @@ notifyToggle.addEventListener("change", () => {
 });
 
 async function saveSettings(): Promise<void> {
+  if (!settingsRendered) return;
   const payload = collectSettings();
   const previousDefault = llmStatus?.default_provider ?? null;
   settingsSaveButton.disabled = true;
