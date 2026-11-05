@@ -339,9 +339,9 @@ foreach ($f in @($NewMsi, $NewExe)) {
     Assert-True (Test-Path $f) "required bundle not found: $f"
 }
 if ((Test-Path $script:DbPath) -and -not $AllowDataWipe) {
-    Fail ("{0} already exists and may be your real archive. The smoke test " +
+    Fail (("{0} already exists and may be your real archive. The smoke test " +
         "deletes {1} before every phase and at the end; rerun with " +
-        "-AllowDataWipe to consent to that." -f $script:DbPath, $script:DataDir)
+        "-AllowDataWipe to consent to that.") -f $script:DbPath, $script:DataDir)
 }
 $upgradeReady = ($OldMsi -ne '' -and $OldExe -ne '' -and
     $FixtureDb -ne '' -and $InspectExe -ne '')
