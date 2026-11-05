@@ -1,10 +1,10 @@
 # Data and API contracts
 
-Status: **mixed**. This document owns identity, migration, persistence, and IPC semantics for [P01–P07](product-plan.md#functional-requirements). The sections marked **current** below (compatibility boundary, persistence model, identity, time, migration, and the job-protocol half of errors and events) document the implemented canonical store and job system at `57f40c8`; the remaining sections are the reviewed **proposed** design for their owning slices. It is a design contract, not a generated schema; the SQL source of truth is [storage.rs](../crates/vault-core/src/storage.rs).
+Status: **mixed**. This document owns identity, migration, persistence, and IPC semantics for [P01–P07](product-plan.md#functional-requirements). The sections marked **current** below (compatibility boundary, persistence model, identity, time, migration, the job-protocol half of errors and events, and the shipped v2 reading surface within the IPC section) document the implemented canonical store, job system, and v2 search/detail/context commands (M1/M2 at `57f40c8`; M3.2 at `8df0721`); the remaining sections are the reviewed **proposed** design for their owning slices. It is a design contract, not a generated schema; the SQL source of truth is [storage.rs](../crates/vault-core/src/storage.rs).
 
 ## Current compatibility boundary
 
-**Current.** Frontend types are in [src/types.ts](../src/types.ts), Rust query types in [query.rs](../crates/vault-core/src/query.rs) / [search2.rs](../crates/vault-core/src/search2.rs), and commands in [the Tauri shell](../src-tauri/src/lib.rs). The legacy v1 command surface keeps its shapes and now runs entirely over the canonical tables — since M1.1 the core storage APIs read and write canonical tables only, so the existing IPC adapters followed without dual writes. A v2 IPC surface ships alongside: the background-job protocol (M2.1) and the v2 search/detail/context commands (M3.2), which return structured `AppError` results. Legacy message row IDs are stable and unchanged. Do not mix v1 and v2 result shapes under one command name; retire v1 commands only after every repository caller migrates. There are no documented external IPC clients.
+**Current.** Frontend types are in [src/types.ts](../src/types.ts) and [src/v2types.ts](../src/v2types.ts), Rust query types in [query.rs](../crates/vault-core/src/query.rs) / [search2.rs](../crates/vault-core/src/search2.rs), and commands in [the Tauri shell](../src-tauri/src/lib.rs). The legacy v1 command surface keeps its shapes and now runs entirely over the canonical tables — since M1.1 the core storage APIs read and write canonical tables only, so the existing IPC adapters followed without dual writes. A v2 IPC surface ships alongside: the background-job protocol (M2.1) and the v2 reading surface (M3.2 — `search_archive_v2`, `message_detail_v2`, `conversation_context_v2`, `list_import_scopes_v2`, `export_messages_v2`), which return structured `AppError` results; the frontend crosses both only through the typed boundary in [ipc.ts](../src/ipc.ts). Legacy message row IDs are stable and unchanged. Do not mix v1 and v2 result shapes under one command name; retire v1 commands only after every repository caller migrates. There are no documented external IPC clients.
 
 ## Domain and persistence model
 
@@ -72,9 +72,9 @@ Opening an existing database with pending migrations goes through the safe-migra
 
 Failure-injection tests at every stage (before/within/after conversion) prove the original archive is never stranded or modified. Migration preserves all information actually stored, not data the old importer already discarded: folder memberships or originals absent from the old database require resync/reimport, pre-M1.3 mail lacks reply evidence (reimport originals to enrich threads rather than infer), and reimport compatibility checks identity aliases before creating a new canonical record.
 
-## Proposed v2 IPC surface
+## v2 IPC surface
 
-**Proposed** unless noted. Use snake_case JSON fields to match Rust serde. Every command returns `Result<T, AppError>`; job start commands return `{job_id}` immediately. A first subset has shipped: the background-job protocol (`job_submit`, `job_get`, `job_list`, `job_events_since`, `job_cancel`, M2.1) and the v2 reading surface (`search_archive_v2`, `message_detail_v2`, `conversation_context_v2`, `list_import_scopes_v2`, `export_messages_v2`, M3.2), inventoried in the root README; the remaining rows are the intended minimum contract for their owning slices.
+**Mixed.** Use snake_case JSON fields to match Rust serde. Every command returns `Result<T, AppError>`; job start commands return `{job_id}` immediately. Shipped and **current**: the background-job protocol (`job_submit`, `job_get`, `job_list`, `job_events_since`, `job_cancel`, M2.1) and the v2 reading surface (M3.2) — `search_archive_v2`, `message_detail_v2` (the contract's `get_message_v2`, shipped under its implemented name), `conversation_context_v2`, `list_import_scopes_v2`, and `export_messages_v2` — all inventoried in the root README and crossing the frontend only through [ipc.ts](../src/ipc.ts). The remaining rows are the intended minimum contract for their owning slices.
 
 | Command | Input | Output / behavior |
 | --- | --- | --- |
@@ -90,11 +90,11 @@ Failure-injection tests at every stage (before/within/after conversion) prove th
 | `start_sync_v2` | Source ID | Job using stored configuration/secret |
 | `get_job_v2`, `list_jobs_v2` | Job ID or bounded pagination | Durable job status, counters and paged issue summaries |
 | `cancel_job_v2`, `retry_job_v2` | Job ID | Cancellation acknowledged or new retry job linked to the original |
-| `search_archive_v2` | Search request below | Bounded result page with summaries; no full bodies/raw JSON |
-| `get_message_v2` | Message ID | Full text, metadata, attachments, occurrences, time confidence, conflict/revision links |
-| `conversation_context_v2` | Message ID, before/after cursors, limit | Chronological context anchored on the message; aliases resolved; unresolved grouping returns anchor only |
+| `search_archive_v2` | Search request below | **Current** (M3.2): bounded result page with summaries; no full bodies/raw JSON |
+| `get_message_v2` | Message ID | **Current**, shipped as `message_detail_v2` (M3.2): full text, metadata, attachments with availability, occurrences, time confidence, and conflict/revision links |
+| `conversation_context_v2` | Message ID, before/after cursors, limit | **Current** (M3.2): chronological context anchored on the message, paged by message-id cursors; unresolved grouping returns the anchor alone with `unverified_conversation` set |
 | `open_attachment_v2`, `export_attachment_v2` | Attachment ID; native destination for export | Validated local preview/open handle or export outcome, never unrestricted path access |
-| `export_messages_v2` | Explicit selected IDs, text/JSON format, native destination | Job, with provenance; attachments require explicit additional selection |
+| `export_messages_v2` | Explicit selected IDs, text/JSON format, native destination | **Current** (M3.2) as a direct command (not a job): the checked rows' ids in order, UTF-8 text or JSON with provenance, native-picked destination, bounded to 10,000 messages per file; attachments require explicit additional selection |
 | `get_settings_v2`, `update_settings_v2` | Versioned preferences | Settings, with secrets excluded; changes to provider/consent invalidate pending AI approvals |
 | `prepare_ask_v2` | Question, search filters, endpoint/config version | Job sending the disclosed question only after explicit action; returns local results and an exact bounded synthesis preview |
 | `generate_answer_v2` | Prepared request ID, payload digest | Job; sends only the approved snapshot, returns answer and citation-to-message map |
@@ -105,6 +105,8 @@ Failure-injection tests at every stage (before/within/after conversion) prove th
 Source kinds are connector-controlled enums; configuration is validated by that connector. Native dialog selections must still be checked in Rust. Bind preview IDs to canonical input roots, file fingerprints, capacity and identity choices; a preview is valid only for its application session and unchanged inputs. Store no arbitrary path authority in frontend preferences.
 
 ### Search request and response
+
+**Current** (M3.2; [search2.rs](../crates/vault-core/src/search2.rs) is the source of truth).
 
 ```typescript
 type SearchArchiveRequest = {
@@ -132,7 +134,9 @@ type MessageSummary = {
   sent_at: string | null;     // resolved UTC instant only
   time_confidence: "explicit_offset" | "user_confirmed" |
     "legacy_assumed" | "unresolved" | "missing";
-  snippet: string;            // bounded to 500 characters plus hit markers
+  snippet: string;            // bounded: 500 Unicode characters including hit
+                             // markers for text search; a 240-character body
+                             // prefix when browsing
   attachment_count: number;
   available_attachment_count: number;
   has_conflicting_revision: boolean;
@@ -152,11 +156,11 @@ AI retrieval intersects active user filters with the validated planned date boun
 
 ## Errors and events
 
-**Mixed.** The background-job protocol below is **current** (M2.1); the `AppError` naming and the richer job states remain **proposed** for their owning slices.
+**Mixed.** The background-job protocol below is **current** (M2.1); the `AppError` envelope is **current for the v2 reading surface** (M3.2 ships the struct — `code`, safe `message`, optional `field`, `retryable`, optional `job_id` — with the codes `invalid_input`, `not_found`, and `internal`, mapping query-shape faults to `invalid_input` and date faults to the `from_date/to_date` field); the fuller code list and richer job states remain **proposed** for their owning slices.
 
 **Current job protocol.** Jobs carry stable ids and typed states — `queued → running → succeeded | failed | cancelled` — with typed error kinds (`storage`, `io`, `import`, `network`, `cancelled`, `queue_full`, `invalid`, `internal`) instead of bare strings. Cancellation is cooperative and may wait for the current bounded item/batch; the UI must not promise instantaneous cancellation. No automatic retry for authentication failure (a source without credentials is reported, not retried); network failures retry on user action or the next scheduled round, never in an immediate storm. The shipped wire names are `job_submit` / `job_get` / `job_list` / `job_events_since` / `job_cancel` plus the `job-event` window event: each event is `{seq, at, job, type, …}` stamped from one global monotonic counter. Events are hints; a client that missed some (webview reload, dropped event) recovers by polling `job_events_since(cursor)`, which returns the gap, the newest `seq`, a `trimmed` flag when the bounded ring no longer holds part of the gap, and the current records to reconcile from. Progress carries done/total with unknown totals as zero, never guessed percentages. Job records live in the process registry with a bounded finished-job history; after an app restart the registry is empty, and interrupted work resumes through its durable records (checkpoints, ledgers) rather than persisted job rows.
 
-**Proposed remainder.** `AppError` contains `code`, safe `message`, optional `field`, `retryable`, and optional `job_id`. Codes include `invalid_input`, `unsupported_format`, `ambiguous_identity`, `credentials_required`, `authentication_failed`, `network_unavailable`, `capacity_exceeded`, `disk_full`, `integrity_failed`, `conflict`, `cancelled`, `not_found`, `unsupported_version`, and `internal`. Never expose raw server responses containing credentials or filesystem internals by default. Not yet implemented: the `partial` and `interrupted` states (a partial outcome is reported inside the succeeded job's result summary and issue ledgers today), a distinct `cancelling` state, retry as a linked job that never rewrites the original outcome, per-item outcome counters (`processed = new + existing + failed + service_skipped`) with separate media item/byte counters, and `vault_job_v2` as the event name.
+**Proposed remainder.** The full `AppError` code set beyond the shipped `invalid_input`/`not_found`/`internal` — `unsupported_format`, `ambiguous_identity`, `credentials_required`, `authentication_failed`, `network_unavailable`, `capacity_exceeded`, `disk_full`, `integrity_failed`, `conflict`, `cancelled`, `unsupported_version` — lands with the slices that can raise it. Never expose raw server responses containing credentials or filesystem internals by default. Not yet implemented: the `partial` and `interrupted` states (a partial outcome is reported inside the succeeded job's result summary and issue ledgers today), a distinct `cancelling` state, retry as a linked job that never rewrites the original outcome, per-item outcome counters (`processed = new + existing + failed + service_skipped`) with separate media item/byte counters, and `vault_job_v2` as the event name.
 
 ## Media and capacity
 
