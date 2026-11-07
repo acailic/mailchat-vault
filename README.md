@@ -382,7 +382,7 @@ same webview reason; the formats themselves are round-trip tested in
 
 ## Out of scope for now (separate tasks)
 
-multi-account UI, push notifications. The media-extraction layer is source-generic: when further chat sources land, their exports plug into the same hash-named `media/` store and `raw_json` convention.
+push notifications. The media-extraction layer is source-generic: when further chat sources land, their exports plug into the same hash-named `media/` store and `raw_json` convention.
 
 ## Planning & implementation docs
 
