@@ -85,6 +85,7 @@ import {
 } from "./state";
 import { initWorkspace, type WorkspaceController } from "./workspace";
 import type {
+  AccountView,
   ChatImportOutcome,
   EmbeddingStatus,
   ExportSummary,
@@ -106,6 +107,11 @@ import {
 } from "./jobsview";
 import { renderWatchEvents, renderWatchFolders, watchStatusText } from "./watchview";
 import { autoSyncStatusText, isIntervalChoice } from "./schedview";
+import {
+  renderAccounts,
+  syncNowRequest,
+  type SyncNowRequest,
+} from "./accountsview";
 import * as ipc from "./ipc";
 
 const PAGE_SIZE = 50;
@@ -168,6 +174,10 @@ const watchAddButton = document.querySelector<HTMLButtonElement>("#watch-add-btn
 const watchStatus = document.querySelector<HTMLElement>("#watch-status")!;
 const watchFoldersList = document.querySelector<HTMLUListElement>("#watch-folders")!;
 const watchEventsList = document.querySelector<HTMLUListElement>("#watch-events")!;
+const accountsStatus = document.querySelector<HTMLElement>("#accounts-status")!;
+const accountsListEl = document.querySelector<HTMLUListElement>("#accounts-list")!;
+const accountsRefreshButton = document.querySelector<HTMLButtonElement>("#accounts-refresh")!;
+const accountsAddButton = document.querySelector<HTMLButtonElement>("#accounts-add")!;
 const jobsStatus = document.querySelector<HTMLElement>("#jobs-status")!;
 const jobsList = document.querySelector<HTMLUListElement>("#jobs-list")!;
 const dashboard = document.querySelector<HTMLElement>("#dashboard")!;
@@ -220,6 +230,7 @@ const statsGuard = new SequenceGuard();
 const dashboardGuard = new SequenceGuard();
 const askGuard = new SequenceGuard();
 const embedGuard = new SequenceGuard();
+const accountsGuard = new SequenceGuard();
 
 /** The last `llm_status` response: powers the Ask provider menu and the
  * privacy note for the current selection. */
@@ -1214,6 +1225,7 @@ async function importMbox(): Promise<void> {
     await refreshStats();
     void refreshImportScopes();
     void refreshSources();
+    void refreshAccounts();
     void refreshEmbedStatus();
     void refreshDashboard();
   } catch (e) {
@@ -1266,6 +1278,7 @@ async function importChatExport(): Promise<void> {
     await refreshStats();
     void refreshImportScopes();
     void refreshSources();
+    void refreshAccounts();
     void refreshEmbedStatus();
     void refreshDashboard();
     if (outcome.media) void refreshMediaUsage(); // media landed in the store
@@ -1284,6 +1297,7 @@ async function seedDemo(): Promise<void> {
     await refreshStats();
     void refreshImportScopes();
     void refreshSources();
+    void refreshAccounts();
     void refreshEmbedStatus();
     void refreshDashboard();
   } catch (e) {
@@ -1418,6 +1432,7 @@ async function syncImap(): Promise<void> {
     await refreshStats();
     void refreshEmbedStatus();
     void refreshDashboard();
+    void refreshAccounts();
   } catch (e) {
     imapStatus.textContent = `Sync failed: ${e}`;
   } finally {
@@ -1487,6 +1502,113 @@ async function refreshAutoSync(): Promise<void> {
 void ipc.onEvent<SyncScheduleView>("scheduler-status", (payload) => {
   renderAutoSync(payload);
 });
+
+// ---------------------------------------------------------------------------
+// Accounts (multi-account overview: listing, sync now, pause, forget)
+// ---------------------------------------------------------------------------
+
+/** The panel status line: a one-line summary of what is listed. */
+function describeAccountsStatus(accounts: AccountView[]): string {
+  if (accounts.length === 0) return ""; // the list itself shows the empty state
+  const imap = accounts.filter((a) => a.kind === "imap").length;
+  const imports = accounts.length - imap;
+  const parts = [`${accounts.length} account${accounts.length === 1 ? "" : "s"}`];
+  if (imap > 0) parts.push(`${imap} email`);
+  if (imports > 0) parts.push(`${imports} import${imports === 1 ? "" : "s"}`);
+  return parts.join(" · ");
+}
+
+function renderAccountsPanel(accounts: AccountView[]): void {
+  renderAccounts(accountsListEl, accounts, {
+    onSyncNow: (account) => void syncAccountNow(account),
+    onTogglePause: (account) => void toggleAccountPause(account),
+    onForget: (account) => void forgetAccountCredentials(account),
+  });
+  accountsStatus.textContent = describeAccountsStatus(accounts);
+}
+
+async function refreshAccounts(): Promise<void> {
+  const token = accountsGuard.next();
+  try {
+    const accounts = await ipc.accountsList();
+    if (!accountsGuard.isCurrent(token)) return; // a newer refresh superseded this response
+    renderAccountsPanel(accounts);
+  } catch (e) {
+    if (accountsGuard.isCurrent(token)) {
+      accountsListEl.replaceChildren();
+      accountsStatus.textContent = `Accounts unavailable: ${e}`;
+    }
+  }
+}
+
+/** The per-folder outcome of one account sync, as one line. */
+function accountSyncOutcomeLine(account: AccountView, outcome: ipc.ImapSyncOutcome): string {
+  const lines = outcome.folders.map(
+    (f) =>
+      `${f.folder}: ${f.inserted} new, ${f.skipped} already present` +
+      (f.failed > 0 ? `, ${f.failed} failed to parse` : "") +
+      (f.reset ? " (full rescan)" : "") +
+      (f.error ? ` — failed: ${f.error}` : ""),
+  );
+  const note =
+    outcome.saved_to === "memory"
+      ? " (password kept in memory only for this session — no OS keyring available)"
+      : outcome.saved_to === "os_keyring"
+        ? " (password stored in the OS keyring)"
+        : "";
+  return `Synced ${account.label}: ${lines.join(" · ") || "no folders"}${note}`;
+}
+
+/** Sync one listed account now: `sync_imap` with the account's stored
+ * identity and an empty password — the backend resolves the stored
+ * keyring credential (or runs the Google sign-in refresh for OAuth). */
+async function syncAccountNow(account: AccountView): Promise<void> {
+  const request: SyncNowRequest | null = syncNowRequest(account);
+  if (!request) {
+    accountsStatus.textContent = `${account.label} is an import — nothing to sync.`;
+    return;
+  }
+  accountsStatus.textContent = `Syncing ${account.label}… (first sync of a large mailbox can take a while)`;
+  try {
+    const outcome = await ipc.syncImap(request);
+    await refreshStats();
+    void refreshEmbedStatus();
+    void refreshDashboard();
+    await refreshAccounts();
+    accountsStatus.textContent = accountSyncOutcomeLine(account, outcome);
+  } catch (e) {
+    accountsStatus.textContent = `Sync failed for ${account.label}: ${e}`;
+  }
+}
+
+/** Pause/resume one email account: per-source exclusion — coordinator
+ * rounds skip it while the archive and cursors are kept. */
+async function toggleAccountPause(account: AccountView): Promise<void> {
+  try {
+    await ipc.sourceSetExcluded(account.source_id, !account.excluded);
+    await refreshAccounts();
+    accountsStatus.textContent = account.excluded
+      ? `${account.label} resumed — auto-sync rounds include it again.`
+      : `${account.label} paused — auto-sync skips it; the archive and cursors are kept.`;
+  } catch (e) {
+    accountsStatus.textContent = `Could not change ${account.label}: ${e}`;
+  }
+}
+
+/** Forget one email account's credentials (keyring + session memory);
+ * the archive, cursors, and configuration stay. */
+async function forgetAccountCredentials(account: AccountView): Promise<void> {
+  try {
+    const removed = await ipc.accountForgetCredentials(account.source_id);
+    await refreshAccounts();
+    accountsStatus.textContent = removed
+      ? `Forgot stored credentials of ${account.label} — the archive stays; enter a password or sign in with Google to sync again.`
+      : `${account.label} had no stored credentials.`;
+  } catch (e) {
+    accountsStatus.textContent = `Could not forget credentials of ${account.label}: ${e}`;
+  }
+}
+
 
 // ---------------------------------------------------------------------------
 // Folder watching
@@ -1617,6 +1739,7 @@ function refreshAfterJobEvent(event: JobEvent): void {
     void refreshDashboard();
     void refreshEmbedStatus();
     void refreshSources();
+    void refreshAccounts();
     void refreshImportScopes();
     if (event.type === "succeeded" && state.hits.length > 0) {
       // The archive may have changed under the visible results: offer a
@@ -1862,6 +1985,8 @@ imapSyncButton.addEventListener("click", () => void syncImap());
 autoSyncToggle.addEventListener("change", onAutoSyncToggle);
 autoSyncInterval.addEventListener("change", onAutoSyncIntervalChange);
 embedButton.addEventListener("click", () => void runEmbedJob());
+accountsRefreshButton.addEventListener("click", () => void refreshAccounts());
+accountsAddButton.addEventListener("click", () => workspace.store.setView("sources"));
 watchButton.addEventListener("click", () => void watchTypedPath());
 watchPathInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") void watchTypedPath();
@@ -1900,4 +2025,5 @@ void refreshLlm();
 void refreshEmbedStatus();
 void refreshWatchStatus();
 void refreshAutoSync();
+void refreshAccounts();
 void loadSettings();

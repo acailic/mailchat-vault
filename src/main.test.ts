@@ -347,7 +347,11 @@ beforeEach(() => {
   notifications.granted = true;
   notifications.requested = 0;
   notifications.requestAnswer = true;
-  notifications.sent.length = 0;});
+  notifications.sent.length = 0;
+  // The multi-account overview boots with the empty state by default
+  // (individual tests override the handler with fixtures).
+  tauri.handlers.set("accounts_list", () => []);
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -3421,5 +3425,258 @@ describe("workspace shell", () => {
     author.focus();
     pressKey(author, "/");
     expect(win.document.activeElement).toBe(author);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Accounts panel (multi-account UI): listing, sync-now params, pause,
+// forget credentials, empty state — the acceptance-critical wiring.
+// ---------------------------------------------------------------------------
+
+const IMAP_ACCOUNT = {
+  source_id: "inst-imap-1",
+  kind: "imap",
+  label: "imap:imap.gmail.com:993:ana@gmail.com",
+  imap: {
+    host: "imap.gmail.com",
+    port: 993,
+    username: "ana@gmail.com",
+    folders: ["INBOX", "Archive"],
+    has_password: true,
+    has_oauth: false,
+  },
+  message_count: 1234,
+  failed_items: 2,
+  state: "connected",
+  excluded: false,
+  last_attempt_at: "2026-01-02 10:00:00",
+  last_success_at: "2026-01-02 10:00:05",
+} as const;
+
+const IMPORT_ACCOUNT = {
+  source_id: "inst-import-1",
+  kind: "import",
+  label: "mbox:archive.mbox",
+  imap: null,
+  message_count: 6,
+  failed_items: 0,
+  state: "connected",
+  excluded: false,
+  last_attempt_at: null,
+  last_success_at: null,
+} as const;
+
+const OAUTH_ACCOUNT = {
+  ...IMAP_ACCOUNT,
+  source_id: "inst-imap-2",
+  label: "imap:imap.gmail.com:993:bob@gmail.com",
+  imap: {
+    host: "imap.gmail.com",
+    port: 993,
+    username: "bob@gmail.com",
+    folders: [],
+    has_password: false,
+    has_oauth: true,
+  },
+} as const;
+
+describe("accounts panel", () => {
+  it("lists accounts with stats, sync state, and per-kind actions", async () => {
+    tauri.handlers.set("accounts_list", () => [IMAP_ACCOUNT, IMPORT_ACCOUNT]);
+    await boot();
+    await vi.waitFor(() =>
+      expect($("#accounts-list .account-row[data-source-id='inst-imap-1']")).toBeTruthy(),
+    );
+    const imapRow = $("#accounts-list .account-row[data-source-id='inst-imap-1']");
+    expect(imapRow.querySelector(".account-label")!.textContent).toBe(
+      "imap:imap.gmail.com:993:ana@gmail.com",
+    );
+    expect(imapRow.querySelector(".account-kind")!.textContent).toBe("Email (IMAP)");
+    expect(imapRow.querySelector(".account-stats")!.textContent).toBe(
+      "1,234 messages · 2 failing",
+    );
+    expect(imapRow.querySelector(".account-sync")!.textContent).toContain(
+      "last synced 2026-01-02 10:00:05",
+    );
+    expect(imapRow.querySelector(".account-sync")!.textContent).toContain(
+      "credentials: password",
+    );
+    expect(
+      [...imapRow.querySelectorAll("button")].map((b) => b.textContent),
+    ).toEqual(["Sync now", "Pause", "Forget credentials"]);
+    // The import account renders with stats but no management actions.
+    const importRow = $("#accounts-list .account-row[data-source-id='inst-import-1']");
+    expect(importRow.querySelector(".account-kind")!.textContent).toBe("Import");
+    expect(importRow.querySelectorAll("button").length).toBe(0);
+    expect($("#accounts-status").textContent).toContain("2 accounts");
+  });
+
+  it("shows the empty state when no account exists", async () => {
+    await boot();
+    await vi.waitFor(() => expect($("#accounts-status").textContent).toBe(""));
+    expect($("#accounts-list .account-row.empty")).toBeTruthy();
+    expect($("#accounts-list .account-row.empty").textContent).toContain("No accounts yet");
+  });
+
+  it("sync now triggers sync_imap with the account's stored parameters", async () => {
+    tauri.handlers.set("accounts_list", () => [IMAP_ACCOUNT]);
+    let syncArgs: unknown = null;
+    tauri.handlers.set("sync_imap", (args) => {
+      syncArgs = args;
+      return {
+        folders: [
+          {
+            folder: "INBOX",
+            uidvalidity: 7,
+            reset: false,
+            seen: 3,
+            inserted: 2,
+            skipped: 1,
+            failed: 0,
+            resolved_failures: 0,
+            conflicting_revisions: 0,
+            error: null,
+          },
+        ],
+        saved_to: null,
+      };
+    });
+    await boot();
+    await vi.waitFor(() => expect($("#accounts-list .account-sync-btn")).toBeTruthy());
+    ($("#accounts-list .account-sync-btn") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(syncArgs).not.toBeNull());
+    // The acceptance-critical assertion: the stored account maps to the
+    // right sync_imap parameters — identity from the vault, an empty
+    // password (the backend resolves the keyring secret), stored folders.
+    expect(syncArgs).toEqual({
+      host: "imap.gmail.com",
+      port: 993,
+      username: "ana@gmail.com",
+      password: "",
+      folders: ["INBOX", "Archive"],
+      auth: "password",
+    });
+    await vi.waitFor(() =>
+      expect($("#accounts-status").textContent).toContain(
+        "Synced imap:imap.gmail.com:993:ana@gmail.com: INBOX: 2 new, 1 already present",
+      ),
+    );
+  });
+
+  it("an OAuth-only account syncs through Google sign-in with default folders", async () => {
+    tauri.handlers.set("accounts_list", () => [OAUTH_ACCOUNT]);
+    let syncArgs: unknown = null;
+    tauri.handlers.set("sync_imap", (args) => {
+      syncArgs = args;
+      return { folders: [], saved_to: null };
+    });
+    await boot();
+    await vi.waitFor(() => expect($("#accounts-list .account-sync-btn")).toBeTruthy());
+    ($("#accounts-list .account-sync-btn") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(syncArgs).not.toBeNull());
+    expect(syncArgs).toEqual({
+      host: "imap.gmail.com",
+      port: 993,
+      username: "bob@gmail.com",
+      password: "",
+      folders: null,
+      auth: "oauth",
+    });
+  });
+
+  it("a failed sync reports the error in the panel status", async () => {
+    tauri.handlers.set("accounts_list", () => [IMAP_ACCOUNT]);
+    tauri.handlers.set("sync_imap", () => {
+      throw new Error("no password stored for this account — enter one");
+    });
+    await boot();
+    await vi.waitFor(() => expect($("#accounts-list .account-sync-btn")).toBeTruthy());
+    ($("#accounts-list .account-sync-btn") as HTMLButtonElement).click();
+    await vi.waitFor(() =>
+      expect($("#accounts-status").textContent).toContain(
+        "Sync failed for imap:imap.gmail.com:993:ana@gmail.com",
+      ),
+    );
+    expect($("#accounts-status").textContent).toContain("no password stored");
+  });
+
+  it("pause triggers source_set_excluded and re-renders the row", async () => {
+    let excluded = false;
+    tauri.handlers.set("accounts_list", () => [
+      { ...IMAP_ACCOUNT, excluded },
+    ]);
+    tauri.handlers.set("source_set_excluded", (args) => {
+      excluded = (args as { excluded: boolean }).excluded;
+      return null;
+    });
+    await boot();
+    await vi.waitFor(() => expect($("#accounts-list .account-pause-btn")).toBeTruthy());
+    ($("#accounts-list .account-pause-btn") as HTMLButtonElement).click();
+    await vi.waitFor(() =>
+      expect(
+        tauri.calls.find(
+          (c) =>
+            c.cmd === "source_set_excluded" &&
+            (c.args as { sourceId: string; excluded: boolean }).sourceId === "inst-imap-1" &&
+            (c.args as { sourceId: string; excluded: boolean }).excluded === true,
+        ),
+      ).toBeTruthy(),
+    );
+    await vi.waitFor(() =>
+      expect($("#accounts-list .account-pause-btn").textContent).toBe("Resume"),
+    );
+    expect($("#accounts-status").textContent).toContain("paused");
+  });
+
+  it("forget credentials triggers the removal command and re-lists", async () => {
+    tauri.handlers.set("accounts_list", () => [IMAP_ACCOUNT]);
+    tauri.handlers.set("account_forget_credentials", () => true);
+    await boot();
+    await vi.waitFor(() => expect($("#accounts-list .account-forget-btn")).toBeTruthy());
+    ($("#accounts-list .account-forget-btn") as HTMLButtonElement).click();
+    await vi.waitFor(() =>
+      expect(
+        tauri.calls.find(
+          (c) =>
+            c.cmd === "account_forget_credentials" &&
+            (c.args as { sourceId: string }).sourceId === "inst-imap-1",
+        ),
+      ).toBeTruthy(),
+    );
+    await vi.waitFor(() =>
+      expect($("#accounts-status").textContent).toContain("Forgot stored credentials"),
+    );
+  });
+
+  it("Add account… opens the Add source view", async () => {
+    await boot();
+    ($("#accounts-add") as HTMLButtonElement).click();
+    expect($("#app").dataset.view).toBe("sources");
+  });
+
+  it("the Accounts navigation destination switches the workspace view", async () => {
+    await boot();
+    const navBtn = $<HTMLButtonElement>('.nav-view-btn[data-view-target="accounts"]');
+    navBtn.click();
+    expect($("#app").dataset.view).toBe("accounts");
+    // The nav button marks the current page for screen readers.
+    expect(navBtn.getAttribute("aria-current")).toBe("page");
+    // Compact drawer: switching views closes it (the shell contract).
+    $<HTMLButtonElement>("#nav-toggle").click();
+    expect($("#app").dataset.nav).toBe("open");
+    navBtn.click();
+    expect($("#app").dataset.nav).toBe("closed");
+  });
+
+  it("Refresh re-lists the accounts", async () => {
+    let listed = 0;
+    tauri.handlers.set("accounts_list", () => {
+      listed += 1;
+      return [];
+    });
+    await boot();
+    const before = listed;
+    ($("#accounts-refresh") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(listed).toBeGreaterThan(before));
   });
 });

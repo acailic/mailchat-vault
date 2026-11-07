@@ -186,10 +186,12 @@ body {
 
 #app[data-view="workspace"] #view-workspace { display: grid; }
 #app[data-view="sources"] #view-sources { display: block; }
+#app[data-view="accounts"] #view-accounts { display: block; }
 #app[data-view="activity"] #view-activity { display: block; }
 #app[data-view="settings"] #view-settings { display: block; }
 
 #view-sources,
+#view-accounts,
 #view-activity,
 #view-settings {
   flex: 1;
@@ -204,6 +206,7 @@ body {
 }
 
 #view-sources h2:not(.view-heading),
+#view-accounts h2:not(.view-heading),
 #view-activity h2:not(.view-heading),
 #view-settings h2:not(.view-heading) {
   font-size: var(--text-section);
@@ -554,6 +557,29 @@ mark.hit {
 .job.succeeded { color: var(--success); }
 .job.failed { color: var(--danger); }
 .job.cancelled { color: var(--muted); }
+
+/* --- Accounts view (multi-account overview) ------------------------------- */
+
+#view-accounts .row { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; margin-top: var(--sp-1); }
+#view-accounts section { margin-bottom: var(--sp-4); }
+.accounts-list { list-style: none; margin: var(--sp-1) 0 0; padding: 0; }
+.account-row {
+  display: flex;
+  gap: var(--sp-3);
+  align-items: flex-start;
+  flex-wrap: wrap;
+  padding: var(--sp-2) var(--sp-3);
+  margin-bottom: var(--sp-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--panel-2);
+}
+.account-row.empty { border-style: dashed; color: var(--muted); }
+.account-row .account-main { min-width: 22em; flex: 1 1 22em; display: grid; gap: 2px; }
+.account-row .account-label { font-weight: 600; word-break: break-all; }
+.account-row .account-kind { color: var(--muted); }
+.account-row .account-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.account-row .account-actions button { font-size: 12px; padding: 3px 10px; }
 
 /* --- Activity view (jobs + statistics) ----------------------------------- */
 

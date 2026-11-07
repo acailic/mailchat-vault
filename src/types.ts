@@ -238,6 +238,46 @@ export interface SourceInstance {
   created_at: string;
 }
 
+// ---------------------------------------------------------------------------
+// Multi-account UI (roadmap: the accounts panel) — mirrors the Tauri
+// `AccountView` / `AccountImap` wire types (never credentials)
+// ---------------------------------------------------------------------------
+
+/** The non-secret IMAP identity of one account. */
+export interface AccountImap {
+  host: string;
+  port: number;
+  username: string;
+  /** Configured folders (empty = the connector's default set). */
+  folders: string[];
+  /** Whether the secret store holds an app password. */
+  has_password: boolean;
+  /** Whether the secret store holds a Google sign-in refresh token. */
+  has_oauth: boolean;
+}
+
+/** One account row of the accounts overview. */
+export interface AccountView {
+  /** The durable source instance id (pause uses it; chips filter by it). */
+  source_id: string;
+  /** `"imap"` for live email accounts, `"import"` for file imports. */
+  kind: "imap" | "import" | string;
+  label: string;
+  /** IMAP connection identity; `null` for imports. */
+  imap: AccountImap | null;
+  /** Archived messages of the account. */
+  message_count: number;
+  /** Open rows in the failed-item ledger (the sync backlog). */
+  failed_items: number;
+  /** `"connected"` after a successful sync, `"disconnected"` otherwise. */
+  state: "connected" | "disconnected" | string;
+  /** Paused: excluded from coordinator rounds (archive and cursors kept). */
+  excluded: boolean;
+  last_attempt_at: string | null;
+  last_success_at: string | null;
+}
+
+
 /** One row of the failed-item ledger: what fell, where, why, how often retried. */
 export interface FailedItem {
   source_instance_id: string;
