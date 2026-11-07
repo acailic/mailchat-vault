@@ -1,0 +1,19 @@
+{
+  "screenshots": [
+    {
+      "width": 900,
+      "layout": "medium",
+      "clipped": false
+    },
+    {
+      "width": 640,
+      "layout": "compact",
+      "clipped": false
+    },
+    {
+      "width": 1280,
+      "layout": "wide",
+      "clipped": false
+    }
+  ]
+}

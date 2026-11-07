@@ -1,0 +1,42 @@
+[
+  {
+    "name": "empty-archive",
+    "passed": true,
+    "seconds": 1.531
+  },
+  {
+    "name": "import-mbox",
+    "passed": true,
+    "seconds": 2.386
+  },
+  {
+    "name": "search-results",
+    "passed": true,
+    "seconds": 3.928
+  },
+  {
+    "name": "keyboard-nav",
+    "passed": true,
+    "seconds": 2.909
+  },
+  {
+    "name": "detail-view",
+    "passed": true,
+    "seconds": 2.643
+  },
+  {
+    "name": "settings-providers",
+    "passed": true,
+    "seconds": 4.652
+  },
+  {
+    "name": "stats-dashboard",
+    "passed": true,
+    "seconds": 3.831
+  },
+  {
+    "name": "search-v2",
+    "passed": true,
+    "seconds": 3.449
+  }
+]
