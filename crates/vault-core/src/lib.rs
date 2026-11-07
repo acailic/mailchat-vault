@@ -35,6 +35,12 @@
 //!   the stage → promote → reference lifecycle (no half-written object
 //!   is ever visible, references never dangle), the import capacity
 //!   budget, and the reconciliation/integrity tool.
+//! - [`backup`]: the M4.4 versioned backup container and staged restore —
+//!   a ZIP holding `manifest.json`, a consistent SQLite snapshot (the
+//!   backup API, never a live-file copy), the settings file, and every
+//!   referenced media object, each checksummed in the manifest; restore
+//!   validates checksums/SQLite integrity/references in a staging vault
+//!   before a journaled, recoverable switch replaces the active one.
 //! - [`import_bounds`]: the M4.1 import bounds — traversal/symlink-safe
 //!   path resolution, bounded directory walks, and bounded ZIP
 //!   expansion (every import tree goes through this fence).
@@ -66,6 +72,7 @@
 //! - [`export`]: export search results or whole chats to CSV / JSON Lines /
 //!   MBOX.
 
+pub mod backup;
 pub mod bounded;
 pub mod chat_export;
 pub mod demo;
@@ -140,6 +147,8 @@ pub enum Error {
     InvalidExport(String),
     #[error("media store error: {0}")]
     Media(String),
+    #[error("backup/restore error: {0}")]
+    Backup(String),
     #[error("archive schema version {db} is newer than this build supports ({supported}); upgrade the app before opening it")]
     SchemaTooNew { db: i64, supported: i64 },
     #[error("unsafe to migrate: {0}")]

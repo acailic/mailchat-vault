@@ -15,6 +15,20 @@ import {
   type MediaUsageView,
 } from "./media";
 import {
+  backupDoneLine,
+  canCommit,
+  previewLine,
+  recoveryLine,
+  renderRecoverySlots,
+  renderRestoreFlow,
+  restoreDoneLine,
+  gateBusy,
+  switchStopped,
+  type BackupSummaryView,
+  type RestoreFlow,
+  type RestorePreviewView,
+} from "./backupview";
+import {
   consentPromptText,
   consentStatusLine,
   describePlan,
@@ -210,6 +224,13 @@ const themeSelect = document.querySelector<HTMLSelectElement>("#theme")!;
 const summarizeTopInput = document.querySelector<HTMLInputElement>("#summarize-top")!;
 const notifyToggle = document.querySelector<HTMLInputElement>("#notify-toggle")!;
 const settingsSaveButton = document.querySelector<HTMLButtonElement>("#settings-save-btn")!;
+const backupStatus = document.querySelector<HTMLElement>("#backup-status")!;
+const backupCreateButton = document.querySelector<HTMLButtonElement>("#backup-create-btn")!;
+const restorePickButton = document.querySelector<HTMLButtonElement>("#restore-pick-btn")!;
+const restoreFlowPanel = document.querySelector<HTMLElement>("#restore-flow")!;
+const recoveryLineEl = document.querySelector<HTMLElement>("#recovery-line")!;
+const recoveryRefreshButton = document.querySelector<HTMLButtonElement>("#recovery-refresh-btn")!;
+const recoverySlotsEl = document.querySelector<HTMLElement>("#recovery-slots")!;
 
 // ---------------------------------------------------------------------------
 // State (explicit modules, not loose globals)
@@ -1756,6 +1777,7 @@ void ipc.onEvent<JobEvent>("job-event", (payload) => {
   // `submitted` event predates this listener (boot recovery).
   notifier.onJobEvent(payload, jobs.records.get(payload.job)?.kind);
   refreshAfterJobEvent(payload);
+  feedBackupJobEvent(payload);
   renderJobs();
   if (jobs.needsPoll) {
     void syncJobs(); // seq gap: recover the missed events by polling
@@ -1936,6 +1958,252 @@ async function reconcileMediaStore(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Storage & backup (M4.4): versioned containers, staged journaled
+// restore, and the previous-vault recovery surface
+// ---------------------------------------------------------------------------
+
+/** The restore flow's state (see backupview.ts for the shape). */
+let restoreFlow: RestoreFlow = { step: "idle" };
+/** The job id of an in-flight backup (its success line lands in
+ * `backupStatus` via the job-event stream). */
+let pendingBackupJob: number | null = null;
+/** The job id of an in-flight restore validation. */
+let pendingRestoreJob: number | null = null;
+/** Set once a restore/return switched the vault: the backend pool is
+ * shut down and every further command fails until the app restarts. */
+let vaultSwitched = false;
+/** Set while a commit or return switch is running: the backend
+ * serializes switches, and the UI must not offer a second one. */
+let switchInFlight = false;
+
+function renderRestorePanel(): void {
+  renderRestoreFlow(
+    restoreFlowPanel,
+    restoreFlow,
+    (archive) => void startRestoreValidation(archive),
+    (preview) => void commitRestore(preview),
+    () => {
+      restoreFlow = { step: "idle" };
+      pendingRestoreJob = null;
+      renderRestorePanel();
+    },
+  );
+}
+
+/** Pick a destination and start the `backup_create` job (progress in
+ * Activity; the success line lands here when it finishes). */
+async function createBackup(): Promise<void> {
+  if (vaultSwitched || switchInFlight) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const picked = await save({
+    title: "Create a vault backup",
+    defaultPath: `mailchat-vault-${today}.mcbackup`,
+    filters: [{ name: "Vault backup", extensions: ["mcbackup"] }],
+  });
+  if (typeof picked !== "string") return; // cancelled
+  backupStatus.textContent = `Backing up to ${picked}… (ingest is paused while the snapshot is taken; progress in Activity)`;
+  try {
+    const handle = await ipc.jobSubmit("backup_create", { dest: picked });
+    pendingBackupJob = handle.id;
+  } catch (e) {
+    backupStatus.textContent = `Backup failed to start: ${e}`;
+  }
+}
+
+/** Pick a container, inspect it, and offer the validation step. */
+async function pickRestoreArchive(): Promise<void> {
+  if (vaultSwitched || switchInFlight) return;
+  const picked = await open({
+    title: "Restore from a vault backup",
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Vault backup", extensions: ["mcbackup"] }],
+  });
+  const archive = typeof picked === "string" ? picked : null;
+  if (archive === null) return; // cancelled
+  restoreFlow = { step: "validating", archive };
+  renderRestorePanel();
+  try {
+    const manifest = await ipc.backupInspect(archive);
+    restoreFlow = { step: "inspected", archive, manifest };
+  } catch (e) {
+    restoreFlow = { step: "error", message: `Not a usable backup: ${e}` };
+  }
+  renderRestorePanel();
+}
+
+/** Start the `restore_preview` job: checksum every entry, validate the
+ *  database, stage the payload. */
+async function startRestoreValidation(archive: string): Promise<void> {
+  if (vaultSwitched || switchInFlight) return;
+  restoreFlow = { step: "validating", archive };
+  renderRestorePanel();
+  try {
+    const handle = await ipc.jobSubmit("restore_preview", { archive });
+    pendingRestoreJob = handle.id;
+  } catch (e) {
+    restoreFlow = { step: "error", message: `Validation failed to start: ${e}` };
+    renderRestorePanel();
+  }
+}
+
+/** Commit the validated restore: stops the app's vault access and
+ *  switches through the journal. A restart is required afterwards. */
+async function commitRestore(preview: RestorePreviewView): Promise<void> {
+  if (vaultSwitched || switchInFlight || !canCommit(restoreFlow)) return;
+  const confirmed = window.confirm(
+    `Replace the current vault with this backup?\n\n${previewLine(preview)}\n\nThe current vault is kept as a recovery snapshot. The app will need a restart.`,
+  );
+  if (!confirmed) return;
+  switchInFlight = true;
+  backupCreateButton.disabled = true;
+  restorePickButton.disabled = true;
+  restoreFlow = { step: "committing", preview };
+  renderRestorePanel();
+  try {
+    const outcome = await ipc.restoreCommit(preview.preview_id);
+    restoreFlow = { step: "done", outcome };
+    vaultSwitched = true;
+    backupCreateButton.disabled = true;
+    restorePickButton.disabled = true;
+    setStatus(restoreDoneLine(outcome) + " Restart the app now.", false);
+    void refreshRecovery();
+  } catch (e) {
+    if (switchStopped(e)) {
+      // The backend stopped mid-switch: a restart resolves the journal;
+      // nothing further is usable, so the UI must say so and lock.
+      vaultSwitched = true;
+      backupCreateButton.disabled = true;
+      restorePickButton.disabled = true;
+      restoreFlow = {
+        step: "error",
+        message: `Restore stopped mid-switch — restart the app; the switch journal recovers the vault automatically. (${e})`,
+      };
+      setStatus("Restart the app to recover the vault switch.", true);
+    } else if (gateBusy(e)) {
+      // Refused while another switch or backup holds the gate: nothing
+      // stopped, the staged preview is still committable — keep the
+      // validated panel and let the user retry.
+      switchInFlight = false;
+      backupCreateButton.disabled = false;
+      restorePickButton.disabled = false;
+      restoreFlow = { step: "validated", preview };
+      setStatus("A vault switch or backup is already in progress — the validated restore stays ready; retry the commit when it finishes.", true);
+    } else {
+      // Refused before anything stopped: the vault and the app are both untouched.
+      switchInFlight = false;
+      backupCreateButton.disabled = false;
+      restorePickButton.disabled = false;
+      restoreFlow = { step: "error", message: `Restore refused (the vault was not replaced): ${e}` };
+    }
+  }
+  renderRestorePanel();
+}
+
+/** Load and render the recovery surface (previous-vault slots). */
+async function refreshRecovery(): Promise<void> {
+  try {
+    const status = await ipc.recoveryStatus();
+    // The staged-preview claim is session-bound: only this session's
+    // validated flow can commit; anything else is a leftover from an
+    // earlier session and says so.
+    recoveryLineEl.textContent = recoveryLine(status, restoreFlow.step === "validated");
+    renderRecoverySlots(recoverySlotsEl, status, onReturnSlot, onForgetSlot, {
+      returnPending: vaultSwitched || switchInFlight,
+      forgetPending: switchInFlight,
+    });
+  } catch (e) {
+    recoveryLineEl.textContent = `Recovery status failed: ${e}`;
+  }
+}
+
+async function onReturnSlot(slotId: string): Promise<void> {
+  if (vaultSwitched || switchInFlight) return;
+  const confirmed = window.confirm(
+    `Return to this previous vault?\n\nThe current vault is kept as a new recovery snapshot. The app will need a restart.`,
+  );
+  if (!confirmed) return;
+  switchInFlight = true;
+  backupCreateButton.disabled = true;
+  restorePickButton.disabled = true;
+  recoveryLineEl.textContent = "Switching back to the previous vault…";
+  try {
+    const outcome = await ipc.returnToPreviousVault(slotId);
+    vaultSwitched = true;
+    backupCreateButton.disabled = true;
+    restorePickButton.disabled = true;
+    recoveryLineEl.textContent =
+      restoreDoneLine(outcome) + " Restart the app now.";
+    setStatus("Previous vault restored. Restart the app now.", false);
+  } catch (e) {
+    if (switchStopped(e)) {
+      vaultSwitched = true;
+      backupCreateButton.disabled = true;
+      restorePickButton.disabled = true;
+      recoveryLineEl.textContent =
+        `Switch stopped mid-way — restart the app; the switch journal recovers the vault automatically. (${e})`;
+      setStatus("Restart the app to recover the vault switch.", true);
+    } else {
+      // Refused before anything stopped: the vault and the app are both untouched.
+      switchInFlight = false;
+      backupCreateButton.disabled = false;
+      restorePickButton.disabled = false;
+      recoveryLineEl.textContent = `Return refused (the current vault was not replaced): ${e}`;
+    }
+  }
+}
+
+async function onForgetSlot(slotId: string): Promise<void> {
+  // A switch in flight could be consuming this slot; the backend
+  // serializes Forget with the same gate, the UI refuses up front.
+  if (switchInFlight) return;
+  const confirmed = window.confirm(
+    "Delete this recovery snapshot for good? The active vault is not touched.",
+  );
+  if (!confirmed) return;
+  try {
+    await ipc.recoveryForget(slotId);
+  } catch (e) {
+    recoveryLineEl.textContent = `Forget failed: ${e}`;
+  }
+  void refreshRecovery();
+}
+
+/** Feed backup/restore job outcomes into their panels (the job stream
+ *  carries the results; the tracker only keeps states). */
+function feedBackupJobEvent(event: JobEvent): void {
+  if (pendingBackupJob !== null && event.job === pendingBackupJob) {
+    if (event.type === "succeeded") {
+      const summary = event.result as BackupSummaryView;
+      backupStatus.textContent = backupDoneLine(summary);
+      pendingBackupJob = null;
+    } else if (event.type === "failed") {
+      backupStatus.textContent = `Backup failed: ${"message" in event.error ? event.error.message : event.error.kind}`;
+      pendingBackupJob = null;
+    } else if (event.type === "cancelled") {
+      backupStatus.textContent = "Backup cancelled — no file was written.";
+      pendingBackupJob = null;
+    }
+  }
+  if (pendingRestoreJob !== null && event.job === pendingRestoreJob) {
+    if (event.type === "succeeded") {
+      restoreFlow = { step: "validated", preview: event.result as RestorePreviewView };
+      pendingRestoreJob = null;
+    } else if (event.type === "failed") {
+      restoreFlow = {
+        step: "error",
+        message: `Validation failed: ${"message" in event.error ? event.error.message : event.error.kind}`,
+      };
+      pendingRestoreJob = null;
+    } else if (event.type === "cancelled") {
+      restoreFlow = { step: "idle" };
+      pendingRestoreJob = null;
+    }
+    renderRestorePanel();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 
@@ -1998,10 +2266,17 @@ addProviderButton.addEventListener("click", addProviderRow);
 settingsSaveButton.addEventListener("click", () => void saveSettings());
 mediaRefreshButton.addEventListener("click", () => void refreshMediaUsage());
 mediaReconcileButton.addEventListener("click", () => void reconcileMediaStore());
+backupCreateButton.addEventListener("click", () => void createBackup());
+restorePickButton.addEventListener("click", () => void pickRestoreArchive());
+recoveryRefreshButton.addEventListener("click", () => void refreshRecovery());
 // The media report loads when Settings is opened (and after imports that
-// extracted media) — not eagerly at startup.
+// extracted media) — not eagerly at startup. The recovery surface loads
+// with it (previous-vault snapshots exist independently of imports).
 workspace.store.subscribe((current) => {
-  if (current.view === "settings") void refreshMediaUsage();
+  if (current.view === "settings") {
+    void refreshMediaUsage();
+    void refreshRecovery();
+  }
 });
 themeSelect.addEventListener("change", () => applyTheme(themeSelect.value as SettingsView["theme"]));
 providerRows.addEventListener("click", (event) => {

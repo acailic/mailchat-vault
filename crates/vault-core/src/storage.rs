@@ -56,6 +56,29 @@ use crate::stats::{ArchiveStats, AuthorCount, ChatCount, DayCount};
 use crate::vector::VectorHit;
 use crate::{Error, Result};
 
+/// The identity fingerprint of an archive at a point in time: schema
+/// version, archive revision, and the row counts that describe what the
+/// vault holds. The M4.4 restore flow records it when a backup is
+/// previewed (staged + validated) and refuses to commit the switch when
+/// the live vault's fingerprint changed in between — a restore never
+/// replaces a vault that moved under it ([`crate::backup`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultFingerprint {
+    pub schema_version: i64,
+    pub archive_revision: u64,
+    pub messages: u64,
+    pub sources: u64,
+    pub media_objects: u64,
+}
+
+/// The newest schema version this build knows how to produce. Databases
+/// recording a higher version are refused by [`Storage::open_with`]
+/// instead of being silently opened (M1.4 newer-schema refusal); backup
+/// restore applies the same ceiling to archives before switching
+/// anything (M4.4).
+pub const SUPPORTED_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
+const MAX_SCHEMA_VERSION: i64 = SUPPORTED_SCHEMA_VERSION;
+
 /// Ordered schema migrations; each entry runs exactly once. Since M1.4
 /// every *pending* migration commits in one single transaction on open
 /// (all or nothing), guarded by [`crate::safe_migration`]'s pre-migration
@@ -671,11 +694,6 @@ pub struct Storage {
     /// ([`crate::search2`]), which owns the v2 IPC read paths.
     pub(crate) conn: Connection,
 }
-
-/// The newest schema version this build knows how to produce. Databases
-/// recording a higher version are refused by [`Storage::open_with`]
-/// instead of being silently opened (M1.4 newer-schema refusal).
-const MAX_SCHEMA_VERSION: i64 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
 impl Storage {
     /// Open (and migrate) a database file, creating it when missing.
@@ -2404,15 +2422,25 @@ impl Storage {
     /// can offer a refresh when the archive changed under a paginated
     /// result set (A07).
     pub fn archive_revision(&self) -> Result<u64> {
-        let value: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT value FROM archive_meta WHERE key = 'archive_revision'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(value.and_then(|v| v.parse().ok()).unwrap_or(0))
+        archive_revision_on(&self.conn)
+    }
+
+    /// The live connection (writer when reached through the pool's write
+    /// queue). Backup/maintenance operations that need the connection
+    /// itself — the SQLite backup API, whole-file snapshots — use this;
+    /// ordinary callers keep going through the typed methods.
+    pub fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
+    /// The identity fingerprint of the archive right now: schema
+    /// version, archive revision, and the row counts a staged restore
+    /// must not silently diverge from (M4.4's preview→commit binding —
+    /// [`crate::backup`] compares the fingerprint taken when a restore
+    /// was previewed with the one at commit time and refuses a switch
+    /// when the active vault changed in between).
+    pub fn vault_fingerprint(&self) -> Result<VaultFingerprint> {
+        vault_fingerprint_on(&self.conn)
     }
 
     /// Every distinct media digest the archive references — the
@@ -2423,18 +2451,7 @@ impl Storage {
     /// object-store reconciliation (see
     /// [`crate::object_store::ObjectStore::reconcile`]).
     pub fn media_digests(&self) -> Result<std::collections::HashSet<String>> {
-        let mut digests = self.message_media_digests()?;
-        {
-            let mut stmt = self.conn.prepare("SELECT sha256 FROM media_objects")?;
-            let mut rows = stmt.query([])?;
-            while let Some(row) = rows.next()? {
-                let sha: String = row.get(0)?;
-                if !sha.is_empty() {
-                    digests.insert(sha);
-                }
-            }
-        }
-        Ok(digests)
+        media_digests_on(&self.conn)
     }
 
     /// The digests referenced by stored messages only (the
@@ -2641,6 +2658,87 @@ fn media_entries(raw_json: &str) -> Vec<serde_json::Value> {
                 .cloned()
         })
         .unwrap_or_default()
+}
+
+/// The current `archive_revision` counter on an arbitrary connection
+/// (0 when the archive has none yet).
+fn archive_revision_on(conn: &Connection) -> Result<u64> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM archive_meta WHERE key = 'archive_revision'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(value.and_then(|v| v.parse().ok()).unwrap_or(0))
+}
+
+/// [`Storage::media_digests`] over an arbitrary connection — every
+/// digest the archive on that connection references (message media
+/// entries plus the `media_objects` registry). Shared with the M4.4
+/// backup module, which runs the same collection against a consistent
+/// snapshot or a staged restore instead of the live writer.
+pub(crate) fn media_digests_on(conn: &Connection) -> Result<std::collections::HashSet<String>> {
+    let mut digests = std::collections::HashSet::new();
+    if table_exists_on(conn, "archive_messages")? {
+        let mut stmt = conn
+            .prepare("SELECT raw_json FROM archive_messages WHERE raw_json LIKE '%\"media\"%'")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let raw: String = row.get(0)?;
+            for entry in media_entries(&raw) {
+                if let Some(sha) = entry.get("sha256").and_then(|v| v.as_str()) {
+                    if !sha.is_empty() {
+                        digests.insert(sha.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if table_exists_on(conn, "media_objects")? {
+        let mut stmt = conn.prepare("SELECT sha256 FROM media_objects WHERE sha256 != ''")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let sha: String = row.get(0)?;
+            digests.insert(sha);
+        }
+    }
+    Ok(digests)
+}
+
+/// The archive's identity fingerprint on an arbitrary connection —
+/// schema version, archive revision, and the row counts that describe
+/// what the vault holds (see [`Storage::vault_fingerprint`]). Backup
+/// staging records it for the archive it validated; committing a staged
+/// restore compares it with the live vault's fingerprint and refuses
+/// when anything changed since the preview.
+pub(crate) fn vault_fingerprint_on(conn: &Connection) -> Result<VaultFingerprint> {
+    let count = |table: &str| -> Result<u64> {
+        if !table_exists_on(conn, table)? {
+            return Ok(0); // a legacy (pre-canonical) database holds none
+        }
+        Ok(conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
+                r.get::<_, i64>(0)
+            })?
+            .max(0) as u64)
+    };
+    Ok(VaultFingerprint {
+        schema_version: read_schema_version(conn)?,
+        archive_revision: archive_revision_on(conn)?,
+        messages: count("archive_messages")?,
+        sources: count("source_instances")?,
+        media_objects: count("media_objects")?,
+    })
+}
+
+fn table_exists_on(conn: &Connection, name: &str) -> Result<bool> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        [name],
+        |row| row.get(0),
+    )?;
+    Ok(exists)
 }
 
 /// Merge `entries` into a message's existing `media` array inside an open
@@ -3485,7 +3583,7 @@ fn register_canonical_functions(conn: &Connection) -> Result<()> {
 /// The schema version recorded in the database, or 0 when the
 /// bookkeeping table does not exist yet. Read-only: safe to call before
 /// any pragma or migration has touched the file.
-fn read_schema_version(conn: &Connection) -> Result<i64> {
+pub(crate) fn read_schema_version(conn: &Connection) -> Result<i64> {
     let has_table: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations')",
         [],

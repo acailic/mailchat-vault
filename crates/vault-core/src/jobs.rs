@@ -180,7 +180,8 @@ impl From<Error> for JobError {
             | Error::MigrationFailed { .. }
             | Error::InsufficientSpace { .. }
             | Error::SchemaTooNew { .. }
-            | Error::MigrationFault(_) => JobError::Storage {
+            | Error::MigrationFault(_)
+            | Error::Backup(_) => JobError::Storage {
                 message: e.to_string(),
             },
             Error::Io(_) => JobError::Io {
