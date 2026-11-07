@@ -68,7 +68,7 @@ Cancel file selection makes no changes. Cancelling preview discards temporary fi
 
 ## Connected email
 
-**Proposed (M3.4)** — today the app-password/Google-sign-in IMAP controls live in the Add source view (sources panel) with no account page, credential-update flow, or disconnect/local-deletion separation yet.
+**Proposed (M3.4)** — today the app-password/Google-sign-in IMAP controls live in the Add source view (sources panel), and per-account sync/pause/forget-credentials management lives in the multi-account Accounts panel (inventoried in the root [README](../README.md)); there is still no account page with folder selection, credential-update flow, or disconnect/local-deletion separation.
 
 Choose Gmail preset or Custom IMAP. Keep host, port, and TLS details under Advanced for Gmail. Use visible labels for email/username and password; explain app-password requirements without promising OAuth. Validate host, port, and required values before testing the connection.
 
