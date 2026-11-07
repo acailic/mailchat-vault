@@ -1253,11 +1253,7 @@ fn interrupted_return_recovery_keeps_the_return_target_slot() {
     assert_eq!(
         recovery,
         SwitchRecovery::RolledBack {
-            previous_slot: staged
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned(),
+            previous_slot: staged.file_name().unwrap().to_string_lossy().into_owned(),
         }
     );
     // The active vault is the displaced one, whole (the "new" vault).
@@ -1297,9 +1293,7 @@ fn interrupted_return_recovery_keeps_the_return_target_slot() {
             .and_then(|name| name.split('.').next())
             .unwrap();
         assert!(
-            slot_names
-                .iter()
-                .any(|n| n.starts_with(digest)),
+            slot_names.iter().any(|n| n.starts_with(digest)),
             "slot holds object {digest}: {slot_names:?}"
         );
     }
