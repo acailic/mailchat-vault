@@ -100,6 +100,7 @@ use chrono::Utc;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
+use vault_core::backup::{self, BackupManifest, RecoveryStatus, RestoreOutcome};
 use vault_core::bounded::{
     import_id_for, BoundedRun, Flow, MediaKind, MediaPass, StreamItem, StreamSource,
 };
@@ -116,7 +117,6 @@ use vault_core::llm::{
 };
 use vault_core::mbox::MboxSource;
 use vault_core::oauth::{self, OAuthConfig};
-use vault_core::backup::{self, BackupManifest, RecoveryStatus, RestoreOutcome};
 use vault_core::object_store::{MediaUsage, ObjectStore, ReconcileReport};
 use vault_core::query::{ChatContext, SearchPage, SearchQuery};
 use vault_core::scheduler::{SyncSchedule as CoreSyncSchedule, SyncScheduler};
@@ -169,7 +169,10 @@ impl SwitchGate {
     /// covers both).
     fn try_begin(&self) -> Result<SwitchLease<'_>, String> {
         if self.busy.swap(true, std::sync::atomic::Ordering::AcqRel) {
-            Err("a vault switch or backup is already in progress — wait for it to finish".to_string())
+            Err(
+                "a vault switch or backup is already in progress — wait for it to finish"
+                    .to_string(),
+            )
         } else {
             Ok(SwitchLease { busy: &self.busy })
         }
@@ -1606,7 +1609,15 @@ fn job_submit(
     let secrets = Arc::clone(secrets.inner());
     let switch_gate = Arc::clone(&state.switch_gate);
     pool.try_submit_job(spec.kind(), move |ctx: &JobContext| {
-        run_job_spec(ctx, &spec, &job_pool, embedder, &data_dir, &secrets, &switch_gate)
+        run_job_spec(
+            ctx,
+            &spec,
+            &job_pool,
+            embedder,
+            &data_dir,
+            &secrets,
+            &switch_gate,
+        )
     })
     .map(|id| JobHandle { id })
     .map_err(|e| e.to_string())
@@ -2690,7 +2701,8 @@ mod tests {
             "a concurrent switch must refuse with the user-facing message"
         );
         drop(lease);
-        gate.try_begin().expect("the gate reopens after the switch ends");
+        gate.try_begin()
+            .expect("the gate reopens after the switch ends");
     }
 
     #[test]

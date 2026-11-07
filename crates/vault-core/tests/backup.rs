@@ -81,20 +81,23 @@ impl Sandbox {
 
     /// Open the vault through the real pool (the app's shape) and run
     /// `op` on the writer connection.
-    fn with_pool<R: Send + 'static>(
-        &self,
-        op: impl FnOnce(&Storage) -> R + Send + 'static,
-    ) -> R {
+    fn with_pool<R: Send + 'static>(&self, op: impl FnOnce(&Storage) -> R + Send + 'static) -> R {
         let pool = self.spawn_pool();
-        let result =
-            pool.submit_write(move |s| -> vault_core::Result<R> { Ok(op(s)) }).unwrap();
+        let result = pool
+            .submit_write(move |s| -> vault_core::Result<R> { Ok(op(s)) })
+            .unwrap();
         pool.shutdown();
         result
     }
 
     fn spawn_pool(&self) -> std::sync::Arc<DbPool> {
         fs::create_dir_all(self.data_dir()).unwrap();
-        DbPool::spawn(self.data_dir().join("vault.db"), PoolConfig::default(), |_| {}).unwrap()
+        DbPool::spawn(
+            self.data_dir().join("vault.db"),
+            PoolConfig::default(),
+            |_| {},
+        )
+        .unwrap()
     }
 
     fn store(&self) -> ObjectStore {
@@ -137,15 +140,7 @@ impl Sandbox {
             }
             let batch = vec![msg];
             pool.submit_write(move |s| {
-                s.commit_import_batch(
-                    &import_id,
-                    &source,
-                    &batch,
-                    &[],
-                    &[],
-                    0,
-                    true,
-                )
+                s.commit_import_batch(&import_id, &source, &batch, &[], &[], 0, true)
             })
             .unwrap();
         }
@@ -184,16 +179,16 @@ impl Sandbox {
 
         // A settings file (provider profile, no key material).
         let mut settings = Settings::default();
-        settings.providers.push(vault_core::settings::ProviderProfile {
-            id: "test-profile".to_string(),
-            name: "Test".to_string(),
-            kind: vault_core::settings::ProviderKind::Custom,
-            base_url: "https://example.invalid/api".to_string(),
-            model: "test-model".to_string(),
-        });
         settings
-            .save(&self.data_dir().join(SETTINGS_FILE))
-            .unwrap();
+            .providers
+            .push(vault_core::settings::ProviderProfile {
+                id: "test-profile".to_string(),
+                name: "Test".to_string(),
+                kind: vault_core::settings::ProviderKind::Custom,
+                base_url: "https://example.invalid/api".to_string(),
+                model: "test-model".to_string(),
+            });
+        settings.save(&self.data_dir().join(SETTINGS_FILE)).unwrap();
 
         SeedSummary {
             messages: n as u64,
@@ -211,21 +206,24 @@ impl Sandbox {
         self.backup_with(name, BackupOptions::default()).unwrap()
     }
 
-    fn backup_with(&self, name: &str, opts: BackupOptions) -> vault_core::Result<backup::BackupSummary> {
+    fn backup_with(
+        &self,
+        name: &str,
+        opts: BackupOptions,
+    ) -> vault_core::Result<backup::BackupSummary> {
         let data_dir = self.data_dir();
         let dest = self.outside(name);
         let pool = self.spawn_pool();
-        let result = pool
-            .submit_write(move |s| {
-                backup::create_backup(
-                    &data_dir,
-                    s.connection(),
-                    &dest,
-                    &no_progress,
-                    &|| false,
-                    &opts,
-                )
-            });
+        let result = pool.submit_write(move |s| {
+            backup::create_backup(
+                &data_dir,
+                s.connection(),
+                &dest,
+                &no_progress,
+                &|| false,
+                &opts,
+            )
+        });
         pool.shutdown();
         result
     }
@@ -245,8 +243,14 @@ impl Sandbox {
         let pool = DbPool::spawn(data_dir.join("vault.db"), PoolConfig::default(), |_| {}).unwrap();
         let result = pool
             .submit_write(move |s| {
-                backup::create_backup(&dir, s.connection(), &dest, &no_progress, &|| false,
-                    &BackupOptions::default())
+                backup::create_backup(
+                    &dir,
+                    s.connection(),
+                    &dest,
+                    &no_progress,
+                    &|| false,
+                    &BackupOptions::default(),
+                )
             })
             .unwrap();
         pool.shutdown();
@@ -290,13 +294,20 @@ fn backup_round_trips_counts_hashes_settings_and_objects() {
     let mut expected_digests = seed.digests.clone();
     expected_digests.push(seed.unlinked_digest.clone());
     expected_digests.sort();
-    let manifest_digests: Vec<String> =
-        summary.manifest.objects.iter().map(|o| o.sha256.clone()).collect();
+    let manifest_digests: Vec<String> = summary
+        .manifest
+        .objects
+        .iter()
+        .map(|o| o.sha256.clone())
+        .collect();
     assert_eq!(manifest_digests, expected_digests);
     // The snapshot entry's checksum describes real snapshot bytes.
     assert_eq!(sha256_hex(&summary.path), sha256_hex(&summary.path)); // container exists
     backup::verify_backup(&summary.path, &no_progress).unwrap();
-    assert!(summary.manifest.settings.is_some(), "settings are part of the backup");
+    assert!(
+        summary.manifest.settings.is_some(),
+        "settings are part of the backup"
+    );
 
     // Mutate the vault after the backup: delete a message's object set
     // is not possible without corruption, so instead prove the restore
@@ -309,8 +320,14 @@ fn backup_round_trips_counts_hashes_settings_and_objects() {
     let _ = &sb;
 
     let fingerprint = sb.fingerprint();
-    backup::restore_backup(&sb.data_dir(), &summary.path, &fingerprint, &no_progress,
-        &RestoreOptions::default(), &keyring_has_everything)
+    backup::restore_backup(
+        &sb.data_dir(),
+        &summary.path,
+        &fingerprint,
+        &no_progress,
+        &RestoreOptions::default(),
+        &keyring_has_everything,
+    )
     .unwrap();
 
     // Counts and digests round-trip exactly (the M4 exit criterion:
@@ -327,18 +344,27 @@ fn backup_round_trips_counts_hashes_settings_and_objects() {
         assert_eq!(sha256_hex(&path), object.sha256);
     }
     // Settings were restored byte-exact.
-    let settings = Settings::load(&sb.data_dir().join(SETTINGS_FILE)).unwrap().unwrap();
+    let settings = Settings::load(&sb.data_dir().join(SETTINGS_FILE))
+        .unwrap()
+        .unwrap();
     assert_eq!(settings.providers.len(), 1);
     assert_eq!(settings.providers[0].id, "test-profile");
     // The store reconciles clean against the restored archive.
     let digests = sb.with_pool(|s| s.media_digests().unwrap());
     let report = sb.store().reconcile(&digests, false).unwrap();
-    assert!(report.is_clean(), "restored store reconciles clean: {report:?}");
+    assert!(
+        report.is_clean(),
+        "restored store reconciles clean: {report:?}"
+    );
 
     // The previous vault (the one replaced) is kept under recovery.
     let status = backup::recovery_status(&sb.data_dir()).unwrap();
     assert_eq!(status.journal_state, Some(SwitchState::Completed));
-    assert_eq!(status.previous.len(), 1, "the replaced vault is kept: {status:?}");
+    assert_eq!(
+        status.previous.len(),
+        1,
+        "the replaced vault is kept: {status:?}"
+    );
     // And it still opens.
     let slot = sb.outside("vault-recovery").join(&status.previous[0].id);
     let conn = rusqlite::Connection::open_with_flags(
@@ -346,7 +372,9 @@ fn backup_round_trips_counts_hashes_settings_and_objects() {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM archive_messages", [], |r| r.get(0)).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM archive_messages", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(count as u64, seed.messages);
 }
 
@@ -374,15 +402,27 @@ fn unlinked_registry_objects_round_trip() {
     // original — the registry row and its object must come back.
     let empty_summary = sb.empty_vault_backup("u");
     let fp = sb.fingerprint();
-    backup::restore_backup(&sb.data_dir(), &empty_summary.path, &fp, &no_progress,
-        &RestoreOptions::default(), &keyring_has_everything)
+    backup::restore_backup(
+        &sb.data_dir(),
+        &empty_summary.path,
+        &fp,
+        &no_progress,
+        &RestoreOptions::default(),
+        &keyring_has_everything,
+    )
     .unwrap();
     let unlinked = sb.with_pool(|s| s.unlinked_media_objects().unwrap());
     assert!(unlinked.is_empty(), "the empty vault has no registry rows");
 
     let fp = sb.fingerprint();
-    backup::restore_backup(&sb.data_dir(), &summary.path, &fp, &no_progress,
-        &RestoreOptions::default(), &keyring_has_everything)
+    backup::restore_backup(
+        &sb.data_dir(),
+        &summary.path,
+        &fp,
+        &no_progress,
+        &RestoreOptions::default(),
+        &keyring_has_everything,
+    )
     .unwrap();
     let unlinked = sb.with_pool(|s| s.unlinked_media_objects().unwrap());
     assert_eq!(unlinked.len(), 1);
@@ -406,16 +446,30 @@ fn backup_rejects_destinations_inside_the_vault_and_recovery_dirs() {
     let data_dir = sb.data_dir();
     let check = inside.clone();
     let result = sb.with_pool(move |s| {
-        backup::create_backup(&data_dir, s.connection(), &check, &no_progress, &|| false,
-            &BackupOptions::default())
+        backup::create_backup(
+            &data_dir,
+            s.connection(),
+            &check,
+            &no_progress,
+            &|| false,
+            &BackupOptions::default(),
+        )
     });
-    assert!(matches!(&result, Err(vault_core::Error::Backup(m)) if m.contains("inside the vault root")));
+    assert!(
+        matches!(&result, Err(vault_core::Error::Backup(m)) if m.contains("inside the vault root"))
+    );
 
     let data_dir = sb.data_dir();
     let check = in_recovery.clone();
     let result = sb.with_pool(move |s| {
-        backup::create_backup(&data_dir, s.connection(), &check, &no_progress, &|| false,
-            &BackupOptions::default())
+        backup::create_backup(
+            &data_dir,
+            s.connection(),
+            &check,
+            &no_progress,
+            &|| false,
+            &BackupOptions::default(),
+        )
     });
     assert!(matches!(&result, Err(vault_core::Error::Backup(m)) if m.contains("recovery")));
     assert!(!inside.exists() && !in_recovery.exists());
@@ -433,12 +487,18 @@ fn backup_failures_leave_no_destination_and_an_untouched_vault() {
         BackupFailPoint::BeforeRename,
     ] {
         let dest = sb.outside(&format!("fail-{fail_at:?}.mcbackup"));
-        let result = sb.backup_with(&format!("fail-{fail_at:?}.mcbackup"), BackupOptions {
-            fail_at,
-            ..BackupOptions::default()
-        });
+        let result = sb.backup_with(
+            &format!("fail-{fail_at:?}.mcbackup"),
+            BackupOptions {
+                fail_at,
+                ..BackupOptions::default()
+            },
+        );
         drop(result);
-        assert!(!dest.exists(), "no destination after failure at {fail_at:?}");
+        assert!(
+            !dest.exists(),
+            "no destination after failure at {fail_at:?}"
+        );
         assert_eq!(sha256_hex(&sb.data_dir().join("vault.db")), db_before);
         // No temp litter left in the destination directory.
         let litter: Vec<String> = fs::read_dir(&sb.root)
@@ -455,11 +515,17 @@ fn backup_preflight_refuses_without_space_and_writes_nothing() {
     let sb = Sandbox::new("space");
     sb.seed_vault("s", 1);
     let dest = sb.outside("big.mcbackup");
-    let result = sb.backup_with("big.mcbackup", BackupOptions {
-        min_free_bytes: Some(u64::MAX / 2),
-        ..BackupOptions::default()
-    });
-    assert!(matches!(result, Err(vault_core::Error::InsufficientSpace { .. })));
+    let result = sb.backup_with(
+        "big.mcbackup",
+        BackupOptions {
+            min_free_bytes: Some(u64::MAX / 2),
+            ..BackupOptions::default()
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(vault_core::Error::InsufficientSpace { .. })
+    ));
     assert!(!dest.exists());
 }
 
@@ -498,7 +564,9 @@ fn tampered_container(src: &Path, dest: &Path, replace_entry: &str, bytes: &[u8]
             body = bytes.to_vec();
         }
         use std::io::Write as _;
-        writer.start_file(name, zip::write::FileOptions::<()>::default()).unwrap();
+        writer
+            .start_file(name, zip::write::FileOptions::<()>::default())
+            .unwrap();
         writer.write_all(&body).unwrap();
     }
     writer.finish().unwrap();
@@ -525,8 +593,14 @@ fn damaged_container_and_tampered_manifest_are_refused() {
     tampered_container(&summary.path, &tampered, "vault.db", b"not a database");
     assert!(backup::verify_backup(&tampered, &no_progress).is_err());
     let fp = sb.fingerprint();
-    let result = backup::restore_backup(&sb.data_dir(), &tampered, &fp, &no_progress,
-        &RestoreOptions::default(), &keyring_has_everything);
+    let result = backup::restore_backup(
+        &sb.data_dir(),
+        &tampered,
+        &fp,
+        &no_progress,
+        &RestoreOptions::default(),
+        &keyring_has_everything,
+    );
     assert!(result.is_err(), "an unverified container is never restored");
     // The active vault is untouched.
     let (messages, _, _, _) = sb.vault_shape();
@@ -563,8 +637,14 @@ fn restore_refuses_newer_format_schema_and_missing_objects() {
     missing.objects.clear();
     let crafted = craft_container(&sb, "missing-objects.mcbackup", &missing, &summary.path);
     let fp = sb.fingerprint();
-    let result = backup::restore_backup(&sb.data_dir(), &crafted, &fp, &no_progress,
-        &RestoreOptions::default(), &keyring_has_everything);
+    let result = backup::restore_backup(
+        &sb.data_dir(),
+        &crafted,
+        &fp,
+        &no_progress,
+        &RestoreOptions::default(),
+        &keyring_has_everything,
+    );
     assert!(matches!(&result, Err(vault_core::Error::Backup(m)) if m.contains("does not carry")));
 }
 
@@ -588,15 +668,27 @@ fn restore_refuses_an_entry_expanding_past_its_declared_size() {
     let crafted = craft_container(&sb, "shrunk.mcbackup", &shrunk, &summary.path);
 
     let fp = sb.fingerprint();
-    let result = backup::stage_restore(&sb.data_dir(), &crafted, &fp,
-        &no_progress, &RestoreOptions::default());
-    assert!(matches!(&result, Err(vault_core::Error::Backup(m)) if m.contains("expands past its manifest size")));
+    let result = backup::stage_restore(
+        &sb.data_dir(),
+        &crafted,
+        &fp,
+        &no_progress,
+        &RestoreOptions::default(),
+    );
+    assert!(
+        matches!(&result, Err(vault_core::Error::Backup(m)) if m.contains("expands past its manifest size"))
+    );
     // The active vault is untouched.
     let (messages, _, _, _) = sb.vault_shape();
     assert_eq!(messages, 1);
 }
 
-fn craft_container(sb: &Sandbox, name: &str, manifest: &backup::BackupManifest, src: &Path) -> PathBuf {
+fn craft_container(
+    sb: &Sandbox,
+    name: &str,
+    manifest: &backup::BackupManifest,
+    src: &Path,
+) -> PathBuf {
     let dest = sb.outside(name);
     let file = fs::File::open(src).unwrap();
     let mut zip = zip::ZipArchive::new(file).unwrap();
@@ -613,10 +705,13 @@ fn craft_container(sb: &Sandbox, name: &str, manifest: &backup::BackupManifest, 
         if entry_name == "manifest.json" {
             body = manifest_bytes.clone();
         }
-        if entry_name == "manifest.json" || manifest.db.path == entry_name
+        if entry_name == "manifest.json"
+            || manifest.db.path == entry_name
             || manifest.settings.as_ref().map(|s| s.path.as_str()) == Some(entry_name.as_str())
         {
-            writer.start_file(entry_name, zip::write::FileOptions::<()>::default()).unwrap();
+            writer
+                .start_file(entry_name, zip::write::FileOptions::<()>::default())
+                .unwrap();
             writer.write_all(&body).unwrap();
         }
     }
@@ -630,10 +725,21 @@ fn restore_preflight_refuses_without_space() {
     sb.seed_vault("rs", 1);
     let summary = sb.backup("rs.mcbackup");
     let fp = sb.fingerprint();
-    let result = backup::restore_backup(&sb.data_dir(), &summary.path, &fp, &no_progress,
-        &RestoreOptions { min_free_bytes: Some(u64::MAX / 2), ..RestoreOptions::default() },
-        &keyring_has_everything);
-    assert!(matches!(result, Err(vault_core::Error::InsufficientSpace { .. })));
+    let result = backup::restore_backup(
+        &sb.data_dir(),
+        &summary.path,
+        &fp,
+        &no_progress,
+        &RestoreOptions {
+            min_free_bytes: Some(u64::MAX / 2),
+            ..RestoreOptions::default()
+        },
+        &keyring_has_everything,
+    );
+    assert!(matches!(
+        result,
+        Err(vault_core::Error::InsufficientSpace { .. })
+    ));
     // Nothing staged, nothing switched.
     let status = backup::recovery_status(&sb.data_dir()).unwrap();
     assert_eq!(status.journal_state, None);
@@ -650,8 +756,14 @@ fn restore_refuses_an_archive_inside_the_vault() {
     let inside = sb.data_dir().join("stolen.mcbackup");
     fs::copy(&summary.path, &inside).unwrap();
     let fp = sb.fingerprint();
-    let result = backup::restore_backup(&sb.data_dir(), &inside, &fp, &no_progress,
-        &RestoreOptions::default(), &keyring_has_everything);
+    let result = backup::restore_backup(
+        &sb.data_dir(),
+        &inside,
+        &fp,
+        &no_progress,
+        &RestoreOptions::default(),
+        &keyring_has_everything,
+    );
     assert!(matches!(&result, Err(vault_core::Error::Backup(m)) if m.contains("inside the vault")));
 }
 
@@ -665,19 +777,34 @@ fn commit_refuses_a_vault_that_changed_since_the_preview() {
     sb.seed_vault("c", 2);
     let summary = sb.backup("c.mcbackup");
 
-    let preview = backup::stage_restore(&sb.data_dir(), &summary.path, &sb.fingerprint(),
-        &no_progress, &RestoreOptions::default())
+    let preview = backup::stage_restore(
+        &sb.data_dir(),
+        &summary.path,
+        &sb.fingerprint(),
+        &no_progress,
+        &RestoreOptions::default(),
+    )
     .unwrap();
     // The vault gains a message between preview and commit.
     sb.with_pool(|s| {
         let msg = vault_core::message::NewMessage::new(
-            "c-source", "late@example.org", "Late <late@example.org>",
-            "2026-11-09T12:00:00Z", "arrived after the preview",
+            "c-source",
+            "late@example.org",
+            "Late <late@example.org>",
+            "2026-11-09T12:00:00Z",
+            "arrived after the preview",
         );
-        s.commit_import_batch("late-import", "c-source", &[msg], &[], &[], 0, true).unwrap();
+        s.commit_import_batch("late-import", "c-source", &[msg], &[], &[], 0, true)
+            .unwrap();
     });
-    let result = backup::commit_restore(&sb.data_dir(), &preview.preview_id, &sb.fingerprint(),
-        &no_progress, &RestoreOptions::default(), &keyring_has_everything);
+    let result = backup::commit_restore(
+        &sb.data_dir(),
+        &preview.preview_id,
+        &sb.fingerprint(),
+        &no_progress,
+        &RestoreOptions::default(),
+        &keyring_has_everything,
+    );
     assert!(matches!(&result, Err(vault_core::Error::Backup(m)) if m.contains("changed since")));
     // The vault still holds the late message.
     let (messages, _, _, _) = sb.vault_shape();
@@ -689,18 +816,31 @@ fn commit_refuses_staged_bytes_that_changed_since_validation() {
     let sb = Sandbox::new("staged");
     sb.seed_vault("st", 2);
     let summary = sb.backup("st.mcbackup");
-    let preview = backup::stage_restore(&sb.data_dir(), &summary.path, &sb.fingerprint(),
-        &no_progress, &RestoreOptions::default())
+    let preview = backup::stage_restore(
+        &sb.data_dir(),
+        &summary.path,
+        &sb.fingerprint(),
+        &no_progress,
+        &RestoreOptions::default(),
+    )
     .unwrap();
     // Tamper with the staged database (the staging area changed).
-    let staged_db = backup::recovery_dir(&sb.data_dir()).join("staging").join("vault.db");
+    let staged_db = backup::recovery_dir(&sb.data_dir())
+        .join("staging")
+        .join("vault.db");
     let staged = fs::read(&staged_db).unwrap();
     let mut tampered = staged.clone();
     let mid = tampered.len() / 2;
     tampered[mid] ^= 0xff;
     fs::write(&staged_db, tampered).unwrap();
-    let result = backup::commit_restore(&sb.data_dir(), &preview.preview_id, &sb.fingerprint(),
-        &no_progress, &RestoreOptions::default(), &keyring_has_everything);
+    let result = backup::commit_restore(
+        &sb.data_dir(),
+        &preview.preview_id,
+        &sb.fingerprint(),
+        &no_progress,
+        &RestoreOptions::default(),
+        &keyring_has_everything,
+    );
     assert!(matches!(&result, Err(vault_core::Error::Backup(m)) if m.contains("restage")));
     // The active vault is untouched.
     let (messages, _, _, _) = sb.vault_shape();
@@ -712,16 +852,32 @@ fn commit_refuses_an_unknown_or_superseded_preview_id() {
     let sb = Sandbox::new("preview-id");
     sb.seed_vault("p", 1);
     let summary = sb.backup("p.mcbackup");
-    let first = backup::stage_restore(&sb.data_dir(), &summary.path, &sb.fingerprint(),
-        &no_progress, &RestoreOptions::default())
+    let first = backup::stage_restore(
+        &sb.data_dir(),
+        &summary.path,
+        &sb.fingerprint(),
+        &no_progress,
+        &RestoreOptions::default(),
+    )
     .unwrap();
     // A second preview supersedes the first.
-    let second = backup::stage_restore(&sb.data_dir(), &summary.path, &sb.fingerprint(),
-        &no_progress, &RestoreOptions::default())
+    let second = backup::stage_restore(
+        &sb.data_dir(),
+        &summary.path,
+        &sb.fingerprint(),
+        &no_progress,
+        &RestoreOptions::default(),
+    )
     .unwrap();
     assert_ne!(first.preview_id, second.preview_id);
-    let result = backup::commit_restore(&sb.data_dir(), &first.preview_id, &sb.fingerprint(),
-        &no_progress, &RestoreOptions::default(), &keyring_has_everything);
+    let result = backup::commit_restore(
+        &sb.data_dir(),
+        &first.preview_id,
+        &sb.fingerprint(),
+        &no_progress,
+        &RestoreOptions::default(),
+        &keyring_has_everything,
+    );
     assert!(matches!(&result, Err(vault_core::Error::Backup(m)) if m.contains("newer preview")));
 }
 
@@ -740,14 +896,29 @@ fn restore_reports_zero_reauth_when_the_keyring_still_holds_every_account() {
     let sb2 = Sandbox::new("reauth-same-machine-new");
     sb2.seed_vault("new", 2);
     let new_summary = sb2.backup("new.mcbackup");
-    assert!(new_summary.manifest.counts.sources > 0, "fixture must carry sources");
+    assert!(
+        new_summary.manifest.counts.sources > 0,
+        "fixture must carry sources"
+    );
 
     let fp = sb.fingerprint();
-    let outcome = backup::restore_backup(&sb.data_dir(), &new_summary.path, &fp, &no_progress,
-        &RestoreOptions::default(), &|_| false)
+    let outcome = backup::restore_backup(
+        &sb.data_dir(),
+        &new_summary.path,
+        &fp,
+        &no_progress,
+        &RestoreOptions::default(),
+        &|_| false,
+    )
     .unwrap();
-    assert_eq!(outcome.sources_needing_reauth, 0, "keyring holds every account");
-    assert!(outcome.manifest.counts.sources > 0, "the manifest still counts them");
+    assert_eq!(
+        outcome.sources_needing_reauth, 0,
+        "keyring holds every account"
+    );
+    assert!(
+        outcome.manifest.counts.sources > 0,
+        "the manifest still counts them"
+    );
 }
 
 #[test]
@@ -776,15 +947,27 @@ fn restore_counts_reauth_per_source_not_from_the_manifest_total() {
 
     // No credential resolves on this machine: every source counts.
     let fp = sb.fingerprint();
-    let all = backup::restore_backup(&sb.data_dir(), &new_summary.path, &fp, &no_progress,
-        &RestoreOptions::default(), &|_| true)
+    let all = backup::restore_backup(
+        &sb.data_dir(),
+        &new_summary.path,
+        &fp,
+        &no_progress,
+        &RestoreOptions::default(),
+        &|_| true,
+    )
     .unwrap();
     assert_eq!(all.sources_needing_reauth, total);
 
     // Exactly one account's credentials are missing: exactly it counts.
     let fp = sb.fingerprint();
-    let partial = backup::restore_backup(&sb.data_dir(), &new_summary.path, &fp, &no_progress,
-        &RestoreOptions::default(), &|i| i.label == "new-source-b")
+    let partial = backup::restore_backup(
+        &sb.data_dir(),
+        &new_summary.path,
+        &fp,
+        &no_progress,
+        &RestoreOptions::default(),
+        &|i| i.label == "new-source-b",
+    )
     .unwrap();
     assert_eq!(partial.sources_needing_reauth, 1);
 }
@@ -797,12 +980,21 @@ fn verify_committable_raises_every_refusal_before_the_switch() {
     let sb = Sandbox::new("verify-committable");
     sb.seed_vault("vc", 2);
     let summary = sb.backup("vc.mcbackup");
-    let preview = backup::stage_restore(&sb.data_dir(), &summary.path, &sb.fingerprint(),
-        &no_progress, &RestoreOptions::default())
+    let preview = backup::stage_restore(
+        &sb.data_dir(),
+        &summary.path,
+        &sb.fingerprint(),
+        &no_progress,
+        &RestoreOptions::default(),
+    )
     .unwrap();
     // The clean case passes — and switches nothing.
-    backup::verify_committable(&sb.data_dir(), &preview.preview_id, &sb.fingerprint(),
-        &no_progress)
+    backup::verify_committable(
+        &sb.data_dir(),
+        &preview.preview_id,
+        &sb.fingerprint(),
+        &no_progress,
+    )
     .unwrap();
     let (messages, _, _, _) = sb.vault_shape();
     assert_eq!(messages, 2, "the precheck must not switch anything");
@@ -817,18 +1009,32 @@ fn verify_committable_raises_every_refusal_before_the_switch() {
             "2026-11-09T12:00:00Z",
             "arrived after the preview",
         );
-        s.commit_import_batch("late-import", "vc-source", &[msg], &[], &[], 0, true).unwrap();
+        s.commit_import_batch("late-import", "vc-source", &[msg], &[], &[], 0, true)
+            .unwrap();
     });
-    let result = backup::verify_committable(&sb.data_dir(), &preview.preview_id, &sb.fingerprint(),
-        &no_progress);
+    let result = backup::verify_committable(
+        &sb.data_dir(),
+        &preview.preview_id,
+        &sb.fingerprint(),
+        &no_progress,
+    );
     assert!(matches!(&result, Err(vault_core::Error::Backup(m)) if m.contains("changed since")));
 
     // A superseded preview id refuses the same way — still read-only.
-    let _second = backup::stage_restore(&sb.data_dir(), &summary.path, &sb.fingerprint(),
-        &no_progress, &RestoreOptions::default())
+    let _second = backup::stage_restore(
+        &sb.data_dir(),
+        &summary.path,
+        &sb.fingerprint(),
+        &no_progress,
+        &RestoreOptions::default(),
+    )
     .unwrap();
-    let result = backup::verify_committable(&sb.data_dir(), &preview.preview_id, &sb.fingerprint(),
-        &no_progress);
+    let result = backup::verify_committable(
+        &sb.data_dir(),
+        &preview.preview_id,
+        &sb.fingerprint(),
+        &no_progress,
+    );
     assert!(matches!(&result, Err(vault_core::Error::Backup(m)) if m.contains("newer preview")));
     // The active vault still holds everything the late import wrote.
     let (messages, _, _, _) = sb.vault_shape();
@@ -854,12 +1060,27 @@ fn interrupted_case(fail_at: RestoreFailPoint, rolls_back: bool, slot_kept: bool
     let sb2 = Sandbox::new(&format!("{tag}-new"));
     let _new_seed = sb2.seed_vault("new", 2);
     let new_summary = sb2.backup("new.mcbackup");
-    assert_ne!(summary.manifest.counts.messages, new_summary.manifest.counts.messages);
+    assert_ne!(
+        summary.manifest.counts.messages,
+        new_summary.manifest.counts.messages
+    );
 
     let fp = sb.fingerprint();
-    let result = backup::restore_backup(&sb.data_dir(), &new_summary.path, &fp, &no_progress,
-        &RestoreOptions { fail_at, ..RestoreOptions::default() }, &keyring_has_everything);
-    assert!(result.is_err(), "the injected failure must fire at {fail_at:?}");
+    let result = backup::restore_backup(
+        &sb.data_dir(),
+        &new_summary.path,
+        &fp,
+        &no_progress,
+        &RestoreOptions {
+            fail_at,
+            ..RestoreOptions::default()
+        },
+        &keyring_has_everything,
+    );
+    assert!(
+        result.is_err(),
+        "the injected failure must fire at {fail_at:?}"
+    );
 
     // Recovery resolves the interruption deterministically.
     let recovery = backup::recover_interrupted_switch(&sb.data_dir()).unwrap();
@@ -874,9 +1095,15 @@ fn interrupted_case(fail_at: RestoreFailPoint, rolls_back: bool, slot_kept: bool
             // switch); the original vault simply still stands.
             assert!(matches!(fail_at, RestoreFailPoint::AfterStagedValidate));
         }
-        SwitchRecovery::AlreadyCompleted { .. } => panic!("journal cannot be complete at {fail_at:?}"),
-        SwitchRecovery::RolledBack { .. } => assert!(rolls_back, "unexpected rollback at {fail_at:?}"),
-        SwitchRecovery::RolledForward { .. } => assert!(!rolls_back, "unexpected roll-forward at {fail_at:?}"),
+        SwitchRecovery::AlreadyCompleted { .. } => {
+            panic!("journal cannot be complete at {fail_at:?}")
+        }
+        SwitchRecovery::RolledBack { .. } => {
+            assert!(rolls_back, "unexpected rollback at {fail_at:?}")
+        }
+        SwitchRecovery::RolledForward { .. } => {
+            assert!(!rolls_back, "unexpected roll-forward at {fail_at:?}")
+        }
     }
     // The active vault is whole and holds exactly the expected archive.
     let (messages, _sources, _registry, digests) = sb.vault_shape();
@@ -887,17 +1114,27 @@ fn interrupted_case(fail_at: RestoreFailPoint, rolls_back: bool, slot_kept: bool
     // Every referenced digest resolves to a real object.
     let store = sb.store();
     for digest in &digests {
-        assert!(store.has(digest), "digest {digest} resolvable at {fail_at:?}");
+        assert!(
+            store.has(digest),
+            "digest {digest} resolvable at {fail_at:?}"
+        );
     }
     // Recovery is idempotent: a second recovery changes nothing.
     let again = backup::recover_interrupted_switch(&sb.data_dir()).unwrap();
-    assert!(matches!(again, SwitchRecovery::None | SwitchRecovery::AlreadyCompleted { .. }));
+    assert!(matches!(
+        again,
+        SwitchRecovery::None | SwitchRecovery::AlreadyCompleted { .. }
+    ));
     // The recovery status reports a completed journal (when a switch
     // ever started — AfterStagedValidate predates the journal), and the
     // previous slot survived exactly when the switch reached phase B.
     let status = backup::recovery_status(&sb.data_dir()).unwrap();
     if !matches!(fail_at, RestoreFailPoint::AfterStagedValidate) {
-        assert_eq!(status.journal_state, Some(SwitchState::Completed), "at {fail_at:?}");
+        assert_eq!(
+            status.journal_state,
+            Some(SwitchState::Completed),
+            "at {fail_at:?}"
+        );
     } else {
         assert_eq!(status.journal_state, None, "no journal at {fail_at:?}");
     }
@@ -930,14 +1167,29 @@ fn restore_over_a_staged_only_failure_can_retry_cleanly() {
     let new_summary = sb2.backup("rn.mcbackup");
 
     let fp = sb.fingerprint();
-    let result = backup::restore_backup(&sb.data_dir(), &new_summary.path, &fp, &no_progress,
-        &RestoreOptions { fail_at: RestoreFailPoint::AfterStagedValidate, ..Default::default() }, &keyring_has_everything);
+    let result = backup::restore_backup(
+        &sb.data_dir(),
+        &new_summary.path,
+        &fp,
+        &no_progress,
+        &RestoreOptions {
+            fail_at: RestoreFailPoint::AfterStagedValidate,
+            ..Default::default()
+        },
+        &keyring_has_everything,
+    );
     assert!(result.is_err());
     backup::recover_interrupted_switch(&sb.data_dir()).unwrap();
 
     let fp = sb.fingerprint();
-    backup::restore_backup(&sb.data_dir(), &new_summary.path, &fp, &no_progress,
-        &RestoreOptions::default(), &keyring_has_everything)
+    backup::restore_backup(
+        &sb.data_dir(),
+        &new_summary.path,
+        &fp,
+        &no_progress,
+        &RestoreOptions::default(),
+        &keyring_has_everything,
+    )
     .unwrap();
     let (messages, _, _, _) = sb.vault_shape();
     assert_eq!(messages, 1, "the retry restored the new vault");
@@ -958,8 +1210,14 @@ fn return_to_previous_vault_switches_back_and_records_the_current_one() {
 
     // Replace the vault with the "after" backup.
     let fp = sb.fingerprint();
-    backup::restore_backup(&sb.data_dir(), &after.path, &fp, &no_progress,
-        &RestoreOptions::default(), &keyring_has_everything)
+    backup::restore_backup(
+        &sb.data_dir(),
+        &after.path,
+        &fp,
+        &no_progress,
+        &RestoreOptions::default(),
+        &keyring_has_everything,
+    )
     .unwrap();
     let (messages, _, _, _) = sb.vault_shape();
     assert_eq!(messages, 2);
@@ -968,7 +1226,8 @@ fn return_to_previous_vault_switches_back_and_records_the_current_one() {
     let status = backup::recovery_status(&sb.data_dir()).unwrap();
     assert_eq!(status.previous.len(), 1);
     let slot = status.previous[0].id.clone();
-    backup::return_to_previous_vault(&sb.data_dir(), &slot, &no_progress, &keyring_has_everything).unwrap();
+    backup::return_to_previous_vault(&sb.data_dir(), &slot, &no_progress, &keyring_has_everything)
+        .unwrap();
     let (messages, _, _, digests) = sb.vault_shape();
     assert_eq!(messages, 4);
     assert_eq!(digests.len(), 3);
@@ -977,10 +1236,15 @@ fn return_to_previous_vault_switches_back_and_records_the_current_one() {
     // the (single) newest previous slot — the slot we returned to was
     // consumed into the active vault.
     let status = backup::recovery_status(&sb.data_dir()).unwrap();
-    assert_eq!(status.previous.len(), 1, "the replaced vault is kept: {status:?}");
+    assert_eq!(
+        status.previous.len(),
+        1,
+        "the replaced vault is kept: {status:?}"
+    );
     // And returning to it would bring the 2-message vault back.
     let slot = status.previous[0].id.clone();
-    backup::return_to_previous_vault(&sb.data_dir(), &slot, &no_progress, &keyring_has_everything).unwrap();
+    backup::return_to_previous_vault(&sb.data_dir(), &slot, &no_progress, &keyring_has_everything)
+        .unwrap();
     let (messages, _, _, _) = sb.vault_shape();
     assert_eq!(messages, 2);
     drop(before);
@@ -994,20 +1258,35 @@ fn recovery_forget_removes_one_slot_and_refuses_unresolved_switches() {
     sb2.seed_vault("fgn", 1);
     let after = sb2.backup("fgn.mcbackup");
     let fp = sb.fingerprint();
-    backup::restore_backup(&sb.data_dir(), &after.path, &fp, &no_progress,
-        &RestoreOptions::default(), &keyring_has_everything)
+    backup::restore_backup(
+        &sb.data_dir(),
+        &after.path,
+        &fp,
+        &no_progress,
+        &RestoreOptions::default(),
+        &keyring_has_everything,
+    )
     .unwrap();
 
     let status = backup::recovery_status(&sb.data_dir()).unwrap();
     let slot = status.previous[0].id.clone();
     // Traversal-shaped ids never resolve to a path.
     assert!(backup::recovery_forget(&sb.data_dir(), "../../etc").is_err());
-    assert!(backup::return_to_previous_vault(&sb.data_dir(), "previous-x", &no_progress, &keyring_has_everything).is_err());
+    assert!(backup::return_to_previous_vault(
+        &sb.data_dir(),
+        "previous-x",
+        &no_progress,
+        &keyring_has_everything
+    )
+    .is_err());
     // A real slot id is removed exactly on request.
     backup::recovery_forget(&sb.data_dir(), &slot).unwrap();
     let status = backup::recovery_status(&sb.data_dir()).unwrap();
     assert!(status.previous.is_empty());
-    assert!(backup::recovery_forget(&sb.data_dir(), &slot).is_err(), "already forgotten");
+    assert!(
+        backup::recovery_forget(&sb.data_dir(), &slot).is_err(),
+        "already forgotten"
+    );
 }
 
 #[test]
@@ -1018,21 +1297,38 @@ fn switch_refuses_while_a_journal_is_unresolved() {
     sb2.seed_vault("unn", 1);
     let after = sb2.backup("unn.mcbackup");
     let fp = sb.fingerprint();
-    let result = backup::restore_backup(&sb.data_dir(), &after.path, &fp, &no_progress,
+    let result = backup::restore_backup(
+        &sb.data_dir(),
+        &after.path,
+        &fp,
+        &no_progress,
         &RestoreOptions {
             fail_at: RestoreFailPoint::DuringMoveToPrevious(1),
             ..Default::default()
-        }, &keyring_has_everything);
+        },
+        &keyring_has_everything,
+    );
     assert!(result.is_err());
     // While unresolved, no new staging or switching may start.
-    assert!(backup::stage_restore(&sb.data_dir(), &after.path, &fp, &no_progress,
-        &RestoreOptions::default())
+    assert!(backup::stage_restore(
+        &sb.data_dir(),
+        &after.path,
+        &fp,
+        &no_progress,
+        &RestoreOptions::default()
+    )
     .is_err());
     // Recovery clears it.
     backup::recover_interrupted_switch(&sb.data_dir()).unwrap();
     let fp = sb.fingerprint();
-    backup::restore_backup(&sb.data_dir(), &after.path, &fp, &no_progress,
-        &RestoreOptions::default(), &keyring_has_everything)
+    backup::restore_backup(
+        &sb.data_dir(),
+        &after.path,
+        &fp,
+        &no_progress,
+        &RestoreOptions::default(),
+        &keyring_has_everything,
+    )
     .unwrap();
 }
 
@@ -1052,7 +1348,12 @@ fn backups_never_carry_credential_material() {
     let names: HashSet<String> = (0..zip.len())
         .map(|i| zip.by_index(i).unwrap().name().unwrap().to_string())
         .collect();
-    let mut expected: HashSet<String> = summary.manifest.objects.iter().map(|o| o.path.clone()).collect();
+    let mut expected: HashSet<String> = summary
+        .manifest
+        .objects
+        .iter()
+        .map(|o| o.path.clone())
+        .collect();
     expected.insert("manifest.json".to_string());
     expected.insert("vault.db".to_string());
     if summary.manifest.settings.is_some() {
@@ -1066,6 +1367,9 @@ fn backups_never_carry_credential_material() {
         use std::io::Read as _;
         entry.read_to_end(&mut bytes).unwrap();
         let text = String::from_utf8(bytes).unwrap();
-        assert!(!text.to_lowercase().contains("key"), "no key material in settings: {text}");
+        assert!(
+            !text.to_lowercase().contains("key"),
+            "no key material in settings: {text}"
+        );
     }
 }

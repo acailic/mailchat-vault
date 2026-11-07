@@ -85,8 +85,8 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::object_store::ObjectStore;
 use crate::storage::{
-    SUPPORTED_SCHEMA_VERSION, SourceInstance, VaultFingerprint, media_digests_on, read_schema_version,
-    vault_fingerprint_on,
+    media_digests_on, read_schema_version, vault_fingerprint_on, SourceInstance, VaultFingerprint,
+    SUPPORTED_SCHEMA_VERSION,
 };
 use crate::{Error, Result};
 
@@ -438,11 +438,22 @@ pub fn write_backup_container(
     let dest_parent = dest
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
-        .ok_or_else(|| bad(format!("backup destination has no directory: {}", dest.display())))?;
-    let file_name = dest
-        .file_name()
-        .ok_or_else(|| bad(format!("backup destination is a directory: {}", dest.display())))?;
-    let canonical_dest = dest_parent.canonicalize().map_err(Error::Io)?.join(file_name);
+        .ok_or_else(|| {
+            bad(format!(
+                "backup destination has no directory: {}",
+                dest.display()
+            ))
+        })?;
+    let file_name = dest.file_name().ok_or_else(|| {
+        bad(format!(
+            "backup destination is a directory: {}",
+            dest.display()
+        ))
+    })?;
+    let canonical_dest = dest_parent
+        .canonicalize()
+        .map_err(Error::Io)?
+        .join(file_name);
     let vault_root = data_dir.canonicalize().map_err(Error::Io)?;
     if canonical_dest.starts_with(&vault_root) {
         return Err(bad(format!(
@@ -472,9 +483,15 @@ pub fn write_backup_container(
         .saturating_mul(2)
         .saturating_add(store_bytes)
         .saturating_add(SLACK_BYTES);
-    let needed = opts.min_free_bytes.map_or(needed, |floor| needed.max(floor));
-    let available = fs4::available_space(dest_parent)
-        .map_err(|e| bad(format!("cannot measure free space at {}: {e}", dest_parent.display())))?;
+    let needed = opts
+        .min_free_bytes
+        .map_or(needed, |floor| needed.max(floor));
+    let available = fs4::available_space(dest_parent).map_err(|e| {
+        bad(format!(
+            "cannot measure free space at {}: {e}",
+            dest_parent.display()
+        ))
+    })?;
     if available < needed {
         return Err(Error::InsufficientSpace { needed, available });
     }
@@ -489,7 +506,11 @@ pub fn write_backup_container(
     let mut zip = ZipWriter::new(zip_file);
     let total_entries = plan.objects.len() as u64 + 1 + u64::from(plan.has_settings);
 
-    progress(ProgressNote { phase: "container", done: 0, total: total_entries });
+    progress(ProgressNote {
+        phase: "container",
+        done: 0,
+        total: total_entries,
+    });
     let streamed = write_entry(
         &mut zip,
         DB_ENTRY,
@@ -501,7 +522,11 @@ pub fn write_backup_container(
         size: streamed.size,
         sha256: streamed.sha256,
     };
-    progress(ProgressNote { phase: "container", done: 1, total: total_entries });
+    progress(ProgressNote {
+        phase: "container",
+        done: 1,
+        total: total_entries,
+    });
 
     let mut settings_entry = None;
     if plan.has_settings {
@@ -516,7 +541,11 @@ pub fn write_backup_container(
             size: streamed.size,
             sha256: streamed.sha256,
         });
-        progress(ProgressNote { phase: "container", done: 2, total: total_entries });
+        progress(ProgressNote {
+            phase: "container",
+            done: 2,
+            total: total_entries,
+        });
     }
 
     for (i, object) in plan.objects.iter().enumerate() {
@@ -604,14 +633,17 @@ pub fn create_backup(
         .unwrap_or_else(|| "backup".to_string());
     let snapshot_tmp = dest_parent.join(format!(".{stem}-snapshot-{}", std::process::id()));
     let _snapshot_guard = TempPath(&snapshot_tmp);
-    progress(ProgressNote { phase: "snapshot", done: 0, total: 0 });
+    progress(ProgressNote {
+        phase: "snapshot",
+        done: 0,
+        total: 0,
+    });
     let plan = snapshot_for_backup(data_dir, conn, &snapshot_tmp)?;
     let summary = write_backup_container(data_dir, &plan, dest, progress, cancel, opts)?;
     // The snapshot's job is done once the container is verified.
     discard_snapshot(&snapshot_tmp);
     Ok(summary)
 }
-
 
 /// Snapshot a live database into `dest` using SQLite's backup API.
 /// The destination must not exist (a fresh, empty target is required).
@@ -825,8 +857,11 @@ fn verify_container(
         });
     }
     if verified.len() as u64 != total {
-        let missing: Vec<&str> =
-            expected.keys().filter(|k| !verified.contains(*k)).map(|s| s.as_str()).collect();
+        let missing: Vec<&str> = expected
+            .keys()
+            .filter(|k| !verified.contains(*k))
+            .map(|s| s.as_str())
+            .collect();
         return Err(bad(format!(
             "the container is missing manifest entries: {}",
             missing.join(", ")
@@ -931,9 +966,15 @@ pub fn stage_restore(
         .map(|e| e.size)
         .sum::<u64>()
         .saturating_add(SLACK_BYTES);
-    let needed = opts.min_free_bytes.map_or(payload, |floor| payload.max(floor));
-    let available = fs4::available_space(&recovery)
-        .map_err(|e| bad(format!("cannot measure free space at {}: {e}", recovery.display())))?;
+    let needed = opts
+        .min_free_bytes
+        .map_or(payload, |floor| payload.max(floor));
+    let available = fs4::available_space(&recovery).map_err(|e| {
+        bad(format!(
+            "cannot measure free space at {}: {e}",
+            recovery.display()
+        ))
+    })?;
     if available < needed {
         return Err(Error::InsufficientSpace { needed, available });
     }
@@ -1074,15 +1115,25 @@ fn validate_staged_database(db: &Path, manifest: &BackupManifest) -> Result<()> 
     let conn = open_read_only(db)?;
     let verdict: String = conn
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-        .map_err(|e| bad(format!("staged database integrity check failed to run: {e}")))?;
+        .map_err(|e| {
+            bad(format!(
+                "staged database integrity check failed to run: {e}"
+            ))
+        })?;
     if verdict != "ok" {
         return Err(bad(format!(
             "the staged database fails its integrity check: {verdict}"
         )));
     }
     let fk_violations: i64 = conn
-        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0))
-        .map_err(|e| bad(format!("staged database foreign-key check failed to run: {e}")))?;
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+            row.get(0)
+        })
+        .map_err(|e| {
+            bad(format!(
+                "staged database foreign-key check failed to run: {e}"
+            ))
+        })?;
     if fk_violations > 0 {
         return Err(bad(format!(
             "the staged database reports {fk_violations} foreign-key violations"
@@ -1162,8 +1213,13 @@ pub fn commit_restore(
     needs_reauth: &dyn Fn(&SourceInstance) -> bool,
 ) -> Result<RestoreOutcome> {
     let staging = staging_dir(data_dir);
-    let (record, manifest) =
-        precheck_commit(data_dir, &staging, preview_id, current_fingerprint, progress)?;
+    let (record, manifest) = precheck_commit(
+        data_dir,
+        &staging,
+        preview_id,
+        current_fingerprint,
+        progress,
+    )?;
 
     let previous_slot = new_previous_slot(data_dir)?;
     write_journal(data_dir, |journal| {
@@ -1201,7 +1257,14 @@ pub fn verify_committable(
     progress: &dyn Fn(ProgressNote),
 ) -> Result<()> {
     let staging = staging_dir(data_dir);
-    precheck_commit(data_dir, &staging, preview_id, current_fingerprint, progress).map(|_| ())
+    precheck_commit(
+        data_dir,
+        &staging,
+        preview_id,
+        current_fingerprint,
+        progress,
+    )
+    .map(|_| ())
 }
 
 /// The shared pre-switch refusal checks of [`commit_restore`]: the
@@ -1229,8 +1292,11 @@ fn precheck_commit(
     // An unresolved switch must be recovered before committing a new one.
     ensure_no_open_switch(data_dir)?;
     // The staged bytes must still be exactly what was validated.
-    let manifest: BackupManifest = read_json(&staging.join(STAGED_MANIFEST))
-        .map_err(|e| bad(format!("the staged manifest is unreadable — restage the restore: {e}")))?;
+    let manifest: BackupManifest = read_json(&staging.join(STAGED_MANIFEST)).map_err(|e| {
+        bad(format!(
+            "the staged manifest is unreadable — restage the restore: {e}"
+        ))
+    })?;
     let manifest_bytes = fs::read(staging.join(STAGED_MANIFEST)).map_err(Error::Io)?;
     let manifest_sha = format!("{:x}", Sha256::digest(&manifest_bytes));
     if manifest_sha != record.manifest_sha256 {
@@ -1249,7 +1315,9 @@ fn precheck_commit(
     let staged_fingerprint = vault_fingerprint_on(&staged_conn)?;
     drop(staged_conn);
     if staged_fingerprint != record.staged_fingerprint {
-        return Err(bad("the staged database changed since validation — refusing to switch"));
+        return Err(bad(
+            "the staged database changed since validation — refusing to switch",
+        ));
     }
     Ok((record, manifest))
 }
@@ -1310,12 +1378,16 @@ fn run_switch(
     for (i, item) in SWITCH_ITEMS.iter().enumerate() {
         move_switch_item(data_dir, previous_slot, item)?;
         if opts.fail_at == RestoreFailPoint::DuringMoveToPrevious(i) {
-            return Err(fault("restore failure injected while moving the vault aside"));
+            return Err(fault(
+                "restore failure injected while moving the vault aside",
+            ));
         }
     }
     fsync_dir(previous_slot)?;
     if opts.fail_at == RestoreFailPoint::AfterMovesToPrevious {
-        return Err(fault("restore failure injected after moving the vault aside"));
+        return Err(fault(
+            "restore failure injected after moving the vault aside",
+        ));
     }
     write_journal(data_dir, |journal| {
         if let Some(journal) = journal.as_mut() {
@@ -1327,7 +1399,9 @@ fn run_switch(
     for (i, item) in SWITCH_ITEMS.iter().enumerate() {
         move_switch_item(source, data_dir, item)?;
         if opts.fail_at == RestoreFailPoint::DuringMoveToActive(i) {
-            return Err(fault("restore failure injected while switching the new vault in"));
+            return Err(fault(
+                "restore failure injected while switching the new vault in",
+            ));
         }
     }
     fsync_dir(data_dir)?;
@@ -1343,7 +1417,9 @@ fn run_switch(
         ));
     }
     if opts.fail_at == RestoreFailPoint::BeforeCompleted {
-        return Err(fault("restore failure injected before completing the switch"));
+        return Err(fault(
+            "restore failure injected before completing the switch",
+        ));
     }
     write_journal(data_dir, |journal| {
         if let Some(journal) = journal.as_mut() {
@@ -1355,15 +1431,19 @@ fn run_switch(
     fs::remove_dir_all(source).ok();
     fsync_dir(&recovery_dir(data_dir))?;
 
-    progress(ProgressNote { phase: "done", done: 1, total: 1 });
+    progress(ProgressNote {
+        phase: "done",
+        done: 1,
+        total: 1,
+    });
     // Reauth accounting reads the *restored* vault's own source list
     // against the caller's credential-presence check (the OS keyring):
     // a same-machine restore whose keyring still holds every user@host
     // reports 0. The switch is already complete here — accounting must
     // never fail it, so an unreadable fresh vault falls back to the
     // manifest's (conservative) source count.
-    let sources_needing_reauth = restored_sources_needing_reauth(data_dir, needs_reauth)
-        .unwrap_or(manifest.counts.sources);
+    let sources_needing_reauth =
+        restored_sources_needing_reauth(data_dir, needs_reauth).unwrap_or(manifest.counts.sources);
     Ok(RestoreOutcome {
         manifest: manifest.clone(),
         previous_slot: previous_slot
@@ -1544,10 +1624,7 @@ pub fn verify_returnable(data_dir: &Path, slot_id: &str) -> Result<()> {
 /// Validate a previous-vault slot exactly as the switch would: openable,
 /// integral, its schema supported, and every referenced media object
 /// present. Returns the slot path, its schema version, and its counts.
-fn validate_previous_slot(
-    data_dir: &Path,
-    slot_id: &str,
-) -> Result<(PathBuf, i64, BackupCounts)> {
+fn validate_previous_slot(data_dir: &Path, slot_id: &str) -> Result<(PathBuf, i64, BackupCounts)> {
     if !is_slot_id(slot_id) {
         return Err(bad(format!("not a previous-vault id: {slot_id}")));
     }
@@ -1566,7 +1643,11 @@ fn validate_previous_slot(
     let conn = open_read_only(&slot.join(DB_ENTRY))?;
     let verdict: String = conn
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-        .map_err(|e| bad(format!("previous vault {slot_id} failed its integrity check: {e}")))?;
+        .map_err(|e| {
+            bad(format!(
+                "previous vault {slot_id} failed its integrity check: {e}"
+            ))
+        })?;
     if verdict != "ok" {
         return Err(bad(format!(
             "previous vault {slot_id} fails its integrity check: {verdict}"
@@ -1820,9 +1901,7 @@ fn new_previous_slot(data_dir: &Path) -> Result<PathBuf> {
     fs::create_dir_all(&recovery).map_err(Error::Io)?;
     let stamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
     for _ in 0..64 {
-        let hex: String = (0..6)
-            .map(|_| format!("{:x}", rand_nibble()))
-            .collect();
+        let hex: String = (0..6).map(|_| format!("{:x}", rand_nibble())).collect();
         let slot = recovery.join(format!("{PREVIOUS_PREFIX}{stamp}-{hex}"));
         if !slot.exists() {
             fs::create_dir_all(&slot).map_err(Error::Io)?;
@@ -1962,12 +2041,16 @@ fn hash_reader(reader: &mut dyn Read) -> Result<(String, u64)> {
 }
 
 fn fsync_file(path: &Path) -> Result<()> {
-    File::open(path).and_then(|f| f.sync_all()).map_err(Error::Io)
+    File::open(path)
+        .and_then(|f| f.sync_all())
+        .map_err(Error::Io)
 }
 
 #[cfg(unix)]
 fn fsync_dir(path: &Path) -> Result<()> {
-    File::open(path).and_then(|f| f.sync_all()).map_err(Error::Io)
+    File::open(path)
+        .and_then(|f| f.sync_all())
+        .map_err(Error::Io)
 }
 
 #[cfg(not(unix))]
@@ -2035,10 +2118,16 @@ mod tests {
         assert!(is_media_object_path(&format!("media/{sha}.jpg")));
         assert!(is_media_object_path(&format!("media/{sha}.BIN")));
         assert!(!is_media_object_path(&format!("media/{sha}")));
-        assert!(!is_media_object_path(&format!("media/{}.jpg/x", "a".repeat(63))));
+        assert!(!is_media_object_path(&format!(
+            "media/{}.jpg/x",
+            "a".repeat(63)
+        )));
         assert!(!is_media_object_path(&format!("media/../{sha}.jpg")));
         assert!(!is_media_object_path(&format!("media/{sha}/x.jpg")));
-        assert!(!is_media_object_path(&format!("media/{}.jpg", "z".repeat(64))));
+        assert!(!is_media_object_path(&format!(
+            "media/{}.jpg",
+            "z".repeat(64)
+        )));
         assert!(!is_media_object_path("vault.db"));
         assert!(!is_media_object_path("settings.json"));
         assert_eq!(object_digest_of(&format!("media/{sha}.jpg")).unwrap(), sha);
@@ -2064,6 +2153,9 @@ mod tests {
     fn recovery_dir_is_a_sibling_of_the_vault_root() {
         let dir = Path::new("/x/y/mailchat-vault");
         assert_eq!(recovery_dir(dir), Path::new("/x/y/mailchat-vault-recovery"));
-        assert_eq!(recovery_dir(Path::new("/vault")), Path::new("/vault-recovery"));
+        assert_eq!(
+            recovery_dir(Path::new("/vault")),
+            Path::new("/vault-recovery")
+        );
     }
 }

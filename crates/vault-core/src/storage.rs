@@ -2678,13 +2678,11 @@ fn archive_revision_on(conn: &Connection) -> Result<u64> {
 /// entries plus the `media_objects` registry). Shared with the M4.4
 /// backup module, which runs the same collection against a consistent
 /// snapshot or a staged restore instead of the live writer.
-pub(crate) fn media_digests_on(
-    conn: &Connection,
-) -> Result<std::collections::HashSet<String>> {
+pub(crate) fn media_digests_on(conn: &Connection) -> Result<std::collections::HashSet<String>> {
     let mut digests = std::collections::HashSet::new();
     if table_exists_on(conn, "archive_messages")? {
-        let mut stmt =
-            conn.prepare("SELECT raw_json FROM archive_messages WHERE raw_json LIKE '%\"media\"%'")?;
+        let mut stmt = conn
+            .prepare("SELECT raw_json FROM archive_messages WHERE raw_json LIKE '%\"media\"%'")?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let raw: String = row.get(0)?;
@@ -2719,10 +2717,11 @@ pub(crate) fn vault_fingerprint_on(conn: &Connection) -> Result<VaultFingerprint
         if !table_exists_on(conn, table)? {
             return Ok(0); // a legacy (pre-canonical) database holds none
         }
-        Ok(conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
-            r.get::<_, i64>(0)
-        })?
-        .max(0) as u64)
+        Ok(conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
+                r.get::<_, i64>(0)
+            })?
+            .max(0) as u64)
     };
     Ok(VaultFingerprint {
         schema_version: read_schema_version(conn)?,
