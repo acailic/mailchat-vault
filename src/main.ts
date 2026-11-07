@@ -22,6 +22,7 @@ import {
   renderRecoverySlots,
   renderRestoreFlow,
   restoreDoneLine,
+  switchStopped,
   type BackupSummaryView,
   type RestoreFlow,
   type RestorePreviewView,
@@ -1970,6 +1971,9 @@ let pendingRestoreJob: number | null = null;
 /** Set once a restore/return switched the vault: the backend pool is
  * shut down and every further command fails until the app restarts. */
 let vaultSwitched = false;
+/** Set while a commit or return switch is running: the backend
+ * serializes switches, and the UI must not offer a second one. */
+let switchInFlight = false;
 
 function renderRestorePanel(): void {
   renderRestoreFlow(
@@ -2043,19 +2047,13 @@ async function startRestoreValidation(archive: string): Promise<void> {
 
 /** Commit the validated restore: stops the app's vault access and
  *  switches through the journal. A restart is required afterwards. */
-/** A commit/return error raised after the backend was stopped: the
- *  vault switch is mid-flight and resolves on restart (the switch
- *  journal recovers it) — the app cannot serve the vault anymore. */
-function switchStoppedMidWay(e: unknown): boolean {
-  return String(e).includes("restart required");
-}
-
 async function commitRestore(preview: RestorePreviewView): Promise<void> {
-  if (vaultSwitched || !canCommit(restoreFlow)) return;
+  if (vaultSwitched || switchInFlight || !canCommit(restoreFlow)) return;
   const confirmed = window.confirm(
     `Replace the current vault with this backup?\n\n${previewLine(preview)}\n\nThe current vault is kept as a recovery snapshot. The app will need a restart.`,
   );
   if (!confirmed) return;
+  switchInFlight = true;
   restoreFlow = { step: "committing", preview };
   renderRestorePanel();
   try {
@@ -2067,7 +2065,7 @@ async function commitRestore(preview: RestorePreviewView): Promise<void> {
     setStatus(restoreDoneLine(outcome) + " Restart the app now.", false);
     void refreshRecovery();
   } catch (e) {
-    if (switchStoppedMidWay(e)) {
+    if (switchStopped(e)) {
       // The backend stopped mid-switch: a restart resolves the journal;
       // nothing further is usable, so the UI must say so and lock.
       vaultSwitched = true;
@@ -2080,6 +2078,7 @@ async function commitRestore(preview: RestorePreviewView): Promise<void> {
       setStatus("Restart the app to recover the vault switch.", true);
     } else {
       // Refused before anything stopped: the vault and the app are both untouched.
+      switchInFlight = false;
       restoreFlow = { step: "error", message: `Restore refused (the vault was not replaced): ${e}` };
     }
   }
@@ -2091,18 +2090,20 @@ async function refreshRecovery(): Promise<void> {
   try {
     const status = await ipc.recoveryStatus();
     recoveryLineEl.textContent = recoveryLine(status);
-    renderRecoverySlots(recoverySlotsEl, status, onReturnSlot, onForgetSlot);
+    renderRecoverySlots(recoverySlotsEl, status, onReturnSlot, onForgetSlot,
+      vaultSwitched || switchInFlight);
   } catch (e) {
     recoveryLineEl.textContent = `Recovery status failed: ${e}`;
   }
 }
 
 async function onReturnSlot(slotId: string): Promise<void> {
-  if (vaultSwitched) return;
+  if (vaultSwitched || switchInFlight) return;
   const confirmed = window.confirm(
     `Return to this previous vault?\n\nThe current vault is kept as a new recovery snapshot. The app will need a restart.`,
   );
   if (!confirmed) return;
+  switchInFlight = true;
   recoveryLineEl.textContent = "Switching back to the previous vault…";
   try {
     const outcome = await ipc.returnToPreviousVault(slotId);
@@ -2113,7 +2114,7 @@ async function onReturnSlot(slotId: string): Promise<void> {
       restoreDoneLine(outcome) + " Restart the app now.";
     setStatus("Previous vault restored. Restart the app now.", false);
   } catch (e) {
-    if (switchStoppedMidWay(e)) {
+    if (switchStopped(e)) {
       vaultSwitched = true;
       backupCreateButton.disabled = true;
       restorePickButton.disabled = true;
@@ -2122,6 +2123,7 @@ async function onReturnSlot(slotId: string): Promise<void> {
       setStatus("Restart the app to recover the vault switch.", true);
     } else {
       // Refused before anything stopped: the vault and the app are both untouched.
+      switchInFlight = false;
       recoveryLineEl.textContent = `Return refused (the current vault was not replaced): ${e}`;
     }
   }

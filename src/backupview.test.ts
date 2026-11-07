@@ -13,6 +13,8 @@ import {
   previewLine,
   recoveryLine,
   restoreDoneLine,
+  switchStopped,
+  SWITCH_STOPPED_MARKER,
   slotLine,
   type BackupManifest,
   type RecoveryStatusView,
@@ -93,6 +95,19 @@ describe("job and preview lines", () => {
     restored_settings: true,
     sources_needing_reauth: 2,
   };
+
+  it("switchStopped matches the exact backend marker, never prose", () => {
+    // The stable Rust↔frontend contract: only the exact leading token
+    // counts — a wording change on either side cannot silently flip a
+    // real mid-switch failure into the usable-app refusal branch.
+    expect(switchStopped(`${SWITCH_STOPPED_MARKER} restart required — details`)).toBe(true);
+    expect(switchStopped(new Error(`${SWITCH_STOPPED_MARKER} restart required`))).toBe(true);
+    // Not at the start, or merely mentioning the words: refused.
+    expect(switchStopped("restore refused: some switch_stopped: mid-token")).toBe(false);
+    expect(switchStopped("restart required — but no marker")).toBe(false);
+    expect(switchStopped("a vault switch is already in progress")).toBe(false);
+    expect(switchStopped(null)).toBe(false);
+  });
 
   it("restoreDoneLine asks to reconnect only what the keyring lacks", () => {
     const line = restoreDoneLine(outcome);

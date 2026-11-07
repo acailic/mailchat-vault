@@ -139,6 +139,22 @@ export function restoreDoneLine(outcome: RestoreOutcomeView): string {
   );
 }
 
+/** The exact token the backend prefixes to every post-stop switch
+ *  failure from `restore_commit` / `return_to_previous_vault` — a
+ *  stable Rust↔frontend contract, never prose-matched. */
+export const SWITCH_STOPPED_MARKER = "switch_stopped:";
+
+/** Whether an error from `restore_commit` / `return_to_previous_vault`
+ *  reports a switch that stopped after the backend was drained: the
+ *  vault switch is mid-flight and resolves on restart (the switch
+ *  journal recovers it) — the app cannot serve the vault anymore.
+ *  Only the exact leading token counts (an `Error`'s message is
+ *  checked, so the wrapper shape cannot hide the marker). */
+export function switchStopped(e: unknown): boolean {
+  const text = e instanceof Error ? e.message : String(e);
+  return text.startsWith(SWITCH_STOPPED_MARKER);
+}
+
 /** One line per previous-vault slot. */
 export function slotLine(slot: PreviousVaultSlot): string {
   return `${slot.created_at} · ${humanBytes(slot.total_bytes)} · ${slot.files} files`;
@@ -243,6 +259,7 @@ export function renderRecoverySlots(
   status: RecoveryStatusView,
   onReturn: (slotId: string) => void,
   onForget: (slotId: string) => void,
+  switchPending = false,
 ): void {
   el.replaceChildren();
   if (status.previous.length === 0) {
@@ -264,6 +281,7 @@ export function renderRecoverySlots(
     back.type = "button";
     back.title = "Switch the active vault back to this snapshot (validated, journaled; restart required)";
     back.textContent = "Return to this vault";
+    back.disabled = switchPending;
     back.addEventListener("click", () => onReturn(slot.id));
     const forget = document.createElement("button");
     forget.type = "button";

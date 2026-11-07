@@ -148,6 +148,38 @@ const EMBED_JOB_BATCH: u64 = 500;
 /// keys + env fallback), the local offline embedder behind hybrid ranking
 /// (stateless), the background folder watcher, and the opt-in periodic
 /// sync scheduler (M2.4).
+/// Mutual exclusion for the two vault-switch entry points
+/// (`restore_commit`, `return_to_previous_vault`): only one switch may
+/// run its precheck→drain→switch sequence at a time. A second attempt
+/// while one is in flight refuses fast, with the app fully usable.
+#[derive(Default)]
+struct SwitchGate {
+    busy: std::sync::atomic::AtomicBool,
+}
+
+/// One held switch slot; releases the gate on drop (a panic or early
+/// return can never wedge it closed).
+struct SwitchLease<'a> {
+    busy: &'a std::sync::atomic::AtomicBool,
+}
+
+impl SwitchGate {
+    /// Claim the switch slot. `Err` carries the user-facing refusal.
+    fn try_begin(&self) -> Result<SwitchLease<'_>, String> {
+        if self.busy.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            Err("a vault switch is already in progress — wait for it to finish".to_string())
+        } else {
+            Ok(SwitchLease { busy: &self.busy })
+        }
+    }
+}
+
+impl Drop for SwitchLease<'_> {
+    fn drop(&mut self) {
+        self.busy.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 struct AppState {
     pool: Arc<DbPool>,
     registry: Arc<Mutex<LlmRegistry>>,
@@ -159,6 +191,9 @@ struct AppState {
     /// The vault root (app data dir): `vault.db`, `media/`,
     /// `settings.json` — what the M4.4 backup containers capture.
     data_dir: PathBuf,
+    /// Serializes `restore_commit` / `return_to_previous_vault` (see
+    /// [`SwitchGate`]).
+    switch_gate: SwitchGate,
 }
 
 /// Result of an IMAP sync: per-folder summaries plus where an entered
@@ -530,6 +565,9 @@ async fn restore_commit(
     secrets: State<'_, Arc<secrets::Secrets>>,
     preview_id: String,
 ) -> Result<RestoreOutcome, String> {
+    // One switch at a time: a concurrent commit/return refuses fast
+    // while this one runs its precheck→drain→switch sequence.
+    let _switch_lease = state.switch_gate.try_begin()?;
     let scheduler = Arc::clone(&state.scheduler);
     let pool = Arc::clone(&state.pool);
     let data_dir = state.data_dir.clone();
@@ -560,9 +598,11 @@ async fn restore_commit(
         )
         .map_err(|e| {
             // The pool is drained now and the journal may hold a
-            // mid-switch state that resolves on restart: say so — the
-            // vault switch itself is recoverable, not lost.
-            format!("restart required — the switch stopped and recovers on restart: {e}")
+            // mid-switch state that resolves on restart. The exact
+            // `switch_stopped:` token is the stable frontend contract
+            // (see SWITCH_STOPPED_MARKER in src/backupview.ts) — keep
+            // the human message after it, never inside a prose match.
+            format!("switch_stopped: restart required — the switch stopped and recovers on restart: {e}")
         })?;
         Ok(outcome)
     })
@@ -616,6 +656,9 @@ async fn return_to_previous_vault(
     secrets: State<'_, Arc<secrets::Secrets>>,
     slot_id: String,
 ) -> Result<RestoreOutcome, String> {
+    // One switch at a time: a concurrent commit/return refuses fast
+    // while this one runs its precheck→drain→switch sequence.
+    let _switch_lease = state.switch_gate.try_begin()?;
     let scheduler = Arc::clone(&state.scheduler);
     let pool = Arc::clone(&state.pool);
     let data_dir = state.data_dir.clone();
@@ -635,7 +678,7 @@ async fn return_to_previous_vault(
             &needs_reauth_after_restore(&secrets),
         )
         .map_err(|e| {
-            format!("restart required — the switch stopped and recovers on restart: {e}")
+            format!("switch_stopped: restart required — the switch stopped and recovers on restart: {e}")
         })
     })
     .await
@@ -2532,6 +2575,7 @@ pub fn run() {
                 watcher,
                 scheduler,
                 data_dir,
+                switch_gate: SwitchGate::default(),
             });
             app.manage(Arc::clone(&secrets));
             Ok(())
@@ -2596,6 +2640,23 @@ mod tests {
 
     fn params(map: Value) -> Value {
         map
+    }
+
+    #[test]
+    fn switch_gate_serializes_concurrent_switches() {
+        // The serialization the two switch commands rely on: a second
+        // attempt while one lease is held refuses fast with the
+        // user-facing message; releasing (drop) makes the slot available
+        // again, and a panic-path drop cannot wedge the gate.
+        let gate = SwitchGate::default();
+        let lease = gate.try_begin().expect("first switch claims the gate");
+        let second = gate.try_begin();
+        assert!(
+            matches!(&second, Err(m) if m == "a vault switch is already in progress — wait for it to finish"),
+            "a concurrent switch must refuse with the user-facing message"
+        );
+        drop(lease);
+        gate.try_begin().expect("the gate reopens after the switch ends");
     }
 
     #[test]
