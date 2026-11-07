@@ -164,10 +164,12 @@ struct SwitchLease<'a> {
 }
 
 impl SwitchGate {
-    /// Claim the switch slot. `Err` carries the user-facing refusal.
+    /// Claim the switch slot. `Err` carries the user-facing refusal
+    /// (backup and staging jobs hold the same gate, so the wording
+    /// covers both).
     fn try_begin(&self) -> Result<SwitchLease<'_>, String> {
         if self.busy.swap(true, std::sync::atomic::Ordering::AcqRel) {
-            Err("a vault switch is already in progress — wait for it to finish".to_string())
+            Err("a vault switch or backup is already in progress — wait for it to finish".to_string())
         } else {
             Ok(SwitchLease { busy: &self.busy })
         }
@@ -2684,7 +2686,7 @@ mod tests {
         let lease = gate.try_begin().expect("first switch claims the gate");
         let second = gate.try_begin();
         assert!(
-            matches!(&second, Err(m) if m == "a vault switch is already in progress — wait for it to finish"),
+            matches!(&second, Err(m) if m == "a vault switch or backup is already in progress — wait for it to finish"),
             "a concurrent switch must refuse with the user-facing message"
         );
         drop(lease);
