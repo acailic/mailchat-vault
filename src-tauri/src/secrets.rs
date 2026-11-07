@@ -132,7 +132,8 @@ impl Secrets {
         let mut keys = vec![key.clone(), format!("oauth:{key}")];
         let legacy_key = Self::account_key(host, &username.to_lowercase());
         if legacy_key != key {
-            keys.push(legacy_key);
+            keys.push(legacy_key.clone());
+            keys.push(format!("oauth:{legacy_key}"));
         }
         let mut removed = false;
         for key in keys {
@@ -320,6 +321,28 @@ mod tests {
             secrets.load(HOST, username),
             None,
             "the legacy key must not resurrect a forgotten password"
+        );
+        assert!(!secrets.clear_account(HOST, username));
+    }
+
+    #[test]
+    fn clear_account_also_forgets_legacy_oauth_refresh_token() {
+        let secrets = Secrets::new();
+        // Google sign-in (`oauth_gmail_login`) lowercases the username
+        // before storing, so the refresh token sits under the legacy
+        // `oauth:{lower(username)@host}` key while the account is forgotten
+        // under its exact configured casing.
+        let username = "Ana@Example.invalid";
+        secrets.save_refresh(HOST, &username.to_lowercase(), "legacy-refresh-fixture");
+
+        assert!(
+            secrets.clear_account(HOST, username),
+            "the legacy oauth entry counts as a stored secret"
+        );
+        assert_eq!(
+            secrets.load_refresh(HOST, &username.to_lowercase()),
+            None,
+            "the legacy key must not keep the forgotten refresh token alive"
         );
         assert!(!secrets.clear_account(HOST, username));
     }
