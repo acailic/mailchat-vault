@@ -1,0 +1,28 @@
+{
+  "boot": "empty archive",
+  "empty": "Search author from to files \n                      any\n                      has attachment\n                      no attachment\n                     import any import sort \n                      Relevance\n                      Newest\n                     Clear Type something to search, or set a filter to browse. ‹ Prev0 resultsNext › export: \n                    CSV\n                    JSON Lines\n                    MBOX (email rows)\n                   Export results… selection: \n                      Text\n                      JSON\n                     Export selected… Ctrl+K or / search · ↑↓ move · Enter open · Esc close Ask the archive (natural language) Local full-text (no LLM) Ask Update local embeddings no messages to embed yet LLM assist is off for this ask — it runs fully locally as a plain local full-text search plus local hybrid vector ranking once embeddings are built; nothing leaves this machine. Configure a provider in Settings (z.ai GLM, Anthropic, or a custom endpoint), or set ZAI_API_KEY / GLM_API_KEY or ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL in the environment. AI consent: not granted — asks run fully locally; nothing is sent to any provider. Send & ask for this session Keep asking locally",
+  "hiddenConsent": {
+    "display": "flex",
+    "width": 616,
+    "buttons": [
+      {
+        "width": 190.484375,
+        "text": "Send & ask for this session"
+      },
+      {
+        "width": 145.375,
+        "text": "Keep asking locally"
+      }
+    ],
+    "hidden": true
+  },
+  "source": "Add source Import files Import .mbox Import chat export… extract media Load demo Connect email (IMAP) \n                  App password\n                  Google sign-in (OAuth)\n                 Sync Auto-sync every \n                    5\n                    15\n                    30\n                    60\n                   min Auto-sync off — every IMAP source syncs when you press Sync (or run imap_sync_all). Folder watching Watch Pick folder… No folders watched yet — add one to import exports automatically. New or modified .mbox, WhatsApp .txt, and Telegram / Signal .json files in watched folders are imported automatically (debounced; re-imports never duplicate). Unrecognized files are skipped and reported above.",
+  "oauth": "Gmail sign-in is not configured — set MAILCHAT_GMAIL_CLIENT_ID and MAILCHAT_GMAIL_CLIENT_SECRET (see README → IMAP sync).",
+  "search": "1–3 of 3 for “vault”",
+  "fonts": {
+    "body": "\"Source Sans 3\", system-ui, -apple-system, \"Segoe UI\", sans-serif",
+    "sourceSans": true,
+    "fontReady": "loaded"
+  },
+  "settings": "Settings Add provider \n                    z.ai GLM (default)\n                    Anthropic\n                    Custom endpoint\n                   Add provider automatic (environment) Theme \n                    System\n                    Light\n                    Dark\n                   Results for summary Desktop notifications Save settings Providers live in settings.json in the app data dir; API keys are stored in the OS keyring (session memory when none is available) — never in the settings file or the database. Text is set in the bundled Source Sans 3 (SIL OFL 1.1), falling back to your system font. Media store Preserved attachments live in the app data dir, content-addressed by SHA-256 and served to the reading pane read-only. Nothing is ever fetched remotely to display media. Refresh Reconcile… 0 objects · 0 B total · 0 referenced (0 B) · 0 unreferenced (0 B)"
+}
