@@ -78,11 +78,12 @@ export class SequenceGuard {
 
 /** Navigation destinations. Imports, account configuration, and
  * maintenance live outside the reading surface. */
-export type WorkspaceView = "workspace" | "sources" | "activity" | "settings";
+export type WorkspaceView = "workspace" | "sources" | "accounts" | "activity" | "settings";
 
 export const VIEW_TITLES: Record<WorkspaceView, string> = {
   workspace: "All messages",
   sources: "Add source",
+  accounts: "Accounts",
   activity: "Activity",
   settings: "Settings",
 };

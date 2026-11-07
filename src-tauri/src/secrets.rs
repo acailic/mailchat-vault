@@ -122,6 +122,35 @@ impl Secrets {
         self.load_key(&format!("oauth:{}", Self::account_key(host, username)))
     }
 
+    /// Forget everything stored for one IMAP account — the app password
+    /// *and* the Google sign-in refresh token — in every store (OS keyring
+    /// and session memory). The multi-account UI's “forget credentials”:
+    /// the vault's archive, cursors, and configuration stay untouched;
+    /// only the secrets go. Returns whether anything was actually stored.
+    pub fn clear_account(&self, host: &str, username: &str) -> bool {
+        let key = Self::account_key(host, username);
+        let mut keys = vec![key.clone(), format!("oauth:{key}")];
+        let legacy_key = Self::account_key(host, &username.to_lowercase());
+        if legacy_key != key {
+            keys.push(legacy_key.clone());
+            keys.push(format!("oauth:{legacy_key}"));
+        }
+        let mut removed = false;
+        for key in keys {
+            let in_memory = self
+                .memory
+                .lock()
+                .expect("secrets memory lock")
+                .remove(&key)
+                .is_some();
+            let in_keyring = keyring::Entry::new(SERVICE, &key)
+                .and_then(|entry| entry.delete_credential())
+                .is_ok();
+            removed |= in_memory || in_keyring;
+        }
+        removed
+    }
+
     /// Read one keyring/memory key: OS keyring first, then session memory.
     fn load_key(&self, key: &str) -> Option<String> {
         if let Ok(entry) = keyring::Entry::new(SERVICE, key) {
@@ -253,5 +282,82 @@ mod tests {
         assert_eq!(secrets.load(HOST, "ana@example.invalid"), None);
         // Cased username with nothing stored anywhere: also None.
         assert_eq!(secrets.load(HOST, "Ana@Example.invalid"), None);
+    }
+
+    #[test]
+    fn clear_account_forgets_both_secret_kinds() {
+        let secrets = Secrets::new();
+        let username = "forget@me.invalid";
+        secrets.save(HOST, username, "app-fixture");
+        secrets.save_refresh(HOST, username, "refresh-fixture");
+        assert!(secrets.load(HOST, username).is_some());
+        assert!(secrets.load_refresh(HOST, username).is_some());
+
+        assert!(
+            secrets.clear_account(HOST, username),
+            "clearing an account with stored secrets reports removal"
+        );
+        assert_eq!(secrets.load(HOST, username), None);
+        assert_eq!(secrets.load_refresh(HOST, username), None);
+
+        // A second clear reports nothing-stored rather than pretending a
+        // secret existed.
+        assert!(!secrets.clear_account(HOST, username));
+    }
+
+    #[test]
+    fn clear_account_also_forgets_pre_upgrade_legacy_key() {
+        let secrets = Secrets::new();
+        // Pre-upgrade save: keyed by the lowercased username, while the
+        // account is forgotten under its exact configured casing.
+        let username = "Ana@Example.invalid";
+        secrets.save(HOST, &username.to_lowercase(), "legacy-fixture");
+
+        assert!(
+            secrets.clear_account(HOST, username),
+            "the legacy entry counts as a stored secret"
+        );
+        assert_eq!(
+            secrets.load(HOST, username),
+            None,
+            "the legacy key must not resurrect a forgotten password"
+        );
+        assert!(!secrets.clear_account(HOST, username));
+    }
+
+    #[test]
+    fn clear_account_also_forgets_legacy_oauth_refresh_token() {
+        let secrets = Secrets::new();
+        // Google sign-in (`oauth_gmail_login`) lowercases the username
+        // before storing, so the refresh token sits under the legacy
+        // `oauth:{lower(username)@host}` key while the account is forgotten
+        // under its exact configured casing.
+        let username = "Ana@Example.invalid";
+        secrets.save_refresh(HOST, &username.to_lowercase(), "legacy-refresh-fixture");
+
+        assert!(
+            secrets.clear_account(HOST, username),
+            "the legacy oauth entry counts as a stored secret"
+        );
+        assert_eq!(
+            secrets.load_refresh(HOST, &username.to_lowercase()),
+            None,
+            "the legacy key must not keep the forgotten refresh token alive"
+        );
+        assert!(!secrets.clear_account(HOST, username));
+    }
+
+    #[test]
+    fn clear_account_leaves_other_accounts_untouched() {
+        let secrets = Secrets::new();
+        secrets.save(HOST, "kept@me.invalid", "keep-me");
+        secrets.save(HOST, "gone@me.invalid", "drop-me");
+
+        assert!(secrets.clear_account(HOST, "gone@me.invalid"));
+        assert_eq!(
+            secrets.load(HOST, "kept@me.invalid").as_deref(),
+            Some("keep-me")
+        );
+        assert_eq!(secrets.load(HOST, "gone@me.invalid"), None);
     }
 }

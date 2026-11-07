@@ -43,6 +43,13 @@
 //!   per-source exclusion (skipped by coordinator rounds, archive kept),
 //!   and the durable failed-item ledger (what fell, why, how often
 //!   retried — visible, never silent).
+//! - `accounts_list` / `account_forget_credentials` — the multi-account
+//!   UI surface (roadmap: the accounts panel): every account in one
+//!   overview — IMAP accounts (host/user identity, never credentials)
+//!   and import accounts — with per-account message counts, open
+//!   failed-item rows, last-sync stamps, pause (exclusion) state, and
+//!   which credential kinds are stored; and the removal action that
+//!   forgets one account's keyring secrets while keeping its archive.
 //! - `watch_add_folder` / `watch_remove_folder` / `watch_status` —
 //!   automatic folder watching: new/modified export files in user-chosen
 //!   folders are imported in the background; the UI is kept current via
@@ -1619,6 +1626,169 @@ fn source_failures(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Multi-account surface (roadmap: the accounts panel)
+// ---------------------------------------------------------------------------
+
+/// One account row of the multi-account overview: what the accounts
+/// panel renders per account. Never credentials — `imap` carries the
+/// connection identity plus which credential *kinds* are stored.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct AccountView {
+    /// The durable source instance id (the same id `sources_list`
+    /// reports; pause uses it, the search chips filter by it).
+    source_id: String,
+    /// `"imap"` for live email accounts, `"import"` for file imports
+    /// (mbox/chat exports) and legacy namespaces.
+    kind: String,
+    /// Human-readable label (`imap:host:port:username` or the import's
+    /// source name).
+    label: String,
+    /// IMAP connection identity (never present for imports).
+    imap: Option<AccountImap>,
+    /// Archived messages of the account (trigger-maintained counters).
+    message_count: u64,
+    /// Open rows in the failed-item ledger (the account's sync backlog).
+    failed_items: u64,
+    /// `"connected"` after a successful sync, `"disconnected"`
+    /// otherwise.
+    state: String,
+    /// Paused: excluded from every coordinator round; the archive and
+    /// cursors are kept (M2.3 exclusion re-used as the account pause).
+    excluded: bool,
+    last_attempt_at: Option<String>,
+    last_success_at: Option<String>,
+}
+
+/// The non-secret IMAP identity of one account, parsed from the stored
+/// source configuration (see [`StoredImapConfig`]).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct AccountImap {
+    host: String,
+    port: u16,
+    username: String,
+    /// Configured folders (empty = the connector's default set).
+    folders: Vec<String>,
+    /// Whether the secret store holds an app password for the account.
+    has_password: bool,
+    /// Whether the secret store holds a Google sign-in refresh token.
+    has_oauth: bool,
+}
+
+/// Assemble the accounts overview from the stored source instances, the
+/// per-account counts, and a credential probe (`(password?, oauth?)` per
+/// stored IMAP config — the keyring in the app, plain closures in tests).
+/// Pure: unit-tested below, command-thread free.
+fn assemble_accounts(
+    instances: &[SourceInstance],
+    counts: &[vault_core::storage::AccountCounts],
+    credentials: impl Fn(&StoredImapConfig) -> (bool, bool),
+) -> Vec<AccountView> {
+    let counts: std::collections::HashMap<&str, &vault_core::storage::AccountCounts> =
+        counts.iter().map(|c| (c.source_id.as_str(), c)).collect();
+    instances
+        .iter()
+        .map(|instance| {
+            let zero = vault_core::storage::AccountCounts {
+                source_id: String::new(),
+                messages: 0,
+                failed_items: 0,
+            };
+            let count = counts.get(instance.id.as_str()).copied().unwrap_or(&zero);
+            let imap = StoredImapConfig::of(instance).map(|stored| {
+                let (has_password, has_oauth) = credentials(&stored);
+                AccountImap {
+                    host: stored.host,
+                    port: stored.port,
+                    username: stored.username,
+                    folders: stored.folders,
+                    has_password,
+                    has_oauth,
+                }
+            });
+            AccountView {
+                source_id: instance.id.clone(),
+                kind: if instance.kind == "imap" {
+                    "imap".into()
+                } else {
+                    "import".into()
+                },
+                label: instance.label.clone(),
+                imap,
+                message_count: count.messages,
+                failed_items: count.failed_items,
+                state: instance.state.clone(),
+                excluded: instance.excluded,
+                last_attempt_at: instance.last_attempt_at.clone(),
+                last_success_at: instance.last_success_at.clone(),
+            }
+        })
+        .collect()
+}
+
+/// Every account in one overview (the accounts panel): IMAP accounts and
+/// import accounts with per-account message counts, failed-item backlog,
+/// last-sync stamps, pause state, and which credential kinds are stored.
+/// One bounded read (instances + counter rows) plus one keyring probe per
+/// IMAP account — keyring access happens off the UI thread.
+#[tauri::command]
+async fn accounts_list(
+    state: State<'_, AppState>,
+    secrets: State<'_, Arc<secrets::Secrets>>,
+) -> Result<Vec<AccountView>, String> {
+    let pool = Arc::clone(&state.pool);
+    let secrets = Arc::clone(secrets.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let (instances, counts) = pool
+            .with_read(|s| -> vault_core::Result<_> {
+                Ok((s.list_source_instances()?, s.account_counts()?))
+            })
+            .map_err(|e: vault_core::Error| e.to_string())?;
+        Ok(assemble_accounts(&instances, &counts, |stored| {
+            (
+                secrets.load(&stored.host, &stored.username).is_some(),
+                secrets
+                    .load_refresh(&stored.host, &stored.username)
+                    .is_some(),
+            )
+        }))
+    })
+    .await
+    .map_err(|e| format!("accounts task failed: {e}"))?
+}
+
+/// Forget one IMAP account's credentials (the accounts panel's removal
+/// action): the app password and the Google sign-in refresh token leave
+/// the OS keyring / session memory. The account's archive, cursors, and
+/// configuration stay — only the secrets go. Import accounts have no
+/// stored credentials; an unknown id is an error, never a silent no-op.
+#[tauri::command]
+async fn account_forget_credentials(
+    state: State<'_, AppState>,
+    secrets: State<'_, Arc<secrets::Secrets>>,
+    source_id: String,
+) -> Result<bool, String> {
+    let pool = Arc::clone(&state.pool);
+    let secrets = Arc::clone(secrets.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let instance = pool
+            .with_read(|s| s.list_source_instances())
+            .map_err(|e: vault_core::Error| e.to_string())?
+            .into_iter()
+            .find(|i| i.id == source_id)
+            .ok_or_else(|| format!("unknown account {source_id:?}"))?;
+        let stored = StoredImapConfig::of(&instance).ok_or_else(|| {
+            format!(
+                "{} is an import account — it stores no credentials",
+                instance.label
+            )
+        })?;
+        Ok(secrets.clear_account(&stored.host, &stored.username))
+    })
+    .await
+    .map_err(|e| format!("forget-credentials task failed: {e}"))?
+}
+
 /// The periodic-sync schedule for the UI (M2.4): the persisted choice
 /// plus the live scheduler status in one round trip.
 #[derive(Debug, Clone, Serialize)]
@@ -2097,6 +2267,8 @@ pub fn run() {
             sources_list,
             source_set_excluded,
             source_failures,
+            accounts_list,
+            account_forget_credentials,
             sync_schedule_get,
             sync_schedule_set,
             watch_add_folder,
@@ -2643,5 +2815,120 @@ mod tests {
         // The first recognized flag wins among mixed arguments.
         let out = cli_flag_response(&["ignored.mbox".to_string(), "-V".to_string()]).unwrap();
         assert!(out.starts_with("mailchat-vault "));
+    }
+
+    // ------------------------------------------------------------------
+    // Multi-account overview assembly (roadmap: the accounts panel)
+    // ------------------------------------------------------------------
+
+    fn imap_instance(
+        id: &str,
+        host: &str,
+        port: u16,
+        username: &str,
+        folders: &[&str],
+    ) -> SourceInstance {
+        SourceInstance {
+            id: id.into(),
+            kind: "imap".into(),
+            label: format!("imap:{host}:{port}:{username}"),
+            connector_key: Some(format!("imap|{host}|{port}|implicit-tls|{username}")),
+            config_json: serde_json::json!({
+                "host": host,
+                "port": port,
+                "tls_mode": "implicit-tls",
+                "username": username,
+                "folders": folders,
+            })
+            .to_string(),
+            state: "connected".into(),
+            excluded: false,
+            last_attempt_at: Some("2026-01-02 10:00:00".into()),
+            last_success_at: Some("2026-01-02 10:00:05".into()),
+            created_at: "2026-01-01 00:00:00".into(),
+        }
+    }
+
+    fn import_instance(id: &str, label: &str) -> SourceInstance {
+        SourceInstance {
+            id: id.into(),
+            kind: "legacy".into(),
+            label: label.into(),
+            connector_key: None,
+            config_json: "{}".into(),
+            state: "connected".into(),
+            excluded: false,
+            last_attempt_at: None,
+            last_success_at: None,
+            created_at: "2026-01-01 00:00:00".into(),
+        }
+    }
+
+    #[test]
+    fn accounts_assembly_maps_every_account_kind() {
+        let instances = vec![
+            imap_instance(
+                "inst-imap",
+                "imap.gmail.com",
+                993,
+                "ana@gmail.com",
+                &["INBOX"],
+            ),
+            import_instance("inst-mbox", "mbox:archive.mbox"),
+        ];
+        let counts = vec![
+            vault_core::storage::AccountCounts {
+                source_id: "inst-imap".into(),
+                messages: 12,
+                failed_items: 1,
+            },
+            vault_core::storage::AccountCounts {
+                source_id: "inst-mbox".into(),
+                messages: 34,
+                failed_items: 0,
+            },
+        ];
+
+        let views = assemble_accounts(&instances, &counts, |stored| {
+            (stored.username == "ana@gmail.com", false)
+        });
+
+        assert_eq!(views.len(), 2);
+        let imap = &views[0];
+        assert_eq!(imap.kind, "imap");
+        assert_eq!(imap.source_id, "inst-imap");
+        assert_eq!(imap.label, "imap:imap.gmail.com:993:ana@gmail.com");
+        assert_eq!(imap.message_count, 12);
+        assert_eq!(imap.failed_items, 1);
+        assert!(!imap.excluded);
+        let identity = imap.imap.as_ref().expect("imap identity");
+        assert_eq!(identity.host, "imap.gmail.com");
+        assert_eq!(identity.port, 993);
+        assert_eq!(identity.username, "ana@gmail.com");
+        assert_eq!(identity.folders, vec!["INBOX".to_string()]);
+        assert!(identity.has_password);
+        assert!(!identity.has_oauth);
+
+        let import = &views[1];
+        assert_eq!(import.kind, "import");
+        assert_eq!(import.imap, None, "imports carry no IMAP identity");
+        assert_eq!(import.message_count, 34);
+    }
+
+    #[test]
+    fn accounts_assembly_defaults_missing_counts_to_zero_and_marks_pause() {
+        // An instance the counts query somehow did not cover still lists
+        // (a connected-but-empty account), and the exclusion flag rides
+        // through as the account's paused state.
+        let mut paused = imap_instance("inst-paused", "imap.b.test", 993, "bob@b.test", &[]);
+        paused.excluded = true;
+        let views = assemble_accounts(&[paused], &[], |_: &StoredImapConfig| (false, true));
+        assert_eq!(views.len(), 1);
+        assert!(views[0].excluded, "exclusion is the pause state");
+        assert_eq!(views[0].message_count, 0);
+        assert_eq!(views[0].failed_items, 0);
+        let identity = views[0].imap.as_ref().unwrap();
+        assert!(identity.has_oauth, "credential kinds come from the probe");
+        assert!(!identity.has_password);
     }
 }

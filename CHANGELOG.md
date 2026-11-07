@@ -41,6 +41,12 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
   Windows, Linux). Notifications stay silent while the app window is
   focused, honor the on/off switch in Settings and the OS-level
   permission, and never interrupt the app if the OS refuses them.
+- **Multi-account accounts panel** — every configured account (email
+  and file imports) in one Accounts overview: per-account message
+  counts, last-sync stamps, pause state, and which credentials are
+  stored (never the secrets themselves). Email accounts can be synced,
+  paused, and have their keyring credentials forgotten right from the
+  row, while the archive stays untouched.
 - **Headless `--version` / `--help`** — the packaged binary answers
   `--version`/`-V` and `--help`/`-h` and exits before touching any
   GUI, so installed copies can be smoke-tested without a display.
@@ -104,8 +110,6 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
 - **No backup/restore yet** — the versioned backup feature is planned
   but not shipped in 0.2.0; copy the data directory manually if you
   need a snapshot.
-- **No multi-account yet** — the multi-account accounts panel (PR #53)
-  is open and unmerged, so 0.2.0 still holds one account per vault.
 - **No auto-update** — new releases are a fresh download; there is no
   in-app updater.
 
