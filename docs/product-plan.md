@@ -2,6 +2,8 @@
 
 Status: **proposed**. Audience: individual desktop users. Decision basis: the user's choices recorded in the [documentation index](README.md#authority-and-status).
 
+The [2026-11-06 product review](product-review.md) separates working capabilities from adoption risks. Its [user success plan](user-success-plan.md) recommends an import-first pilot for a specific user hypothesis, with measurable outcomes and a [research protocol](user-research-playbook.md). These recommendations do not mark the release requirements below complete or remove the three-platform target.
+
 ## Purpose and user needs
 
 Mailchat Vault helps a person find a past message, understand the exchange around it, and keep an independent copy of the available content. Its primary value is trustworthy recall across personal mail and chat sources.
@@ -30,7 +32,7 @@ The first user is someone with years of exports and one or more mail accounts. T
 
 The first polished release includes all milestones M1–M6 in the [roadmap](implementation-roadmap.md). Earlier internal builds may exercise completed slices, but are not the agreed complete release.
 
-Included sources are mbox, WhatsApp text/media exports, Telegram single-chat JSON/media exports, and TLS IMAP including Gmail app passwords. Users can import a file, supported export directory, or ZIP. A Telegram all-chats export is not implicitly supported: preview must identify an unsupported shape rather than report a successful empty import.
+Included sources are mbox, WhatsApp text/media exports, Telegram single-chat JSON/media exports, Signal conversation JSON, Discord data packages, and TLS IMAP including Gmail app passwords and Google sign-in where the OAuth client is configured. The Google path currently requires developer configuration; its presence is not evidence of self-service consumer onboarding. Users can import a file, supported export directory, or ZIP through source-specific paths; the unified selection and preview flow remains required. A Telegram all-chats export is not implicitly supported: preview must identify an unsupported shape rather than report a successful empty import.
 
 “Complete available media” means preserving attachments and files actually present in supplied exports or fetched mail. It includes copied originals, durable attachment links where evidence exists, honest missing-file states, storage reporting, backup, and restore. It does not promise to recover files omitted by an exporter or infer which message owns an unmatched file.
 
@@ -66,7 +68,9 @@ Assess success with local test evidence and voluntary usability sessions. Do not
 
 ## Deferred work
 
-Sending/replying, shared access, cloud synchronization, a mobile app, OAuth login, additional connectors, OCR, transcription, attachment-content indexing, vector search, automatic directory watching, automatic updates, and app-managed vault encryption are deferred. Search covers message text, participants, subjects, and attachment filenames; binary content is preserved without claiming it is searchable.
+Sending/replying, shared access, cloud synchronization, a mobile app, further connectors beyond the implemented inventory, OCR, transcription, attachment-content indexing, automatic updates, and app-managed vault encryption are deferred. Binary content is preserved without claiming its contents are searchable.
+
+Gmail OAuth, local hybrid ranking with hash-based vectors, automatic folder watching, Signal/Discord imports, and multi-provider configuration have already landed and are no longer classified as deferred. Their remaining onboarding, source-specific media, retrieval-quality and release gaps are assessed in the [product review](product-review.md) and [implementation assessment](project-assessment.md). Hash-based vector ranking is not a validated claim of synonym, cross-language or general semantic understanding.
 
 AI refinement remains part of the release because AI already exists, but it must not delay correctness work or become necessary for ordinary retrieval. Settings support the existing compatible-provider integration; a provider marketplace and multi-provider comparison UI are deferred.
 
