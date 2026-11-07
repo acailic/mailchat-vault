@@ -149,6 +149,7 @@ impl Secrets {
             removed |= in_memory || in_keyring;
         }
         removed
+    }
 
     /// Whether the credentials for `user@host` are already present —
     /// the OS keyring first, then session memory (the same places
@@ -370,7 +371,9 @@ mod tests {
             Some("keep-me")
         );
         assert_eq!(secrets.load(HOST, "gone@me.invalid"), None);
+    }
 
+    #[test]
     fn has_account_reports_credential_presence() {
         // Present (keyring or session memory): a same-machine restore
         // resolves the account — no reconnection needed.
