@@ -161,7 +161,13 @@ export function slotLine(slot: PreviousVaultSlot): string {
 }
 
 /** The recovery panel's headline: journal state + slot count. */
-export function recoveryLine(status: RecoveryStatusView): string {
+/** The recovery panel's headline: journal state, slot count, and the
+ *  staged-preview state — honest about the session-bound contract
+ *  (docs/data-and-api-contracts.md): a preview is committable only in
+ *  the session that validated it, so one staged in an earlier session
+ *  directs to re-validation instead of claiming a pending commit the
+ *  UI cannot perform. */
+export function recoveryLine(status: RecoveryStatusView, sessionPreview = false): string {
   if (status.previous.length === 0) {
     return "No previous-vault snapshots recorded yet (one is kept every time a restore replaces the vault).";
   }
@@ -171,7 +177,9 @@ export function recoveryLine(status: RecoveryStatusView): string {
     line += ` (a switch journal from ${status.journal_created_at ?? "an earlier session"} is unresolved — restart the app to recover it)`;
   }
   if (status.staged_preview) {
-    line += " A validated restore is waiting to be committed.";
+    line += sessionPreview
+      ? " A validated restore is waiting to be committed."
+      : " A staged restore from an earlier session is present — previews are session-bound; validate the backup again to commit it.";
   }
   return line;
 }

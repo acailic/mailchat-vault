@@ -1991,7 +1991,7 @@ function renderRestorePanel(): void {
 /** Pick a destination and start the `backup_create` job (progress in
  * Activity; the success line lands here when it finishes). */
 async function createBackup(): Promise<void> {
-  if (vaultSwitched) return;
+  if (vaultSwitched || switchInFlight) return;
   const today = new Date().toISOString().slice(0, 10);
   const picked = await save({
     title: "Create a vault backup",
@@ -2010,7 +2010,7 @@ async function createBackup(): Promise<void> {
 
 /** Pick a container, inspect it, and offer the validation step. */
 async function pickRestoreArchive(): Promise<void> {
-  if (vaultSwitched) return;
+  if (vaultSwitched || switchInFlight) return;
   const picked = await open({
     title: "Restore from a vault backup",
     multiple: false,
@@ -2033,7 +2033,7 @@ async function pickRestoreArchive(): Promise<void> {
 /** Start the `restore_preview` job: checksum every entry, validate the
  *  database, stage the payload. */
 async function startRestoreValidation(archive: string): Promise<void> {
-  if (vaultSwitched) return;
+  if (vaultSwitched || switchInFlight) return;
   restoreFlow = { step: "validating", archive };
   renderRestorePanel();
   try {
@@ -2054,6 +2054,8 @@ async function commitRestore(preview: RestorePreviewView): Promise<void> {
   );
   if (!confirmed) return;
   switchInFlight = true;
+  backupCreateButton.disabled = true;
+  restorePickButton.disabled = true;
   restoreFlow = { step: "committing", preview };
   renderRestorePanel();
   try {
@@ -2079,6 +2081,8 @@ async function commitRestore(preview: RestorePreviewView): Promise<void> {
     } else {
       // Refused before anything stopped: the vault and the app are both untouched.
       switchInFlight = false;
+      backupCreateButton.disabled = false;
+      restorePickButton.disabled = false;
       restoreFlow = { step: "error", message: `Restore refused (the vault was not replaced): ${e}` };
     }
   }
@@ -2089,7 +2093,10 @@ async function commitRestore(preview: RestorePreviewView): Promise<void> {
 async function refreshRecovery(): Promise<void> {
   try {
     const status = await ipc.recoveryStatus();
-    recoveryLineEl.textContent = recoveryLine(status);
+    // The staged-preview claim is session-bound: only this session's
+    // validated flow can commit; anything else is a leftover from an
+    // earlier session and says so.
+    recoveryLineEl.textContent = recoveryLine(status, restoreFlow.step === "validated");
     renderRecoverySlots(recoverySlotsEl, status, onReturnSlot, onForgetSlot, {
       returnPending: vaultSwitched || switchInFlight,
       forgetPending: switchInFlight,
@@ -2106,6 +2113,8 @@ async function onReturnSlot(slotId: string): Promise<void> {
   );
   if (!confirmed) return;
   switchInFlight = true;
+  backupCreateButton.disabled = true;
+  restorePickButton.disabled = true;
   recoveryLineEl.textContent = "Switching back to the previous vault…";
   try {
     const outcome = await ipc.returnToPreviousVault(slotId);
@@ -2126,6 +2135,8 @@ async function onReturnSlot(slotId: string): Promise<void> {
     } else {
       // Refused before anything stopped: the vault and the app are both untouched.
       switchInFlight = false;
+      backupCreateButton.disabled = false;
+      restorePickButton.disabled = false;
       recoveryLineEl.textContent = `Return refused (the current vault was not replaced): ${e}`;
     }
   }

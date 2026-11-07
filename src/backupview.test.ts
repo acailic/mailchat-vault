@@ -154,8 +154,15 @@ describe("recovery lines", () => {
     };
     const line = recoveryLine(status);
     expect(line).toContain("1 previous-vault snapshot kept:");
-    expect(line).toContain("validated restore is waiting");
+    // No session preview behind it: the staged bytes are from an earlier
+    // session — the headline directs to re-validation, never claims a
+    // committable restore the UI cannot commit.
+    expect(line).toContain("previews are session-bound");
+    expect(line).not.toContain("waiting to be committed");
     expect(line).not.toContain("unresolved");
+    // With this session's validated preview behind it, the commit claim
+    // is true.
+    expect(recoveryLine(status, true)).toContain("validated restore is waiting");
     const unresolved = recoveryLine({
       ...status,
       journal_state: "staged",

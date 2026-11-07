@@ -191,9 +191,10 @@ struct AppState {
     /// The vault root (app data dir): `vault.db`, `media/`,
     /// `settings.json` — what the M4.4 backup containers capture.
     data_dir: PathBuf,
-    /// Serializes `restore_commit` / `return_to_previous_vault` (see
-    /// [`SwitchGate`]).
-    switch_gate: SwitchGate,
+    /// Serializes `restore_commit` / `return_to_previous_vault` /
+    /// `recovery_forget` and the `backup_create` / `restore_preview`
+    /// jobs (see [`SwitchGate`]).
+    switch_gate: Arc<SwitchGate>,
 }
 
 /// Result of an IMAP sync: per-folder summaries plus where an entered
@@ -1601,8 +1602,9 @@ fn job_submit(
     };
     let job_pool = Arc::clone(&pool);
     let secrets = Arc::clone(secrets.inner());
+    let switch_gate = Arc::clone(&state.switch_gate);
     pool.try_submit_job(spec.kind(), move |ctx: &JobContext| {
-        run_job_spec(ctx, &spec, &job_pool, embedder, &data_dir, &secrets)
+        run_job_spec(ctx, &spec, &job_pool, embedder, &data_dir, &secrets, &switch_gate)
     })
     .map(|id| JobHandle { id })
     .map_err(|e| e.to_string())
@@ -1619,6 +1621,7 @@ fn run_job_spec(
     embedder: HashEmbedder,
     data_dir: &Path,
     secrets: &Arc<secrets::Secrets>,
+    switch_gate: &SwitchGate,
 ) -> std::result::Result<Value, JobError> {
     match spec {
         JobSpec::SeedDemo => {
@@ -1699,9 +1702,11 @@ fn run_job_spec(
             Ok(serde_json::to_value(&summaries).unwrap_or(Value::Null))
         }
         JobSpec::ImapSyncAll => run_sync_all_round(ctx, pool, secrets, data_dir),
-        JobSpec::BackupCreate { dest } => run_backup_create(ctx, data_dir, Path::new(dest)),
+        JobSpec::BackupCreate { dest } => {
+            run_backup_create(ctx, switch_gate, data_dir, Path::new(dest))
+        }
         JobSpec::RestorePreview { archive } => {
-            run_restore_preview(ctx, data_dir, Path::new(archive))
+            run_restore_preview(ctx, switch_gate, data_dir, Path::new(archive))
         }
     }
 }
@@ -1715,12 +1720,19 @@ fn run_job_spec(
 /// cooperative cancellation while search keeps serving.
 fn run_backup_create(
     ctx: &JobContext,
+    switch_gate: &SwitchGate,
     data_dir: &Path,
     dest: &Path,
 ) -> std::result::Result<Value, JobError> {
     if ctx.is_cancelled() {
         return Err(JobError::Cancelled);
     }
+    // Serialized with the switch entry points: a snapshot racing a
+    // restore's drain/switch would run against a half-switched vault
+    // (and its write queue dies with the drained pool).
+    let _switch_lease = switch_gate
+        .try_begin()
+        .map_err(|message| JobError::Storage { message })?;
     ctx.progress(0, 0, "taking a consistent database snapshot");
     let dest_parent = dest.parent().unwrap_or(Path::new(".")).to_path_buf();
     let stem = dest
@@ -1763,12 +1775,19 @@ fn run_backup_create(
 /// changes; the returned preview id commits through `restore_commit`.
 fn run_restore_preview(
     ctx: &JobContext,
+    switch_gate: &SwitchGate,
     data_dir: &Path,
     archive: &Path,
 ) -> std::result::Result<Value, JobError> {
     if ctx.is_cancelled() {
         return Err(JobError::Cancelled);
     }
+    // Serialized with the switch entry points: staging wipes and
+    // repopulates the recovery staging directory — exactly the tree a
+    // commit's switch phase B moves items out of.
+    let _switch_lease = switch_gate
+        .try_begin()
+        .map_err(|message| JobError::Storage { message })?;
     let fingerprint = ctx
         .read(|s| s.vault_fingerprint())
         .map_err(backup_job_error)?;
@@ -2588,7 +2607,7 @@ pub fn run() {
                 watcher,
                 scheduler,
                 data_dir,
-                switch_gate: SwitchGate::default(),
+                switch_gate: Arc::new(SwitchGate::default()),
             });
             app.manage(Arc::clone(&secrets));
             Ok(())
