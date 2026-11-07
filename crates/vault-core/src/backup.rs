@@ -982,6 +982,18 @@ pub fn stage_restore(
             out.write_all(&buf[..n]).map_err(Error::Io)?;
             hasher.update(&buf[..n]);
             size += n as u64;
+            // Bounded expansion (the M4.1 invariant): a crafted entry
+            // cannot grow past its manifest-declared size and fill the
+            // staging disk before any later comparison fires — the
+            // declared size is the preflight's budget, so it is the
+            // extraction's budget too.
+            if size > expected_entry.size {
+                drop(out);
+                fs::remove_file(&target).ok();
+                return Err(bad(format!(
+                    "container entry {name} expands past its manifest size — the backup is damaged"
+                )));
+            }
         }
         out.sync_all().map_err(Error::Io)?;
         drop(out);
@@ -1319,6 +1331,17 @@ fn run_switch(
         }
     }
     fsync_dir(data_dir)?;
+    // The switch consumed its source: if anything removed the source
+    // mid-switch (a slot Forget racing this return), the active vault
+    // would be silently missing — refuse loudly instead. The journal
+    // stays `staged`; restart recovery re-resolves it (or reports the
+    // failure) rather than completing a vault-less switch.
+    if !data_dir.join(DB_ENTRY).is_file() {
+        return Err(bad(
+            "the switch source vanished mid-switch — the active vault is missing; \
+             restart the app to resolve the switch",
+        ));
+    }
     if opts.fail_at == RestoreFailPoint::BeforeCompleted {
         return Err(fault("restore failure injected before completing the switch"));
     }

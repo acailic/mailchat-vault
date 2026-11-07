@@ -2090,8 +2090,10 @@ async function refreshRecovery(): Promise<void> {
   try {
     const status = await ipc.recoveryStatus();
     recoveryLineEl.textContent = recoveryLine(status);
-    renderRecoverySlots(recoverySlotsEl, status, onReturnSlot, onForgetSlot,
-      vaultSwitched || switchInFlight);
+    renderRecoverySlots(recoverySlotsEl, status, onReturnSlot, onForgetSlot, {
+      returnPending: vaultSwitched || switchInFlight,
+      forgetPending: switchInFlight,
+    });
   } catch (e) {
     recoveryLineEl.textContent = `Recovery status failed: ${e}`;
   }
@@ -2130,6 +2132,9 @@ async function onReturnSlot(slotId: string): Promise<void> {
 }
 
 async function onForgetSlot(slotId: string): Promise<void> {
+  // A switch in flight could be consuming this slot; the backend
+  // serializes Forget with the same gate, the UI refuses up front.
+  if (switchInFlight) return;
   const confirmed = window.confirm(
     "Delete this recovery snapshot for good? The active vault is not touched.",
   );

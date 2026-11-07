@@ -570,6 +570,32 @@ fn restore_refuses_newer_format_schema_and_missing_objects() {
 
 /// Build a container with the given manifest and a real backup's other
 /// entries (test-side crafting only).
+#[test]
+fn restore_refuses_an_entry_expanding_past_its_declared_size() {
+    // Bounded expansion (the M4.1 invariant, applied to staging): a
+    // crafted container can pass the space preflight with small
+    // declared sizes while a deflated entry expands far larger —
+    // extraction must abort the moment the streamed size passes the
+    // manifest's number, before the staging disk fills.
+    let sb = Sandbox::new("expand-bound");
+    sb.seed_vault("x", 1);
+    let summary = sb.backup("x.mcbackup");
+
+    let mut shrunk = summary.manifest.clone();
+    let real = shrunk.db.size;
+    assert!(real > 2, "the seeded vault's database must have bytes");
+    shrunk.db.size = real / 2;
+    let crafted = craft_container(&sb, "shrunk.mcbackup", &shrunk, &summary.path);
+
+    let fp = sb.fingerprint();
+    let result = backup::stage_restore(&sb.data_dir(), &crafted, &fp,
+        &no_progress, &RestoreOptions::default());
+    assert!(matches!(&result, Err(vault_core::Error::Backup(m)) if m.contains("expands past its manifest size")));
+    // The active vault is untouched.
+    let (messages, _, _, _) = sb.vault_shape();
+    assert_eq!(messages, 1);
+}
+
 fn craft_container(sb: &Sandbox, name: &str, manifest: &backup::BackupManifest, src: &Path) -> PathBuf {
     let dest = sb.outside(name);
     let file = fs::File::open(src).unwrap();

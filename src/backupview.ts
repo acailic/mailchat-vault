@@ -254,12 +254,21 @@ export function renderRestoreFlow(
 
 /** Render the previous-vault slots: one row per slot with its line and
  *  the explicit Return / Forget actions. */
+/** What the recovery slot panel should allow right now: a switch
+ *  that is running locks Return (never two switches) and Forget (it
+ *  could delete the slot a return is consuming); after a completed
+ *  switch only Return stays locked until the app restarts. */
+export interface RecoveryActionsState {
+  returnPending?: boolean;
+  forgetPending?: boolean;
+}
+
 export function renderRecoverySlots(
   el: HTMLElement,
   status: RecoveryStatusView,
   onReturn: (slotId: string) => void,
   onForget: (slotId: string) => void,
-  switchPending = false,
+  actions: RecoveryActionsState = {},
 ): void {
   el.replaceChildren();
   if (status.previous.length === 0) {
@@ -281,12 +290,13 @@ export function renderRecoverySlots(
     back.type = "button";
     back.title = "Switch the active vault back to this snapshot (validated, journaled; restart required)";
     back.textContent = "Return to this vault";
-    back.disabled = switchPending;
+    back.disabled = actions.returnPending ?? false;
     back.addEventListener("click", () => onReturn(slot.id));
     const forget = document.createElement("button");
     forget.type = "button";
     forget.title = "Delete this recovery snapshot for good (the active vault is never touched)";
     forget.textContent = "Forget";
+    forget.disabled = actions.forgetPending ?? false;
     forget.addEventListener("click", () => onForget(slot.id));
     row.append(info, back, forget);
     el.append(row);

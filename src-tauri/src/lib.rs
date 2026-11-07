@@ -636,8 +636,12 @@ async fn recovery_status(state: State<'_, AppState>) -> Result<RecoveryStatus, S
 }
 
 /// Explicitly forget one previous-vault slot (releases its disk).
+/// Serialized with the switch entry points: a Forget racing a return's
+/// pre-journal window would delete the very slot the switch is about
+/// to consume, so it takes the same gate and refuses while one runs.
 #[tauri::command]
 async fn recovery_forget(state: State<'_, AppState>, slot_id: String) -> Result<(), String> {
+    let _switch_lease = state.switch_gate.try_begin()?;
     let data_dir = state.data_dir.clone();
     tauri::async_runtime::spawn_blocking(move || backup::recovery_forget(&data_dir, &slot_id))
         .await
@@ -2506,8 +2510,17 @@ pub fn run() {
             // anything opens the vault — `switching` rolls back to the
             // intact previous vault, `staged` rolls forward to the new
             // one; either way this app start opens one verified vault.
+            // A failed recovery fails CLOSED: opening anyway could spawn
+            // the pool over a missing vault.db (a fresh empty database)
+            // whose new session writes the next restart's rollback would
+            // then silently discard.
             if let Err(e) = backup::recover_interrupted_switch(&data_dir) {
-                eprintln!("Switch recovery failed: {e}");
+                return Err(format!(
+                    "an interrupted vault switch could not be resolved: {e} — \
+                     the vault will not be opened in this state; check the \
+                     recovery directory or restore from a healthy backup"
+                )
+                .into());
             }
             // M2.1: one pool over the vault file — writer worker + two
             // read connections. Job events stream to the UI; the same
