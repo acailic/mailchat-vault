@@ -513,24 +513,34 @@ async fn backup_inspect(archive: String) -> Result<BackupManifest, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Commit a staged, validated restore. Stops the scheduler, watcher,
-/// and the database pool first — the switch moves `vault.db` itself —
-/// then replaces the vault payload through the recoverable switch
-/// journal. On success the app must be restarted to reopen the vault;
-/// the caller shows that state. Credentials are never restored:
-/// `sources_needing_reauth` is the count the UI warns with.
+/// Commit a staged, validated restore. Every refusal the commit can
+/// raise is checked read-only (`verify_committable`) while the backend
+/// is still live, so a refused commit never leaves a drained pool
+/// behind a usable UI; only then does this stop the scheduler, watcher,
+/// and the database pool — the switch moves `vault.db` itself — and
+/// replaces the vault payload through the recoverable switch journal.
+/// On success the app must be restarted to reopen the vault.
+/// `sources_needing_reauth` counts the restored IMAP accounts whose
+/// `user@host` credentials are missing from this machine's keyring: a
+/// same-machine restore with live keyring entries reports 0
+/// (credentials are never part of a backup).
 #[tauri::command]
 async fn restore_commit(
     state: State<'_, AppState>,
+    secrets: State<'_, Arc<secrets::Secrets>>,
     preview_id: String,
 ) -> Result<RestoreOutcome, String> {
     let scheduler = Arc::clone(&state.scheduler);
     let pool = Arc::clone(&state.pool);
     let data_dir = state.data_dir.clone();
+    let secrets = Arc::clone(secrets.inner());
     tauri::async_runtime::spawn_blocking(move || -> Result<RestoreOutcome, String> {
         // The active vault must be exactly what the preview validated.
         let fingerprint = pool
             .with_read(|s| s.vault_fingerprint())
+            .map_err(|e| e.to_string())?;
+        // Refusals surface before anything stops: the app stays usable.
+        backup::verify_committable(&data_dir, &preview_id, &fingerprint, &|_| {})
             .map_err(|e| e.to_string())?;
         // Stop scheduled rounds and watched-folder imports before the
         // switch (their writes would fail on the drained pool anyway,
@@ -540,17 +550,38 @@ async fn restore_commit(
             interval_ms: 0,
         });
         pool.shutdown();
-        backup::commit_restore(
+        let outcome = backup::commit_restore(
             &data_dir,
             &preview_id,
             &fingerprint,
             &|_| {},
             &backup::RestoreOptions::default(),
+            &needs_reauth_after_restore(&secrets),
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| {
+            // The pool is drained now and the journal may hold a
+            // mid-switch state that resolves on restart: say so — the
+            // vault switch itself is recoverable, not lost.
+            format!("restart required — the switch stopped and recovers on restart: {e}")
+        })?;
+        Ok(outcome)
     })
     .await
     .map_err(|e| format!("restore task failed: {e}"))?
+}
+
+/// The per-source reauth check the restore outcome counts with: an
+/// IMAP account whose `user@host` entry is missing from this machine's
+/// keyring (non-IMAP sources never hold credentials, so they never
+/// count).
+fn needs_reauth_after_restore(
+    secrets: &secrets::Secrets,
+) -> impl Fn(&vault_core::storage::SourceInstance) -> bool + '_ {
+    move |instance| {
+        vault_core::imap_coordinator::StoredImapConfig::of(instance)
+            .map(|stored| !secrets.has_account(&stored.host, &stored.username))
+            .unwrap_or(false)
+    }
 }
 
 /// The recovery state: the switch journal, a staged (validated,
@@ -576,23 +607,36 @@ async fn recovery_forget(state: State<'_, AppState>, slot_id: String) -> Result<
 
 /// Switch the active vault back to a recorded previous vault through
 /// the same validated switch process. Like `restore_commit` this
-/// stops the app's access and requires a restart.
+/// raises every refusal (unknown slot, unresolved switch, failed slot
+/// validation) before stopping the app's access, so a refused return
+/// leaves the app usable; a committed one requires a restart.
 #[tauri::command]
 async fn return_to_previous_vault(
     state: State<'_, AppState>,
+    secrets: State<'_, Arc<secrets::Secrets>>,
     slot_id: String,
 ) -> Result<RestoreOutcome, String> {
     let scheduler = Arc::clone(&state.scheduler);
     let pool = Arc::clone(&state.pool);
     let data_dir = state.data_dir.clone();
+    let secrets = Arc::clone(secrets.inner());
     tauri::async_runtime::spawn_blocking(move || -> Result<RestoreOutcome, String> {
+        // Refusals surface before anything stops: the app stays usable.
+        backup::verify_returnable(&data_dir, &slot_id).map_err(|e| e.to_string())?;
         let _ = scheduler.set(vault_core::scheduler::SyncSchedule {
             enabled: false,
             interval_ms: 0,
         });
         pool.shutdown();
-        backup::return_to_previous_vault(&data_dir, &slot_id, &|_| {})
-            .map_err(|e| e.to_string())
+        backup::return_to_previous_vault(
+            &data_dir,
+            &slot_id,
+            &|_| {},
+            &needs_reauth_after_restore(&secrets),
+        )
+        .map_err(|e| {
+            format!("restart required — the switch stopped and recovers on restart: {e}")
+        })
     })
     .await
     .map_err(|e| format!("return task failed: {e}"))?
@@ -1637,26 +1681,32 @@ fn run_backup_create(
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "backup".to_string());
     let snapshot_tmp = dest_parent.join(format!(".{stem}-snapshot-{}", std::process::id()));
-    let plan = ctx
-        .write({
-            let data_dir = data_dir.to_path_buf();
-            let snapshot_tmp = snapshot_tmp.clone();
-            move |s| backup::snapshot_for_backup(&data_dir, s.connection(), &snapshot_tmp)
-        })
-        .map_err(backup_job_error)?;
-    let summary = backup::write_backup_container(
-        data_dir,
-        &plan,
-        dest,
-        &|note| {
-            ctx.progress(note.done, note.total, note.phase);
-        },
-        &|| ctx.is_cancelled(),
-        &backup::BackupOptions::default(),
-    )
-    .map_err(backup_job_error)?;
-    // The snapshot temp is consumed once the container is verified.
-    let _ = std::fs::remove_file(&plan.snapshot);
+    let summary = (|| -> std::result::Result<backup::BackupSummary, JobError> {
+        let plan = ctx
+            .write({
+                let data_dir = data_dir.to_path_buf();
+                let snapshot_tmp = snapshot_tmp.clone();
+                move |s| backup::snapshot_for_backup(&data_dir, s.connection(), &snapshot_tmp)
+            })
+            .map_err(backup_job_error)?;
+        backup::write_backup_container(
+            data_dir,
+            &plan,
+            dest,
+            &|note| {
+                ctx.progress(note.done, note.total, note.phase);
+            },
+            &|| ctx.is_cancelled(),
+            &backup::BackupOptions::default(),
+        )
+        .map_err(backup_job_error)
+    })();
+    // The snapshot temp never outlives the job: a failed snapshot or a
+    // failed/cancelled container write leaves nothing beside the
+    // user's picked destination (success consumed it already — this
+    // is a no-op then).
+    backup::discard_snapshot(&snapshot_tmp);
+    let summary = summary?;
     ctx.progress(1, 1, "backup verified");
     Ok(serde_json::to_value(&summary).unwrap_or(Value::Null))
 }

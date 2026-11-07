@@ -118,17 +118,24 @@ export function previewLine(preview: RestorePreviewView): string {
   return `${manifestLine(preview.manifest)} — validated; ${settings}.`;
 }
 
-/** The post-commit sentence: restart + reconnection are always required
- *  (credentials are never part of a backup). */
+/** The post-commit sentence: a restart is always required;
+ *  reconnection is asked for only the restored accounts whose
+ *  credentials are missing from this machine's keyring (the backend
+ *  counts them against the keyring — a same-machine restore with
+ *  live keyring entries reports 0 and asks for nothing). */
 export function restoreDoneLine(outcome: RestoreOutcomeView): string {
+  const n = outcome.sources_needing_reauth;
+  const total = outcome.manifest.counts.sources;
   const sources =
-    outcome.sources_needing_reauth === 1
-      ? "1 restored account"
-      : `${outcome.sources_needing_reauth} restored accounts`;
+    0 < n && n < total
+      ? `${n} of ${total} restored accounts`
+      : n === 1
+        ? "1 restored account"
+        : `${n} restored accounts`;
   return (
     `Vault restored from backup. The replaced vault is kept as recovery snapshot ` +
     `${outcome.previous_slot}. Restart the app to open the restored vault` +
-    (outcome.sources_needing_reauth > 0 ? `, then reconnect ${sources} (passwords are never restored).` : ".")
+    (n > 0 ? `, then reconnect ${sources} (passwords are never restored).` : ".")
   );
 }
 

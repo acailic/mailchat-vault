@@ -85,7 +85,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::object_store::ObjectStore;
 use crate::storage::{
-    SUPPORTED_SCHEMA_VERSION, VaultFingerprint, media_digests_on, read_schema_version,
+    SUPPORTED_SCHEMA_VERSION, SourceInstance, VaultFingerprint, media_digests_on, read_schema_version,
     vault_fingerprint_on,
 };
 use crate::{Error, Result};
@@ -608,8 +608,7 @@ pub fn create_backup(
     let plan = snapshot_for_backup(data_dir, conn, &snapshot_tmp)?;
     let summary = write_backup_container(data_dir, &plan, dest, progress, cancel, opts)?;
     // The snapshot's job is done once the container is verified.
-    let _ = fs::remove_file(&snapshot_tmp);
-    remove_journal_sidecars(&snapshot_tmp);
+    discard_snapshot(&snapshot_tmp);
     Ok(summary)
 }
 
@@ -1123,24 +1122,88 @@ pub struct RestoreOutcome {
     pub previous_slot: String,
     /// Whether a settings file was restored.
     pub restored_settings: bool,
-    /// Restored sources requiring reconnection (credentials are never
-    /// restored — the count the UI warns with).
+    /// Restored sources the caller's credential-presence check flags
+    /// (the app checks the OS keyring's `user@host` entries): a
+    /// same-machine restore whose keyring still holds every account
+    /// reports 0; credentials are never part of a backup, so only the
+    /// accounts missing from *this* machine count.
     pub sources_needing_reauth: u64,
 }
 
 /// Commit a staged restore: re-verify the staged bytes, refuse a vault
 /// that changed since the preview, then switch through the journal.
+/// `needs_reauth` decides, per restored source, whether its credentials
+/// are missing on this machine (the app passes a keyring lookup) — the
+/// outcome counts exactly those sources, never the manifest's total.
 ///
 /// The caller must have stopped every writer and closed the pool before
-/// this runs — the switch moves `vault.db` itself.
+/// this runs — the switch moves `vault.db` itself. Every refusal this
+/// function can raise *before* the switch is also available read-only
+/// through [`verify_committable`], so a caller that drains its backend
+/// can refuse while everything is still running.
 pub fn commit_restore(
     data_dir: &Path,
     preview_id: &str,
     current_fingerprint: &VaultFingerprint,
     progress: &dyn Fn(ProgressNote),
     opts: &RestoreOptions,
+    needs_reauth: &dyn Fn(&SourceInstance) -> bool,
 ) -> Result<RestoreOutcome> {
     let staging = staging_dir(data_dir);
+    let (record, manifest) =
+        precheck_commit(data_dir, &staging, preview_id, current_fingerprint, progress)?;
+
+    let previous_slot = new_previous_slot(data_dir)?;
+    write_journal(data_dir, |journal| {
+        *journal = Some(SwitchJournal {
+            version: 1,
+            state: SwitchState::Switching,
+            created_at: now_rfc3339(),
+            archive: Some(record.archive.clone()),
+            previous: previous_slot.clone(),
+            source: staging.clone(),
+        })
+    })?;
+    run_switch(
+        data_dir,
+        &previous_slot,
+        &staging,
+        &manifest,
+        progress,
+        opts,
+        needs_reauth,
+    )
+}
+
+/// Every refusal a [`commit_restore`] can raise before the switch
+/// starts, checked read-only against the still-active vault. Callers
+/// whose backend must stay usable (the app drains its pool around the
+/// switch) run this first: a refusal surfaces while every writer is
+/// still live, so nothing is left stopped behind a "usable" UI.
+/// [`commit_restore`] re-runs the identical checks — a switch only
+/// ever publishes re-verified bytes.
+pub fn verify_committable(
+    data_dir: &Path,
+    preview_id: &str,
+    current_fingerprint: &VaultFingerprint,
+    progress: &dyn Fn(ProgressNote),
+) -> Result<()> {
+    let staging = staging_dir(data_dir);
+    precheck_commit(data_dir, &staging, preview_id, current_fingerprint, progress).map(|_| ())
+}
+
+/// The shared pre-switch refusal checks of [`commit_restore`]: the
+/// staged preview must still be the validated one, the staged bytes
+/// must still hash to their manifest, the active vault must be the
+/// fingerprint the preview validated, and the staged database must be
+/// the one that was validated.
+fn precheck_commit(
+    data_dir: &Path,
+    staging: &Path,
+    preview_id: &str,
+    current_fingerprint: &VaultFingerprint,
+    progress: &dyn Fn(ProgressNote),
+) -> Result<(PreviewRecord, BackupManifest)> {
     let record: PreviewRecord = read_json(&staging.join(PREVIEW_FILE)).map_err(|e| {
         bad(format!(
             "no staged restore to commit (run the validation first): {e}"
@@ -1163,7 +1226,7 @@ pub fn commit_restore(
             "the staged restore changed since its validation — restage it before committing",
         ));
     }
-    reverify_staged(&staging, &manifest, progress)?;
+    reverify_staged(staging, &manifest, progress)?;
     // The active vault must be the one the preview validated.
     if record.active_fingerprint != *current_fingerprint {
         return Err(bad(
@@ -1176,19 +1239,7 @@ pub fn commit_restore(
     if staged_fingerprint != record.staged_fingerprint {
         return Err(bad("the staged database changed since validation — refusing to switch"));
     }
-
-    let previous_slot = new_previous_slot(data_dir)?;
-    write_journal(data_dir, |journal| {
-        *journal = Some(SwitchJournal {
-            version: 1,
-            state: SwitchState::Switching,
-            created_at: now_rfc3339(),
-            archive: Some(record.archive.clone()),
-            previous: previous_slot.clone(),
-            source: staging.clone(),
-        })
-    })?;
-    run_switch(data_dir, &previous_slot, &staging, &manifest, progress, opts)
+    Ok((record, manifest))
 }
 
 /// Refuse while a switch is unresolved (a journal that is not
@@ -1241,6 +1292,7 @@ fn run_switch(
     manifest: &BackupManifest,
     progress: &dyn Fn(ProgressNote),
     opts: &RestoreOptions,
+    needs_reauth: &dyn Fn(&SourceInstance) -> bool,
 ) -> Result<RestoreOutcome> {
     // Phase A: active → previous (journal `switching`; a crash rolls back).
     for (i, item) in SWITCH_ITEMS.iter().enumerate() {
@@ -1281,6 +1333,14 @@ fn run_switch(
     fsync_dir(&recovery_dir(data_dir))?;
 
     progress(ProgressNote { phase: "done", done: 1, total: 1 });
+    // Reauth accounting reads the *restored* vault's own source list
+    // against the caller's credential-presence check (the OS keyring):
+    // a same-machine restore whose keyring still holds every user@host
+    // reports 0. The switch is already complete here — accounting must
+    // never fail it, so an unreadable fresh vault falls back to the
+    // manifest's (conservative) source count.
+    let sources_needing_reauth = restored_sources_needing_reauth(data_dir, needs_reauth)
+        .unwrap_or(manifest.counts.sources);
     Ok(RestoreOutcome {
         manifest: manifest.clone(),
         previous_slot: previous_slot
@@ -1288,7 +1348,47 @@ fn run_switch(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default(),
         restored_settings: data_dir.join(SETTINGS_ENTRY).is_file(),
-        sources_needing_reauth: manifest.counts.sources,
+        sources_needing_reauth,
+    })
+}
+
+/// Count the restored vault's sources the caller flags as needing
+/// reconnection — credentials absent on this machine. Reads the fresh
+/// active database read-only; `None` means it could not be opened.
+fn restored_sources_needing_reauth(
+    data_dir: &Path,
+    needs_reauth: &dyn Fn(&SourceInstance) -> bool,
+) -> Option<u64> {
+    let conn = open_read_only(&data_dir.join(DB_ENTRY)).ok()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, kind, label, connector_key, config_json, state, excluded, \
+                     last_attempt_at, last_success_at, created_at \
+             FROM source_instances",
+        )
+        .ok()?;
+    let instances = stmt
+        .query_map([], restored_source_instance)
+        .ok()?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .ok()?;
+    Some(instances.iter().filter(|i| needs_reauth(i)).count() as u64)
+}
+
+/// One `source_instances` row as a [`SourceInstance`] (read-only; the
+/// storage layer's own mapper lives behind its write paths).
+fn restored_source_instance(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceInstance> {
+    Ok(SourceInstance {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        label: row.get(2)?,
+        connector_key: row.get(3)?,
+        config_json: row.get(4)?,
+        state: row.get(5)?,
+        excluded: row.get::<_, i64>(6)? != 0,
+        last_attempt_at: row.get(7)?,
+        last_success_at: row.get(8)?,
+        created_at: row.get(9)?,
     })
 }
 
@@ -1341,9 +1441,17 @@ pub fn restore_backup(
     active_fingerprint: &VaultFingerprint,
     progress: &dyn Fn(ProgressNote),
     opts: &RestoreOptions,
+    needs_reauth: &dyn Fn(&SourceInstance) -> bool,
 ) -> Result<RestoreOutcome> {
     let preview = stage_restore(data_dir, archive, active_fingerprint, progress, opts)?;
-    commit_restore(data_dir, &preview.preview_id, active_fingerprint, progress, opts)
+    commit_restore(
+        data_dir,
+        &preview.preview_id,
+        active_fingerprint,
+        progress,
+        opts,
+        needs_reauth,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1357,12 +1465,66 @@ pub fn restore_backup(
 /// `slot_id` is the exact directory name under the recovery directory
 /// (see [`recovery_status`]). The caller must have stopped every writer
 /// first, and must confirm with the user — this replaces the current
-/// vault.
+/// vault. `needs_reauth` is the per-source credential-presence check
+/// (see [`commit_restore`]). Every refusal this can raise before the
+/// switch is also available read-only through [`verify_returnable`].
 pub fn return_to_previous_vault(
     data_dir: &Path,
     slot_id: &str,
     progress: &dyn Fn(ProgressNote),
+    needs_reauth: &dyn Fn(&SourceInstance) -> bool,
 ) -> Result<RestoreOutcome> {
+    let (slot, schema, counts) = validate_previous_slot(data_dir, slot_id)?;
+    let manifest = BackupManifest {
+        format_version: BACKUP_FORMAT_VERSION,
+        schema_version: schema,
+        created_at: now_rfc3339(),
+        counts,
+        db: BackupEntry {
+            path: DB_ENTRY.to_string(),
+            size: 0,
+            sha256: String::new(),
+        },
+        settings: None,
+        objects: Vec::new(),
+    };
+
+    let previous_slot = new_previous_slot(data_dir)?;
+    write_journal(data_dir, |journal| {
+        *journal = Some(SwitchJournal {
+            version: 1,
+            state: SwitchState::Switching,
+            created_at: now_rfc3339(),
+            archive: None,
+            previous: previous_slot.clone(),
+            source: slot.clone(),
+        })
+    })?;
+    run_switch(
+        data_dir,
+        &previous_slot,
+        &slot,
+        &manifest,
+        progress,
+        &RestoreOptions::default(),
+        needs_reauth,
+    )
+}
+
+/// Every refusal a [`return_to_previous_vault`] can raise before the
+/// switch starts, checked read-only — the drained-backend precheck
+/// counterpart of [`verify_committable`].
+pub fn verify_returnable(data_dir: &Path, slot_id: &str) -> Result<()> {
+    validate_previous_slot(data_dir, slot_id).map(|_| ())
+}
+
+/// Validate a previous-vault slot exactly as the switch would: openable,
+/// integral, its schema supported, and every referenced media object
+/// present. Returns the slot path, its schema version, and its counts.
+fn validate_previous_slot(
+    data_dir: &Path,
+    slot_id: &str,
+) -> Result<(PathBuf, i64, BackupCounts)> {
     if !is_slot_id(slot_id) {
         return Err(bad(format!("not a previous-vault id: {slot_id}")));
     }
@@ -1412,32 +1574,7 @@ pub fn return_to_previous_vault(
             )));
         }
     }
-    let manifest = BackupManifest {
-        format_version: BACKUP_FORMAT_VERSION,
-        schema_version: schema,
-        created_at: now_rfc3339(),
-        counts,
-        db: BackupEntry {
-            path: DB_ENTRY.to_string(),
-            size: 0,
-            sha256: String::new(),
-        },
-        settings: None,
-        objects: Vec::new(),
-    };
-
-    let previous_slot = new_previous_slot(data_dir)?;
-    write_journal(data_dir, |journal| {
-        *journal = Some(SwitchJournal {
-            version: 1,
-            state: SwitchState::Switching,
-            created_at: now_rfc3339(),
-            archive: None,
-            previous: previous_slot.clone(),
-            source: slot.clone(),
-        })
-    })?;
-    run_switch(data_dir, &previous_slot, &slot, &manifest, progress, &RestoreOptions::default())
+    Ok((slot, schema, counts))
 }
 
 // ---------------------------------------------------------------------------
@@ -1813,6 +1950,15 @@ fn fsync_dir(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn fsync_dir(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+/// Remove a finished-or-failed snapshot temp (the file plus its WAL
+/// sidecars). Every exit path of a backup uses this — the one-shot
+/// [`create_backup`] and the app's job alike — so a failed or cancelled
+/// run leaves nothing beside the user's destination.
+pub fn discard_snapshot(path: &Path) {
+    let _ = fs::remove_file(path);
+    remove_journal_sidecars(path);
 }
 
 /// A temporary path removed on drop (best effort — a hard crash's

@@ -2043,6 +2043,13 @@ async function startRestoreValidation(archive: string): Promise<void> {
 
 /** Commit the validated restore: stops the app's vault access and
  *  switches through the journal. A restart is required afterwards. */
+/** A commit/return error raised after the backend was stopped: the
+ *  vault switch is mid-flight and resolves on restart (the switch
+ *  journal recovers it) — the app cannot serve the vault anymore. */
+function switchStoppedMidWay(e: unknown): boolean {
+  return String(e).includes("restart required");
+}
+
 async function commitRestore(preview: RestorePreviewView): Promise<void> {
   if (vaultSwitched || !canCommit(restoreFlow)) return;
   const confirmed = window.confirm(
@@ -2060,7 +2067,21 @@ async function commitRestore(preview: RestorePreviewView): Promise<void> {
     setStatus(restoreDoneLine(outcome) + " Restart the app now.", false);
     void refreshRecovery();
   } catch (e) {
-    restoreFlow = { step: "error", message: `Restore failed (the vault was not replaced): ${e}` };
+    if (switchStoppedMidWay(e)) {
+      // The backend stopped mid-switch: a restart resolves the journal;
+      // nothing further is usable, so the UI must say so and lock.
+      vaultSwitched = true;
+      backupCreateButton.disabled = true;
+      restorePickButton.disabled = true;
+      restoreFlow = {
+        step: "error",
+        message: `Restore stopped mid-switch — restart the app; the switch journal recovers the vault automatically. (${e})`,
+      };
+      setStatus("Restart the app to recover the vault switch.", true);
+    } else {
+      // Refused before anything stopped: the vault and the app are both untouched.
+      restoreFlow = { step: "error", message: `Restore refused (the vault was not replaced): ${e}` };
+    }
   }
   renderRestorePanel();
 }
@@ -2092,7 +2113,17 @@ async function onReturnSlot(slotId: string): Promise<void> {
       restoreDoneLine(outcome) + " Restart the app now.";
     setStatus("Previous vault restored. Restart the app now.", false);
   } catch (e) {
-    recoveryLineEl.textContent = `Return failed (the current vault was not replaced): ${e}`;
+    if (switchStoppedMidWay(e)) {
+      vaultSwitched = true;
+      backupCreateButton.disabled = true;
+      restorePickButton.disabled = true;
+      recoveryLineEl.textContent =
+        `Switch stopped mid-way — restart the app; the switch journal recovers the vault automatically. (${e})`;
+      setStatus("Restart the app to recover the vault switch.", true);
+    } else {
+      // Refused before anything stopped: the vault and the app are both untouched.
+      recoveryLineEl.textContent = `Return refused (the current vault was not replaced): ${e}`;
+    }
   }
 }
 

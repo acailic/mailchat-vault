@@ -149,6 +149,14 @@ impl Secrets {
             removed |= in_memory || in_keyring;
         }
         removed
+
+    /// Whether the credentials for `user@host` are already present —
+    /// the OS keyring first, then session memory (the same places
+    /// [`Self::load`] resolves). The restore outcome's reauth accounting
+    /// uses this: a same-machine restore whose keyring still holds the
+    /// account needs no reconnection, so it must not be counted.
+    pub fn has_account(&self, host: &str, username: &str) -> bool {
+        self.load(host, username).is_some()
     }
 
     /// Read one keyring/memory key: OS keyring first, then session memory.
@@ -359,5 +367,20 @@ mod tests {
             Some("keep-me")
         );
         assert_eq!(secrets.load(HOST, "gone@me.invalid"), None);
+
+    fn has_account_reports_credential_presence() {
+        // Present (keyring or session memory): a same-machine restore
+        // resolves the account — no reconnection needed.
+        let secrets = Secrets::new();
+        secrets.save(HOST, "ana@example.invalid", "app-password");
+        assert!(secrets.has_account(HOST, "ana@example.invalid"));
+        // The legacy lowercase key counts as present too (it resolves
+        // through `load`): stored under "dana@…", asked for as "Dana@…".
+        secrets.save(HOST, "dana@example.invalid", "legacy");
+        assert!(secrets.has_account(HOST, "Dana@Example.invalid"));
+
+        // Absent (a cross-machine restore, or a never-entered password):
+        // the account must be reconnected.
+        assert!(!secrets.has_account(HOST, "stranger@example.invalid"));
     }
 }

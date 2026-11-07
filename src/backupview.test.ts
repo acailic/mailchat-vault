@@ -94,17 +94,26 @@ describe("job and preview lines", () => {
     sources_needing_reauth: 2,
   };
 
-  it("restoreDoneLine demands a restart and reconnection", () => {
+  it("restoreDoneLine asks to reconnect only what the keyring lacks", () => {
     const line = restoreDoneLine(outcome);
     expect(line).toContain("Restart the app");
-    expect(line).toContain("reconnect 2 restored accounts");
+    expect(line).toContain("reconnect 2 of 3 restored accounts");
     expect(line).toContain("passwords are never restored");
     expect(line).toContain("previous-20261127153045-abc123");
-    // Zero sources: no reconnection clause.
-    expect(restoreDoneLine({ ...outcome, sources_needing_reauth: 0 })).not.toContain("reconnect");
+    // Same-machine restore with live keyring entries (0): restart only —
+    // no reconnection clause and no "passwords are never restored" claim.
+    const sameMachine = restoreDoneLine({ ...outcome, sources_needing_reauth: 0 });
+    expect(sameMachine).not.toContain("reconnect");
+    expect(sameMachine).not.toContain("passwords are never restored");
+    expect(sameMachine).toContain("Restart the app");
+    // One of three accounts missing: singular, qualified by the total.
     expect(restoreDoneLine({ ...outcome, sources_needing_reauth: 1 })).toContain(
-      "reconnect 1 restored account",
+      "reconnect 1 of 3 restored accounts",
     );
+    // Cross-machine restore (every source): the plain count, no "of".
+    const crossMachine = restoreDoneLine({ ...outcome, sources_needing_reauth: 3 });
+    expect(crossMachine).toContain("reconnect 3 restored accounts");
+    expect(crossMachine).not.toContain("of 3 restored");
   });
 });
 
