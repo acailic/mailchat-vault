@@ -22,6 +22,7 @@ import {
   renderRecoverySlots,
   renderRestoreFlow,
   restoreDoneLine,
+  gateBusy,
   switchStopped,
   type BackupSummaryView,
   type RestoreFlow,
@@ -1983,6 +1984,7 @@ function renderRestorePanel(): void {
     (preview) => void commitRestore(preview),
     () => {
       restoreFlow = { step: "idle" };
+      pendingRestoreJob = null;
       renderRestorePanel();
     },
   );
@@ -2078,6 +2080,15 @@ async function commitRestore(preview: RestorePreviewView): Promise<void> {
         message: `Restore stopped mid-switch — restart the app; the switch journal recovers the vault automatically. (${e})`,
       };
       setStatus("Restart the app to recover the vault switch.", true);
+    } else if (gateBusy(e)) {
+      // Refused while another switch or backup holds the gate: nothing
+      // stopped, the staged preview is still committable — keep the
+      // validated panel and let the user retry.
+      switchInFlight = false;
+      backupCreateButton.disabled = false;
+      restorePickButton.disabled = false;
+      restoreFlow = { step: "validated", preview };
+      setStatus("A vault switch or backup is already in progress — the validated restore stays ready; retry the commit when it finishes.", true);
     } else {
       // Refused before anything stopped: the vault and the app are both untouched.
       switchInFlight = false;

@@ -1195,6 +1195,116 @@ fn restore_over_a_staged_only_failure_can_retry_cleanly() {
     assert_eq!(messages, 1, "the retry restored the new vault");
 }
 
+#[test]
+fn interrupted_return_recovery_keeps_the_return_target_slot() {
+    // A crash during phase A of a *return* switch (the journal is still
+    // `switching`, the chosen previous-vault slot is the switch's
+    // source) rolls back on restart — and the intact return target must
+    // survive the rollback: only recovery_forget deletes slots.
+    let sb = Sandbox::new("return-crash");
+    sb.seed_vault("old", 4);
+    let old = sb.backup("old.mcbackup");
+    let sb2 = Sandbox::new("return-crash-new");
+    sb2.seed_vault("new", 2);
+    let new = sb2.backup("new.mcbackup");
+
+    // Replace the active vault with the "new" backup: the replaced
+    // "old" vault becomes a recorded previous-vault slot.
+    let fp = sb.fingerprint();
+    backup::restore_backup(
+        &sb.data_dir(),
+        &new.path,
+        &fp,
+        &no_progress,
+        &RestoreOptions::default(),
+        &keyring_has_everything,
+    )
+    .unwrap();
+    let status = backup::recovery_status(&sb.data_dir()).unwrap();
+    assert_eq!(status.previous.len(), 1);
+    let slot_id = status.previous[0].id.clone();
+    let slot_path = backup::recovery_dir(&sb.data_dir()).join(&slot_id);
+
+    // Crash during phase A of a return to `slot`: the active vault was
+    // moved aside into a fresh slot, the journal never left `switching`.
+    let staged = backup::recovery_dir(&sb.data_dir()).join("previous-20260101000000-c0ffee");
+    fs::create_dir_all(&staged).unwrap();
+    for item in ["vault.db", "settings.json", "media"] {
+        let from = sb.data_dir().join(item);
+        if from.exists() {
+            fs::rename(&from, staged.join(item)).unwrap();
+        }
+    }
+    fs::write(
+        backup::recovery_dir(&sb.data_dir()).join("switch-journal.json"),
+        serde_json::json!({
+            "version": 1,
+            "state": "switching",
+            "created_at": "2026-01-01T00:00:00Z",
+            "archive": null,
+            "previous": staged.to_string_lossy(),
+            "source": slot_path.to_string_lossy(),
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let recovery = backup::recover_interrupted_switch(&sb.data_dir()).unwrap();
+    assert_eq!(
+        recovery,
+        SwitchRecovery::RolledBack {
+            previous_slot: staged
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        }
+    );
+    // The active vault is the displaced one, whole (the "new" vault).
+    let (messages, _, _, digests) = sb.vault_shape();
+    assert_eq!(messages, 2);
+    for digest in &digests {
+        assert!(sb.store().has(digest), "digest {digest} resolvable");
+    }
+    // The return target survived: the intact "old" vault with its
+    // database, media, and settings is still in its slot.
+    assert!(slot_path.join("vault.db").is_file(), "return target kept");
+    assert!(slot_path.join("media").is_dir(), "return target media kept");
+    assert!(
+        slot_path.join("settings.json").is_file(),
+        "return target settings kept"
+    );
+    // And it still opens, holding exactly the "old" vault's messages.
+    let conn = rusqlite::Connection::open_with_flags(
+        slot_path.join("vault.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM archive_messages", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count as u64, old.manifest.counts.messages);
+    // Every "old" media object is still in the slot's media dir.
+    let slot_media = fs::read_dir(slot_path.join("media")).unwrap();
+    let slot_names: Vec<String> = slot_media
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    for object in &old.manifest.objects {
+        let digest = object
+            .path
+            .split('/')
+            .next_back()
+            .and_then(|name| name.split('.').next())
+            .unwrap();
+        assert!(
+            slot_names
+                .iter()
+                .any(|n| n.starts_with(digest)),
+            "slot holds object {digest}: {slot_names:?}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Previous-vault recovery surface
 // ---------------------------------------------------------------------------

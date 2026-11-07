@@ -1733,7 +1733,10 @@ pub fn recover_interrupted_switch(data_dir: &Path) -> Result<SwitchRecovery> {
                     j.state = SwitchState::Completed;
                 }
             })?;
-            fs::remove_dir_all(&journal.source).ok();
+            // Phase B never ran, so the source is intact: for a return
+            // switch it is a recorded previous vault (only
+            // `recovery_forget` deletes slots), for a restore the
+            // staging area the next stage_restore re-wipes.
             fs::remove_dir_all(&journal.previous).ok();
             fsync_dir(data_dir)?;
             verify_active_vault(data_dir)?;

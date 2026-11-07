@@ -155,6 +155,20 @@ export function switchStopped(e: unknown): boolean {
   return text.startsWith(SWITCH_STOPPED_MARKER);
 }
 
+/** The exact message the backend refuses a concurrent vault switch or
+ *  backup with (the switch gate in src-tauri's `AppState` — shared
+ *  word-for-word as a contract; a test on the Rust side pins it). */
+export const GATE_BUSY_MESSAGE =
+  "a vault switch or backup is already in progress — wait for it to finish";
+
+/** Whether an error from a switch/commit call is the transient gate
+ *  refusal: the staged preview stays committable, so the flow can
+ *  keep its validated state and let the user retry. */
+export function gateBusy(e: unknown): boolean {
+  const text = e instanceof Error ? e.message : String(e);
+  return text === GATE_BUSY_MESSAGE;
+}
+
 /** One line per previous-vault slot. */
 export function slotLine(slot: PreviousVaultSlot): string {
   return `${slot.created_at} · ${humanBytes(slot.total_bytes)} · ${slot.files} files`;

@@ -8,6 +8,8 @@ import {
   backupDoneLine,
   canCommit,
   countsLine,
+  gateBusy,
+  GATE_BUSY_MESSAGE,
   humanBytes,
   manifestLine,
   previewLine,
@@ -107,6 +109,17 @@ describe("job and preview lines", () => {
     expect(switchStopped("restart required — but no marker")).toBe(false);
     expect(switchStopped("a vault switch is already in progress")).toBe(false);
     expect(switchStopped(null)).toBe(false);
+  });
+
+  it("gateBusy matches the backend gate refusal word-for-word", () => {
+    // The shared contract with the switch gate's refusal (pinned on the
+    // Rust side): only the exact message counts — a gate refusal is
+    // transient, so the commit flow distinguishes it from final refusals.
+    expect(gateBusy(GATE_BUSY_MESSAGE)).toBe(true);
+    expect(gateBusy(new Error(GATE_BUSY_MESSAGE))).toBe(true);
+    expect(gateBusy(`restore refused: ${GATE_BUSY_MESSAGE}`)).toBe(false);
+    expect(gateBusy("a vault switch or backup is already in progress")).toBe(false);
+    expect(gateBusy(null)).toBe(false);
   });
 
   it("restoreDoneLine asks to reconnect only what the keyring lacks", () => {
