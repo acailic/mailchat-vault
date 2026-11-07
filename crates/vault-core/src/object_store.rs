@@ -452,6 +452,15 @@ impl ObjectStore {
         existing_store_name(&self.store_dir, sha256).is_some()
     }
 
+    /// The file name under which this digest's bytes are stored
+    /// (`<sha256>.<ext>` — the extension varies, the hash does not), or
+    /// `None` when no object holds this content. The M4.4 backup copies
+    /// each referenced digest through this lookup so a backup contains
+    /// exactly what the archive references.
+    pub fn object_name(&self, sha256: &str) -> Option<String> {
+        existing_store_name(&self.store_dir, sha256)
+    }
+
     /// Resolve a store-relative reference (`media/<sha256>.<ext>`, the
     /// `path` recorded in a message's `media` entries) to its absolute
     /// path, refusing anything that is not exactly one store object:

@@ -151,6 +151,18 @@ impl Secrets {
         removed
     }
 
+    /// Whether the credentials for `user@host` are already present —
+    /// the OS keyring first, then session memory (the same places
+    /// [`Self::load`] resolves), counting either credential the sync
+    /// resolver accepts: a stored app password *or* a Google sign-in
+    /// refresh token (an OAuth-only account is connected, not
+    /// reconnectable). The restore outcome's reauth accounting uses
+    /// this: a same-machine restore whose keyring still holds the
+    /// account needs no reconnection, so it must not be counted.
+    pub fn has_account(&self, host: &str, username: &str) -> bool {
+        self.load(host, username).is_some() || self.load_refresh(host, username).is_some()
+    }
+
     /// Read one keyring/memory key: OS keyring first, then session memory.
     fn load_key(&self, key: &str) -> Option<String> {
         if let Ok(entry) = keyring::Entry::new(SERVICE, key) {
@@ -359,5 +371,27 @@ mod tests {
             Some("keep-me")
         );
         assert_eq!(secrets.load(HOST, "gone@me.invalid"), None);
+    }
+
+    #[test]
+    fn has_account_reports_credential_presence() {
+        // Present (keyring or session memory): a same-machine restore
+        // resolves the account — no reconnection needed.
+        let secrets = Secrets::new();
+        secrets.save(HOST, "ana@example.invalid", "app-password");
+        assert!(secrets.has_account(HOST, "ana@example.invalid"));
+        // The legacy lowercase key counts as present too (it resolves
+        // through `load`): stored under "dana@…", asked for as "Dana@…".
+        secrets.save(HOST, "dana@example.invalid", "legacy");
+        assert!(secrets.has_account(HOST, "Dana@Example.invalid"));
+        // An OAuth-only account (Google sign-in, no app password) is
+        // connected: the stored refresh token counts exactly like the
+        // resolver accepts it.
+        secrets.save_refresh(HOST, "gina@example.invalid", "refresh-token");
+        assert!(secrets.has_account(HOST, "gina@example.invalid"));
+
+        // Absent (a cross-machine restore, or a never-entered password):
+        // the account must be reconnected.
+        assert!(!secrets.has_account(HOST, "stranger@example.invalid"));
     }
 }
