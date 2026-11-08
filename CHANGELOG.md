@@ -68,6 +68,11 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
 
 ### Fixed
 
+- The AI-consent prompt buttons no longer render on the very first boot,
+  on an empty archive, before any question is asked: the `hidden`
+  attribute now always wins over layout rules such as the results-row
+  `display: flex` (the same guard covers the archive-changed refresh
+  notice, which had the same shape).
 - Configured periodic-sync intervals are preserved across restarts
   (previously a normalization could reset them), and job status events
   are reported consistently.
