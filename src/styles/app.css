@@ -13,6 +13,15 @@
 
 * { box-sizing: border-box; }
 
+/* The hidden attribute must always win over author display rules: any
+ * selector like `#results-col .row { display: flex; }` (author origin)
+ * beats the UA stylesheet's `[hidden] { display: none }` regardless of
+ * specificity, so hidden elements inside those rows rendered anyway
+ * (P0: the consent prompt and its buttons were physically visible on
+ * first boot, before any question; #refresh-notice had the same shape).
+ * This guard applies to every view's .row rules at once. */
+[hidden] { display: none !important; }
+
 html, body { height: 100%; }
 
 body {
