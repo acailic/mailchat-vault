@@ -347,7 +347,10 @@ export async function run(ctx) {
     });
     const imported = await awaitJob(browser, importJob.id, { timeoutMs: 300_000 });
     assert.equal(imported.state.state, "succeeded", "big mbox imports via the v2 import_mbox job");
-    assert.equal(imported.state.result.inserted, BIG_ARCHIVE, "all bulk messages inserted");
+    // M4.2+: the import_mbox job result mirrors the chat import outcome —
+    // ingest counts under `summary`, media counters under `media`.
+    assert.equal(imported.state.result.summary.inserted, BIG_ARCHIVE, "all bulk messages inserted");
+    assert.ok(imported.state.result.media, "the mbox media pass is reported");
 
     const big = await ipc(browser, "job_submit", { kind: "embed_messages", params: {} });
     const runningRec = await pollJob(browser, big.id, (rec) => rec.state.state === "running");

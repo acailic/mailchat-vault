@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::import_bounds::{safe_child, walk_bounded, ImportBounds};
+use crate::import_bounds::{safe_child, walk_bounded, ImportBounds, WalkedFile};
 use crate::message::NewMessage;
 use crate::object_store::{Capacity, ObjectStore};
 use crate::{Error, Result};
@@ -73,6 +73,17 @@ impl MissingReason {
 
 /// The honest missing reason for a failed store: a budget-bound refusal
 /// is not unreadability.
+///
+/// This is the one rule every store-failure arm applies — the three
+/// message passes' `Err` arms ([`extract_telegram`],
+/// [`extract_whatsapp`], [`MailMedia::store_message`] record it as a
+/// `reason` on a missing `media` entry) and the unlinked pass's `Err`
+/// arm ([`extract_unlinked`] counts it into `unlinked_dropped`, since
+/// there is no message to carry an entry). The mapping is asserted for
+/// all of them by the budget-exhaustion and unreadable-file invariant
+/// tests in `tests/media_extract.rs`: a budget refusal is always
+/// `budget-exceeded`, anything else is `unreadable`, and the two are
+/// never confused.
 fn missing_reason(err: &Error) -> MissingReason {
     match err {
         Error::ImportBounds(_) => MissingReason::Budget,
@@ -373,6 +384,51 @@ fn telegram_refs(obj: &Map<String, Value>) -> Vec<(String, Option<String>, Optio
     refs
 }
 
+/// Every display name a stored Telegram media entry can carry for this
+/// message object: the export's `file_name` (top-level or nested) and
+/// the nested path basenames — the single rule both the writer
+/// ([`extract_telegram`], via [`telegram_refs`]) and the reader
+/// (`attachment_summaries`) must agree on. A stored entry's name is
+/// always in this list, so the read side can suppress an unavailable
+/// "phantom" row by checking this list against the entry names —
+/// by construction, not by keeping a second copy of the rule in sync
+/// (the M4.2 F2/R3F1 seam).
+pub fn telegram_entry_names(obj: &Map<String, Value>) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let push = |names: &mut Vec<String>, name: &str| {
+        // Empty names are never display names; duplicates add nothing.
+        if !name.is_empty() && !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+    };
+    // Explicit export names first (a stored entry's preferred display).
+    for field in ["file_name", "file_name_unique"] {
+        if let Some(Value::String(name)) = obj.get(field) {
+            push(&mut names, name);
+        }
+    }
+    // The refs themselves: each display the writer would pick — the
+    // explicit `file_name` for `file` refs, else the path's basename.
+    for (rel, _hint, display) in telegram_refs(obj) {
+        if let Some(name) = display {
+            push(&mut names, &name);
+        }
+        push(&mut names, &file_display_name(&rel));
+    }
+    // Object-shaped refs may carry their own names — the reader's
+    // fallback display for an unlinked reference.
+    for field in ["photo", "file"] {
+        if let Some(Value::Object(inner)) = obj.get(field) {
+            for name_field in ["file_name", "file_name_unique"] {
+                if let Some(Value::String(name)) = inner.get(name_field) {
+                    push(&mut names, name);
+                }
+            }
+        }
+    }
+    names
+}
+
 /// Extract media for a WhatsApp export: attachment names parsed from
 /// `(file attached)` placeholders are matched against files next to the
 /// export `.txt` (recursively, since some exports nest media folders).
@@ -580,72 +636,100 @@ pub fn extract_unlinked(
     if !export_root.is_dir() {
         return Ok(records);
     }
-    let Ok(files) = walk_bounded(export_root, &ImportBounds::default()) else {
+    match walk_export_tree(export_root) {
         // The walk refused or failed: nothing past this point can be
         // examined, and the import must not fail over export litter —
         // but the summary must not pretend the tree was fully walked.
-        summary.unlinked_walk_failed += 1;
-        return Ok(records);
-    };
-    for file in files {
-        if file.path.is_dir() {
-            continue;
+        WalkedExport::Failed => {
+            summary.unlinked_walk_failed += 1;
+            return Ok(records);
         }
-        if Some(file.path.as_path()) == export_file {
-            continue;
-        }
-        if consumed.contains(&file.path) {
-            continue;
-        }
-        let Some(name) = file
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-        else {
-            continue;
-        };
-        if is_export_artifact(&name) {
-            continue;
-        }
-        let kind = media_kind(None, &name);
-        match store(data_dir, &file.path, &name, &kind, budget) {
-            Ok((entry, written)) => {
-                if linked_digests.contains(&entry.sha256) {
-                    // The content is message-linked — already preserved
-                    // and reachable from its message (this run's or an
-                    // interrupted earlier run's batches). Not unlinked.
-                    if written {
-                        // First copy in the vault; it stays, but it is a
-                        // linked object's bytes, not an unlinked one.
-                        summary.stored += 1;
-                    }
+        WalkedExport::Complete(files) => {
+            for file in files {
+                if file.path.is_dir() {
                     continue;
                 }
-                if written {
-                    summary.unlinked += 1;
-                } else {
-                    summary.unlinked_deduped += 1;
+                if Some(file.path.as_path()) == export_file {
+                    continue;
                 }
-                records.push(UnlinkedObject {
-                    sha256: entry.sha256,
-                    size: entry.size,
-                    name: entry.name,
-                    kind: entry.kind,
-                });
-            }
-            // An unreadable stray file is skipped: there is no message
-            // to record a missing entry on, and the import must not
-            // fail over export litter. A budget refusal is counted, not
-            // silent: the summary says the tree was not fully stored.
-            Err(e) => {
-                if matches!(e, Error::ImportBounds(_)) {
-                    summary.unlinked_dropped += 1;
+                if consumed.contains(&file.path) {
+                    continue;
                 }
-                continue;
+                let Some(name) = file
+                    .path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                else {
+                    continue;
+                };
+                if is_export_artifact(&name) {
+                    continue;
+                }
+                let kind = media_kind(None, &name);
+                match store(data_dir, &file.path, &name, &kind, budget) {
+                    Ok((entry, written)) => {
+                        if linked_digests.contains(&entry.sha256) {
+                            // The content is message-linked — already preserved
+                            // and reachable from its message (this run's or an
+                            // interrupted earlier run's batches). Not unlinked.
+                            if written {
+                                // First copy in the vault; it stays, but it is a
+                                // linked object's bytes, not an unlinked one.
+                                summary.stored += 1;
+                            }
+                            continue;
+                        }
+                        if written {
+                            summary.unlinked += 1;
+                        } else {
+                            summary.unlinked_deduped += 1;
+                        }
+                        records.push(UnlinkedObject {
+                            sha256: entry.sha256,
+                            size: entry.size,
+                            name: entry.name,
+                            kind: entry.kind,
+                        });
+                    }
+                    // An unreadable stray file is skipped: there is no message
+                    // to record a missing entry on, and the import must not
+                    // fail over export litter. A budget refusal is counted, not
+                    // silent: the summary says the tree was not fully stored
+                    // (the same `missing_reason` rule the message passes'
+                    // Err arms apply — see its doc).
+                    Err(e) => {
+                        if matches!(missing_reason(&e), MissingReason::Budget) {
+                            summary.unlinked_dropped += 1;
+                        }
+                        continue;
+                    }
+                }
             }
         }
     }
     Ok(records)
+}
+
+/// The unlinked pass's walk outcome, modeled as a type (the Group-1
+/// lesson of the M4.2 review rounds): the export tree was either fully
+/// enumerated within the import bounds, or the walk refused/failed and
+/// nothing about the tree is known. The tri-state policy ("resilient but
+/// honest": an import never fails over export litter, and a failed walk
+/// is counted, never silent) is written once here and in
+/// [`extract_unlinked`]'s match on it, and is testable in isolation.
+enum WalkedExport {
+    Complete(Vec<WalkedFile>),
+    Failed,
+}
+
+/// Walk the export tree within the default import bounds: `Complete`
+/// with every file under `root`, or `Failed` when the walk itself
+/// refused (bounds) or errored (I/O).
+fn walk_export_tree(root: &Path) -> WalkedExport {
+    match walk_bounded(root, &ImportBounds::default()) {
+        Ok(files) => WalkedExport::Complete(files),
+        Err(_) => WalkedExport::Failed,
+    }
 }
 
 /// The mail media pass handle: stores one parsed mail's attachment

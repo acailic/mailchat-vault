@@ -262,6 +262,8 @@ export async function run(ctx) {
       path: out("all.mbox"),
     });
     assert.ok(roundtrip.ok, `re-import of exported mbox succeeded: ${roundtrip.error}`);
+    // M4.2+: import_mbox returns { summary, media } — ingest counts live
+    // under `summary`, the media pass's counters under `media`.
     assert.equal(roundtrip.value.summary.failed, 0, "no failed rows in mbox round-trip");
     assert.ok(
       roundtrip.value.summary.inserted + roundtrip.value.summary.skipped >= emailCount,
