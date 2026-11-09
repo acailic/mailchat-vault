@@ -1403,6 +1403,41 @@ describe("import picker → preview → confirm (U03)", () => {
     expect(($("#preview-import-btn") as HTMLButtonElement).disabled).toBe(true);
     expect($("#import-preview").textContent).toContain("free — the archive may not fit");
   });
+
+  it("surfaces fully-deduped strays when no stray was stored", async () => {
+    // Re-importing an export directory: every stray dedupes, so the
+    // unlinked counter stays 0 — the deduped strays still render.
+    await boot();
+    dialog.open.mockResolvedValue("/tmp/tg-export/result.json");
+    tauri.handlers.set("preview_import", () => Promise.resolve(TELEGRAM_PREVIEW));
+    tauri.handlers.set("list_import_scopes_v2", () => []);
+    tauri.handlers.set("import_chat_export", () =>
+      Promise.resolve({
+        summary: { source: "telegram", seen: 2, inserted: 0, skipped: 2, failed: 0 },
+        import_id: "chat-import-dedup",
+        media: {
+          referenced: 1,
+          stored: 0,
+          deduped: 1,
+          missing: 0,
+          linked: 1,
+          unlinked: 0,
+          unlinked_deduped: 2,
+          unlinked_dropped: 0,
+          unlinked_walk_failed: 0,
+        },
+      }),
+    );
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
+    $("#preview-import-btn").click();
+    await vi.waitFor(() =>
+      expect($("#import-status").textContent).toBe(
+        "Imported 0 new, 2 already present (of 2 in telegram)." +
+          " Media: 1 deduped, 1 linked, 2 unlinked (deduped).",
+      ),
+    );
+  });
 });
 
 describe("first-run state and the isolated sample archive (U02)", () => {

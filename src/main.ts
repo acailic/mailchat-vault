@@ -1566,6 +1566,8 @@ function describeMedia(media: ChatImportOutcome["media"]): string {
         ? `${media.unlinked} unlinked (${media.unlinked_deduped} deduped)`
         : `${media.unlinked} unlinked`,
     );
+  } else if (media.unlinked_deduped > 0) {
+    parts.push(`${media.unlinked_deduped} unlinked (deduped)`);
   }
   add(media.unlinked_dropped, "dropped (budget)");
   if (media.unlinked_walk_failed > 0) parts.push("walk failed");
