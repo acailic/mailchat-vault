@@ -1403,6 +1403,119 @@ describe("import picker → preview → confirm (U03)", () => {
     expect(($("#preview-import-btn") as HTMLButtonElement).disabled).toBe(true);
     expect($("#import-preview").textContent).toContain("free — the archive may not fit");
   });
+
+  it("surfaces fully-deduped strays when no stray was stored", async () => {
+    // Re-importing an export directory: every stray dedupes, so the
+    // unlinked counter stays 0 — the deduped strays still render.
+    await boot();
+    dialog.open.mockResolvedValue("/tmp/tg-export/result.json");
+    tauri.handlers.set("preview_import", () => Promise.resolve(TELEGRAM_PREVIEW));
+    tauri.handlers.set("list_import_scopes_v2", () => []);
+    tauri.handlers.set("import_chat_export", () =>
+      Promise.resolve({
+        summary: { source: "telegram", seen: 2, inserted: 0, skipped: 2, failed: 0 },
+        import_id: "chat-import-dedup",
+        media: {
+          referenced: 1,
+          stored: 0,
+          deduped: 1,
+          missing: 0,
+          linked: 1,
+          unlinked: 0,
+          unlinked_deduped: 2,
+          unlinked_dropped: 0,
+          unlinked_walk_failed: 0,
+        },
+      }),
+    );
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
+    $("#preview-import-btn").click();
+    await vi.waitFor(() =>
+      expect($("#import-status").textContent).toBe(
+        "Imported 0 new, 2 already present (of 2 in telegram)." +
+          " Media: 1 deduped, 1 linked, 2 unlinked (deduped).",
+      ),
+    );
+  });
+
+  it("an mbox import's status line renders its media counters", async () => {
+    // M4.2: import_mbox returns { summary, media } — the mail pass's
+    // stored MIME attachments surface in the picker status line (they
+    // used to be dropped on the floor).
+    await boot();
+    dialog.open.mockResolvedValue("/tmp/archive.mbox");
+    tauri.handlers.set("preview_import", () =>
+      Promise.resolve({
+        ...TELEGRAM_PREVIEW,
+        kind: "mbox",
+        source: "mbox",
+        media_referenced: 2,
+        media_missing: 0,
+      }),
+    );
+    tauri.handlers.set("import_mbox", () =>
+      Promise.resolve({
+        summary: { source: "mbox", seen: 2, inserted: 2, skipped: 0, failed: 0 },
+        import_id: "mbox-import-media",
+        media: {
+          referenced: 2,
+          stored: 2,
+          deduped: 0,
+          missing: 0,
+          linked: 2,
+          unlinked: 0,
+          unlinked_deduped: 0,
+          unlinked_dropped: 0,
+          unlinked_walk_failed: 0,
+        },
+      }),
+    );
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($(".preview-title").textContent).toBe("Email archive (.mbox)"));
+    $("#preview-import-btn").click();
+    await vi.waitFor(() =>
+      expect($("#import-status").textContent).toBe(
+        "Imported 2 new, 0 already present (of 2 in mbox). Media: 2 stored, 2 linked.",
+      ),
+    );
+  });
+
+  it("budget drops and a failed walk render in the status line", async () => {
+    // The honesty counters are only-non-zero: a budget-refused stray
+    // ("N dropped (budget)") and a failed tree walk ("walk failed")
+    // surface instead of pretending the pass was clean.
+    await boot();
+    dialog.open.mockResolvedValue("/tmp/tg-export/result.json");
+    tauri.handlers.set("preview_import", () => Promise.resolve(TELEGRAM_PREVIEW));
+    tauri.handlers.set("list_import_scopes_v2", () => []);
+    tauri.handlers.set("import_chat_export", () =>
+      Promise.resolve({
+        summary: { source: "telegram", seen: 1, inserted: 1, skipped: 0, failed: 0 },
+        import_id: "chat-import-honesty",
+        media: {
+          referenced: 0,
+          stored: 0,
+          deduped: 0,
+          missing: 0,
+          linked: 0,
+          unlinked: 0,
+          unlinked_deduped: 3,
+          unlinked_dropped: 2,
+          unlinked_walk_failed: 1,
+        },
+      }),
+    );
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
+    $("#preview-import-btn").click();
+    await vi.waitFor(() =>
+      expect($("#import-status").textContent).toBe(
+        "Imported 1 new, 0 already present (of 1 in telegram)." +
+          " Media: 3 unlinked (deduped), 2 dropped (budget), walk failed.",
+      ),
+    );
+  });
 });
 
 describe("first-run state and the isolated sample archive (U02)", () => {

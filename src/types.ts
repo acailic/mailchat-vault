@@ -72,16 +72,19 @@ export interface MediaSummary {
   missing: number;
   /** Messages whose media links were written or backfilled. */
   linked: number;
+  /** Export-tree files no message references, newly stored. */
+  unlinked: number;
+  /** Unlinked files whose content was already in the store. */
+  unlinked_deduped: number;
+  /** Unlinked files skipped because the media budget ran out. */
+  unlinked_dropped: number;
+  /** 1 when the unlinked pass's tree walk failed (counts understate). */
+  unlinked_walk_failed: number;
 }
 
-/** Result of an .mbox import: the ingest summary plus the run's
- * import id (the "View imported messages" scope). */
-export interface ImportOutcome {
-  summary: IngestSummary;
-  import_id: string;
-}
-
-/** Result of a chat export import: ingest summary + media pass. */
+/** Result of an import that can run a media pass: ingest + media.
+ * Mbox imports return it too — the mail pass stores MIME attachments,
+ * and the run's import_id stays the import-scope filter value. */
 export interface ChatImportOutcome {
   summary: IngestSummary;
   /** The import run's id (an import-scope filter value). */

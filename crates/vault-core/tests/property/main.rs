@@ -16,6 +16,9 @@
 //! - [`integrity`]: the FTS index stays consistent with the
 //!   `archive_messages` table under arbitrary operation sequences, and
 //!   recovers via `rebuild_fts`.
+//! - [`media_names`]: every display name `extract_telegram` writes into
+//!   a `media` entry is in `telegram_entry_names` — the single
+//!   write/read naming rule (M4.2's phantom-row seam).
 //!
 //! Determinism and reproduction
 //! ----------------------------
@@ -40,6 +43,7 @@ mod fixtures;
 mod fts_match;
 mod ingest_idempotence;
 mod integrity;
+mod media_names;
 mod migrations;
 
 use proptest::prelude::*;

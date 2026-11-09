@@ -109,9 +109,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use vault_core::backup::{self, BackupManifest, RecoveryStatus, RestoreOutcome};
-use vault_core::bounded::{
-    import_id_for, BoundedRun, Flow, MediaKind, MediaPass, StreamItem, StreamSource,
-};
+use vault_core::bounded::{import_id_for, BoundedRun, Flow, MediaPass, StreamItem, StreamSource};
 use vault_core::chat_export::{self, ChatImportOutcome};
 use vault_core::export::{self, ExportFormat, ExportSummary};
 use vault_core::imap::{self, FolderSyncSummary, ImapAuth, ImapConfig};
@@ -1114,42 +1112,27 @@ fn embed_status(state: State<AppState>) -> Result<EmbeddingStatus, String> {
 /// M4.2: each mail's MIME attachments/inline parts are decoded by the
 /// parser and staged into the app data `media/` store, linked from the
 /// message's `media` entries — re-importing skips stored messages
-/// without re-storing their bytes.
-/// Result of one finished import: the ingest summary plus the run's
-/// import id — the value the import-scope filter keys on, so the UI can
-/// offer "View imported messages" scoped to exactly this run.
-#[derive(Debug, Clone, Serialize)]
-struct ImportOutcomeView {
-    summary: IngestSummary,
-    import_id: String,
-}
-
+/// without re-storing their bytes. The outcome mirrors the chat import:
+/// ingest summary plus the media pass's counters; the run's import_id
+/// stays the value the import-scope filter keys on, so the UI can offer
+/// "View imported messages" scoped to exactly this run.
 #[tauri::command]
 async fn import_mbox(
     app: AppHandle,
     state: State<'_, AppState>,
     path: String,
-) -> Result<ImportOutcomeView, String> {
+) -> Result<ChatImportOutcome, String> {
     state.refuse_in_demo()?;
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let pool = Arc::clone(&state.pool);
     tauri::async_runtime::spawn_blocking(move || {
         let source = MboxSource::new(&path);
         let mut run = BoundedRun::new(import_id_for("mbox-import", Path::new(&path)));
-        run.media = Some(MediaPass {
-            kind: MediaKind::Mail,
-            export_root: Path::new("."),
-            export_file: None,
-            data_dir: &data_dir,
-            unlinked: false,
-        });
+        run.media = Some(MediaPass::mail(&data_dir));
         let mut sink = PoolSink(&pool);
         let mut no_progress = |_: u64, _: u64, _: &str| {};
         run.run(&source, &mut sink, &|| false, &mut no_progress)
-            .map(|outcome| ImportOutcomeView {
-                summary: outcome.summary,
-                import_id: outcome.import_id,
-            })
+            .map(ChatImportOutcome::from)
             .map_err(|e: Error| e.to_string())
     })
     .await
@@ -1844,15 +1827,11 @@ fn run_job_spec(
             }
             let source = MboxSource::new(path);
             let import_id = import_id_for("mbox-import", Path::new(path));
-            let media = MediaPass {
-                kind: MediaKind::Mail,
-                export_root: Path::new("."),
-                export_file: None,
-                data_dir,
-                unlinked: false,
-            };
+            let media = MediaPass::mail(data_dir);
             let outcome = run_bounded(ctx, pool, import_id, &source, Some(media), path)?;
-            Ok(serde_json::to_value(&outcome.summary).unwrap_or(Value::Null))
+            // The outcome carries the media pass's counters too — the
+            // same shape as `import_mbox` and the chat-export import.
+            Ok(serde_json::to_value(ChatImportOutcome::from(outcome)).unwrap_or(Value::Null))
         }
         JobSpec::ImportChatExport {
             path,

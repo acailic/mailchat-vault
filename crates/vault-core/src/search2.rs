@@ -555,22 +555,15 @@ pub fn attachment_summaries(raw_json: &str) -> Vec<AttachmentSummary> {
         }
     }
     // Telegram exports keep the original objects verbatim. The media
-    // pass names the stored entry by the export's `file_name` (top-level
-    // or inside the object) or the nested path's basename — the row must
-    // answer for the same names that pass resolves, or a stored file
-    // also renders as an unavailable phantom.
+    // pass names a stored entry by exactly the names
+    // `media::telegram_entry_names` returns (the export's `file_name`
+    // or the ref path's basename) — the single shared rule, so a stored
+    // file can never also render as an unavailable phantom: if any of
+    // those names matches a linked `media` entry's name, the reference
+    // is already accounted for.
     for key in ["photo", "file"] {
-        if let Some(Value::Object(item)) = map.get(key) {
-            let mut names: Vec<String> = ["file_name", "file_name_unique"]
-                .iter()
-                .filter_map(|n| str_of(&map, n).or_else(|| str_of(item, n)))
-                .map(str::to_string)
-                .collect();
-            for nested in ["file", "photo"] {
-                if let Some(path) = str_of(item, nested).filter(|p| !p.is_empty()) {
-                    names.push(path.rsplit(['/', '\\']).next().unwrap_or(path).to_string());
-                }
-            }
+        if let Some(Value::Object(_item)) = map.get(key) {
+            let names = crate::media::telegram_entry_names(&map);
             if names.iter().any(|n| media_names.contains(n)) {
                 continue;
             }

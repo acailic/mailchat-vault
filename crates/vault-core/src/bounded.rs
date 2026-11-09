@@ -294,6 +294,25 @@ pub struct MediaPass<'a> {
     pub unlinked: bool,
 }
 
+impl<'a> MediaPass<'a> {
+    /// The mail media pass (mbox): attachment bytes are already decoded
+    /// onto the messages, so there is no export tree to walk — the
+    /// `export_root`/`export_file`/`unlinked` fields are dead state for
+    /// mail and stay at their documented inert values (`"."`, `None`,
+    /// `false`) so one struct serves every kind (M4.2; see the field
+    /// docs). The single construction site for the two src-tauri mbox
+    /// paths (the command and the job) so the literals cannot drift.
+    pub fn mail(data_dir: &'a Path) -> Self {
+        Self {
+            kind: MediaKind::Mail,
+            export_root: Path::new("."),
+            export_file: None,
+            data_dir,
+            unlinked: false,
+        }
+    }
+}
+
 /// Storage access for [`BoundedRun`]: load a checkpoint, commit a batch.
 ///
 /// Implemented directly by [`crate::storage::Storage`] (tests, the

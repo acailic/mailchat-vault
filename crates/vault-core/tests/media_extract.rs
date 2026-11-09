@@ -955,3 +955,220 @@ fn unlinked_walk_failure_is_counted_not_silent() {
     assert_eq!(summary.unlinked, 0);
     assert_eq!(summary.unlinked_walk_failed, 1, "the failure is counted");
 }
+
+// ---------------------------------------------------------------------
+// S1 invariants: budget exhaustion and unreadability on the *message*
+// path — the F4 mapping (a budget refusal is a `budget-exceeded` missing
+// entry, never `unreadable`, never a silent drop) asserted for all three
+// passes, plus the unreadable-vs-budget distinction.
+// ---------------------------------------------------------------------
+
+/// A `NewMessage` whose `raw_json` is the given Telegram message object.
+fn tg_message(id: &str, obj: serde_json::Value) -> vault_core::message::NewMessage {
+    let mut msg =
+        vault_core::message::NewMessage::new("telegram", id, "A", "2026-11-01T09:00:00Z", "");
+    msg.raw_json = obj.to_string();
+    msg
+}
+
+/// Every `media` entry of a message's `raw_json`, parsed.
+fn media_entries_of(raw_json: &str) -> Vec<serde_json::Value> {
+    let raw: serde_json::Value = serde_json::from_str(raw_json).unwrap();
+    raw["media"].as_array().cloned().unwrap_or_default()
+}
+
+#[test]
+fn budget_exhaustion_records_budget_exceeded_missing_entries_all_passes() {
+    use std::collections::HashSet;
+
+    use vault_core::media::{extract_telegram, extract_whatsapp, MailMedia, MediaSummary};
+    use vault_core::object_store::Capacity;
+
+    // Telegram: a real export tree whose files exist, but the media
+    // budget is pre-exhausted (`Capacity::new(0, 0)`): every reference
+    // records {"missing": true, "reason": "budget-exceeded"} — the F4
+    // mapping on the message path.
+    let sb = Sandbox::new("budget-tg");
+    write_telegram_export(&sb);
+    let mut messages = vec![
+        tg_message(
+            "1",
+            serde_json::json!({
+                "id": 102, "type": "message", "date_unixtime": "1698832920",
+                "from": "Ana", "photo": "photos/photo_102@01-11-2023_11-02-00.jpg", "text": ""
+            }),
+        ),
+        tg_message(
+            "2",
+            serde_json::json!({
+                "id": 103, "type": "message", "date_unixtime": "1698832980",
+                "from": "Marko", "file": "files/plan.pdf",
+                "file_name": "plan.pdf", "text": ""
+            }),
+        ),
+    ];
+    let mut summary = MediaSummary::default();
+    extract_telegram(
+        &mut messages,
+        &sb.export_dir(),
+        &sb.data_dir(),
+        &mut summary,
+        &mut Capacity::new(0, 0),
+        &mut HashSet::new(),
+    )
+    .unwrap();
+    assert_eq!(summary.referenced, 2);
+    assert_eq!(summary.missing, 2, "nothing could be staged");
+    assert_eq!(summary.stored + summary.deduped, 0);
+    for msg in &messages {
+        let entries = media_entries_of(&msg.raw_json);
+        assert_eq!(entries.len(), 1, "exactly one honest missing entry");
+        assert_eq!(entries[0]["missing"], true);
+        assert_eq!(entries[0]["reason"], "budget-exceeded");
+        assert!(entries[0].get("sha256").is_none());
+    }
+    // Nothing was written: no store directory came into existence.
+    assert!(!sb.store_dir().exists());
+
+    // WhatsApp: the named file sits next to the export, but the budget
+    // refuses — same honest marker.
+    let sb = Sandbox::new("budget-wa");
+    sb.put("IMG-1.jpg", "photo.jpg");
+    let mut messages = vec![{
+        let mut msg =
+            vault_core::message::NewMessage::new("whatsapp", "1", "A", "2026-11-01T09:04:00Z", "");
+        msg.raw_json = serde_json::json!({
+            "attachment": { "name": "IMG-1.jpg", "kind": "image" }
+        })
+        .to_string();
+        msg
+    }];
+    let mut summary = MediaSummary::default();
+    extract_whatsapp(
+        &mut messages,
+        &sb.export_dir(),
+        &sb.data_dir(),
+        &mut summary,
+        &mut Capacity::new(0, 0),
+        &mut HashSet::new(),
+    )
+    .unwrap();
+    assert_eq!(summary.missing, 1);
+    let entries = media_entries_of(&messages[0].raw_json);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["name"], "IMG-1.jpg");
+    assert_eq!(entries[0]["missing"], true);
+    assert_eq!(entries[0]["reason"], "budget-exceeded");
+
+    // Mail (the pass both mbox and IMAP drive): in-memory bytes, budget
+    // pre-exhausted — the missing entry lands on the message the same
+    // way and the pass counts it.
+    let sb = Sandbox::new("budget-mail");
+    let mut msg = vault_core::message::NewMessage::new(
+        "mbox",
+        "<a@b>",
+        "A <a@b>",
+        "2026-11-01T09:00:00Z",
+        "with attachment",
+    );
+    msg.attachments.push(vault_core::message::NewAttachment {
+        name: "report.pdf".to_string(),
+        kind: "document".to_string(),
+        bytes: b"%PDF-fake".to_vec(),
+    });
+    let mail_data_dir = sb.data_dir();
+    let mut mail_budget = Capacity::new(0, 0);
+    let mut mail = MailMedia::new(&mail_data_dir, &mut mail_budget);
+    mail.store_message(&mut msg);
+    assert_eq!(mail.missing, 1);
+    assert_eq!(mail.stored + mail.deduped, 0);
+    let entries = media_entries_of(&msg.raw_json);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["name"], "report.pdf");
+    assert_eq!(entries[0]["missing"], true);
+    assert_eq!(entries[0]["reason"], "budget-exceeded");
+}
+
+#[test]
+fn unreadable_file_reason_is_unreadable_not_budget() {
+    use std::collections::HashSet;
+
+    use vault_core::media::{extract_telegram, MediaSummary};
+    use vault_core::object_store::Capacity;
+
+    // A directory sitting where the export's reference points: the file
+    // "exists" and resolves inside the tree, but its bytes cannot be
+    // read (EISDIR) — a store failure that is NOT a budget refusal, so
+    // the reason must be `unreadable` (chmod-000 files hit the same arm;
+    // the directory shape is deterministic on every host).
+    let sb = Sandbox::new("unreadable-tg");
+    fs::create_dir_all(sb.export_dir().join("files/plan.pdf")).unwrap();
+    let mut messages = vec![tg_message(
+        "1",
+        serde_json::json!({
+            "id": 103, "type": "message", "date_unixtime": "1698832980",
+            "from": "Marko", "file": "files/plan.pdf", "text": ""
+        }),
+    )];
+    let mut summary = MediaSummary::default();
+    extract_telegram(
+        &mut messages,
+        &sb.export_dir(),
+        &sb.data_dir(),
+        &mut summary,
+        &mut Capacity::default(),
+        &mut HashSet::new(),
+    )
+    .unwrap();
+    assert_eq!(summary.missing, 1);
+    let entries = media_entries_of(&messages[0].raw_json);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["name"], "plan.pdf");
+    assert_eq!(entries[0]["missing"], true);
+    assert_eq!(
+        entries[0]["reason"], "unreadable",
+        "an unreadable file is never misreported as a budget drop"
+    );
+}
+
+#[test]
+fn unlinked_walk_over_20k_files_reports_walk_failed() {
+    use std::collections::HashSet;
+
+    use vault_core::media::{extract_unlinked, MediaSummary};
+    use vault_core::object_store::Capacity;
+
+    // AC3 of the consolidation spec: a directory-pick import whose tree
+    // exceeds the walk's file-count bound (20 000 by default) must
+    // report `unlinked_walk_failed: 1` — the tree was not fully walked,
+    // and the summary says so instead of reporting a clean pass. The
+    // surfaced counter is what the import status line renders ("walk
+    // failed"), asserted on the frontend side in main.test.ts.
+    let sb = Sandbox::new("unlinked-20k");
+    let export = sb.export_dir();
+    for i in 0..20_001 {
+        fs::write(export.join(format!("f{i:05}.bin")), b"x").unwrap();
+    }
+    let mut summary = MediaSummary::default();
+    let mut budget = Capacity::default();
+    let records = extract_unlinked(
+        &export,
+        None,
+        &sb.data_dir(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &mut summary,
+        &mut budget,
+    )
+    .unwrap();
+    assert!(records.is_empty(), "the walk refused, nothing registered");
+    assert_eq!(
+        summary.unlinked_walk_failed, 1,
+        "the file-count bound trips the walk-failure counter"
+    );
+    assert_eq!(
+        summary.unlinked + summary.unlinked_deduped,
+        0,
+        "no file was claimed from an unwalked tree"
+    );
+}
