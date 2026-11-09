@@ -96,8 +96,8 @@ export async function run(ctx) {
     await saveScreenshot(browser, "09-dashboard-seeded.png");
 
     // --- 3. import the mbox fixture → dashboard refreshes automatically --
-    const importStatus = await ui.importMbox(browser, ui.archiveMbox);
-    assert.matches(importStatus, /Imported 8 new/, "mbox import");
+    const importSummary = await ui.importMbox(browser, ui.archiveMbox);
+    assert.equal(importSummary.inserted, 8, "mbox import");
     await ui.openView(browser, "activity");
     const imported = await ui.waitForText(browser, "#dashboard .meta", (text) =>
       text.startsWith("14 messages"),

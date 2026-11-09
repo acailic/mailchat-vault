@@ -2463,6 +2463,7 @@ name = "mailchat-vault"
 version = "0.2.0"
 dependencies = [
  "chrono",
+ "fs4",
  "keyring",
  "serde",
  "serde_json",

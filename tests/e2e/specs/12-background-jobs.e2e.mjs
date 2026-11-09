@@ -49,21 +49,26 @@ export async function run(ctx) {
     await embedButton.click();
 
     // The job finishes fast (hash embedder, 8 messages); wait for the
-    // terminal event to reach the panel header (Activity view).
+    // terminal event to reach the panel header (Activity view). The
+    // harness's mbox import is the other finished entry.
     await ui.openView(browser, "activity");
-    await ui.waitForText(browser, "#jobs-status", "No active jobs (1 finished).");
+    await ui.waitForText(browser, "#jobs-status", "No active jobs (2 finished).");
 
-    // The panel lists the finished embed job with its result summary.
+    // The panel lists the finished jobs: the harness's mbox import (the
+    // same v2 job the UI's confirm step would submit) plus the embed job.
     const lines = await jobLines(browser);
-    assert.equal(lines.length, 1, "one job entry in the jobs panel");
-    assert.matches(
-      lines[0],
-      /^local embeddings — done \(8 embedded\)$/,
+    assert.equal(lines.length, 2, "two finished job entries in the jobs panel");
+    assert.ok(
+      lines.some((line) => /^local embeddings — done \(8 embedded\)$/.test(line)),
       "embed job entry shows the result summary",
     );
     assert.ok(
-      (await browser.$$("#jobs-list li.job.succeeded")).length === 1,
-      "the entry carries the succeeded styling",
+      lines.some((line) => /^\.mbox import — done/.test(line)),
+      "the mbox import job entry is listed too",
+    );
+    assert.ok(
+      (await browser.$$("#jobs-list li.job.succeeded")).length === 2,
+      "the entries carry the succeeded styling",
     );
     assert.equal(
       (await browser.$$("#jobs-list li.job.failed")).length,
@@ -97,11 +102,10 @@ export async function run(ctx) {
     await browser.refresh();
     await ui.waitForApp(browser);
     await ui.openView(browser, "activity");
-    await ui.waitForText(browser, "#jobs-status", "No active jobs (1 finished).");
+    await ui.waitForText(browser, "#jobs-status", "No active jobs (2 finished).");
     const reloaded = await jobLines(browser);
-    assert.matches(
-      reloaded[0],
-      /^local embeddings — done \(8 embedded\)$/,
+    assert.ok(
+      reloaded.some((line) => /^local embeddings — done \(8 embedded\)$/.test(line)),
       "jobs panel restored from job_events_since(0) after reload",
     );
     await saveScreenshot(browser, "12-jobs-panel-after-reload.png");

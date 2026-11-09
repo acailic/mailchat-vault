@@ -29,7 +29,11 @@ export async function run(ctx) {
   await withSession({}, async (browser, { dataDir }) => {
     await ui.waitForApp(browser);
     const status = await ui.importMbox(browser, mbox);
-    assert.includes(status, "Imported 2 new, 0 already present", "import summary");
+    assert.deepEqual(
+      status,
+      { source: "mbox", seen: 2, inserted: 2, skipped: 0, failed: 0 },
+      "import summary",
+    );
     const storeDir = path.join(dataDir, "com.acailic.mailchatvault", "media");
     const names = readdirSync(storeDir).sort();
     assert.equal(names.length, 2, "exactly two objects in the media store");
@@ -103,7 +107,11 @@ export async function run(ctx) {
     }
     // --- re-import is idempotent: nothing new stored, nothing re-linked
     const again = await ui.importMbox(browser, mbox);
-    assert.includes(again, "Imported 0 new, 2 already present", "re-import dedups");
+    assert.deepEqual(
+      again,
+      { source: "mbox", seen: 2, inserted: 0, skipped: 2, failed: 0 },
+      "re-import dedups (0 new, 2 already present)",
+    );
     assert.equal(readdirSync(storeDir).length, 2, "store unchanged after re-import");
     await browser.execute(() => location.reload());
     await ui.waitForApp(browser);

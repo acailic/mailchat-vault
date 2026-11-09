@@ -88,8 +88,8 @@ export async function run(ctx) {
       "wide range matches all dated messages, excluding the undated one",
     );
 
-    // Clear returns to the unfiltered prompt (empty query, no filters).
+    // Clear returns to the unfiltered browse (U04: empty text browses).
     await browser.$("#clear-filters").click();
-    await ui.waitForText(browser, "#status", "Type something to search");
+    await ui.waitForText(browser, "#status", (text) => /^1–8 of 8$/.test(text));
   });
 }

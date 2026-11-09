@@ -82,11 +82,11 @@ export async function run(ctx) {
       (await chipsWith[0].getText()).includes("has attachment"),
       "the attachment filter renders as a removable chip",
     );
-    // Removing the only chip returns to the empty-query guard without a
-    // silent unfiltered browse.
+    // Removing the only chip returns to the unfiltered browse (U04:
+    // empty text browses newest-first — 1–8 of 8, no query echo).
     await chipsWith[0].click();
-    await ui.waitForText(browser, "#status", (text) => text.startsWith("Type something"), {
-      timeoutMsg: "removing the last filter did not return to the prompt",
+    await ui.waitForText(browser, "#status", (text) => /^1–8 of 8$/.test(text), {
+      timeoutMsg: "removing the last filter did not return to the browse",
     });
 
     // --- import scope: one chip per bounded import run -------------------
@@ -100,16 +100,15 @@ export async function run(ctx) {
       "the mbox import scope holds exactly the 8 fixture messages",
     );
 
-    // Removing the chip (with no text) returns to the empty-query guard
-    // without another IPC round-trip.
+    // Removing the chip (with no text) returns to the unfiltered browse.
     const scopeChips = await browser.$$("#active-filter-chips .filter-chip");
     assert.ok(
       (await scopeChips[0].getText()).startsWith("import:"),
       "the import scope renders as a removable chip",
     );
     await scopeChips[0].click();
-    await ui.waitForText(browser, "#status", (text) => text.startsWith("Type something"), {
-      timeoutMsg: "removing the import-scope chip did not return to the prompt",
+    await ui.waitForText(browser, "#status", (text) => /^1–8 of 8$/.test(text), {
+      timeoutMsg: "removing the import-scope chip did not return to the browse",
     });
 
     // --- deep link: a pasted locator opens that message -------------------
@@ -127,7 +126,7 @@ export async function run(ctx) {
     // status line still shows the empty-prompt state.
     const statusAfterLink = await browser.$("#status").getText();
     assert.ok(
-      statusAfterLink.startsWith("Type something"),
+      /^1–8 of 8$/.test(statusAfterLink),
       `no text search ran for the locator, got: ${statusAfterLink}`,
     );
 
@@ -137,6 +136,10 @@ export async function run(ctx) {
       () => browser.execute(() => document.querySelector("#detail.open") === null),
       { timeoutMsg: "Back did not close the reading pane" },
     );
-    assert.equal((await browser.$$("#results li.hit-item")).length, 0, "no fabricated rows");
+    assert.equal(
+      (await browser.$$("#results li.hit-item")).length,
+      8,
+      "Back restores the unfiltered browse rows, nothing fabricated",
+    );
   });
 }

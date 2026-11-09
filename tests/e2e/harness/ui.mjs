@@ -117,31 +117,114 @@ async function clearStatus(browser, selector) {
   }, selector);
 }
 
-/** Type a path into the import field, click Import, return the final status. */
-export async function importMbox(browser, mboxPath) {
-  await openView(browser, "sources"); // import controls live in the Add-source view
-  const input = await browser.$("#mbox-path");
-  await input.setValue(mboxPath);
-  await clearStatus(browser, "#import-status");
-  const button = await browser.$("#import-btn");
-  await button.click();
-  // Both UI generations print "Imported N new, M already present (of X in src)."
-  return waitForText(
-    browser,
-    "#import-status",
-    (text) => text.includes(" new, ") && !text.startsWith("Importing"),
-    { timeoutMsg: "import never finished" },
+/** Invoke a Tauri command inside the live webview (real IPC, real app)
+ * and resolve with its value; rejects with the command's error string.
+ * (The same seam the backup/discord specs use for native-dialog-bound
+ * flows: the command runs with the path the picker would have returned.) */
+export async function invokeCommand(browser, cmd, args = {}) {
+  await browser.execute(
+    (command, payload) => {
+      window.__e2eInvoke = null;
+      window.__e2eInvokeError = null;
+      window.__TAURI_INTERNALS__.invoke(command, payload)
+        .then((value) => {
+          window.__e2eInvoke = { ok: value };
+        })
+        .catch((error) => {
+          window.__e2eInvokeError = String(error);
+        });
+    },
+    cmd,
+    args,
+  );
+  return browser.waitUntil(
+    async () =>
+      (await browser.execute(() => window.__e2eInvoke !== null || window.__e2eInvokeError !== null)),
+    { timeout: 60_000, timeoutMsg: `${cmd} never settled` },
+  ).then(async () => {
+    const { ok, error } = await browser.execute(() => ({
+      ok: window.__e2eInvoke?.ok,
+      error: window.__e2eInvokeError,
+    }));
+    if (error !== null && error !== undefined) throw new Error(`${cmd} failed in webview: ${error}`);
+    return ok;
+  });
+}
+
+/** Poll a submitted job to a terminal state; returns the job record. */
+export async function waitForJob(browser, id, { timeout = 120_000 } = {}) {
+  let job = null;
+  await browser.waitUntil(
+    async () => {
+      job = await invokeCommand(browser, "job_get", { id });
+      return ["succeeded", "failed", "cancelled"].includes(job?.state?.state);
+    },
+    { timeout, timeoutMsg: `job ${id} never reached a terminal state` },
+  );
+  return job;
+}
+
+/** Read #stats via textContent — the same WebKitWebDriver getText()
+ * empty-string quirk waitForApp works around (live-region elements). */
+async function statsLabelText(browser) {
+  return browser.execute(
+    () => document.querySelector("#stats")?.textContent ?? "",
   );
 }
 
-export async function seedDemo(browser) {
-  await openView(browser, "sources"); // the demo button lives in the Add-source view
-  await clearStatus(browser, "#import-status");
-  const button = await browser.$("#seed-btn");
-  await button.click();
-  return waitForText(browser, "#import-status", "Demo messages:", {
-    timeoutMsg: "demo seeding never finished",
+/** Wait until the #stats label matches a fresh `stats` round trip — the
+ * deterministic settle for "the UI noticed the archive changed" (the
+ * terminal job event refreshes every vault-reading panel). */
+export async function waitForStatsSync(browser, { timeout = 30_000 } = {}) {
+  await browser.waitUntil(
+    async () => {
+      const stats = await invokeCommand(browser, "stats", {});
+      const label = await statsLabelText(browser);
+      const parts = stats.by_source.map((s) => `${s.source}: ${s.count}`).join(", ");
+      const expected =
+        stats.total === 0 ? "empty archive" : `${stats.total} messages (${parts})`;
+      return label === expected;
+    },
+    { timeout, timeoutMsg: "stats label never synced with the vault" },
+  );
+  return statsLabelText(browser);
+}
+
+/** Import an .mbox file into the running app through the v2 job engine
+ * (the same bounded importer the UI's confirm step dispatches to; the
+ * native picker itself is beyond WebDriver's reach, as documented). The
+ * UI picks the change up through the job-event stream; resolves with the
+ * run's ingest summary: { source, seen, inserted, skipped, failed }. */
+export async function importMbox(browser, mboxPath) {
+  const { id } = await invokeCommand(browser, "job_submit", {
+    kind: "import_mbox",
+    params: { path: mboxPath },
   });
+  const job = await waitForJob(browser, id);
+  if (job.state.state !== "succeeded") {
+    throw new Error(`import_mbox job ended ${job.state.state}: ${job.state.error?.message}`);
+  }
+  // import_mbox jobs report the summary directly; chat jobs wrap it.
+  const result = job.state.result ?? {};
+  const summary = result.summary ?? result;
+  await waitForStatsSync(browser);
+  return summary;
+}
+
+export async function seedDemo(browser) {
+  // Through the job engine (like importMbox): the terminal job event
+  // is what refreshes the UI's panels.
+  const { id } = await invokeCommand(browser, "job_submit", {
+    kind: "seed_demo",
+    params: {},
+  });
+  const job = await waitForJob(browser, id);
+  if (job.state.state !== "succeeded") {
+    throw new Error(`seed_demo job ended ${job.state.state}: ${job.state.error?.message}`);
+  }
+  const summary = job.state.result ?? {};
+  await waitForStatsSync(browser);
+  return `Demo messages: ${summary.inserted} new, ${summary.skipped} already present.`;
 }
 
 /** Submit a search (Enter in the query box), return the settled status line. */

@@ -11,6 +11,29 @@ and viewable in the app, AI answers run only behind your explicit
 consent, new mail can notify you, and the Linux packages install as
 real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
 
+### Added (first-source journey)
+
+- **First-run guidance** — an empty archive now presents "Add your
+  first source" (import files, connect email, or try a sample archive)
+  instead of an empty search box.
+- **Isolated sample archive** — "Try a sample archive" opens a private
+  in-memory demo vault: searches, reading, and stats answer from it,
+  while the personal vault is never touched and every import/sync
+  refuses until you leave the sample. Demo content can no longer mix
+  into a personal archive.
+- **Import preview** — every import starts from the native file/folder
+  picker and shows a bounded preview before anything is stored: detected
+  format, sample messages, message counts (lower bounds for huge
+  inputs), media references and provably-missing files, input size, and
+  free-space guidance that disables Import when the archive likely does
+  not fit. No more typed paths or raw `os error` messages.
+- **"View imported messages"** — a finished import offers a one-click
+  jump to the messages that run brought in, scoped to exactly that
+  import.
+- **Truthful "All messages"** — the workspace browses newest-first on
+  boot and after imports instead of showing zero rows until something
+  is typed or filtered.
+
 ### Added
 
 - **Email attachments** — synced mail now stores its MIME attachments
