@@ -1465,10 +1465,11 @@ struct DemoMode {
 }
 
 /// Open the sample archive: a fresh in-memory canonical database,
-/// seeded through the same bounded pipeline every import uses. The
-/// personal `vault.db` is never opened, read, or written — leaving the
-/// demo drops it entirely, so demo rows can never mix into the personal
-/// vault (the M3.4 boundary). Re-entering replaces any earlier demo.
+/// seeded through the same bounded pipeline every import uses. Demo
+/// flows never read or write the personal `vault.db` — leaving the
+/// demo drops the in-memory copy entirely, so demo rows can never mix
+/// into the personal vault (the M3.4 boundary). Re-entering replaces
+/// any earlier demo.
 #[tauri::command]
 async fn demo_enter(state: State<'_, AppState>) -> Result<DemoMode, String> {
     let slot = Arc::clone(&state.demo);
