@@ -262,6 +262,8 @@ export async function run(ctx) {
       path: out("all.mbox"),
     });
     assert.ok(roundtrip.ok, `re-import of exported mbox succeeded: ${roundtrip.error}`);
+    // M4.2+: import_mbox returns { summary, media } — ingest counts live
+    // under `summary`, the media pass's counters under `media`.
     assert.equal(roundtrip.value.summary.failed, 0, "no failed rows in mbox round-trip");
     assert.ok(
       roundtrip.value.summary.inserted + roundtrip.value.summary.skipped >= emailCount,
@@ -341,28 +343,25 @@ export async function run(ctx) {
     assert.matches(badFormat.error, /unknown format/, "error names the format problem");
   });
 
-  // -- Session 2: empty archive — the export controls are not offered at
-  //    all on the first-run card (U02: no dead controls before there is
-  //    anything to export); a zero-result search keeps the honest refusal.
+  // -- Session 2: empty archive — the Export results… button must refuse
+  // before any dialog when there is nothing to export (real UI click).
   await withSession({}, async (browser) => {
     await ui.waitForApp(browser);
 
     assert.equal(await ui.waitForApp(browser), "empty archive", "fresh install stats label");
 
-    // First-run card owns the empty archive; the export controls hide
-    // with it (nothing can be exported yet).
     const button = await browser.$("#export-btn");
     assert.ok(await button.isExisting(), "export button exists");
-    assert.equal(
-      await button.isDisplayed(),
-      false,
-      "export controls are hidden on the first-run empty archive",
+    await button.click();
+    const status = await ui.waitForText(
+      browser,
+      "#export-status",
+      (text) => text.includes("Nothing to export"),
+      { timeoutMsg: "empty-archive export never produced the guard message" },
     );
+    assert.includes(status, "Nothing to export");
 
-    // With content and a zero-result search, the guard message stays.
-    await ui.importMbox(browser, ui.archiveMbox);
-    await ui.openView(browser, "workspace");
-    await browser.waitUntil(async () => (await button.isDisplayed()) === true);
+    // With a zero-result search (filters can't match), same guard.
     const miss = await ui.search(browser, "quartzxyz");
     assert.matches(miss, /0 results|0 of/, "zero-result search ran");
     await button.click();

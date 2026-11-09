@@ -181,10 +181,17 @@ export function describeJobState(record: JobRecord): string {
 function describeResult(result: unknown): string {
   if (typeof result !== "object" || result === null) return "";
   const r = result as Record<string, unknown>;
+  // Imports that run a media pass return { summary, media } — the ingest
+  // counts live one level down; flat results (embed jobs) read directly.
+  const counts =
+    r.summary && typeof r.summary === "object"
+      ? (r.summary as Record<string, unknown>)
+      : r;
   const bits: string[] = [];
-  if (typeof r.inserted === "number") {
-    bits.push(`${r.inserted} new`);
-    if (typeof r.skipped === "number" && r.skipped > 0) bits.push(`${r.skipped} present`);
+  if (typeof counts.inserted === "number") {
+    bits.push(`${counts.inserted} new`);
+    if (typeof counts.skipped === "number" && counts.skipped > 0)
+      bits.push(`${counts.skipped} present`);
   }
   if (typeof r.embedded === "number" && r.embedded > 0) bits.push(`${r.embedded} embedded`);
   return bits.length > 0 ? ` (${bits.join(", ")})` : "";

@@ -19,7 +19,6 @@ import type {
   DemoMode,
   EmbeddingStatus,
   ExportSummary,
-  ImportOutcome,
   ImportPreview,
   JobEventsPage,
   SearchPage,
@@ -251,8 +250,12 @@ export function archiveStats(top = 10): Promise<ArchiveStats> {
 // Import / sync / watch
 // ---------------------------------------------------------------------------
 
-export function importMbox(path: string): Promise<ImportOutcome> {
-  return invoke<ImportOutcome>("import_mbox", { path });
+// M4.2+: the mbox import runs the mail media pass (MIME attachments are
+// stored and linked), so its outcome mirrors the chat import's: the
+// ingest summary, the run's import_id (the import-scope filter value),
+// plus how the media pass went.
+export function importMbox(path: string): Promise<ChatImportOutcome> {
+  return invoke<ChatImportOutcome>("import_mbox", { path });
 }
 
 export function importChatExport(

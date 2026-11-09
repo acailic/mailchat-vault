@@ -1394,6 +1394,7 @@ async function confirmImport(): Promise<void> {
       const outcome = await ipc.importMbox(target.path);
       summary = outcome.summary;
       importId = outcome.import_id;
+      mediaSummary = outcome.media;
     } else {
       const outcome = await ipc.importChatExport(target.path, extractMedia);
       summary = outcome.summary;
@@ -1415,7 +1416,7 @@ async function confirmImport(): Promise<void> {
     void refreshEmbedStatus();
     void refreshDashboard();
     void runSearch(0); // newest-first browse, ready when the user returns
-    if (mediaSummary) void refreshMediaUsage();
+    if (mediaSummary) void refreshMediaUsage(); // media landed in the store
   } catch (e) {
     importStatus.textContent = friendlyImportError(e, target.path);
   } finally {
@@ -1546,7 +1547,9 @@ function updateVaultChrome(): void {
 
 
 /** "media: 2 stored, 1 deduped · 3 linked · 1 missing" with only the
- * non-zero parts; empty when nothing happened. */
+ * non-zero parts; empty when nothing happened. The unlinked_* honesty
+ * counters (M4.2) surface here too: stray files stored, budget drops,
+ * and a failed tree walk are shown rather than swallowed. */
 function describeMedia(media: ChatImportOutcome["media"]): string {
   if (!media) return "";
   const parts: string[] = [];
@@ -1557,6 +1560,15 @@ function describeMedia(media: ChatImportOutcome["media"]): string {
   add(media.deduped, "deduped");
   add(media.linked, "linked");
   add(media.missing, "missing");
+  if (media.unlinked > 0) {
+    parts.push(
+      media.unlinked_deduped > 0
+        ? `${media.unlinked} unlinked (${media.unlinked_deduped} deduped)`
+        : `${media.unlinked} unlinked`,
+    );
+  }
+  add(media.unlinked_dropped, "dropped (budget)");
+  if (media.unlinked_walk_failed > 0) parts.push("walk failed");
   return parts.length === 0 ? "" : ` Media: ${parts.join(", ")}.`;
 }
 

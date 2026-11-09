@@ -319,7 +319,7 @@ Ključ na premijeri.
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use vault_core::bounded::{import_id_for, BoundedOutcome, BoundedRun, MediaKind, MediaPass};
+use vault_core::bounded::{import_id_for, BoundedOutcome, BoundedRun, MediaPass};
 
 /// The mail-media wiring the production import builds (the same
 /// construction as the app's import command): mail pass, no export
@@ -332,13 +332,7 @@ fn import_mbox_bounded(
     let source = MboxSource::new(mbox);
     let mut run = BoundedRun::new(import_id_for("mbox-import", mbox));
     if let Some(data_dir) = data_dir {
-        run.media = Some(MediaPass {
-            kind: MediaKind::Mail,
-            export_root: Path::new(""),
-            export_file: None,
-            data_dir,
-            unlinked: false,
-        });
+        run.media = Some(MediaPass::mail(data_dir));
     }
     run.run(&source, storage, &|| false, &mut |_, _, _| {})
 }
