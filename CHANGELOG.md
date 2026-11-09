@@ -88,6 +88,13 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
   conversation context now run over the canonical archive tables,
   giving stable results and honest "the archive changed under your
   pagination" behavior instead of silent restarts.
+- **Imports say what happened to media** — the import status line now
+  reports the media pass's counters beyond message counts: stored,
+  deduplicated, and missing attachment counts, and for whole-tree
+  picks also stray files stored with no message linked ("N unlinked"),
+  files skipped because the media budget ran out ("N dropped
+  (budget)"), and a failed tree walk ("walk failed"). Mbox imports
+  report their attachment counters too, instead of dropping them.
 
 ### Fixed
 

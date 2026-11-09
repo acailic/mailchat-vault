@@ -236,6 +236,40 @@ export async function run(ctx) {
         JSON.stringify(rm) + ")",
     );
 
+    // --- oversized export tree: the walk refuses, and the import says so ----
+    // M4.2 S3: an export directory with more than the walk's file bound
+    // (>20,000 files) must not silently present a clean pass — the
+    // unlinked pass aborts and reports unlinked_walk_failed: 1.
+    const bigDir = path.join(dataDir, "tg-big");
+    await mkdir(path.join(bigDir, "strays"), { recursive: true });
+    for (let i = 0; i < 20001; i++) {
+      await writeFile(path.join(bigDir, "strays", `f${i}.txt`), "x");
+    }
+    await writeFile(
+      path.join(bigDir, "result.json"),
+      JSON.stringify({
+        name: "big", id: 3,
+        messages: [
+          { id: 1, type: "message", date_unixtime: "1698832800", from: "A", text: "veliko" },
+        ],
+      }),
+    );
+    const bigOutcome = await invoke(browser, "import_chat_export", {
+      path: bigDir,
+      extractMedia: true,
+    });
+    assert.ok(bigOutcome.ok, `big import succeeded: ${bigOutcome.error ?? ""}`);
+    const bm = bigOutcome.value.media;
+    assert.ok(!!bm, "media summary present for the oversized tree");
+    assert.ok(
+      bm.unlinked_walk_failed === 1,
+      "oversized tree reports unlinked_walk_failed: 1 (got " + JSON.stringify(bm) + ")",
+    );
+    assert.ok(
+      bm.unlinked === 0 && bm.stored === 0,
+      "walk aborted before anything stored (got " + JSON.stringify(bm) + ")",
+    );
+
     // --- WhatsApp stem guard ------------------------------------------------
     const waDir = path.join(dataDir, "wa-guard");
     await mkdir(path.join(waDir, "media_docs"), { recursive: true });
