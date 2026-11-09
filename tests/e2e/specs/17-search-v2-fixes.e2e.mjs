@@ -283,8 +283,8 @@ export async function run(ctx) {
       async () => (await browser.$$("#active-filter-chips .filter-chip")).length === 0,
       { timeoutMsg: "removing the chip left applied filter chips behind" },
     );
-    await ui.waitForText(browser, "#status", (text) => text.startsWith("Type something"), {
-      timeoutMsg: "the filter did not reset to the empty-prompt state",
+    await ui.waitForText(browser, "#status", (text) => /^1–4 of 4$/.test(text), {
+      timeoutMsg: "the filter did not reset to the unfiltered browse",
     });
     log("    colliding-label chip: matched 4 messages across both ids, removal cleared both");
   });

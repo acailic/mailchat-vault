@@ -74,11 +74,51 @@ export interface MediaSummary {
   linked: number;
 }
 
+/** Result of an .mbox import: the ingest summary plus the run's
+ * import id (the "View imported messages" scope). */
+export interface ImportOutcome {
+  summary: IngestSummary;
+  import_id: string;
+}
+
 /** Result of a chat export import: ingest summary + media pass. */
 export interface ChatImportOutcome {
   summary: IngestSummary;
+  /** The import run's id (an import-scope filter value). */
+  import_id: string;
   /** Null when media extraction was disabled. */
   media: MediaSummary | null;
+}
+
+/** One sample message of a bounded import preview (U03). */
+export interface ImportPreviewSample {
+  author: string;
+  subject: string;
+  sent_at: string | null;
+  snippet: string;
+}
+
+/** Bounded preview of a picked import input (U03): detected format,
+ * samples, bounded counts, media presence, input size. */
+export interface ImportPreview {
+  kind: string;
+  source: string;
+  input_bytes: number;
+  messages_seen: number;
+  scan_complete: boolean;
+  parse_failures: number;
+  samples: ImportPreviewSample[];
+  media_referenced: number;
+  media_missing: number;
+  warnings: string[];
+  /** Added by the `preview_import` command: free bytes on the vault's
+   * data dir (null when unavailable). */
+  free_bytes: number | null;
+}
+
+/** Whether the isolated sample archive is open (U02). */
+export interface DemoMode {
+  active: boolean;
 }
 
 /** Mirrors `vault_core::watch::WatchEvent` (serde tagged, snake_case). */

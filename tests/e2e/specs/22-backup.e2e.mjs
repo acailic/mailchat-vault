@@ -127,7 +127,7 @@ export async function run(ctx) {
 
       // 1. A known 8-message archive.
       const imported = await ui.importMbox(browser, ui.archiveMbox);
-      assert.ok(imported.includes(" new, "), `the mbox import finished: ${imported}`);
+      assert.equal(imported.inserted, 8, `the mbox import finished: ${JSON.stringify(imported)}`);
       const db = vaultDbPath(dataDir);
       if (sqlite) {
         const rows = await sqlite.query(db, "SELECT COUNT(*) AS n FROM archive_messages");
@@ -191,7 +191,7 @@ export async function run(ctx) {
         browser,
         path.join(ui.fixturesDir, "mail-attachments.mbox"),
       );
-      assert.ok(second.includes(" new, "), `the second import finished: ${second}`);
+      assert.ok(second.inserted > 0, `the second import finished: ${JSON.stringify(second)}`);
       if (sqlite) {
         const rows = await sqlite.query(db, "SELECT COUNT(*) AS n FROM archive_messages");
         originalMessages = rows[0].n;

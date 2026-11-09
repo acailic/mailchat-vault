@@ -16,9 +16,11 @@ import type {
   ArchiveStats,
   ChatContext,
   ChatImportOutcome,
+  DemoMode,
   EmbeddingStatus,
   ExportSummary,
-  IngestSummary,
+  ImportOutcome,
+  ImportPreview,
   JobEventsPage,
   SearchPage,
   SourceInstance,
@@ -249,8 +251,8 @@ export function archiveStats(top = 10): Promise<ArchiveStats> {
 // Import / sync / watch
 // ---------------------------------------------------------------------------
 
-export function importMbox(path: string): Promise<IngestSummary> {
-  return invoke<IngestSummary>("import_mbox", { path });
+export function importMbox(path: string): Promise<ImportOutcome> {
+  return invoke<ImportOutcome>("import_mbox", { path });
 }
 
 export function importChatExport(
@@ -260,8 +262,26 @@ export function importChatExport(
   return invoke<ChatImportOutcome>("import_chat_export", { path, extractMedia });
 }
 
-export function seedDemo(): Promise<IngestSummary> {
-  return invoke<IngestSummary>("seed_demo");
+/** Bounded preview of a picked import input (U03): nothing is stored;
+ * the confirm step dispatches to importMbox/importChatExport. */
+export function previewImport(path: string): Promise<ImportPreview> {
+  return invoke<ImportPreview>("preview_import", { path });
+}
+
+// ---------------------------------------------------------------------------
+// Isolated sample archive (U02)
+// ---------------------------------------------------------------------------
+
+export function demoEnter(): Promise<DemoMode> {
+  return invoke<DemoMode>("demo_enter");
+}
+
+export function demoLeave(): Promise<DemoMode> {
+  return invoke<DemoMode>("demo_leave");
+}
+
+export function demoStatus(): Promise<DemoMode> {
+  return invoke<DemoMode>("demo_status");
 }
 
 export function syncImap(args: {

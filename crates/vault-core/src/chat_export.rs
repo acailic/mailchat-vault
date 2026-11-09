@@ -84,11 +84,15 @@ pub fn detect_chat_format_reader(path: &Path) -> Result<Option<ChatFormat>> {
     Ok(None)
 }
 
-/// Outcome of a chat export import: the ingest summary plus (when media
+/// Outcome of a chat export import: the ingest summary, the bounded
+/// run's import id (the "View imported messages" scope), and (when media
 /// extraction ran) how the media pass went.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatImportOutcome {
     pub summary: IngestSummary,
+    /// The import run's id (an import-scope filter value).
+    #[serde(default)]
+    pub import_id: String,
     pub media: Option<MediaSummary>,
 }
 
@@ -96,6 +100,7 @@ impl From<BoundedOutcome> for ChatImportOutcome {
     fn from(outcome: BoundedOutcome) -> Self {
         Self {
             summary: outcome.summary,
+            import_id: outcome.import_id,
             media: outcome.media,
         }
     }

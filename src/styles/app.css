@@ -324,6 +324,84 @@ kbd {
 }
 #status.error, .error { color: var(--danger); }
 
+/* ------------------------------------------------------------------
+ * First-source journey (U02/U03): demo banner, first-run card,
+ * import preview card.
+ * ------------------------------------------------------------------ */
+
+.row.banner {
+  align-items: center;
+  padding: var(--sp-2) var(--sp-3);
+  margin-bottom: var(--sp-3);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-s);
+  background: color-mix(in srgb, var(--accent) 10%, var(--canvas));
+}
+
+#first-run {
+  margin: var(--sp-4) auto;
+  max-width: 560px;
+  padding: var(--sp-4);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  background: var(--panel);
+}
+
+.first-run-title {
+  font-size: var(--text-section);
+  margin: 0 0 var(--sp-2);
+}
+
+#first-run .row { margin-top: var(--sp-3); }
+
+button.link-btn {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  text-decoration: underline;
+}
+button.link-btn:hover:not(:disabled) { background: none; color: var(--accent-hover); }
+
+.preview-card {
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  background: var(--panel);
+}
+
+.preview-title {
+  font-size: var(--text-section);
+  margin: 0;
+}
+
+.preview-path {
+  overflow-wrap: anywhere;
+}
+
+.preview-hint { margin: var(--sp-2) 0 0; }
+
+.preview-warning { margin: var(--sp-2) 0 0; color: var(--muted); }
+
+.preview-samples {
+  list-style: none;
+  margin: var(--sp-3) 0 0;
+  padding: 0;
+  display: grid;
+  gap: var(--sp-2);
+}
+.preview-samples li {
+  padding: var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+}
+.preview-samples .body {
+  font-size: var(--text-meta);
+  color: var(--muted);
+  margin-top: 2px;
+}
+
 /* Results list */
 #results { list-style: none; margin: 0; padding: 0; }
 .group { margin-bottom: 10px; }

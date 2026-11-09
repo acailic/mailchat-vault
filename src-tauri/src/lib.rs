@@ -68,6 +68,14 @@
 //!   `backup_create` and `restore_preview` (M4.4: the versioned backup
 //!   container writer and the staged, journaled restore validation).
 //! - `seed_demo` — insert the built-in sample messages (idempotent).
+//! - `demo_enter` / `demo_leave` / `demo_status` — the isolated sample
+//!   archive (U02): `demo_enter` opens a private in-memory vault seeded
+//!   with the demo corpus; reads route there while it is open, every
+//!   personal-vault write refuses, and `demo_leave` drops it without
+//!   the personal `vault.db` ever having been touched.
+//! - `preview_import` — bounded import preview (U03): detect the picked
+//!   file/folder/`.zip`, sample messages, bounded counts, media
+//!   presence, input size, and free disk space — nothing is stored.
 //! - `stats` — archive counts per source (drives the source filter chips).
 //! - `archive_stats` — dashboard aggregates: totals, date range, counts by
 //!   source/day, top chats and top authors.
@@ -126,7 +134,7 @@ use vault_core::search2::{
 };
 use vault_core::settings::{self, Options, Settings, SETTINGS_VERSION};
 use vault_core::stats::{ArchiveStats, DEFAULT_TOP};
-use vault_core::storage::{FailedItem, SourceInstance};
+use vault_core::storage::{FailedItem, SourceInstance, Storage};
 use vault_core::vector::{
     self, EmbedJobSummary, Embedder, EmbeddingStatus, HashEmbedder, EMBED_BODY_PREFIX_CHARS,
 };
@@ -200,6 +208,72 @@ struct AppState {
     /// `recovery_forget` and the `backup_create` / `restore_preview`
     /// jobs (see [`SwitchGate`]).
     switch_gate: Arc<SwitchGate>,
+    /// U02 (first-source journey): the isolated sample archive.
+    /// `Some` while the user browses the built-in demo corpus inside a
+    /// private in-memory vault — reads route there, personal-vault
+    /// writes refuse, and the personal `vault.db` is never touched.
+    /// Dropping the handle on `demo_leave` discards the whole demo.
+    demo: Arc<Mutex<Option<Arc<Mutex<Storage>>>>>,
+}
+
+/// The vault read commands run against: the personal pool, or the
+/// isolated in-memory sample archive while it is open (U02). Every
+/// read-only command goes through [`ActiveVault::with_read`] so a
+/// browsing session sees the demo corpus — searches, detail, context,
+/// stats — while the personal archive stays untouched underneath.
+enum ActiveVault {
+    Pool(Arc<DbPool>),
+    Demo(Arc<Mutex<Storage>>),
+}
+
+impl ActiveVault {
+    /// The vault this command should read right now.
+    fn from(state: &AppState) -> Self {
+        match state.demo_vault() {
+            Some(demo) => ActiveVault::Demo(demo),
+            None => ActiveVault::Pool(Arc::clone(&state.pool)),
+        }
+    }
+
+    /// Run one read against the active vault. Cheap and short-lived:
+    /// a pool read takes an idle read connection (WAL — it never waits
+    /// behind writes); a demo read takes the demo storage's mutex.
+    fn with_read<R>(&self, op: impl FnOnce(&Storage) -> R) -> R {
+        match self {
+            ActiveVault::Pool(pool) => pool.with_read(op),
+            ActiveVault::Demo(demo) => {
+                let storage = demo.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                op(&storage)
+            }
+        }
+    }
+}
+
+impl AppState {
+    /// The open sample archive's storage handle, cloned out of its
+    /// slot (safe to move into a blocking task).
+    fn demo_vault(&self) -> Option<Arc<Mutex<Storage>>> {
+        self.demo
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(Arc::clone)
+    }
+
+    /// Refuse personal-vault mutations while the sample archive is
+    /// open — the demo must never mix into the personal vault, and a
+    /// user who believes they are browsing a sample must not silently
+    /// change their real archive underneath.
+    fn refuse_in_demo(&self) -> Result<(), String> {
+        if self.demo_vault().is_some() {
+            Err(
+                "you are browsing the isolated sample archive — leave it before changing your vault"
+                    .to_string(),
+            )
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Result of an IMAP sync: per-folder summaries plus where an entered
@@ -245,8 +319,7 @@ struct JobHandle {
 /// `limit`/`offset`; `total` carries the match count for pagination.
 #[tauri::command]
 fn search_messages(state: State<AppState>, query: SearchQuery) -> Result<SearchPage, String> {
-    state
-        .pool
+    ActiveVault::from(&state)
         .with_read(|s| s.search_page(&query))
         .map_err(|e| e.to_string())
 }
@@ -259,8 +332,7 @@ fn chat_context(
     id: i64,
     radius: Option<u32>,
 ) -> Result<Option<ChatContext>, String> {
-    state
-        .pool
+    ActiveVault::from(&state)
         .with_read(|s| s.chat_context(id, radius.unwrap_or(8)))
         .map_err(|e| e.to_string())
 }
@@ -285,8 +357,7 @@ fn search_archive_v2(
     state: State<AppState>,
     request: SearchArchiveRequest,
 ) -> Result<SearchArchivePage, AppError> {
-    state
-        .pool
+    ActiveVault::from(&state)
         .with_read(|s| s.search_archive(&request))
         .map_err(AppError::from)
 }
@@ -295,8 +366,7 @@ fn search_archive_v2(
 /// provenance, attachments, occurrences, and conflicting-revision links.
 #[tauri::command]
 fn message_detail_v2(state: State<AppState>, id: i64) -> Result<MessageDetail, AppError> {
-    state
-        .pool
+    ActiveVault::from(&state)
         .with_read(|s| s.message_detail(id))
         .map_err(AppError::from)?
         .ok_or_else(|| AppError::not_found(format!("no message with id {id}")))
@@ -313,8 +383,7 @@ fn conversation_context_v2(
     after_cursor: Option<i64>,
     limit: Option<u32>,
 ) -> Result<ConversationContext, AppError> {
-    state
-        .pool
+    ActiveVault::from(&state)
         .with_read(|s| s.conversation_context(id, before_cursor, after_cursor, limit))
         .map_err(AppError::from)?
         .ok_or_else(|| AppError::not_found(format!("no message with id {id}")))
@@ -324,8 +393,7 @@ fn conversation_context_v2(
 /// messages" after an import completes), newest first.
 #[tauri::command]
 fn list_import_scopes_v2(state: State<AppState>) -> Result<Vec<ImportScope>, AppError> {
-    state
-        .pool
+    ActiveVault::from(&state)
         .with_read(|s| s.import_scopes())
         .map_err(AppError::from)
 }
@@ -345,9 +413,12 @@ async fn media_reconcile(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ReconcileReport, String> {
+    // The report compares the store on disk against the *personal*
+    // vault's references; against the demo's empty reference set every
+    // real object would read as an orphan, so it refuses instead.
+    state.refuse_in_demo()?;
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let digests = state
-        .pool
+    let digests = ActiveVault::from(&state)
         .with_read(|s| s.media_digests())
         .map_err(|e| e.to_string())?;
     let verify = true; // maintenance call: pay the re-hash for certainty
@@ -365,9 +436,11 @@ async fn media_reconcile(
 /// the same enumeration `media_reconcile` sees.
 #[tauri::command]
 async fn media_usage(app: AppHandle, state: State<'_, AppState>) -> Result<MediaUsage, String> {
+    // Same reasoning as `media_reconcile`: the referenced/orphaned
+    // split is only meaningful against the personal vault.
+    state.refuse_in_demo()?;
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let digests = state
-        .pool
+    let digests = ActiveVault::from(&state)
         .with_read(|s| s.media_digests())
         .map_err(|e| e.to_string())?;
     tauri::async_runtime::spawn_blocking(move || Ok(ObjectStore::new(&data_dir).usage(&digests)))
@@ -571,6 +644,8 @@ async fn restore_commit(
     secrets: State<'_, Arc<secrets::Secrets>>,
     preview_id: String,
 ) -> Result<RestoreOutcome, String> {
+    // A switch drains the personal pool — never under the demo vault.
+    state.refuse_in_demo()?;
     // One switch at a time: a concurrent commit/return refuses fast
     // while this one runs its precheck→drain→switch sequence.
     let _switch_lease = state.switch_gate.try_begin()?;
@@ -647,6 +722,7 @@ async fn recovery_status(state: State<'_, AppState>) -> Result<RecoveryStatus, S
 /// to consume, so it takes the same gate and refuses while one runs.
 #[tauri::command]
 async fn recovery_forget(state: State<'_, AppState>, slot_id: String) -> Result<(), String> {
+    state.refuse_in_demo()?;
     let _switch_lease = state.switch_gate.try_begin()?;
     let data_dir = state.data_dir.clone();
     tauri::async_runtime::spawn_blocking(move || backup::recovery_forget(&data_dir, &slot_id))
@@ -666,6 +742,8 @@ async fn return_to_previous_vault(
     secrets: State<'_, Arc<secrets::Secrets>>,
     slot_id: String,
 ) -> Result<RestoreOutcome, String> {
+    // A switch drains the personal pool — never under the demo vault.
+    state.refuse_in_demo()?;
     // One switch at a time: a concurrent commit/return refuses fast
     // while this one runs its precheck→drain→switch sequence.
     let _switch_lease = state.switch_gate.try_begin()?;
@@ -719,14 +797,15 @@ async fn export_messages_v2(
             Some("ids"),
         ));
     }
-    let pool = Arc::clone(&state.pool);
+    let vault = ActiveVault::from(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        pool.with_read(|s| -> CoreResult<SelectionExportSummary> {
-            let file = std::fs::File::create(&path).map_err(Error::from)?;
-            let mut out = BufWriter::new(file);
-            search2::export_selection(s, &ids, format, &mut out)
-        })
-        .map_err(AppError::from)
+        vault
+            .with_read(|s| -> CoreResult<SelectionExportSummary> {
+                let file = std::fs::File::create(&path).map_err(Error::from)?;
+                let mut out = BufWriter::new(file);
+                search2::export_selection(s, &ids, format, &mut out)
+            })
+            .map_err(AppError::from)
     })
     .await
     .map_err(|e| AppError::internal(format!("export task failed: {e}")))?
@@ -780,7 +859,7 @@ fn llm_ask(
         selection = registry.select(provider.as_deref());
     }
     run_ask(
-        &state.pool,
+        &ActiveVault::from(&state),
         &state.embedder,
         selection,
         provider.is_some(),
@@ -804,7 +883,7 @@ fn llm_ask(
 /// endpoint and prove the no-consent case makes zero network calls.
 #[allow(clippy::too_many_arguments)] // mirrors vault_core::llm::ask's step list
 fn run_ask(
-    pool: &DbPool,
+    vault: &ActiveVault,
     embedder: &HashEmbedder,
     selection: Selection,
     provider_requested: bool,
@@ -852,14 +931,14 @@ fn run_ask(
         },
         Some(backend) => {
             let candidate = llm::translate(backend, question, today);
-            pool.with_read(|s| llm::validate(s, question, candidate))
+            vault.with_read(|s| llm::validate(s, question, candidate))
         }
     };
     let (results, ranking) = {
-        let fts_results = pool
+        let fts_results = vault
             .with_read(|s| llm::run_plan(s, &planned, limit))
             .map_err(|e| e.to_string())?;
-        let hybrid = pool
+        let hybrid = vault
             .with_read(|s| llm::rank_hybrid(s, embedder, question, &planned, &fts_results, limit))
             .map_err(|e| e.to_string())?;
         (hybrid.results, hybrid.ranking)
@@ -1006,6 +1085,7 @@ fn llm_key_clear(
 /// offline and CPU-bound; runs on the writer through the bounded queue.
 #[tauri::command]
 async fn embed_messages(state: State<'_, AppState>) -> Result<EmbedJobSummary, String> {
+    state.refuse_in_demo()?;
     let pool = Arc::clone(&state.pool);
     let embedder = state.embedder;
     tauri::async_runtime::spawn_blocking(move || {
@@ -1020,9 +1100,9 @@ async fn embed_messages(state: State<'_, AppState>) -> Result<EmbedJobSummary, S
 /// messages are embedded, and how many are still pending.
 #[tauri::command]
 fn embed_status(state: State<AppState>) -> Result<EmbeddingStatus, String> {
-    state
-        .pool
-        .with_read(|s| vector::embedding_status(s, &state.embedder))
+    let embedder = state.embedder;
+    ActiveVault::from(&state)
+        .with_read(|s| vector::embedding_status(s, &embedder))
         .map_err(|e| e.to_string())
 }
 
@@ -1035,12 +1115,22 @@ fn embed_status(state: State<AppState>) -> Result<EmbeddingStatus, String> {
 /// parser and staged into the app data `media/` store, linked from the
 /// message's `media` entries — re-importing skips stored messages
 /// without re-storing their bytes.
+/// Result of one finished import: the ingest summary plus the run's
+/// import id — the value the import-scope filter keys on, so the UI can
+/// offer "View imported messages" scoped to exactly this run.
+#[derive(Debug, Clone, Serialize)]
+struct ImportOutcomeView {
+    summary: IngestSummary,
+    import_id: String,
+}
+
 #[tauri::command]
 async fn import_mbox(
     app: AppHandle,
     state: State<'_, AppState>,
     path: String,
-) -> Result<IngestSummary, String> {
+) -> Result<ImportOutcomeView, String> {
+    state.refuse_in_demo()?;
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let pool = Arc::clone(&state.pool);
     tauri::async_runtime::spawn_blocking(move || {
@@ -1056,7 +1146,10 @@ async fn import_mbox(
         let mut sink = PoolSink(&pool);
         let mut no_progress = |_: u64, _: u64, _: &str| {};
         run.run(&source, &mut sink, &|| false, &mut no_progress)
-            .map(|outcome| outcome.summary)
+            .map(|outcome| ImportOutcomeView {
+                summary: outcome.summary,
+                import_id: outcome.import_id,
+            })
             .map_err(|e: Error| e.to_string())
     })
     .await
@@ -1088,6 +1181,7 @@ async fn import_chat_export(
     path: String,
     extract_media: Option<bool>,
 ) -> Result<ChatImportOutcome, String> {
+    state.refuse_in_demo()?;
     let extract_media = extract_media.unwrap_or(true);
     let data_dir = if extract_media {
         Some(app.path().app_data_dir().map_err(|e| e.to_string())?)
@@ -1155,6 +1249,7 @@ async fn sync_imap(
     folders: Option<Vec<String>>,
     auth: Option<String>,
 ) -> Result<ImapSyncOutcome, String> {
+    state.refuse_in_demo()?;
     // Hostnames are case-insensitive, so one server spelled with different
     // casing must map to one durable source instance. Usernames stay
     // exactly as configured: the identity contract case-folds hosts, not
@@ -1343,6 +1438,7 @@ async fn oauth_status(
 /// data (streamed through the bounded pipeline like every other import).
 #[tauri::command]
 async fn seed_demo(state: State<'_, AppState>) -> Result<IngestSummary, String> {
+    state.refuse_in_demo()?; // the sample archive replaces personal seeding
     let pool = Arc::clone(&state.pool);
     tauri::async_runtime::spawn_blocking(move || {
         let run = BoundedRun::new("demo-seed");
@@ -1356,12 +1452,105 @@ async fn seed_demo(state: State<'_, AppState>) -> Result<IngestSummary, String> 
     .map_err(|e| format!("seed task failed: {e}"))?
 }
 
+// ---------------------------------------------------------------------------
+// Isolated sample archive (U02, first-source journey)
+// ---------------------------------------------------------------------------
+
+/// Whether the isolated sample archive is open. The demo lives in a
+/// private in-memory vault seeded with the built-in demo corpus; reads
+/// route there while it is open and personal writes refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+struct DemoMode {
+    active: bool,
+}
+
+/// Open the sample archive: a fresh in-memory canonical database,
+/// seeded through the same bounded pipeline every import uses. Demo
+/// flows never read or write the personal `vault.db` — leaving the
+/// demo drops the in-memory copy entirely, so demo rows can never mix
+/// into the personal vault (the M3.4 boundary). Re-entering replaces
+/// any earlier demo.
+#[tauri::command]
+async fn demo_enter(state: State<'_, AppState>) -> Result<DemoMode, String> {
+    let slot = Arc::clone(&state.demo);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut storage = Storage::open_in_memory()
+            .map_err(|e| format!("cannot open the sample archive: {e}"))?;
+        let run = BoundedRun::new("demo-seed");
+        let mut no_progress = |_: u64, _: u64, _: &str| {};
+        run.run(&DemoSource, &mut storage, &|| false, &mut no_progress)
+            .map_err(|e: Error| format!("cannot seed the sample archive: {e}"))?;
+        *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(Arc::new(Mutex::new(storage)));
+        Ok(DemoMode { active: true })
+    })
+    .await
+    .map_err(|e| format!("sample-archive task failed: {e}"))?
+}
+
+/// Leave the sample archive: drops the in-memory demo vault and returns
+/// to the personal one, which was never modified.
+#[tauri::command]
+async fn demo_leave(state: State<'_, AppState>) -> Result<DemoMode, String> {
+    *state
+        .demo
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    Ok(DemoMode { active: false })
+}
+
+/// Whether the sample archive is open (boot recovery for a webview
+/// reload while the demo is open — the demo lives in the app process,
+/// not the page).
+#[tauri::command]
+fn demo_status(state: State<AppState>) -> DemoMode {
+    DemoMode {
+        active: state.demo_vault().is_some(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bounded import preview (U03, first-source journey)
+// ---------------------------------------------------------------------------
+
+/// The wire shape of `preview_import`: the bounded preview plus the
+/// free space on the vault's data dir, so the confirm step can warn
+/// when the archive likely does not fit (M3.3 capacity guidance).
+#[derive(Debug, Clone, Serialize)]
+struct PreviewImportView {
+    #[serde(flatten)]
+    preview: vault_core::preview::ImportPreview,
+    /// Free bytes on the vault's data dir (None when unavailable).
+    free_bytes: Option<u64>,
+}
+
+/// Bounded preview of a picked import input (file, directory, or
+/// `.zip`): detected format, sample messages, bounded counts, media
+/// presence, and input size — nothing is stored. The confirm step then
+/// dispatches to `import_mbox` / `import_chat_export` on the same path.
+#[tauri::command]
+async fn preview_import(app: AppHandle, path: String) -> Result<PreviewImportView, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let preview =
+            vault_core::preview::preview_import(Path::new(&path)).map_err(|e| e.to_string())?;
+        let free_bytes = fs4::available_space(&data_dir).ok();
+        Ok(PreviewImportView {
+            preview,
+            free_bytes,
+        })
+    })
+    .await
+    .map_err(|e| format!("preview task failed: {e}"))?
+}
+
 /// Arm a watched folder: existing and new/modified export files
 /// (`.mbox`, WhatsApp `.txt`, Telegram `.json`, Signal conversation
 /// `.json`) under it are imported in the background; re-imports never
 /// duplicate. Returns the fresh status.
 #[tauri::command]
 fn watch_add_folder(state: State<AppState>, path: String) -> Result<WatchSnapshot, String> {
+    state.refuse_in_demo()?;
     let path = path.trim();
     if path.is_empty() {
         return Err("pick a folder to watch first".into());
@@ -1373,6 +1562,7 @@ fn watch_add_folder(state: State<AppState>, path: String) -> Result<WatchSnapsho
 /// Forget a watched folder (removing one that no longer exists is fine).
 #[tauri::command]
 fn watch_remove_folder(state: State<AppState>, path: String) -> Result<WatchSnapshot, String> {
+    state.refuse_in_demo()?;
     let path = path.trim();
     if path.is_empty() {
         return Err("path is required".into());
@@ -1579,6 +1769,9 @@ fn job_submit(
     kind: String,
     params: Value,
 ) -> Result<JobHandle, String> {
+    // Every job kind writes the personal vault (imports, syncs, seeds,
+    // embeddings, backups, restores) — none may run under the demo.
+    state.refuse_in_demo()?;
     let spec = JobSpec::parse(&kind, &params)?;
     let pool = Arc::clone(&state.pool);
     let embedder = state.embedder;
@@ -1948,9 +2141,7 @@ fn run_embed_job(ctx: &JobContext, embedder: HashEmbedder) -> std::result::Resul
 /// keyring (see `secrets`), never in the database.
 #[tauri::command]
 fn sources_list(state: State<AppState>) -> Result<Vec<SourceInstance>, String> {
-    state
-        .pool
-        .with_read(|s| s.list_source_instances().map_err(|e| e.to_string()))
+    ActiveVault::from(&state).with_read(|s| s.list_source_instances().map_err(|e| e.to_string()))
 }
 
 /// Per-source exclusion (M2.3): an excluded source is skipped by every
@@ -1963,6 +2154,7 @@ fn source_set_excluded(
     source_id: String,
     excluded: bool,
 ) -> Result<(), String> {
+    state.refuse_in_demo()?;
     let pool = Arc::clone(&state.pool);
     pool.submit_write(move |s| s.set_source_excluded(&source_id, excluded))
         .map_err(|e| e.to_string())
@@ -1976,7 +2168,7 @@ fn source_failures(
     state: State<AppState>,
     source_id: Option<String>,
 ) -> Result<Vec<FailedItem>, String> {
-    state.pool.with_read(|s| {
+    ActiveVault::from(&state).with_read(|s| {
         s.list_failed_items(source_id.as_deref())
             .map_err(|e| e.to_string())
     })
@@ -2092,10 +2284,10 @@ async fn accounts_list(
     state: State<'_, AppState>,
     secrets: State<'_, Arc<secrets::Secrets>>,
 ) -> Result<Vec<AccountView>, String> {
-    let pool = Arc::clone(&state.pool);
+    let vault = ActiveVault::from(&state);
     let secrets = Arc::clone(secrets.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        let (instances, counts) = pool
+        let (instances, counts) = vault
             .with_read(|s| -> vault_core::Result<_> {
                 Ok((s.list_source_instances()?, s.account_counts()?))
             })
@@ -2124,10 +2316,11 @@ async fn account_forget_credentials(
     secrets: State<'_, Arc<secrets::Secrets>>,
     source_id: String,
 ) -> Result<bool, String> {
-    let pool = Arc::clone(&state.pool);
+    state.refuse_in_demo()?;
+    let vault = ActiveVault::from(&state);
     let secrets = Arc::clone(secrets.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        let instance = pool
+        let instance = vault
             .with_read(|s| s.list_source_instances())
             .map_err(|e: vault_core::Error| e.to_string())?
             .into_iter()
@@ -2262,16 +2455,17 @@ async fn export_search(
     path: String,
 ) -> Result<ExportSummary, String> {
     let format = ExportFormat::parse(&format).map_err(|e| e.to_string())?;
-    let pool = Arc::clone(&state.pool);
+    let vault = ActiveVault::from(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        pool.with_read(|s| -> CoreResult<ExportSummary> {
-            let file = std::fs::File::create(&path).map_err(Error::from)?;
-            let mut out = BufWriter::new(file);
-            let summary = export::export_search(s, &query, format, &mut out)
-                .and_then(|s| out.flush().map(|_| s).map_err(Error::from))?;
-            Ok(summary)
-        })
-        .map_err(|e: Error| e.to_string())
+        vault
+            .with_read(|s| -> CoreResult<ExportSummary> {
+                let file = std::fs::File::create(&path).map_err(Error::from)?;
+                let mut out = BufWriter::new(file);
+                let summary = export::export_search(s, &query, format, &mut out)
+                    .and_then(|s| out.flush().map(|_| s).map_err(Error::from))?;
+                Ok(summary)
+            })
+            .map_err(|e: Error| e.to_string())
     })
     .await
     .map_err(|e| format!("export task failed: {e}"))?
@@ -2288,21 +2482,22 @@ async fn export_chat(
     path: String,
 ) -> Result<Option<ExportSummary>, String> {
     let format = ExportFormat::parse(&format).map_err(|e| e.to_string())?;
-    let pool = Arc::clone(&state.pool);
+    let vault = ActiveVault::from(&state);
     tauri::async_runtime::spawn_blocking(move || {
-        pool.with_read(|s| -> CoreResult<Option<ExportSummary>> {
-            // Existence is checked before the destination is touched: an
-            // unknown id (message deleted between list render and export
-            // click) must leave no file at the user-chosen path.
-            if s.get(id)?.is_none() {
-                return Ok(None);
-            }
-            let file = std::fs::File::create(&path).map_err(Error::from)?;
-            let mut out = BufWriter::new(file);
-            export::export_chat(s, id, format, &mut out)
-                .and_then(|s| out.flush().map(|_| s).map_err(Error::from))
-        })
-        .map_err(|e| e.to_string())
+        vault
+            .with_read(|s| -> CoreResult<Option<ExportSummary>> {
+                // Existence is checked before the destination is touched: an
+                // unknown id (message deleted between list render and export
+                // click) must leave no file at the user-chosen path.
+                if s.get(id)?.is_none() {
+                    return Ok(None);
+                }
+                let file = std::fs::File::create(&path).map_err(Error::from)?;
+                let mut out = BufWriter::new(file);
+                export::export_chat(s, id, format, &mut out)
+                    .and_then(|s| out.flush().map(|_| s).map_err(Error::from))
+            })
+            .map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("export task failed: {e}"))?
@@ -2311,8 +2506,7 @@ async fn export_chat(
 /// Archive counts: total and per source.
 #[tauri::command]
 fn stats(state: State<AppState>) -> Result<message::Stats, String> {
-    state
-        .pool
+    ActiveVault::from(&state)
         .with_read(|s| s.stats())
         .map_err(|e| e.to_string())
 }
@@ -2322,8 +2516,7 @@ fn stats(state: State<AppState>) -> Result<message::Stats, String> {
 /// authors (bounded by `top`, default 10, clamped to 100).
 #[tauri::command]
 fn archive_stats(state: State<AppState>, top: Option<u32>) -> Result<ArchiveStats, String> {
-    state
-        .pool
+    ActiveVault::from(&state)
         .with_read(|s| s.archive_stats(top.unwrap_or(DEFAULT_TOP)))
         .map_err(|e| e.to_string())
 }
@@ -2621,6 +2814,7 @@ pub fn run() {
                 scheduler,
                 data_dir,
                 switch_gate: Arc::new(SwitchGate::default()),
+                demo: Arc::new(Mutex::new(None)),
             });
             app.manage(Arc::clone(&secrets));
             Ok(())
@@ -2656,6 +2850,10 @@ pub fn run() {
             job_events_since,
             job_cancel,
             seed_demo,
+            demo_enter,
+            demo_leave,
+            demo_status,
+            preview_import,
             stats,
             archive_stats,
             export_search,
@@ -3077,7 +3275,7 @@ mod tests {
         );
 
         let outcome = run_ask(
-            &pool,
+            &ActiveVault::Pool(Arc::clone(&pool)),
             &HashEmbedder::new(),
             recorder_selection(base_url),
             true,
@@ -3127,7 +3325,7 @@ mod tests {
         );
 
         let outcome = run_ask(
-            &pool,
+            &ActiveVault::Pool(Arc::clone(&pool)),
             &HashEmbedder::new(),
             recorder_selection(base_url),
             true,
@@ -3165,7 +3363,7 @@ mod tests {
             reason: "provider “z.ai GLM” has no API key stored — set one in Settings".into(),
         };
         let outcome = run_ask(
-            &pool,
+            &ActiveVault::Pool(Arc::clone(&pool)),
             &HashEmbedder::new(),
             selection,
             true,

@@ -30,3 +30,14 @@ export function matches(haystack, pattern, message) {
     );
   }
 }
+
+export function deepEqual(actual, expected, message) {
+  const norm = (value) => JSON.stringify(value, Object.keys(value ?? {}).sort());
+  const a = norm(actual);
+  const e = norm(expected);
+  if (a !== e) {
+    throw new Error(
+      `assert deepEqual failed: ${message}\n  expected: ${e}\n  actual:   ${a}`,
+    );
+  }
+}

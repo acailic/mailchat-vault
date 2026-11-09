@@ -103,7 +103,9 @@ import type {
   ChatImportOutcome,
   EmbeddingStatus,
   ExportSummary,
+  IngestSummary,
   JobEvent,
+  MediaSummary,
   Message,
   SourceInstance,
   Stats,
@@ -154,12 +156,19 @@ const resultsList = document.querySelector<HTMLElement>("#results")!;
 const pagination = document.querySelector<HTMLElement>("#pagination")!;
 const detailPanel = document.querySelector<HTMLElement>("#detail")!;
 const statsLabel = document.querySelector<HTMLElement>("#stats")!;
-const mboxPathInput = document.querySelector<HTMLInputElement>("#mbox-path")!;
-const importButton = document.querySelector<HTMLButtonElement>("#import-btn")!;
-const chatImportButton = document.querySelector<HTMLButtonElement>("#chat-import-btn")!;
+const importPickButton = document.querySelector<HTMLButtonElement>("#import-pick-btn")!;
+const importFolderButton = document.querySelector<HTMLButtonElement>("#import-folder-btn")!;
 const chatMediaToggle = document.querySelector<HTMLInputElement>("#chat-media")!;
-const seedButton = document.querySelector<HTMLButtonElement>("#seed-btn")!;
+const importPreviewEl = document.querySelector<HTMLElement>("#import-preview")!;
 const importStatus = document.querySelector<HTMLElement>("#import-status")!;
+const importFollowup = document.querySelector<HTMLElement>("#import-followup")!;
+const demoBanner = document.querySelector<HTMLElement>("#demo-banner")!;
+const demoLeaveButton = document.querySelector<HTMLButtonElement>("#demo-leave-btn")!;
+const firstRunCard = document.querySelector<HTMLElement>("#first-run")!;
+const firstRunImportButton = document.querySelector<HTMLButtonElement>("#first-run-import-btn")!;
+const firstRunAccountButton = document.querySelector<HTMLButtonElement>("#first-run-account-btn")!;
+const firstRunDemoButton = document.querySelector<HTMLButtonElement>("#first-run-demo-btn")!;
+const exportControls = document.querySelector<HTMLElement>("#export-controls")!;
 const askInput = document.querySelector<HTMLInputElement>("#ask")!;
 const askButton = document.querySelector<HTMLButtonElement>("#ask-btn")!;
 const askStatus = document.querySelector<HTMLElement>("#ask-status")!;
@@ -263,6 +272,21 @@ let llmStatus: LlmStatus | null = null;
  * forever. Once granted, asks with a network provider go out; `Revoke`
  * resets it at any time. The state is always visible in the UI. */
 let aiConsentGranted = false;
+
+/** U02: whether the isolated sample archive is open (backend-tracked —
+ * survives a webview reload; refreshed from `demo_status` at boot). */
+let demoActive = false;
+
+/** U02: the personal vault's message count from the last `stats`
+ * refresh — drives the first-run card (an empty archive offers the
+ * first source instead of a dead search box). While the demo is open
+ * this still reflects the personal vault underneath. */
+let archiveTotal = 0;
+
+/** Whether the initial newest-first browse already ran once this page
+ * (U04: "All messages" shows the archive immediately, not after the
+ * first manual search). */
+let initialBrowseDone = false;
 
 /** Desktop notifications for new mail (roadmap): the saved Settings
  * option, updated from every `settings_get`/`settings_save` response.
@@ -836,13 +860,37 @@ async function refreshStats(): Promise<void> {
   try {
     const stats = await ipc.stats();
     if (!statsGuard.isCurrent(token)) return; // a newer refresh superseded this response
+    archiveTotal = demoActive ? archiveTotal : stats.total;
     const parts = stats.by_source.map((s) => `${s.source}: ${s.count}`).join(", ");
     statsLabel.textContent =
       stats.total === 0 ? "empty archive" : `${stats.total} messages (${parts})`;
     refreshChips(stats);
+    updateVaultChrome();
+    maybeInitialBrowse();
   } catch {
-    if (statsGuard.isCurrent(token)) statsLabel.textContent = "";
+    if (statsGuard.isCurrent(token)) {
+      statsLabel.textContent = "";
+      // Without counts the first-run/browse choice is unknown; the
+      // search box stays the honest entry point.
+      if (!initialBrowseDone) {
+        setStatus("Type something to search, or set a filter to browse.");
+      }
+    }
   }
+}
+
+/** U04: once the boot stats land, browse newest-first immediately —
+ * "All messages" shows the archive without a first manual search. An
+ * empty personal archive instead gets the first-run status line (U02). */
+function maybeInitialBrowse(): void {
+  if (initialBrowseDone) return;
+  if (demoActive) return;
+  if (archiveTotal === 0) {
+    setStatus("Your archive is empty — add a source to get started.");
+    return;
+  }
+  initialBrowseDone = true;
+  void runSearch(0);
 }
 
 async function refreshDashboard(): Promise<void> {
@@ -933,7 +981,10 @@ async function runSearch(offset = 0): Promise<void> {
     return;
   }
   const filters = readFilters(text);
-  if (!text && !hasActiveFilters(filters)) {
+  if (!text && !hasActiveFilters(filters) && !demoActive && archiveTotal === 0) {
+    // Empty personal archive: the first-run card owns the empty state
+    // (U02) — a dead search prompt is not the first thing a new user
+    // should see.
     state.filters = filters;
     state.hits = [];
     state.total = 0;
@@ -943,10 +994,12 @@ async function runSearch(offset = 0): Promise<void> {
     state.selection.clear();
     state.pageRevision = null;
     state.refreshNeeded = false;
-    setStatus("Type something to search, or set a filter to browse.");
+    setStatus("Your archive is empty — add a source to get started.");
     renderAll();
     return;
   }
+  // U04: empty text browses newest-first (the backend enforces the
+  // ordering); a filter or text narrows it. No dead ends.
   // Reject reversed day bounds inline before invocation (UX contract).
   if (!dateBoundsValid(filters.fromDate, filters.toDate)) {
     setStatus(
@@ -1226,35 +1279,271 @@ document.addEventListener("keydown", (event) => {
 });
 
 // ---------------------------------------------------------------------------
-// Import controls
+// Import flow (U03: native pick → bounded preview → confirm)
 // ---------------------------------------------------------------------------
 
-async function importMbox(): Promise<void> {
-  const path = mboxPathInput.value.trim();
-  if (!path) {
-    importStatus.textContent = "Enter a path to an .mbox file first.";
-    return;
+import {
+  formatLabel,
+  hideImportPreview,
+  renderImportPreview,
+} from "./importview";
+
+/** The pick currently awaiting confirmation, if any. */
+let pendingImport: { path: string; kind: string } | null = null;
+/** An import is running (guards double-clicks). */
+let importBusy = false;
+
+/** Map a backend import error to something a first-time importer can
+ * act on — no raw errno, no connector vocabulary. */
+function friendlyImportError(e: unknown, path: string): string {
+  const text = e instanceof Error ? e.message : String(e);
+  if (/not found|os error 2/i.test(text)) {
+    return `Could not read ${path} — the file may have moved or been deleted. Pick it again.`;
   }
-  importButton.disabled = true;
-  importStatus.textContent = `Importing ${path}…`;
+  if (/unrecognized|unsupported/i.test(text)) {
+    return `${text} Supported inputs: an .mbox email archive, a WhatsApp .txt, a Telegram result.json, a Signal .json, a Discord messages.json, or a folder/.zip containing these.`;
+  }
+  return `Import failed: ${text}`;
+}
+
+/** Open the native picker for one file (or an export folder) and show
+ * the bounded preview of what was picked. */
+async function pickImportInput(directory: boolean): Promise<void> {
+  if (importBusy || demoActive) return;
+  const button = directory ? importFolderButton : importPickButton;
+  button.disabled = true;
   try {
-    const summary = await ipc.importMbox(path);
+    const picked = await open(
+      directory
+        ? {
+            multiple: false,
+            directory: true,
+            title: "Import an export folder",
+          }
+        : {
+            multiple: false,
+            title: "Import a file",
+            filters: [
+              {
+                name: "Email or chat export (.mbox, WhatsApp .txt, Telegram/Signal/Discord .json, or a .zip)",
+                extensions: ["mbox", "txt", "json", "zip"],
+              },
+            ],
+          },
+    );
+    if (typeof picked !== "string") {
+      return; // cancelled — no changes, no preview
+    }
+    await showPreview(picked);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/** Preview a picked path: bounded scan, nothing stored. */
+async function showPreview(path: string): Promise<void> {
+  importStatus.textContent = `Reading ${path}…`;
+  importFollowup.hidden = true;
+  try {
+    const preview = await ipc.previewImport(path);
+    pendingImport = { path, kind: preview.kind };
+    renderImportPreview(importPreviewEl, preview, {
+      path,
+      freeBytes: preview.free_bytes,
+      busy: importBusy,
+      onImport: () => void confirmImport(),
+      onCancel: cancelPreview,
+    });
+    importStatus.textContent =
+      preview.messages_seen === 0 && preview.parse_failures === 0
+        ? `Nothing importable found in ${formatLabel(preview.kind)} input.`
+        : "";
+  } catch (e) {
+    pendingImport = null;
+    hideImportPreview(importPreviewEl);
+    importStatus.textContent = friendlyImportError(e, path);
+  }
+}
+
+/** Discard the pending preview: nothing was stored, nothing to undo. */
+function cancelPreview(): void {
+  pendingImport = null;
+  hideImportPreview(importPreviewEl);
+  importStatus.textContent = "";
+}
+
+/** Confirm the previewed import: dispatch to the bounded importer for
+ * the detected format, then offer "View imported messages" scoped to
+ * exactly this run. The preview parameter is the one whose confirm
+ * button was clicked; the pending pick must still match it. */
+async function confirmImport(): Promise<void> {
+  const target = pendingImport;
+  if (!target || importBusy) return;
+  importBusy = true;
+  const extractMedia = chatMediaToggle.checked;
+  hideImportPreview(importPreviewEl);
+  importStatus.textContent =
+    `Importing ${target.path}` +
+    (target.kind !== "mbox" && extractMedia ? " (extracting media)" : "") +
+    "…";
+  try {
+    let summary: IngestSummary;
+    let importId: string;
+    let mediaSummary: MediaSummary | null = null;
+    if (target.kind === "mbox") {
+      const outcome = await ipc.importMbox(target.path);
+      summary = outcome.summary;
+      importId = outcome.import_id;
+    } else {
+      const outcome = await ipc.importChatExport(target.path, extractMedia);
+      summary = outcome.summary;
+      importId = outcome.import_id;
+      mediaSummary = outcome.media;
+    }
     const failedPart = summary.failed > 0 ? `, ${summary.failed} failed to parse` : "";
+    const mediaPart = describeMedia(mediaSummary);
     importStatus.textContent =
       `Imported ${summary.inserted} new, ${summary.skipped} already present` +
-      `${failedPart} (of ${summary.seen} in ${summary.source}).`;
+      `${failedPart} (of ${summary.seen} in ${summary.source}).` +
+      mediaPart;
+    showImportFollowup(importId, summary.inserted);
+    initialBrowseDone = true; // the archive view is live from here on
     await refreshStats();
     void refreshImportScopes();
     void refreshSources();
     void refreshAccounts();
     void refreshEmbedStatus();
     void refreshDashboard();
+    void runSearch(0); // newest-first browse, ready when the user returns
+    if (mediaSummary) void refreshMediaUsage();
   } catch (e) {
-    importStatus.textContent = `Import failed: ${e}`;
+    importStatus.textContent = friendlyImportError(e, target.path);
   } finally {
-    importButton.disabled = false;
+    importBusy = false;
+    pendingImport = null;
   }
 }
+
+/** The post-import affordance: jump to the messages this run brought
+ * in, scoped by the import-scope filter. */
+function showImportFollowup(importId: string | undefined, inserted: number): void {
+  importFollowup.replaceChildren();
+  if (!importId || inserted === 0) {
+    importFollowup.hidden = true;
+    return;
+  }
+  const view = document.createElement("button");
+  view.type = "button";
+  view.id = "view-imported-btn";
+  view.className = "primary";
+  view.textContent = "View imported messages";
+  view.addEventListener("click", () => {
+    // The scope select may not list this run yet (its refresh is async
+    // or returned nothing): add the option so the filter actually
+    // selects this import, not silently "any import".
+    if (![...importScopeSelect.options].some((o) => o.value === importId)) {
+      const option = document.createElement("option");
+      option.value = importId;
+      option.textContent = `${importId} (${inserted} messages)`;
+      importScopeSelect.append(option);
+    }
+    importScopeSelect.value = importId;
+    workspace.store.setView("workspace");
+    void runSearch(0);
+  });
+  importFollowup.append(view);
+  importFollowup.hidden = false;
+}
+
+// ---------------------------------------------------------------------------
+// Isolated sample archive (U02)
+// ---------------------------------------------------------------------------
+
+/** Refresh every vault-reading panel after switching between the
+ * personal vault and the isolated sample archive. */
+async function refreshAfterVaultSwitch(): Promise<void> {
+  // Each vault has its own archive revision: reset the results state so
+  // a page revision from the other vault can never read as stale data.
+  // The query text goes with it — a search typed against one vault is
+  // not a meaningful query against the other.
+  searchInput.value = "";
+  searchGuard.invalidate();
+  detailGuard.invalidate();
+  closeDetail();
+  state.pageRevision = null;
+  state.refreshNeeded = false;
+  state.hits = [];
+  state.total = 0;
+  state.offset = 0;
+  state.activeIndex = -1;
+  state.selectedId = null;
+  state.selection.clear();
+  state.resultsSnapshot = null;
+  await refreshSources();
+  await refreshImportScopes();
+  await refreshStats();
+  void refreshDashboard();
+  void refreshAccounts();
+  void refreshEmbedStatus();
+  updateVaultChrome();
+  initialBrowseDone = demoActive || archiveTotal > 0;
+  if (initialBrowseDone) {
+    void runSearch(0);
+  } else {
+    // Left the demo onto an empty personal archive: the first-run card
+    // owns the state, and the first import re-arms the initial browse.
+    setStatus("Your archive is empty — add a source to get started.");
+    renderAll();
+  }
+}
+
+/** Open the isolated sample archive: reads route to a private in-memory
+ * demo vault; the personal vault underneath is never touched. */
+async function enterDemo(): Promise<void> {
+  if (demoActive) return;
+  firstRunDemoButton.disabled = true;
+  try {
+    await ipc.demoEnter();
+    demoActive = true;
+    workspace.store.setView("workspace");
+    await refreshAfterVaultSwitch();
+  } catch (e) {
+    setStatus(`Could not open the sample archive: ${e}`, true);
+  } finally {
+    firstRunDemoButton.disabled = false;
+  }
+}
+
+/** Leave the sample archive: drops the in-memory demo and returns to
+ * the personal vault exactly as it was. */
+async function leaveDemo(): Promise<void> {
+  if (!demoActive) return;
+  demoLeaveButton.disabled = true;
+  try {
+    await ipc.demoLeave();
+    demoActive = false;
+    await refreshAfterVaultSwitch();
+  } catch (e) {
+    setStatus(`Could not leave the sample archive: ${e}`, true);
+  } finally {
+    demoLeaveButton.disabled = false;
+  }
+}
+
+/** Toggle the vault-dependent chrome: the demo banner, the first-run
+ * card (an empty personal archive), and the source controls' demo
+ * lockout (the backend refuses writes under the demo regardless). */
+function updateVaultChrome(): void {
+  const firstRun = !demoActive && archiveTotal === 0;
+  firstRunCard.hidden = !firstRun;
+  demoBanner.hidden = !demoActive;
+  exportControls.hidden = firstRun;
+  const locked = demoActive;
+  for (const button of [importPickButton, importFolderButton, imapSyncButton, imapOauthButton, watchButton, watchAddButton]) {
+    button.disabled = locked;
+  }
+}
+
 
 /** "media: 2 stored, 1 deduped · 3 linked · 1 missing" with only the
  * non-zero parts; empty when nothing happened. */
@@ -1269,63 +1558,6 @@ function describeMedia(media: ChatImportOutcome["media"]): string {
   add(media.linked, "linked");
   add(media.missing, "missing");
   return parts.length === 0 ? "" : ` Media: ${parts.join(", ")}.`;
-}
-
-async function importChatExport(): Promise<void> {
-  chatImportButton.disabled = true;
-  try {
-    const picked = await open({
-      multiple: false,
-      title: "Import chat export",
-      filters: [
-        {
-          name: "Chat export (WhatsApp .txt, Telegram result.json, Signal .json, Discord messages.json, or a .zip of any of these)",
-          extensions: ["txt", "json", "zip"],
-        },
-      ],
-    });
-    if (typeof picked !== "string") {
-      return; // cancelled
-    }
-    const extractMedia = chatMediaToggle.checked;
-    importStatus.textContent = `Importing ${picked}${extractMedia ? " (extracting media)" : ""}…`;
-    const outcome = await ipc.importChatExport(picked, extractMedia);
-    const summary = outcome.summary;
-    const failedPart = summary.failed > 0 ? `, ${summary.failed} failed to parse` : "";
-    importStatus.textContent =
-      `Imported ${summary.inserted} new, ${summary.skipped} already present` +
-      `${failedPart} (of ${summary.seen} in ${summary.source}).` +
-      describeMedia(outcome.media);
-    await refreshStats();
-    void refreshImportScopes();
-    void refreshSources();
-    void refreshAccounts();
-    void refreshEmbedStatus();
-    void refreshDashboard();
-    if (outcome.media) void refreshMediaUsage(); // media landed in the store
-  } catch (e) {
-    importStatus.textContent = `Import failed: ${e}`;
-  } finally {
-    chatImportButton.disabled = false;
-  }
-}
-
-async function seedDemo(): Promise<void> {
-  seedButton.disabled = true;
-  try {
-    const summary = await ipc.seedDemo();
-    importStatus.textContent = `Demo messages: ${summary.inserted} new, ${summary.skipped} already present.`;
-    await refreshStats();
-    void refreshImportScopes();
-    void refreshSources();
-    void refreshAccounts();
-    void refreshEmbedStatus();
-    void refreshDashboard();
-  } catch (e) {
-    importStatus.textContent = `Seeding failed: ${e}`;
-  } finally {
-    seedButton.disabled = false;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2241,9 +2473,18 @@ hasAttachmentSelect.addEventListener("change", () => void runSearch(0));
 importScopeSelect.addEventListener("change", () => void runSearch(0));
 exportSelectionButton.addEventListener("click", exportSelectionFromResults);
 clearFiltersButton.addEventListener("click", clearFilters);
-importButton.addEventListener("click", () => void importMbox());
-chatImportButton.addEventListener("click", () => void importChatExport());
-seedButton.addEventListener("click", () => void seedDemo());
+importPickButton.addEventListener("click", () => void pickImportInput(false));
+importFolderButton.addEventListener("click", () => void pickImportInput(true));
+demoLeaveButton.addEventListener("click", () => void leaveDemo());
+firstRunImportButton.addEventListener("click", () => {
+  workspace.store.setView("sources");
+  importPickButton.focus();
+});
+firstRunAccountButton.addEventListener("click", () => {
+  workspace.store.setView("sources");
+  imapHostInput.focus();
+});
+firstRunDemoButton.addEventListener("click", () => void enterDemo());
 imapAuthSelect.addEventListener("change", applyImapAuthMode);
 imapUserInput.addEventListener("change", () => {
   if (imapAuthMode() === "oauth") void refreshOauthHint();
@@ -2290,8 +2531,23 @@ providerRows.addEventListener("click", (event) => {
   }
 });
 
-setStatus("Type something to search, or set a filter to browse.");
+// Boot. The status line and the first-run/browse choice follow the
+// first stats + demo-status responses; until then a neutral loading
+// line (the e2e waitForApp settles on the stats label, not this).
+setStatus("Loading…");
 renderAll();
+updateVaultChrome();
+// The demo lives in the app process: a webview reload while the sample
+// archive is open restores the banner instead of silently browsing the
+// personal vault.
+void ipc
+  .demoStatus()
+  .then((mode) => {
+    demoActive = mode.active;
+    updateVaultChrome();
+    if (demoActive) void refreshAfterVaultSwitch();
+  })
+  .catch(() => {});
 void refreshSources();
 void refreshImportScopes();
 void refreshStats();

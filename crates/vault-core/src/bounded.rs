@@ -337,6 +337,9 @@ pub struct BoundedOutcome {
     pub summary: IngestSummary,
     /// Media-pass counters, present when extraction ran.
     pub media: Option<MediaSummary>,
+    /// The run's stable import identity (checkpoints, issue records,
+    /// and the import-scope filter key on it).
+    pub import_id: String,
     /// Cancellation was observed and the run stopped early. Everything
     /// reported in `summary` was committed; the uncommitted partial
     /// batch was discarded; the checkpoint keeps the resume position.
@@ -654,6 +657,7 @@ impl RunState<'_, '_> {
         BoundedOutcome {
             summary: self.summary,
             media: self.media_summary,
+            import_id: self.import_id.to_string(),
             cancelled: self.cancelled,
             resumed_from,
             committed_items: self.committed_items,
