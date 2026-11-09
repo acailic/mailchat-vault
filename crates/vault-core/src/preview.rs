@@ -1,0 +1,525 @@
+//! Bounded import preview (M3.3, the first-source journey): look at a
+//! picked file, directory, or `.zip` **before** anything is stored.
+//!
+//! The preview answers the questions a first import should answer up
+//! front — what did I pick, what format is it, roughly how much is in
+//! it, does it reference media files that are (or are not) present —
+//! without committing a single row. It reuses the exact detection and
+//! streaming surfaces the import itself uses
+//! ([`crate::mbox::MboxSource`] and [`crate::chat_export`]), so what the
+//! preview says is what the import will find.
+//!
+//! Everything here is bounded by design: the item scan stops at
+//! [`SCAN_ITEM_CAP`] entries (counts then read as lower bounds with
+//! `scan_complete = false`, never as exact totals), sample bodies are
+//! truncated, and the tree walk for input size goes through the M4.1
+//! import bounds. Nothing is written to any database or file.
+
+use std::fs;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+use crate::bounded::{Flow, StreamItem, StreamSource};
+use crate::chat_export::{self, ChatFormat};
+use crate::import_bounds::{expand_zip_bounded, walk_bounded, ImportBounds};
+use crate::mbox::{MboxSource, MBOX_SOURCE};
+use crate::{Error, Result};
+
+/// How many items (messages + parse failures) one preview scans before
+/// stopping: enough to know the format parses and to sample it, cheap
+/// enough to feel instant on any machine.
+pub const SCAN_ITEM_CAP: u64 = 500;
+
+/// How many sample messages the preview shows.
+pub const SAMPLE_CAP: usize = 3;
+
+/// Snippet length for samples (characters).
+const SNIPPET_CHARS: usize = 160;
+
+/// One sample message shown in the preview (all strings bounded).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportPreviewSample {
+    /// Display author ("" = unknown).
+    pub author: String,
+    /// Subject or conversation label when the format carries one.
+    pub subject: String,
+    /// RFC 3339 UTC instant; `None` when the message carries no usable
+    /// timestamp (the preview shows "no date" rather than guessing).
+    pub sent_at: Option<String>,
+    /// First `SNIPPET_CHARS` characters of the body.
+    pub snippet: String,
+}
+
+/// Bounded preview of one picked import input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportPreview {
+    /// Machine-readable format id: `mbox`, `whatsapp`, `telegram`,
+    /// `signal`, or `discord`.
+    pub kind: String,
+    /// The dedup namespace the import will store under (`source.name()`).
+    pub source: String,
+    /// Total size of the picked input in bytes (the file, or the bounded
+    /// walk total for a directory/`.zip` tree pick).
+    pub input_bytes: u64,
+    /// Messages seen within the bounded scan; a lower bound when
+    /// `scan_complete` is `false`.
+    pub messages_seen: u64,
+    /// Whether the scan reached the end of the input (`false` = every
+    /// count here is a lower bound, not an exact total).
+    pub scan_complete: bool,
+    /// Entries the parsers could not turn into messages within the scan.
+    pub parse_failures: u64,
+    /// First [`SAMPLE_CAP`] sample messages.
+    pub samples: Vec<ImportPreviewSample>,
+    /// Scanned messages that reference at least one media file.
+    pub media_referenced: u64,
+    /// Referenced media files provably absent from the export (Telegram
+    /// references resolve exactly, so absence is certain; WhatsApp name
+    /// matching is fuzzier, so absence is not claimed there).
+    pub media_missing: u64,
+    /// Human-readable caveats ("scan stopped at 500 items…").
+    pub warnings: Vec<String>,
+}
+
+/// A previewed input, split into what to render and what to import.
+struct PreviewSource {
+    kind: String,
+    source: String,
+    /// The streaming source to scan.
+    stream: Box<dyn StreamSource + Send>,
+    /// Root media references resolve against (None for mbox).
+    export_root: Option<PathBuf>,
+    /// Whether the input is a whole tree (directory or expanded `.zip`)
+    /// whose size is measured by a bounded walk instead of one file.
+    tree_input: bool,
+    /// What the bounded size walk measures: the picked path itself, or
+    /// the extracted tree root for a `.zip` pick.
+    size_root: PathBuf,
+}
+
+/// Does the file start with an mbox `From ` separator line? (Bounded:
+/// only the first line is read.)
+fn looks_like_mbox(path: &Path) -> Result<bool> {
+    let file = fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut first = String::new();
+    reader.read_line(&mut first)?;
+    Ok(first.starts_with("From "))
+}
+
+fn format_name(format: ChatFormat) -> &'static str {
+    match format {
+        ChatFormat::WhatsApp => "whatsapp",
+        ChatFormat::Telegram => "telegram",
+        ChatFormat::Signal => "signal",
+        ChatFormat::Discord => "discord",
+    }
+}
+
+/// Resolve a chat-export source from a file path (bare pick).
+fn resolve_chat_file(file: &Path) -> Result<PreviewSource> {
+    let (format, file, stream) = chat_export::resolve_stream_source(file)?;
+    let export_root = file
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    Ok(PreviewSource {
+        kind: format_name(format).into(),
+        source: stream.name().to_string(),
+        stream,
+        export_root: Some(export_root),
+        tree_input: false,
+        size_root: file.to_path_buf(),
+    })
+}
+
+/// Resolve a directory pick (or an extracted `.zip` root) to a chat
+/// export source. `display` is only used in error messages.
+fn resolve_dir_source(root: &Path, display: &Path) -> Result<PreviewSource> {
+    chat_export::resolve_stream_source(root)
+        .map(|(format, file, stream)| {
+            let export_root = file
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| root.to_path_buf());
+            PreviewSource {
+                kind: format_name(format).into(),
+                source: stream.name().to_string(),
+                stream,
+                export_root: Some(export_root),
+                tree_input: true,
+                size_root: root.to_path_buf(),
+            }
+        })
+        .map_err(|e| {
+            Error::ChatImport(format!(
+                "unrecognized export in {} — expected a Telegram result.json export folder, \
+                 a Discord Data Package, or a folder holding one chat export file ({e})",
+                display.display()
+            ))
+        })
+}
+
+/// Resolve a picked path to the source that would import it, or a
+/// friendly error when nothing recognizes the input. A `.zip` pick is
+/// expanded through the same M4.1 fence the import uses; the returned
+/// guard keeps the extracted tree alive for the scan.
+fn resolve_preview_source(picked: &Path) -> Result<(PreviewSource, Option<tempfile::TempDir>)> {
+    let missing = |p: &Path| {
+        Error::ChatImport(format!(
+            "cannot read {}: file or folder not found — pick it again",
+            p.display()
+        ))
+    };
+    if picked.is_file() {
+        if picked
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+        {
+            let extracted = tempfile::tempdir().map_err(Error::from)?;
+            expand_zip_bounded(picked, extracted.path(), &ImportBounds::default())?;
+            let mut source = resolve_dir_source(extracted.path(), picked)?;
+            source.size_root = extracted.path().to_path_buf();
+            return Ok((source, Some(extracted)));
+        }
+        let is_mbox = picked
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("mbox"))
+            || looks_like_mbox(picked)?;
+        if is_mbox {
+            return Ok((
+                PreviewSource {
+                    kind: "mbox".into(),
+                    source: MBOX_SOURCE.to_string(),
+                    stream: Box::new(MboxSource::new(picked)),
+                    export_root: None,
+                    tree_input: false,
+                    size_root: picked.to_path_buf(),
+                },
+                None,
+            ));
+        }
+        return Ok((resolve_chat_file(picked)?, None));
+    }
+    if picked.is_dir() {
+        return Ok((resolve_dir_source(picked, picked)?, None));
+    }
+    Err(missing(picked))
+}
+
+/// The explicit media references of one Telegram message object
+/// (`photo`/`file` path strings, or the newer nested-object shape).
+fn telegram_ref_paths(obj: &Map<String, Value>) -> Vec<&str> {
+    let mut refs = Vec::new();
+    for field in ["photo", "file"] {
+        match obj.get(field) {
+            Some(Value::String(rel)) if !rel.is_empty() => refs.push(rel.as_str()),
+            Some(Value::Object(inner)) => {
+                for nested in ["file", "photo"] {
+                    if let Some(Value::String(rel)) = inner.get(nested) {
+                        if !rel.is_empty() {
+                            refs.push(rel.as_str());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    refs
+}
+
+/// Media presence of one scanned message: `(references the message
+/// carries, files provably absent from the export)`.
+///
+/// Telegram references resolve exactly under the export root, so
+/// absence is provable; WhatsApp attachment names match fuzzily at
+/// import time (recursive walk), so a reference is reported but absence
+/// is never claimed.
+fn media_refs_of(raw_json: &str, export_root: Option<&Path>) -> (u64, u64) {
+    let Ok(value) = serde_json::from_str::<Value>(raw_json) else {
+        return (0, 0);
+    };
+    let Some(obj) = value.as_object() else {
+        return (0, 0);
+    };
+    let telegram = telegram_ref_paths(obj);
+    if !telegram.is_empty() {
+        let missing = export_root
+            .map(|root| {
+                telegram
+                    .iter()
+                    .filter(|rel| {
+                        crate::import_bounds::safe_child(root, rel).map(|p| p.is_file())
+                            != Some(true)
+                    })
+                    .count() as u64
+            })
+            .unwrap_or(0);
+        return (1, missing);
+    }
+    let whatsapp = obj
+        .get("attachment")
+        .and_then(|a| a.get("name"))
+        .and_then(Value::as_str)
+        .is_some_and(|n| !n.is_empty());
+    if whatsapp {
+        return (1, 0);
+    }
+    (0, 0)
+}
+
+/// Preview a picked import input: detect the format, scan up to
+/// [`SCAN_ITEM_CAP`] items, and report bounded counts, samples, and
+/// media presence — all without storing anything.
+pub fn preview_import(picked: &Path) -> Result<ImportPreview> {
+    let (resolved, _zip_guard) = resolve_preview_source(picked)?;
+    let mut messages_seen: u64 = 0;
+    let mut parse_failures: u64 = 0;
+    let mut media_referenced: u64 = 0;
+    let mut media_missing: u64 = 0;
+    let mut samples: Vec<ImportPreviewSample> = Vec::new();
+    let mut scan_complete = true;
+    resolved
+        .stream
+        .stream(0, &mut |item: StreamItem| -> Result<Flow> {
+            match item {
+                StreamItem::Message(msg) => {
+                    messages_seen += 1;
+                    let (refs, missing) =
+                        media_refs_of(&msg.raw_json, resolved.export_root.as_deref());
+                    media_referenced += refs;
+                    media_missing += missing;
+                    if samples.len() < SAMPLE_CAP {
+                        samples.push(ImportPreviewSample {
+                            author: msg.author,
+                            subject: msg
+                                .body
+                                .lines()
+                                .next()
+                                .unwrap_or("")
+                                .chars()
+                                .take(80)
+                                .collect(),
+                            sent_at: if msg.sent_at.is_empty() {
+                                None
+                            } else {
+                                Some(msg.sent_at)
+                            },
+                            snippet: msg.body.chars().take(SNIPPET_CHARS).collect(),
+                        });
+                    }
+                }
+                StreamItem::Failed { .. } => {
+                    parse_failures += 1;
+                }
+            }
+            if messages_seen + parse_failures >= SCAN_ITEM_CAP {
+                scan_complete = false;
+                Ok(Flow::Stop)
+            } else {
+                Ok(Flow::Continue)
+            }
+        })?;
+    let mut warnings = Vec::new();
+    if !scan_complete {
+        warnings.push(format!(
+            "the preview scanned the first {SCAN_ITEM_CAP} items — every count is a lower bound, not an exact total"
+        ));
+    }
+    if parse_failures > 0 {
+        warnings.push(format!(
+            "{parse_failures} scanned entries could not be parsed — the import records them as issues and continues"
+        ));
+    }
+    // Input size: a bare file's own size, or the bounded walk total of a
+    // tree input. A tree that crosses the import bounds fails the import
+    // itself, so the same failure surfaces here as a warning.
+    let input_bytes = if resolved.tree_input {
+        match walk_bounded(&resolved.size_root, &ImportBounds::default()) {
+            Ok(files) => files.iter().map(|f| f.size).sum(),
+            Err(e) => {
+                warnings.push(format!("could not measure the picked folder's size: {e}"));
+                0
+            }
+        }
+    } else {
+        fs::metadata(picked).map(|m| m.len()).unwrap_or(0)
+    };
+    Ok(ImportPreview {
+        kind: resolved.kind,
+        source: resolved.source,
+        input_bytes,
+        messages_seen,
+        scan_complete,
+        parse_failures,
+        samples,
+        media_referenced,
+        media_missing,
+        warnings,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn tempdir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("tempdir")
+    }
+
+    fn write(path: &Path, contents: &str) {
+        std::fs::write(path, contents).expect("write fixture");
+    }
+
+    #[test]
+    fn previews_mbox() {
+        let dir = tempdir();
+        let path = dir.path().join("archive.mbox");
+        write(
+            &path,
+            "From a@example.com Sun Nov  1 10:00:00 2026\n\
+             From: A <a@example.com>\nTo: b@example.com\nSubject: Hello\nDate: Sun, 1 Nov 2026 10:00:00 +0000\n\
+             Message-ID: <m1@example.com>\n\nBody one.\n\
+             From c@example.com Sun Nov  1 11:00:00 2026\n\
+             From: C <c@example.com>\nSubject: Second\nDate: Sun, 1 Nov 2026 11:00:00 +0000\n\
+             Message-ID: <m2@example.com>\n\nBody two.\n",
+        );
+        let preview = preview_import(&path).expect("mbox preview");
+        assert_eq!(preview.kind, "mbox");
+        assert_eq!(preview.source, "mbox");
+        assert_eq!(preview.messages_seen, 2);
+        assert!(preview.scan_complete);
+        assert_eq!(preview.parse_failures, 0);
+        assert_eq!(preview.samples.len(), 2);
+        assert_eq!(preview.input_bytes, std::fs::metadata(&path).unwrap().len());
+        assert!(preview.warnings.is_empty());
+    }
+
+    #[test]
+    fn previews_telegram_json_with_missing_media() {
+        let dir = tempdir();
+        let path = dir.path().join("result.json");
+        write(
+            &path,
+            r#"{"name":"Chat","id":7,"messages":[
+                {"id":1,"type":"message","date":"2026-11-01T10:00:00","from":"Marko","text":"hi","photo":"photos/absent.jpg"},
+                {"id":2,"type":"message","date":"2026-11-01T10:01:00","from":"Ana","text":"yo"}
+            ]}"#,
+        );
+        let preview = preview_import(&path).expect("telegram preview");
+        assert_eq!(preview.kind, "telegram");
+        assert_eq!(preview.messages_seen, 2);
+        assert_eq!(preview.media_referenced, 1);
+        assert_eq!(
+            preview.media_missing, 1,
+            "photo file is absent next to the export"
+        );
+        assert_eq!(preview.samples.len(), 2);
+    }
+
+    #[test]
+    fn previews_whatsapp_txt_media_reference_without_missing_claim() {
+        let dir = tempdir();
+        let path = dir.path().join("chat.txt");
+        write(
+            &path,
+            "[1.11.2026., 09:00:05] Marko: check this\n[1.11.2026., 09:00:06] Marko: \u{200e}IMG-20261101-WA0001.jpg (file attached)\n",
+        );
+        let preview = preview_import(&path).expect("whatsapp preview");
+        assert_eq!(preview.kind, "whatsapp");
+        assert_eq!(preview.media_referenced, 1);
+        assert_eq!(
+            preview.media_missing, 0,
+            "whatsapp name matching is fuzzy — no missing claim"
+        );
+    }
+
+    #[test]
+    fn previews_discord_package_directory() {
+        let dir = tempdir();
+        let messages = dir.path().join("messages");
+        std::fs::create_dir_all(&messages).unwrap();
+        write(
+            &messages.join("123456.json"),
+            r#"{"channel": {"id": "123456", "name": "general"}, "guild": {"id": "100", "name": "G"}, "messages":[
+                {"id": "1", "type": "Default", "timestamp": "2026-11-01 10:00:00.123+00:00", "content": "hello", "author": {"id": "9", "name": "ana", "nickname": "Ana"}}
+            ]}"#,
+        );
+        let preview = preview_import(&messages).expect("discord dir preview");
+        assert_eq!(preview.kind, "discord");
+        assert_eq!(preview.messages_seen, 1);
+    }
+
+    #[test]
+    fn scan_cap_makes_counts_lower_bounds() {
+        let dir = tempdir();
+        let path = dir.path().join("result.json");
+        let mut json = String::from(r#"{"name":"Big","id":1,"messages":["#);
+        for i in 0..(SCAN_ITEM_CAP + 10) {
+            if i > 0 {
+                json.push(',');
+            }
+            json.push_str(&format!(
+                r#"{{"id":{i},"type":"message","date":"2026-11-01T10:00:00","from":"A","text":"m{i}"}}"#
+            ));
+        }
+        json.push_str("]}");
+        write(&path, &json);
+        let preview = preview_import(&path).expect("big preview");
+        assert!(!preview.scan_complete);
+        assert_eq!(preview.messages_seen, SCAN_ITEM_CAP);
+        assert!(preview.warnings.iter().any(|w| w.contains("lower bound")));
+    }
+
+    #[test]
+    fn unsupported_and_missing_inputs_fail_with_guidance() {
+        let dir = tempdir();
+        let junk = dir.path().join("notes.txt");
+        write(&junk, "just some notes\nwith no export shape\n");
+        let err = preview_import(&junk).unwrap_err().to_string();
+        assert!(
+            err.contains("unrecognized"),
+            "unsupported input explains itself: {err}"
+        );
+
+        let missing = dir.path().join("nope.mbox");
+        let err = preview_import(&missing).unwrap_err().to_string();
+        assert!(
+            err.contains("not found"),
+            "missing input says not found: {err}"
+        );
+    }
+
+    #[test]
+    fn zip_pick_previews_the_expanded_tree() {
+        let dir = tempdir();
+        let inner = dir.path().join("inner");
+        std::fs::create_dir_all(inner.join("photos")).unwrap();
+        let result_json = r#"{"name":"Z","id":1,"messages":[
+            {"id":1,"type":"message","date":"2026-11-01T10:00:00","from":"A","text":"z","photo":"photos/p.jpg"}
+        ]}"#;
+        write(&inner.join("result.json"), result_json);
+        write(&inner.join("photos").join("p.jpg"), "jpegbytes");
+        let zip_path = dir.path().join("export.zip");
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        for (name, bytes) in [
+            ("result.json", result_json.as_bytes().to_vec()),
+            ("photos/p.jpg", b"jpegbytes".to_vec()),
+        ] {
+            zip.start_file(name, zip::write::FileOptions::<()>::default())
+                .unwrap();
+            zip.write_all(&bytes).unwrap();
+        }
+        zip.finish().unwrap();
+        let preview = preview_import(&zip_path).expect("zip preview");
+        assert_eq!(preview.kind, "telegram");
+        assert_eq!(preview.messages_seen, 1);
+        assert_eq!(preview.media_missing, 0, "photo present inside the zip");
+    }
+}

@@ -85,7 +85,7 @@ Failure-injection tests at every stage (before/within/after conversion) prove th
 | `set_source_secret_v2` | Source ID, secret | Validates connection first; reports `os_keyring` or `memory`; never returns the secret |
 | `disconnect_source_v2` | Source ID | Stops scheduled work and removes credentials; retains archive |
 | `delete_source_archive_v2` | Source ID, confirmed count/version token | Maintenance job deleting local records only; refuses stale confirmation or running source job |
-| `preview_import_v2` | Native-picked path, optional source ID | Job; completed result contains preview ID, samples, format/capacity warnings, date/identity questions |
+| `preview_import_v2` | Native-picked path, optional source ID | **Landed (M3.3 first slice)** as the direct `preview_import` command: the bounded preview (format, samples, lower-bound counts, media presence, input bytes) plus free-space on the data dir — direct, not a job, because the scan is bounded by design; the confirm step dispatches to the existing `import_mbox` / `import_chat_export` commands. The preview-ID binding, date/identity questions, and `start_import_v2` remain the M3.3 remainder |
 | `start_import_v2` | Preview ID, source/conversation choices, date/time choices, collision resolutions | Job; rejects changed/expired inputs and re-previews instead of importing different bytes |
 | `start_sync_v2` | Source ID | Job using stored configuration/secret |
 | `get_job_v2`, `list_jobs_v2` | Job ID or bounded pagination | Durable job status, counters and paged issue summaries |

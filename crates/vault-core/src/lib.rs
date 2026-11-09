@@ -90,6 +90,7 @@ pub mod media;
 pub mod message;
 pub mod oauth;
 pub mod object_store;
+pub mod preview;
 pub mod query;
 pub mod safe_migration;
 pub mod scheduler;

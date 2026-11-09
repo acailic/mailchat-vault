@@ -9,11 +9,11 @@ export async function run(ctx) {
     await ui.waitForApp(browser);
 
     // --- first import: 8 new messages ------------------------------------
-    const status = await ui.importMbox(browser, ui.archiveMbox);
-    assert.includes(
-      status,
-      "Imported 8 new, 0 already present (of 8 in mbox).",
-      "import summary",
+    const summary = await ui.importMbox(browser, ui.archiveMbox);
+    assert.deepEqual(
+      summary,
+      { source: "mbox", seen: 8, inserted: 8, skipped: 0, failed: 0 },
+      "import summary (the v2 job result)",
     );
     assert.equal(
       await (await browser.$("#stats")).getText(),
@@ -66,7 +66,11 @@ export async function run(ctx) {
 
     // --- re-import is idempotent ------------------------------------------
     const reimport = await ui.importMbox(browser, ui.archiveMbox);
-    assert.includes(reimport, "Imported 0 new, 8 already present", "re-import dedups");
+    assert.deepEqual(
+      reimport,
+      { source: "mbox", seen: 8, inserted: 0, skipped: 8, failed: 0 },
+      "re-import dedups (0 new, 8 already present)",
+    );
     assert.equal(
       await (await browser.$("#stats")).getText(),
       "8 messages (mbox: 8)",

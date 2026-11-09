@@ -25,12 +25,18 @@ export async function run(ctx) {
     assert.matches(status, /^0 results/, "empty-archive search status");
     assert.equal((await ui.resultTexts(browser)).length, 0, "no result rows");
 
-    // A blank query prompts instead of searching (keyboard submit).
+    // U02: an empty archive presents the first-source journey, not a
+    // dead search prompt. A blank query keeps that state honestly.
+    const firstRun = await browser.$("#first-run");
+    assert.ok(await firstRun.isDisplayed(), "the first-run card is visible on an empty archive");
     const input = await browser.$("#search");
     await input.click();
     await input.setValue("   ");
     await browser.keys("Enter");
-    await ui.waitForText(browser, "#status", "Type something to search");
+    await ui.waitForText(browser, "#status", "Your archive is empty");
+    assert.ok(await firstRun.isDisplayed(), "the first-run card survives a blank query");
+    const banner = await browser.$("#demo-banner");
+    assert.equal(await banner.isDisplayed(), false, "no demo banner outside the sample archive");
 
     // The database was created on boot and holds nothing.
     const db = vaultDbPath(dataDir);

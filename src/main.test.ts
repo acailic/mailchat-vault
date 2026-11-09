@@ -285,8 +285,14 @@ async function boot(): Promise<void> {
     .slice(start, end)
     .replace(/<script[\s\S]*?<\/script>/g, "");
   await import("./main");
-  // Wait until the initial stats refresh settled (label replaced or cleared).
+  // Wait until the initial stats refresh settled (label replaced or
+  // cleared) AND the initial newest-first browse (U04) settled, then
+  // splice the boot-time browse out of the call log so per-test
+  // call-count assertions stay about the actions the test itself drives
+  // (the boot browse has its own tests below).
   await vi.waitFor(() => expect($("#stats").textContent).not.toBe("…"));
+  await vi.waitFor(() => expect($("#status").textContent).not.toBe("Loading…"));
+  tauri.calls = tauri.calls.filter((c) => c.cmd !== "search_archive_v2");
 }
 
 async function bootSearched(): Promise<void> {
@@ -302,6 +308,10 @@ beforeEach(() => {
   tauri.calls.length = 0;
   tauri.handlers.clear();
   tauri.handlers.set("stats", () => STATS);
+  // The boot-time newest-first browse and the demo-status probe (U02/U04)
+  // need defaults; individual tests override.
+  tauri.handlers.set("search_archive_v2", () => pageOf([], 0));
+  tauri.handlers.set("demo_status", () => Promise.resolve({ active: false }));
   // Notifications boot fail-closed (silent until settings load), so every
   // notify test needs the settings round-trip to resolve.
   tauri.handlers.set("settings_get", () => viewWith());
@@ -364,10 +374,11 @@ const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 // ---------------------------------------------------------------------------
 
 describe("search box", () => {
-  it("boots with stats, chips, empty results and the empty-query prompt", async () => {
+  it("boots with stats, chips, and the initial newest-first browse", async () => {
     await boot();
     expect($("#stats").textContent).toBe("9 messages (mbox: 6, demo: 3)");
-    expect($("#status").textContent).toBe("Type something to search, or set a filter to browse.");
+    // U04: boot ends in a browse, not a dead prompt.
+    expect($("#status").textContent).toBe("0 results");
     expect($("#status").classList.contains("error")).toBe(false);
     expect([...win.document.querySelectorAll(".chip")].map((c) => c.textContent)).toEqual([
       "mbox (6)",
@@ -375,16 +386,16 @@ describe("search box", () => {
     ]);
     expect($("#results").children.length).toBe(0);
     expect($(".page-info").textContent).toBe("0 results");
+    expect($("#first-run").getAttribute("hidden")).not.toBeNull();
   });
 
-  it("an empty or whitespace-only query triggers no search at all", async () => {
+  it("an empty or whitespace-only query browses instead of refusing", async () => {
     await boot();
     input("#search").value = "   ";
     pressKey(input("#search"), "Enter");
-    await flush();
-    expect(searchCalls()).toHaveLength(0);
-    expect($("#status").textContent).toBe("Type something to search, or set a filter to browse.");
-    expect($("#results").children.length).toBe(0);
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    expect((searchCalls()[0].args as { request: { text: string } }).request.text).toBe("");
+    await vi.waitFor(() => expect($("#status").textContent).toBe("0 results"));
   });
 
   it("Enter runs a search with the trimmed text and default filters", async () => {
@@ -543,16 +554,18 @@ describe("filters", () => {
     expect(chip.classList.contains("on")).toBe(true);
     expect(chip.getAttribute("aria-pressed")).toBe("true");
 
-    // Toggling the only filter off returns to the empty state via the
-    // empty-query guard — without another IPC round-trip.
+    // Toggling the only filter off returns to the unfiltered browse
+    // (U04: empty text browses — the second IPC round-trip).
     searchRespondsWith(() => pageOf(HITS, 9));
     ($('[data-source="mbox"]') as HTMLElement).click();
-    await flush();
-    expect(searchCalls()).toHaveLength(1); // only the initial filtered browse
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(2));
+    expect(searchCalls()[1].args).toMatchObject({
+      request: { text: "", source_ids: [] },
+    });
     expect($('[data-source="mbox"]')).not.toBeNull();
     expect($('[data-source="mbox"]').classList.contains("on")).toBe(false);
-    expect($("#status").textContent).toBe("Type something to search, or set a filter to browse.");
-    expect(win.document.querySelectorAll("#results .hit-item").length).toBe(0);
+    expect($("#status").textContent).toBe("1–9 of 9");
+    expect(win.document.querySelectorAll("#results .hit-item").length).toBe(3);
   });
 
   it("a shared display label selects every instance carrying that label", async () => {
@@ -652,10 +665,9 @@ describe("filters", () => {
       request: { source_ids: ["inst-mbox", "inst-mbox2"] },
     });
     ($("#active-filter-chips .filter-chip") as HTMLElement).click();
-    await flush();
-    expect(searchCalls()).toHaveLength(1);
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(2)); // removal re-browses unfiltered (U04)
     expect(win.document.querySelectorAll("#active-filter-chips .filter-chip").length).toBe(0);
-    expect($("#status").textContent).toBe("Type something to search, or set a filter to browse.");
+    expect($("#status").textContent).toBe("1–6 of 6");
   });
 
   it("the author filter sends the trimmed substring on Enter", async () => {
@@ -684,7 +696,7 @@ describe("filters", () => {
     });
   });
 
-  it("Clear resets every filter without issuing another query", async () => {
+  it("Clear resets every filter and re-browses unfiltered", async () => {
     await boot();
     await vi.waitFor(() => expect(win.document.querySelectorAll(".chip").length).toBe(2));
     searchRespondsWith(() => pageOf(HITS, 9));
@@ -695,15 +707,13 @@ describe("filters", () => {
     input("#to-date").value = "2026-01-31";
 
     $("#clear-filters").click();
-    await flush();
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(2)); // clear re-browses (U04)
     expect(input("#author").value).toBe("");
     expect(input("#from-date").value).toBe("");
     expect(input("#to-date").value).toBe("");
     expect($('[data-source="mbox"]').classList.contains("on")).toBe(false);
     expect($('[data-source="mbox"]').getAttribute("aria-pressed")).toBe("false");
-    // All filters empty → the empty-query guard fires instead of a browse.
-    expect(searchCalls()).toHaveLength(1);
-    expect($("#status").textContent).toBe("Type something to search, or set a filter to browse.");
+    expect($("#status").textContent).toBe("1–9 of 9");
   });
 });
 
@@ -1235,23 +1245,60 @@ describe("keyboard navigation", () => {
 // Chat export import (media extraction wiring)
 // ---------------------------------------------------------------------------
 
-describe("chat export import", () => {
-  const OUTCOME = {
-    summary: { source: "telegram", seen: 4, inserted: 4, skipped: 0, failed: 0 },
-    media: { referenced: 3, stored: 3, deduped: 1, missing: 0, linked: 3 },
+describe("import picker → preview → confirm (U03)", () => {
+  const TELEGRAM_PREVIEW = {
+    kind: "telegram",
+    source: "telegram",
+    input_bytes: 4096,
+    messages_seen: 4,
+    scan_complete: true,
+    parse_failures: 0,
+    samples: [
+      {
+        author: "Marko",
+        subject: "hi",
+        sent_at: "2026-11-01T10:00:00Z",
+        snippet: "hi",
+      },
+    ],
+    media_referenced: 1,
+    media_missing: 0,
+    warnings: [],
+    free_bytes: 1024 * 1024 * 1024,
   };
 
-  function importCalls(): Array<{ cmd: string; args: unknown }> {
-    return tauri.calls.filter((c) => c.cmd === "import_chat_export");
+  function importCalls(cmd: string): Array<{ cmd: string; args: unknown }> {
+    return tauri.calls.filter((c) => c.cmd === cmd);
   }
 
-  it("passes the picked path and the checked extract-media toggle, then reports media counts", async () => {
+  it("previews the pick, then imports with the extract-media toggle and offers the follow-up", async () => {
     await boot();
     dialog.open.mockResolvedValue("/tmp/tg-export/result.json");
-    tauri.handlers.set("import_chat_export", () => OUTCOME);
-    $("#chat-import-btn").click();
-    await vi.waitFor(() => expect(importCalls()).toHaveLength(1));
-    expect(importCalls()[0].args).toEqual({
+    tauri.handlers.set("preview_import", () => Promise.resolve(TELEGRAM_PREVIEW));
+    tauri.handlers.set(
+      "import_chat_export",
+      () =>
+        Promise.resolve({
+          summary: { source: "telegram", seen: 4, inserted: 4, skipped: 0, failed: 0 },
+          import_id: "chat-import-abc123",
+          media: { referenced: 3, stored: 3, deduped: 1, missing: 0, linked: 3 },
+        }),
+    );
+    tauri.handlers.set("list_import_scopes_v2", () => []);
+    $("#import-pick-btn").click();
+
+    // The preview card renders before anything is stored.
+    await vi.waitFor(() => expect($("#import-preview").getAttribute("hidden")).toBeNull());
+    expect(importCalls("preview_import")).toHaveLength(1);
+    expect(importCalls("import_chat_export")).toHaveLength(0);
+    expect($(".preview-title").textContent).toBe("Telegram export");
+    expect($(".preview-path").textContent).toBe("/tmp/tg-export/result.json");
+    expect($("#import-preview").textContent).toContain("4 messages found");
+
+    // Confirm imports with the checked media toggle.
+    $("#preview-import-btn").click();
+    await vi.waitFor(() => expect(importCalls("import_chat_export")).toHaveLength(1));
+    expect(importCalls("import_chat_export")[0].args).toEqual({
       path: "/tmp/tg-export/result.json",
       extractMedia: true,
     });
@@ -1260,38 +1307,195 @@ describe("chat export import", () => {
         "Imported 4 new, 0 already present (of 4 in telegram). Media: 3 stored, 1 deduped, 3 linked.",
       ),
     );
+    // The follow-up jumps to this run's messages via the import scope.
+    expect($("#import-followup").getAttribute("hidden")).toBeNull();
+    searchRespondsWith(() => pageOf(HITS.slice(0, 1), 1));
+    $("#view-imported-btn").click();
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    expect(searchCalls()[0].args).toMatchObject({
+      request: { import_job_id: "chat-import-abc123" },
+    });
   });
 
-  it("unchecking the toggle disables extraction and omits the media part", async () => {
+  it("an mbox preview dispatches to import_mbox", async () => {
     await boot();
-    dialog.open.mockResolvedValue("/tmp/chat.txt");
-    input("#chat-media").checked = false;
-    tauri.handlers.set("import_chat_export", () => ({
-      summary: { source: "whatsapp", seen: 2, inserted: 2, skipped: 0, failed: 0 },
-      media: null,
-    }));
-    $("#chat-import-btn").click();
-    await vi.waitFor(() => expect(importCalls()).toHaveLength(1));
-    expect(importCalls()[0].args).toEqual({ path: "/tmp/chat.txt", extractMedia: false });
+    dialog.open.mockResolvedValue("/tmp/archive.mbox");
+    tauri.handlers.set("preview_import", () =>
+      Promise.resolve({
+        ...TELEGRAM_PREVIEW,
+        kind: "mbox",
+        source: "mbox",
+        media_referenced: 0,
+        media_missing: 0,
+      }),
+    );
+    tauri.handlers.set("import_mbox", () =>
+      Promise.resolve({
+        summary: { source: "mbox", seen: 2, inserted: 2, skipped: 0, failed: 0 },
+        import_id: "mbox-import-def456",
+      }),
+    );
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($(".preview-title").textContent).toBe("Email archive (.mbox)"));
+    $("#preview-import-btn").click();
+    await vi.waitFor(() => expect(importCalls("import_mbox")).toHaveLength(1));
+    expect(importCalls("import_mbox")[0].args).toEqual({ path: "/tmp/archive.mbox" });
     await vi.waitFor(() =>
       expect($("#import-status").textContent).toBe(
-        "Imported 2 new, 0 already present (of 2 in whatsapp).",
+        "Imported 2 new, 0 already present (of 2 in mbox).",
       ),
     );
   });
 
-  it("a cancelled picker imports nothing; a backend error is shown", async () => {
+  it("a cancelled picker previews nothing; cancelling the preview stores nothing", async () => {
     await boot();
     dialog.open.mockResolvedValue(null);
-    $("#chat-import-btn").click();
+    $("#import-pick-btn").click();
     await vi.waitFor(() => expect(dialog.open).toHaveBeenCalled());
     await flush();
-    expect(importCalls()).toHaveLength(0);
+    expect(importCalls("preview_import")).toHaveLength(0);
 
     dialog.open.mockResolvedValue("/tmp/chat.txt");
+    tauri.handlers.set("preview_import", () => Promise.resolve(TELEGRAM_PREVIEW));
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($("#preview-cancel-btn")).toBeTruthy());
+    $("#preview-cancel-btn").click();
+    await flush();
+    expect(importCalls("import_chat_export")).toHaveLength(0);
+    expect($("#import-preview").getAttribute("hidden")).not.toBeNull();
+    expect($("#import-status").textContent).toBe("");
+  });
+
+  it("preview and import failures are friendly, never raw errno", async () => {
+    await boot();
+    dialog.open.mockResolvedValue("/moved.txt");
+    tauri.handlers.set("preview_import", () =>
+      Promise.reject("io error: No such file or directory (os error 2)"),
+    );
+    $("#import-pick-btn").click();
+    await vi.waitFor(() =>
+      expect($("#import-status").textContent).toContain("Could not read /moved.txt"),
+    );
+
+    dialog.open.mockResolvedValue("/tmp/chat.txt");
+    tauri.handlers.set("preview_import", () => Promise.resolve(TELEGRAM_PREVIEW));
     tauri.handlers.set("import_chat_export", () => Promise.reject("bad export"));
-    $("#chat-import-btn").click();
-    await vi.waitFor(() => expect($("#import-status").textContent).toBe("Import failed: bad export"));
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
+    $("#preview-import-btn").click();
+    await vi.waitFor(() =>
+      expect($("#import-status").textContent).toBe("Import failed: bad export"),
+    );
+  });
+
+  it("the confirm button disables when free space cannot fit the input", async () => {
+    await boot();
+    dialog.open.mockResolvedValue("/tmp/big.zip");
+    tauri.handlers.set("preview_import", () =>
+      Promise.resolve({
+        ...TELEGRAM_PREVIEW,
+        input_bytes: 10 * 1024 * 1024 * 1024,
+        free_bytes: 1024,
+      }),
+    );
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
+    expect(($("#preview-import-btn") as HTMLButtonElement).disabled).toBe(true);
+    expect($("#import-preview").textContent).toContain("free — the archive may not fit");
+  });
+});
+
+describe("first-run state and the isolated sample archive (U02)", () => {
+  it("an empty archive presents the first-source card instead of a search prompt", async () => {
+    tauri.handlers.set("stats", () => ({ total: 0, by_source: [] }));
+    await boot();
+    await vi.waitFor(() => expect($("#first-run").getAttribute("hidden")).toBeNull());
+    expect($("#demo-banner").getAttribute("hidden")).not.toBeNull();
+    expect($("#status").textContent).toBe(
+      "Your archive is empty — add a source to get started.",
+    );
+    // Searching the empty archive stays honest, not an error.
+    searchRespondsWith(() => pageOf([], 0));
+    input("#search").value = "vault";
+    pressKey(input("#search"), "Enter");
+    await vi.waitFor(() => expect($("#status").textContent).toBe("0 results for “vault”"));
+    // The card survives a manual empty browse attempt.
+    expect($("#first-run").getAttribute("hidden")).toBeNull();
+  });
+
+  it("entering the sample archives browses it, leaving restores the personal vault", async () => {
+    await boot();
+    // Demo vault: its own stats/sources/search responses.
+    const demoCalls: string[] = [];
+    tauri.handlers.set("demo_enter", () => {
+      demoCalls.push("enter");
+      return Promise.resolve({ active: true });
+    });
+    tauri.handlers.set("demo_leave", () => {
+      demoCalls.push("leave");
+      return Promise.resolve({ active: false });
+    });
+    const demoStats = { total: 6, by_source: [{ source: "demo", count: 6 }] };
+    let inDemo = false;
+    tauri.handlers.set("demo_enter", () => {
+      demoCalls.push("enter");
+      inDemo = true;
+      return Promise.resolve({ active: true });
+    });
+    tauri.handlers.set("demo_leave", () => {
+      demoCalls.push("leave");
+      inDemo = false;
+      return Promise.resolve({ active: false });
+    });
+    tauri.handlers.set("stats", () => (inDemo ? demoStats : STATS));
+    searchRespondsWith(() =>
+      pageOf(
+        inDemo
+          ? [
+              {
+                ...HITS[0],
+                id: 101,
+                source_id: "inst-demo",
+                source_label: "demo",
+              },
+            ]
+          : HITS,
+        inDemo ? 6 : 9,
+      ),
+    );
+
+    $("#first-run-demo-btn").click();
+    await vi.waitFor(() => expect(demoCalls).toEqual(["enter"]));
+    await vi.waitFor(() =>
+      expect($("#stats").textContent).toBe("6 messages (demo: 6)"),
+    );
+    await vi.waitFor(() => expect($("#demo-banner").getAttribute("hidden")).toBeNull());
+    // The demo archive browses immediately (U04 under the demo).
+    await vi.waitFor(() => expect($("#status").textContent).toBe("1–6 of 6"));
+    // Source controls are locked while the demo is open (the backend
+    // refuses writes regardless).
+    expect(($("#import-pick-btn") as HTMLButtonElement).disabled).toBe(true);
+    expect(($("#imap-sync-btn") as HTMLButtonElement).disabled).toBe(true);
+
+    // Leaving restores the personal vault: banner gone, its stats back.
+    $("#demo-leave-btn").click();
+    await vi.waitFor(() => expect(demoCalls).toEqual(["enter", "leave"]));
+    await vi.waitFor(() =>
+      expect($("#stats").textContent).toBe("9 messages (mbox: 6, demo: 3)"),
+    );
+    await vi.waitFor(() => expect($("#demo-banner").getAttribute("hidden")).not.toBeNull());
+    await vi.waitFor(() => expect($("#status").textContent).toBe("1–9 of 9"));
+    expect(($("#import-pick-btn") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("a webview reload while the demo is open restores the banner (demo_status)", async () => {
+    tauri.handlers.set("stats", () => ({ total: 0, by_source: [] }));
+    tauri.handlers.set("demo_status", () => Promise.resolve({ active: true }));
+    tauri.handlers.set("demo_enter", () => Promise.resolve({ active: true }));
+    await boot();
+    await vi.waitFor(() => expect($("#demo-banner").getAttribute("hidden")).toBeNull());
+    // The demo vault's stats browse, not the empty personal vault.
+    await vi.waitFor(() => expect($("#first-run").getAttribute("hidden")).not.toBeNull());
   });
 });
 
