@@ -14,6 +14,72 @@ export function formatSentAt(iso: string): string {
   );
 }
 
+/** The user-facing label of one time-confidence token: a short word
+ *  (or two) that says how much to trust the shown time — the token
+ *  itself never reaches the reading pane, the copy text, or exports
+ *  (the same classification discipline as the sync error classes: the
+ *  stable token stays in the store/wire, the human phrase in every
+ *  surface a user reads). An unknown future token surfaces verbatim —
+ *  never blanked and never guessed. */
+export function timeConfidenceLabel(confidence: string): string {
+  switch (confidence) {
+    case "explicit_offset":
+      return "exact";
+    case "user_confirmed":
+      return "confirmed";
+    case "legacy_assumed":
+      return "assumed";
+    case "unresolved":
+      return "unresolved";
+    case "missing":
+      return "no time recorded";
+    default:
+      return confidence;
+  }
+}
+
+/** The one-sentence explanation of one time-confidence token (the
+ *  tooltip depth of the reading pane's date row): what the archive
+ *  actually knows about the time. Empty when there is nothing useful
+ *  to say about an unrecognized token. */
+export function timeConfidenceDetail(confidence: string): string {
+  switch (confidence) {
+    case "explicit_offset":
+      return "The time was read from the message itself, with its own timezone.";
+    case "user_confirmed":
+      return "You confirmed this time yourself.";
+    case "legacy_assumed":
+      return "The time was assumed during import and may be off — the source did not state it directly.";
+    case "unresolved":
+      return "The message's time could not be read; no instant was fabricated.";
+    case "missing":
+      return "The message carried no time at all.";
+    default:
+      return "";
+  }
+}
+
+/** The user-facing label of one conversation-confidence token: how the
+ *  archive knows these messages form one conversation. Empty for an
+ *  absent token (no qualifier — an empty "()" fragment must never
+ *  print). Unknown tokens surface verbatim, like time confidence. */
+export function conversationConfidenceLabel(
+  confidence: string | null | undefined,
+): string {
+  switch (confidence ?? "") {
+    case "verified":
+      return "verified";
+    case "user_linked":
+      return "user-linked";
+    case "legacy_unresolved":
+      return "unverified grouping";
+    case "":
+      return "";
+    default:
+      return confidence ?? "";
+  }
+}
+
 /** Collapse a message body into a single-line snippet of at most `max` chars. */
 export function snippet(body: string, max = 200): string {
   const collapsed = body.replace(/\s+/g, " ").trim();
