@@ -767,10 +767,6 @@ fn last_switch_view(origin: &backup::LastSwitchOrigin, recovery: &'static str) -
 #[derive(Debug, Clone)]
 struct StartupRecovery {
     outcome: backup::SwitchRecovery,
-    /// The `created_at` of the journal the outcome resolved; `None`
-    /// when nothing was resolved this session (a clean boot, or the
-    /// switch had already completed before the restart).
-    resolved_journal: Option<String>,
 }
 
 /// The recovery word for the origin line: `"rolled_back"` /
@@ -780,8 +776,17 @@ fn startup_recovery_word(
     startup: &StartupRecovery,
     journal_created_at: Option<&str>,
 ) -> &'static str {
+    let resolved_journal = match &startup.outcome {
+        backup::SwitchRecovery::RolledBack {
+            journal_created_at, ..
+        }
+        | backup::SwitchRecovery::RolledForward {
+            journal_created_at, ..
+        } => Some(journal_created_at.as_str()),
+        _ => None,
+    };
     let scoped = matches!(
-        (journal_created_at, startup.resolved_journal.as_deref()),
+        (journal_created_at, resolved_journal),
         (Some(recorded), Some(resolved)) if recorded == resolved,
     );
     if scoped {
@@ -813,6 +818,10 @@ async fn recovery_status(state: State<'_, AppState>) -> Result<RecoveryStatusVie
             ),
         )
     });
+    // The flattened `status` carries its own `last_switch` under the
+    // same JSON key as the view's resolved one; drop it so exactly one
+    // shape — the app-merged view — reaches the frontend.
+    status.last_switch = None;
     Ok(RecoveryStatusView {
         data_dir: state.data_dir.clone(),
         status,
@@ -2875,26 +2884,11 @@ pub fn run() {
             // then silently discard. The outcome is kept for the U05
             // restart UX: the recovery panel says which vault ended up
             // active when a restart resolved an interrupted switch. A
-            // resolved (rolled) outcome is scoped to the journal it
-            // resolved — read back by its `created_at` so a later
-            // in-session switch that overwrites the journal never
-            // inherits the stale word.
+            // resolved (rolled) outcome carries the `created_at` of the
+            // journal it resolved, so a later in-session switch that
+            // overwrites the journal never inherits the stale word.
             let startup_recovery = match backup::recover_interrupted_switch(&data_dir) {
-                Ok(recovery) => {
-                    let resolved_journal = match &recovery {
-                        backup::SwitchRecovery::RolledBack { .. }
-                        | backup::SwitchRecovery::RolledForward { .. } => {
-                            backup::recovery_status(&data_dir)
-                                .ok()
-                                .and_then(|status| status.journal_created_at)
-                        }
-                        _ => None,
-                    };
-                    StartupRecovery {
-                        outcome: recovery,
-                        resolved_journal,
-                    }
-                }
+                Ok(recovery) => StartupRecovery { outcome: recovery },
                 Err(e) => {
                     return Err(format!(
                         "an interrupted vault switch could not be resolved: {e} — \
@@ -3058,8 +3052,8 @@ mod tests {
         let rolled = StartupRecovery {
             outcome: backup::SwitchRecovery::RolledBack {
                 previous_slot: "previous-20261127153045-abc123".to_string(),
+                journal_created_at: "2026-11-27T15:30:45Z".to_string(),
             },
-            resolved_journal: Some("2026-11-27T15:30:45Z".to_string()),
         };
         let clean = last_switch_view(
             &restored,
@@ -3068,7 +3062,6 @@ mod tests {
                     outcome: backup::SwitchRecovery::AlreadyCompleted {
                         previous_slot: None,
                     },
-                    resolved_journal: None,
                 },
                 Some("2026-11-27T15:30:45Z"),
             ),
@@ -3092,8 +3085,8 @@ mod tests {
                 &StartupRecovery {
                     outcome: backup::SwitchRecovery::RolledForward {
                         previous_slot: "previous-20261127153045-abc123".to_string(),
+                        journal_created_at: "2026-11-27T15:30:45Z".to_string(),
                     },
-                    resolved_journal: Some("2026-11-27T15:30:45Z".to_string()),
                 },
                 Some("2026-11-27T15:30:45Z"),
             ),
@@ -3119,7 +3112,6 @@ mod tests {
             startup_recovery_word(
                 &StartupRecovery {
                     outcome: backup::SwitchRecovery::None,
-                    resolved_journal: None,
                 },
                 Some("2026-11-27T16:00:00Z"),
             ),

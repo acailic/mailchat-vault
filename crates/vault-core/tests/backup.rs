@@ -1254,6 +1254,7 @@ fn interrupted_return_recovery_keeps_the_return_target_slot() {
         recovery,
         SwitchRecovery::RolledBack {
             previous_slot: staged.file_name().unwrap().to_string_lossy().into_owned(),
+            journal_created_at: "2026-01-01T00:00:00Z".to_string(),
         }
     );
     // The active vault is the displaced one, whole (the "new" vault).

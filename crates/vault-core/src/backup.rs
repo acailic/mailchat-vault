@@ -1758,10 +1758,21 @@ pub enum SwitchRecovery {
     AlreadyCompleted { previous_slot: Option<String> },
     /// An interrupted switch was rolled **back**: the active vault is
     /// the pre-switch one, verified.
-    RolledBack { previous_slot: String },
+    RolledBack {
+        previous_slot: String,
+        /// The `created_at` of the journal this outcome resolved —
+        /// carried out so callers never re-read the journal to learn
+        /// which one was resolved (a re-read can fail and silently
+        /// degrade the U05 origin line).
+        journal_created_at: String,
+    },
     /// An interrupted switch was rolled **forward**: the active vault
     /// is the switched-in one, verified.
-    RolledForward { previous_slot: String },
+    RolledForward {
+        previous_slot: String,
+        /// See [`SwitchRecovery::RolledBack`].
+        journal_created_at: String,
+    },
 }
 
 /// Resolve an interrupted switch at startup (before any connection is
@@ -1806,6 +1817,7 @@ pub fn recover_interrupted_switch(data_dir: &Path) -> Result<SwitchRecovery> {
             verify_active_vault(data_dir)?;
             Ok(SwitchRecovery::RolledBack {
                 previous_slot: slot_id(),
+                journal_created_at: journal.created_at.clone(),
             })
         }
         SwitchState::Staged => {
@@ -1823,6 +1835,7 @@ pub fn recover_interrupted_switch(data_dir: &Path) -> Result<SwitchRecovery> {
             verify_active_vault(data_dir)?;
             Ok(SwitchRecovery::RolledForward {
                 previous_slot: slot_id(),
+                journal_created_at: journal.created_at.clone(),
             })
         }
     }
@@ -1887,7 +1900,10 @@ pub struct RecoveryStatus {
     /// the vault). The journal alone cannot say whether this session's
     /// startup recovery rolled the switch back — the app layer merges
     /// that in.
-    #[serde(default)]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub last_switch: Option<LastSwitchOrigin>,
 }
 

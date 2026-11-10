@@ -2371,6 +2371,10 @@ async function refreshLastBackup(): Promise<void> {
   if (pendingBackupJob !== null || vaultSwitched) return;
   try {
     const record = await ipc.lastBackup();
+    // The guards were true before the await; re-check after it — a
+    // backup job may have started (or a switch committed) in between,
+    // and the persisted record must not clobber the live line.
+    if (pendingBackupJob !== null || vaultSwitched) return;
     backupStatus.textContent = record ? lastBackupLine(record) : noBackupLine();
   } catch {
     // The pool is drained (a switch just ran) or the backend is busy:
