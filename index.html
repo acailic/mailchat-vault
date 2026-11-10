@@ -251,6 +251,11 @@
                 <input id="imap-folders" type="text" placeholder="INBOX (comma-separated folders)" />
                 <button id="imap-sync-btn" type="button">Sync</button>
               </div>
+              <p id="imap-cred-note" class="meta" style="margin: 4px 0 0">
+                The password is stored in the OS keyring when available; without a keyring it is kept
+                in memory for this session only — restarting the app then clears it. It is never
+                written to the vault archive.
+              </p>
               <div class="row">
                 <label class="meta" title="Opt-in: round over every configured IMAP source through the background job system. Rounds never overlap; missed time (sleep/offline) never queues.">
                   <input id="auto-sync-toggle" type="checkbox" /> Auto-sync every

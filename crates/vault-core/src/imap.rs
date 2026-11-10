@@ -355,6 +355,191 @@ pub fn authenticate<T: Read + Write>(
     }
 }
 
+/// Why a sync failed, as a stable, user-actionable classification of the
+/// underlying error — no raw errno strings in user-facing text.
+///
+/// The class token ([`SyncFailure::as_str`]) is stable for durable storage
+/// and tests; the actionable text ([`SyncFailure::user_message`]) is what
+/// the UI shows. The first-sync failure loop (cold review §2.2/#5) is
+/// where raw `Connection refused (os error 111)` strings reached users;
+/// every sync failure now maps through this classification at the
+/// connector boundary, and the durable account row keeps the outcome
+/// (see [`Storage::record_source_failure`]) so *what fell and why* stays
+/// visible across restarts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncFailure {
+    /// DNS resolution of the host failed — a mistyped or unknown host name.
+    HostNotFound,
+    /// Nothing listens at the address:port — wrong port, or the server is
+    /// down / firewalled shut.
+    ConnectionRefused,
+    /// The server did not answer within the bounded connect/read timeout.
+    Timeout,
+    /// No network route to the server (offline, VPN, airgap).
+    NetworkUnreachable,
+    /// The server rejected the login — wrong username/password, or an app
+    /// password is required.
+    AuthFailed,
+    /// The TLS handshake failed — the certificate is not trusted, or the
+    /// port is not an implicit-TLS IMAP port.
+    Tls,
+    /// The connection closed before the IMAP session started — typically
+    /// a plain TCP service answering on the IMAP port.
+    ConnectionLost,
+    /// Anything else (protocol errors, unexpected storage errors, …).
+    Other,
+}
+
+impl SyncFailure {
+    /// The stable wire/storage token of this class.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::HostNotFound => "host_not_found",
+            Self::ConnectionRefused => "connection_refused",
+            Self::Timeout => "timeout",
+            Self::NetworkUnreachable => "network_unreachable",
+            Self::AuthFailed => "auth_failed",
+            Self::Tls => "tls",
+            Self::ConnectionLost => "connection_lost",
+            Self::Other => "other",
+        }
+    }
+
+    /// The actionable, errno-free text for this class: what to check,
+    /// in the user's terms.
+    pub fn user_message(&self) -> &'static str {
+        match self {
+            Self::HostNotFound => {
+                "the server address could not be resolved (DNS) — check the host name"
+            }
+            Self::ConnectionRefused => {
+                "nothing answered at that host and port — check the server address and port (993 for IMAP over TLS)"
+            }
+            Self::Timeout => {
+                "the server did not respond in time — it may be down, blocked by a firewall, or unreachable from this network"
+            }
+            Self::NetworkUnreachable => "no route to the server — check the network connection",
+            Self::AuthFailed => {
+                "the server rejected the login — check the username and password (Gmail requires an app password, not the account password)"
+            }
+            Self::Tls => {
+                "a secure connection (TLS) could not be established — check that the host and port serve IMAP over TLS (port 993)"
+            }
+            Self::ConnectionLost => {
+                "the connection closed before the IMAP session started — check that the host and port serve IMAP (port 993 over TLS)"
+            }
+            Self::Other => "the sync could not be completed",
+        }
+    }
+
+    /// Classify an error from the connect/sync path.
+    pub fn classify(err: &crate::Error) -> Self {
+        use crate::Error as E;
+        match err {
+            E::Io(io) => Self::classify_io(io),
+            E::Imap(imap_err) => match imap_err {
+                ::imap::Error::Io(io) => Self::classify_io(io),
+                ::imap::Error::No(text) | ::imap::Error::Bad(text) => {
+                    if is_auth_rejection(text) {
+                        Self::AuthFailed
+                    } else {
+                        Self::Other
+                    }
+                }
+                ::imap::Error::ConnectionLost => Self::ConnectionLost,
+                _ => Self::Other,
+            },
+            E::Tls(_) | E::InvalidServerName(_) => Self::Tls,
+            _ => Self::Other,
+        }
+    }
+
+    /// Classify an I/O error by kind first, then by the resolver's message
+    /// shapes (getaddrinfo failures arrive as uncategorized io errors whose
+    /// text differs by libc: glibc, musl, and Apple's libsystem).
+    fn classify_io(io: &std::io::Error) -> Self {
+        use std::io::ErrorKind;
+        match io.kind() {
+            ErrorKind::ConnectionRefused => Self::ConnectionRefused,
+            ErrorKind::TimedOut | ErrorKind::WouldBlock => Self::Timeout,
+            ErrorKind::NetworkUnreachable | ErrorKind::HostUnreachable => Self::NetworkUnreachable,
+            // EOF/reset/abort before or during the session: the peer closed
+            // the connection — the plain-TCP-listener-on-993 case (the TLS
+            // client's greeting read hits EOF) and mid-session drops.
+            ErrorKind::UnexpectedEof
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted => Self::ConnectionLost,
+            _ => {
+                let msg = io.to_string().to_lowercase();
+                if msg.contains("failed to lookup address information")
+                    || msg.contains("name or service not known")
+                    || msg.contains("nodename nor servname")
+                    || msg.contains("temporary failure in name resolution")
+                {
+                    Self::HostNotFound
+                } else {
+                    Self::Other
+                }
+            }
+        }
+    }
+
+    /// The full user-facing line for one failed sync: the actionable class
+    /// text, plus the server's own words when they add signal beyond the
+    /// class (an auth rejection's stated reason), or the underlying detail
+    /// for unclassified failures — never a bare errno as the primary text.
+    pub fn describe(&self, err: &crate::Error) -> String {
+        match self {
+            Self::AuthFailed => match server_rejection_text(err) {
+                Some(text) => format!("{} ({})", self.user_message(), text),
+                None => self.user_message().to_string(),
+            },
+            // Unclassified: keep the underlying detail for support, after
+            // the actionable lead.
+            Self::Other => format!("{} ({})", self.user_message(), err),
+            _ => self.user_message().to_string(),
+        }
+    }
+}
+
+/// Whether a server `NO`/`BAD` response text is an authentication
+/// rejection (RFC 3501 response codes, or the common free-text phrasings).
+/// Comparison runs over a lowercase alphanumeric-only normalization so
+/// spacing and punctuation cannot hide the token.
+fn is_auth_rejection(text: &str) -> bool {
+    let normalized: String = text
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    [
+        "authenticationfailed",
+        "invalidcredentials",
+        "loginfailed",
+        "invalidlogin",
+        "authenticationrequired",
+        "passworderror",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+
+/// The server's own `NO`/`BAD` response text from an IMAP error, if any.
+fn server_rejection_text(err: &crate::Error) -> Option<String> {
+    match err {
+        crate::Error::Imap(::imap::Error::No(text))
+        | crate::Error::Imap(::imap::Error::Bad(text)) => Some(text.clone()),
+        _ => None,
+    }
+}
+
+impl fmt::Display for SyncFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Connect to the configured server over implicit TLS and authenticate
 /// ([`authenticate`]): `LOGIN` with the configured password, or SASL
 /// `XOAUTH2` with the configured OAuth2 access token.
@@ -432,6 +617,10 @@ pub trait SyncStorage {
     fn record_attempt(&self, instance: &str) -> Result<()>;
     /// Stamp a successful sync on the instance (connected state).
     fn record_success(&self, instance: &str) -> Result<()>;
+    /// Record a failed sync on the instance: the stable failure class and
+    /// the user-facing message (the account-level error state that
+    /// survives restarts — the accounts panel shows what fell and why).
+    fn record_failure(&self, instance: &str, failure: &SyncFailure, message: &str) -> Result<()>;
     /// The folder's stored cursor, if any.
     fn checkpoint(
         &self,
@@ -466,6 +655,9 @@ impl SyncStorage for Storage {
     }
     fn record_success(&self, instance: &str) -> Result<()> {
         self.record_source_success(instance)
+    }
+    fn record_failure(&self, instance: &str, failure: &SyncFailure, message: &str) -> Result<()> {
+        self.record_source_failure(instance, failure.as_str(), message)
     }
     fn checkpoint(
         &self,
@@ -552,6 +744,12 @@ pub fn sync(
 /// ([`crate::jobs::PoolSync`]), which marshals each storage call through
 /// the bounded write queue so the network waits between calls never
 /// occupy the write lane.
+///
+/// A failure after the instance is registered is recorded on the
+/// account row ([`SyncStorage::record_failure`]) as a best effort — the
+/// recorded class and message are exactly what the accounts panel shows
+/// after a restart — and then propagates; recording must never mask the
+/// original error.
 pub fn sync_with<S: SyncStorage>(
     config: &ImapConfig,
     storage: &S,
@@ -559,14 +757,34 @@ pub fn sync_with<S: SyncStorage>(
 ) -> Result<Vec<FolderSyncSummary>> {
     let instance = storage.ensure_instance(config)?;
     storage.record_attempt(&instance)?;
+    match run_session_sync(config, storage, &instance, media_data_dir) {
+        Ok(summaries) => Ok(summaries),
+        Err(e) => {
+            let failure = SyncFailure::classify(&e);
+            let _ = storage.record_failure(&instance, &failure, &failure.describe(&e));
+            Err(e)
+        }
+    }
+}
+
+/// The connect–sync–stamp flow of [`sync_with`] after the instance and
+/// attempt stamp exist: connect, sync every folder, logout, and stamp the
+/// success (which clears any recorded failure). Split out so the failure
+/// recording in [`sync_with`] wraps exactly this span.
+fn run_session_sync<S: SyncStorage>(
+    config: &ImapConfig,
+    storage: &S,
+    instance: &str,
+    media_data_dir: Option<&Path>,
+) -> Result<Vec<FolderSyncSummary>> {
     let mut session = connect(config)?;
     let folders = config.effective_folders();
     let mut budget = crate::object_store::Capacity::default();
     let mut media = media_data_dir.map(|dir| crate::media::MailMedia::new(dir, &mut budget));
-    let summaries = sync_session(&mut session, storage, &instance, &folders, media.as_mut());
+    let summaries = sync_session(&mut session, storage, instance, &folders, media.as_mut());
     // Best-effort logout; a failed logout must not mask a sync error.
     let _ = session.logout();
-    storage.record_success(&instance)?;
+    storage.record_success(instance)?;
     Ok(summaries)
 }
 

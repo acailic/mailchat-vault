@@ -1530,7 +1530,8 @@ fn restored_sources_needing_reauth(
     let mut stmt = conn
         .prepare(
             "SELECT id, kind, label, connector_key, config_json, state, excluded, \
-                     last_attempt_at, last_success_at, created_at \
+                     last_attempt_at, last_success_at, created_at, \
+                     last_error_class, last_error, last_error_at \
              FROM source_instances",
         )
         .ok()?;
@@ -1556,6 +1557,9 @@ fn restored_source_instance(row: &rusqlite::Row<'_>) -> rusqlite::Result<SourceI
         last_attempt_at: row.get(7)?,
         last_success_at: row.get(8)?,
         created_at: row.get(9)?,
+        last_error_class: row.get(10)?,
+        last_error: row.get(11)?,
+        last_error_at: row.get(12)?,
     })
 }
 
