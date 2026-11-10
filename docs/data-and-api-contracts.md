@@ -8,7 +8,7 @@ Status: **mixed**. This document owns identity, migration, persistence, and IPC 
 
 ## Domain and persistence model
 
-**Current** (migration ledger at schema version 13; 13 is M4.2's `media_objects` registry, landed with #60 ahead of its acceptance record — see [Migration and recovery](#migration-and-recovery)). UUID strings identify durable entities except messages, which keep plain SQLite integer rowids with no guard at JavaScript's 2^53 safe-integer boundary (proposed for the v2 IPC surface: new inserts reject numeric ID overflow rather than rounding it in IPC). Timestamps are stored as UTC instants when known, plus separate original-local/time-confidence metadata.
+**Current** (migration ledger at schema version 14; 14 is the account-level sync error state on `source_instances` — the restart-durable record of what fell and why — see [Migration and recovery](#migration-and-recovery)). UUID strings identify durable entities except messages, which keep plain SQLite integer rowids with no guard at JavaScript's 2^53 safe-integer boundary (proposed for the v2 IPC surface: new inserts reject numeric ID overflow rather than rounding it in IPC). Timestamps are stored as UTC instants when known, plus separate original-local/time-confidence metadata.
 
 The following are the logical table contracts as implemented; migrations and indexes live in the versioned ledger in [storage.rs](../crates/vault-core/src/storage.rs).
 
