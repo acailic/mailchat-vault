@@ -56,20 +56,28 @@ export function accountTitle(account: AccountView): string {
   return account.label;
 }
 
-/** One-line per-account sync state: connected/paused/never-synced, the
- * last successful sync, the failed-item backlog, and which credentials
+/** One-line per-account sync state: connected/paused/failed/never-synced,
+ * the last successful sync, the failed-item backlog, and which credentials
  * are stored. Plain text, screen-reader friendly (the row also carries a
- * live region for action results). */
+ * live region for action results). A recorded failure (which survives
+ * restarts — the account-level error state) leads with what fell and
+ * why, in the user's terms. */
 export function describeAccountSync(account: AccountView): string {
   const parts: string[] = [];
   if (account.kind === "imap") {
-    parts.push(
-      account.excluded
-        ? "paused — auto-sync skips this account (archive kept)"
-        : account.state === "connected"
-          ? "connected"
-          : "not connected yet",
-    );
+    if (account.excluded) {
+      parts.push("paused — auto-sync skips this account (archive kept)");
+    } else if (account.last_error) {
+      // The last finished attempt failed: say so, with why and when.
+      // The configured host/port/username stay on the row — nothing is
+      // lost, only the connection fell.
+      const at = account.last_error_at ? ` at ${account.last_error_at}` : "";
+      parts.push(`sync failed${at} — ${account.last_error}`);
+    } else if (account.state === "connected") {
+      parts.push("connected");
+    } else {
+      parts.push("not connected yet");
+    }
     if (account.last_success_at) {
       parts.push(`last synced ${account.last_success_at}`);
     } else {
@@ -93,6 +101,41 @@ export function describeAccountSync(account: AccountView): string {
 /** The empty-state line when no account exists yet. */
 export function accountsEmptyLine(): string {
   return "No accounts yet — connect an email account (IMAP) or import a chat/mbox export and it appears here.";
+}
+
+/** Where one just-saved password lives, as the user must be told it:
+ * the OS keyring persists across restarts; session memory is cleared
+ * when the app exits — the honest-credential rule (a failed sync that
+ * already saved the password still must say where it went). */
+export function passwordStoreNote(
+  savedTo: "os_keyring" | "memory" | null | undefined,
+): string {
+  if (savedTo === "memory") {
+    return "Password kept in memory only for this session (no OS keyring available) — restarting the app clears it.";
+  }
+  if (savedTo === "os_keyring") {
+    return "Password stored in the OS keyring.";
+  }
+  return "";
+}
+
+/** Normalize a `sync_imap` rejection to display text: the classified
+ * message when the structured failure shape arrives, the string itself
+ * for plain-string rejections (older paths), and — either way — the
+ * password-store note when the attempt already saved a password. */
+export function syncFailureText(e: unknown): string {
+  if (e && typeof e === "object" && "message" in e) {
+    const failure = e as { message: unknown; saved_to?: unknown };
+    const message =
+      typeof failure.message === "string" && failure.message.length > 0
+        ? failure.message
+        : "the sync could not be completed";
+    const note = passwordStoreNote(
+      failure.saved_to === "os_keyring" || failure.saved_to === "memory" ? failure.saved_to : null,
+    );
+    return note ? `${message} ${note}` : message;
+  }
+  return String(e);
 }
 
 /** The per-account stats fragment: message count (+ failed backlog). */

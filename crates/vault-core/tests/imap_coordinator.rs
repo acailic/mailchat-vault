@@ -639,6 +639,9 @@ fn stored_config_parses_only_imap_connector_instances() {
         excluded: false,
         last_attempt_at: None,
         last_success_at: None,
+        last_error_class: None,
+        last_error: None,
+        last_error_at: None,
         created_at: "2026-11-01T00:00:00Z".into(),
     };
     let stored = StoredImapConfig::of(&instance).unwrap();

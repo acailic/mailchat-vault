@@ -1345,6 +1345,47 @@ async fn import_chat_export(
     .map_err(|e| format!("import task failed: {e}"))?
 }
 
+/// The rejection shape of a failed [`sync_imap`]: the actionable message
+/// (classified — never a raw errno string; see `vault_core::imap::
+/// SyncFailure`), the stable failure class token, and — the honest
+/// credential rule the cold review asked for (§2.2/#5) — where an entered
+/// password was already kept when the attempt failed. A password is saved
+/// *before* the connection is attempted, so a failed sync can still have
+/// stored one; the UI must tell the user it is there (and that a
+/// session-memory store loses it on restart).
+#[derive(Debug, Clone, Serialize)]
+struct SyncFailureView {
+    /// Stable class token (`"connection_refused"`, `"auth_failed"`, …).
+    class: String,
+    /// The actionable, user-facing message.
+    message: String,
+    /// Where an entered password was saved before the failure (`None`
+    /// when no password was entered or nothing was saved).
+    saved_to: Option<secrets::SecretStore>,
+}
+
+impl SyncFailureView {
+    /// A classified connect/sync failure, with where the password went.
+    fn classified(e: &vault_core::Error, saved_to: Option<secrets::SecretStore>) -> Self {
+        let failure = imap::SyncFailure::classify(e);
+        Self {
+            class: failure.as_str().to_string(),
+            message: failure.describe(e),
+            saved_to,
+        }
+    }
+
+    /// A pre-flight failure (missing input, unconfigured OAuth) whose
+    /// message is already the actionable text — kept verbatim.
+    fn config(message: impl Into<String>) -> Self {
+        Self {
+            class: "config".to_string(),
+            message: message.into(),
+            saved_to: None,
+        }
+    }
+}
+
 /// Incrementally sync an IMAP account. Two auth modes:
 ///
 /// - `"password"` (default): host/port/user + app password (Gmail) or
@@ -1374,6 +1415,11 @@ async fn import_chat_export(
 ///
 /// The flat argument list mirrors the sync form's fields, like every other
 /// Tauri command here.
+///
+/// A failed sync rejects with [`SyncFailureView`]: the classified,
+/// actionable message (never a raw errno), the stable failure class, and
+/// where an entered password was already kept — see that type's docs for
+/// the honest-credential rule.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn sync_imap(
@@ -1386,8 +1432,8 @@ async fn sync_imap(
     password: String,
     folders: Option<Vec<String>>,
     auth: Option<String>,
-) -> Result<ImapSyncOutcome, String> {
-    state.refuse_in_demo()?;
+) -> Result<ImapSyncOutcome, SyncFailureView> {
+    state.refuse_in_demo().map_err(SyncFailureView::config)?;
     // Hostnames are case-insensitive, so one server spelled with different
     // casing must map to one durable source instance. Usernames stay
     // exactly as configured: the identity contract case-folds hosts, not
@@ -1396,22 +1442,30 @@ async fn sync_imap(
     let host = host.trim().to_lowercase();
     let username = username.trim().to_string();
     if username.is_empty() {
-        return Err("username is required".into());
+        return Err(SyncFailureView::config("username is required"));
     }
     let folders = folders.unwrap_or_default();
     let port = port.unwrap_or(imap::GMAIL_IMAP_PORT);
 
-    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| SyncFailureView::config(e.to_string()))?;
     let pool = Arc::clone(&state.pool);
     let secrets = Arc::clone(secrets.inner());
     // Secret resolution (keyring), token refresh (blocking HTTP), and the
-    // network sync itself all block; keep them off the UI thread.
-    let (folders, saved_to) = tauri::async_runtime::spawn_blocking(move || {
+    // network sync itself all block; keep them off the UI thread. The
+    // outcome carries the saved-password store even on failure (a password
+    // is saved before the connection is attempted), so the UI can state
+    // where the credential lives — the honest-credential rule.
+    tauri::async_runtime::spawn_blocking(move || -> Result<ImapSyncOutcome, SyncFailureView> {
         let auth = auth.as_deref().unwrap_or("password");
         // Only the Gmail sign-in flow has a sensible default host; every
         // other server must be named explicitly.
         if host.is_empty() && auth != "oauth" {
-            return Err("host is required (e.g. imap.gmail.com)".to_string());
+            return Err(SyncFailureView::config(
+                "host is required (e.g. imap.gmail.com)",
+            ));
         }
         let host = if host.is_empty() {
             imap::GMAIL_IMAP_HOST.to_string()
@@ -1424,7 +1478,7 @@ async fn sync_imap(
                 // stored before.
                 let (password, saved_to) = if password.is_empty() {
                     let stored = secrets.load(&host, &username).ok_or_else(|| {
-                        "no password stored for this account — enter one".to_string()
+                        SyncFailureView::config("no password stored for this account — enter one")
                     })?;
                     (stored, None)
                 } else {
@@ -1437,13 +1491,15 @@ async fn sync_imap(
                 // Refresh-token sign-in: mint a fresh access token and use
                 // SASL XOAUTH2. The refresh token itself never leaves the
                 // secret store (and never enters the vault database).
-                let config = oauth_config()?;
+                let config = oauth_config().map_err(SyncFailureView::config)?;
                 let refresh = secrets.load_refresh(&host, &username).ok_or_else(|| {
-                    "no Google sign-in stored for this account — use “Sign in with Google” first"
-                        .to_string()
+                    SyncFailureView::config(
+                        "no Google sign-in stored for this account — use \u{201c}Sign in with \
+                         Google\u{201d} first",
+                    )
                 })?;
-                let tokens =
-                    oauth::refresh_access_token(&config, &refresh).map_err(|e| e.to_string())?;
+                let tokens = oauth::refresh_access_token(&config, &refresh)
+                    .map_err(|e| SyncFailureView::classified(&e, None))?;
                 (
                     ImapAuth::Xoauth2 {
                         access_token: tokens.access_token,
@@ -1452,9 +1508,9 @@ async fn sync_imap(
                 )
             }
             other => {
-                return Err(format!(
+                return Err(SyncFailureView::config(format!(
                     "unknown auth mode {other:?} (expected \"password\" or \"oauth\")"
-                ))
+                )))
             }
         };
 
@@ -1465,14 +1521,15 @@ async fn sync_imap(
             auth: imap_auth,
             folders,
         };
+        // The vault-core sync records the failure on the account row
+        // (class + message) so the accounts panel shows what fell, why,
+        // and when — surviving restarts.
         imap::sync_with(&config, &PoolSync(&pool), Some(&data_dir))
-            .map_err(|e| e.to_string())
-            .map(|folders| (folders, saved_to))
+            .map_err(|e| SyncFailureView::classified(&e, saved_to))
+            .map(|folders| ImapSyncOutcome { folders, saved_to })
     })
     .await
-    .map_err(|e| format!("sync task failed: {e}"))??;
-
-    Ok(ImapSyncOutcome { folders, saved_to })
+    .map_err(|e| SyncFailureView::config(format!("sync task failed: {e}")))?
 }
 
 /// The OAuth client credentials from the environment, or a clear error
@@ -2350,6 +2407,12 @@ struct AccountView {
     excluded: bool,
     last_attempt_at: Option<String>,
     last_success_at: Option<String>,
+    /// The last failed sync's user-facing message — the account-level
+    /// error state that survives restarts (cold review §2.2/#5); `None`
+    /// after a success.
+    last_error: Option<String>,
+    /// When the last failed sync was recorded.
+    last_error_at: Option<String>,
 }
 
 /// The non-secret IMAP identity of one account, parsed from the stored
@@ -2413,6 +2476,8 @@ fn assemble_accounts(
                 excluded: instance.excluded,
                 last_attempt_at: instance.last_attempt_at.clone(),
                 last_success_at: instance.last_success_at.clone(),
+                last_error: instance.last_error.clone(),
+                last_error_at: instance.last_error_at.clone(),
             }
         })
         .collect()
@@ -3677,6 +3742,9 @@ mod tests {
             excluded: false,
             last_attempt_at: Some("2026-01-02 10:00:00".into()),
             last_success_at: Some("2026-01-02 10:00:05".into()),
+            last_error_class: None,
+            last_error: None,
+            last_error_at: None,
             created_at: "2026-01-01 00:00:00".into(),
         }
     }
@@ -3692,6 +3760,9 @@ mod tests {
             excluded: false,
             last_attempt_at: None,
             last_success_at: None,
+            last_error_class: None,
+            last_error: None,
+            last_error_at: None,
             created_at: "2026-01-01 00:00:00".into(),
         }
     }
@@ -3762,5 +3833,34 @@ mod tests {
         let identity = views[0].imap.as_ref().unwrap();
         assert!(identity.has_oauth, "credential kinds come from the probe");
         assert!(!identity.has_password);
+    }
+
+    #[test]
+    fn accounts_assembly_carries_the_recorded_failure_for_the_panel() {
+        // The account-level error state (cold review §2.2/#5): what fell
+        // and why survives restarts in the vault database and must reach
+        // the panel row — the entered identity stays on the same row.
+        let mut failed = imap_instance("inst-failed", "imap.c.test", 993, "cin@c.test", &["INBOX"]);
+        failed.state = "disconnected".into();
+        failed.last_error_class = Some("connection_refused".into());
+        failed.last_error = Some(
+            "nothing answered at that host and port — check the server address and port (993 for IMAP over TLS)"
+                .into(),
+        );
+        failed.last_error_at = Some("2026-11-09 23:00:00".into());
+        let views = assemble_accounts(&[failed], &[], |_: &StoredImapConfig| (false, false));
+        assert_eq!(views.len(), 1);
+        let view = &views[0];
+        assert_eq!(view.state, "disconnected");
+        assert_eq!(
+            view.last_error.as_deref(),
+            Some("nothing answered at that host and port — check the server address and port (993 for IMAP over TLS)")
+        );
+        assert_eq!(view.last_error_at.as_deref(), Some("2026-11-09 23:00:00"));
+        // A healthy account carries the empty error state, not a stale one.
+        let healthy = imap_instance("inst-ok", "imap.d.test", 993, "dee@d.test", &[]);
+        let views = assemble_accounts(&[healthy], &[], |_: &StoredImapConfig| (true, false));
+        assert_eq!(views[0].last_error, None);
+        assert_eq!(views[0].last_error_at, None);
     }
 }

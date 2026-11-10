@@ -61,7 +61,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::bounded::IngestSink;
-use crate::imap::{ImapConfig, SyncStorage};
+use crate::imap::{ImapConfig, SyncFailure, SyncStorage};
 use crate::message::NewMessage;
 use crate::storage::{
     BatchFailure, ConnectorIdentity, ImportBatchCounts, ImportIssueRecord, MailBatchItem,
@@ -1078,6 +1078,14 @@ impl SyncStorage for PoolSync<'_> {
         let instance = instance.to_string();
         self.0
             .submit_write(move |s| s.record_source_success(&instance))
+    }
+
+    fn record_failure(&self, instance: &str, failure: &SyncFailure, message: &str) -> Result<()> {
+        let instance = instance.to_string();
+        let class = failure.as_str().to_string();
+        let message = message.to_string();
+        self.0
+            .submit_write(move |s| s.record_source_failure(&instance, &class, &message))
     }
 
     fn checkpoint(
