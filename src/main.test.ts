@@ -3874,7 +3874,10 @@ describe("accounts panel", () => {
     );
     const imapRow = $("#accounts-list .account-row[data-source-id='inst-imap-1']");
     expect(imapRow.querySelector(".account-label")!.textContent).toBe(
-      "imap:imap.gmail.com:993:ana@gmail.com",
+      "ana@gmail.com · imap.gmail.com",
+    );
+    expect((imapRow.querySelector(".account-label") as HTMLElement).title).toBe(
+      "Stored source: imap:imap.gmail.com:993:ana@gmail.com",
     );
     expect(imapRow.querySelector(".account-kind")!.textContent).toBe("Email (IMAP)");
     expect(imapRow.querySelector(".account-stats")!.textContent).toBe(
@@ -3943,7 +3946,7 @@ describe("accounts panel", () => {
     });
     await vi.waitFor(() =>
       expect($("#accounts-status").textContent).toContain(
-        "Synced imap:imap.gmail.com:993:ana@gmail.com: INBOX: 2 new, 1 already present",
+        "Synced ana@gmail.com · imap.gmail.com: INBOX: 2 new, 1 already present",
       ),
     );
   });
@@ -3979,7 +3982,7 @@ describe("accounts panel", () => {
     ($("#accounts-list .account-sync-btn") as HTMLButtonElement).click();
     await vi.waitFor(() =>
       expect($("#accounts-status").textContent).toContain(
-        "Sync failed for imap:imap.gmail.com:993:ana@gmail.com",
+        "Sync failed for ana@gmail.com · imap.gmail.com",
       ),
     );
     expect($("#accounts-status").textContent).toContain("no password stored");
@@ -4033,10 +4036,24 @@ describe("accounts panel", () => {
     );
   });
 
-  it("Add account… opens the Add source view", async () => {
+  it("Add account… opens the Add source view with orientation, not a dead end", async () => {
     await boot();
+    const guidance = $("#add-source-guidance") as HTMLElement;
+    expect(guidance.hidden).toBe(true);
     ($("#accounts-add") as HTMLButtonElement).click();
     expect($("#app").dataset.view).toBe("sources");
+    // §2.6: the arrival carries its own context — where the two paths
+    // live and where the result shows up.
+    expect(guidance.hidden).toBe(false);
+    expect(guidance.textContent).toContain("Import files");
+    expect(guidance.textContent).toContain("Connect email (IMAP)");
+    expect(guidance.textContent).toContain("Accounts panel");
+    // Leaving the view retires the guidance — a later, self-directed
+    // visit to Add source does not start with a leftover message.
+    $('.nav-view-btn[data-view-target="workspace"]').click();
+    expect(guidance.hidden).toBe(true);
+    $('.nav-view-btn[data-view-target="sources"]').click();
+    expect(guidance.hidden).toBe(true);
   });
 
   it("the Accounts navigation destination switches the workspace view", async () => {

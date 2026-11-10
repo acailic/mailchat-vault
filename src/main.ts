@@ -129,6 +129,7 @@ import { autoSyncStatusText, isIntervalChoice } from "./schedview";
 import {
   passwordStoreNote,
   renderAccounts,
+  accountTitle,
   syncFailureText,
   syncNowRequest,
   type SyncNowRequest,
@@ -206,6 +207,9 @@ const accountsStatus = document.querySelector<HTMLElement>("#accounts-status")!;
 const accountsListEl = document.querySelector<HTMLUListElement>("#accounts-list")!;
 const accountsRefreshButton = document.querySelector<HTMLButtonElement>("#accounts-refresh")!;
 const accountsAddButton = document.querySelector<HTMLButtonElement>("#accounts-add")!;
+/** §2.6: the orientation line shown when “Add account…” lands the user
+ * on the Add source view (hidden on every other path into the view). */
+const addSourceGuidance = document.querySelector<HTMLParagraphElement>("#add-source-guidance")!;
 const jobsStatus = document.querySelector<HTMLElement>("#jobs-status")!;
 const jobsList = document.querySelector<HTMLUListElement>("#jobs-list")!;
 const dashboard = document.querySelector<HTMLElement>("#dashboard")!;
@@ -1816,7 +1820,9 @@ async function refreshAccounts(): Promise<void> {
 function accountSyncOutcomeLine(account: AccountView, outcome: ipc.ImapSyncOutcome): string {
   const lines = outcome.folders.map(folderSummaryLine);
   const note = passwordStoreNote(outcome.saved_to);
-  return `Synced ${account.label}: ${lines.join(" · ") || "no folders"}${note ? ` ${note}` : ""}`;
+  // Named by the identity the user knows (address · server), never the
+  // stored `imap:host:port:user` connector label.
+  return `Synced ${accountTitle(account)}: ${lines.join(" · ") || "no folders"}${note ? ` ${note}` : ""}`;
 }
 
 /** Sync one listed account now: `sync_imap` with the account's stored
@@ -1825,10 +1831,10 @@ function accountSyncOutcomeLine(account: AccountView, outcome: ipc.ImapSyncOutco
 async function syncAccountNow(account: AccountView): Promise<void> {
   const request: SyncNowRequest | null = syncNowRequest(account);
   if (!request) {
-    accountsStatus.textContent = `${account.label} is an import — nothing to sync.`;
+    accountsStatus.textContent = `${accountTitle(account)} is an import — nothing to sync.`;
     return;
   }
-  accountsStatus.textContent = `Syncing ${account.label}… (first sync of a large mailbox can take a while)`;
+  accountsStatus.textContent = `Syncing ${accountTitle(account)}… (first sync of a large mailbox can take a while)`;
   try {
     const outcome = await ipc.syncImap(request);
     await refreshStats();
@@ -1842,35 +1848,37 @@ async function syncAccountNow(account: AccountView): Promise<void> {
     // refresh runs first so re-rendering the panel cannot overwrite the
     // failure line the user must see.
     await refreshAccounts();
-    accountsStatus.textContent = `Sync failed for ${account.label}: ${syncFailureText(e)}`;
+    accountsStatus.textContent = `Sync failed for ${accountTitle(account)}: ${syncFailureText(e)}`;
   }
 }
 
 /** Pause/resume one email account: per-source exclusion — coordinator
  * rounds skip it while the archive and cursors are kept. */
 async function toggleAccountPause(account: AccountView): Promise<void> {
+  const name = accountTitle(account);
   try {
     await ipc.sourceSetExcluded(account.source_id, !account.excluded);
     await refreshAccounts();
     accountsStatus.textContent = account.excluded
-      ? `${account.label} resumed — auto-sync rounds include it again.`
-      : `${account.label} paused — auto-sync skips it; the archive and cursors are kept.`;
+      ? `${name} resumed — auto-sync rounds include it again.`
+      : `${name} paused — auto-sync skips it; the archive and cursors are kept.`;
   } catch (e) {
-    accountsStatus.textContent = `Could not change ${account.label}: ${e}`;
+    accountsStatus.textContent = `Could not change ${name}: ${e}`;
   }
 }
 
 /** Forget one email account's credentials (keyring + session memory);
  * the archive, cursors, and configuration stay. */
 async function forgetAccountCredentials(account: AccountView): Promise<void> {
+  const name = accountTitle(account);
   try {
     const removed = await ipc.accountForgetCredentials(account.source_id);
     await refreshAccounts();
     accountsStatus.textContent = removed
-      ? `Forgot stored credentials of ${account.label} — the archive stays; enter a password or sign in with Google to sync again.`
-      : `${account.label} had no stored credentials.`;
+      ? `Forgot stored credentials of ${name} — the archive stays; enter a password or sign in with Google to sync again.`
+      : `${name} had no stored credentials.`;
   } catch (e) {
-    accountsStatus.textContent = `Could not forget credentials of ${account.label}: ${e}`;
+    accountsStatus.textContent = `Could not forget credentials of ${name}: ${e}`;
   }
 }
 
@@ -2533,7 +2541,21 @@ autoSyncToggle.addEventListener("change", onAutoSyncToggle);
 autoSyncInterval.addEventListener("change", onAutoSyncIntervalChange);
 embedButton.addEventListener("click", () => void runEmbedJob());
 accountsRefreshButton.addEventListener("click", () => void refreshAccounts());
-accountsAddButton.addEventListener("click", () => workspace.store.setView("sources"));
+accountsAddButton.addEventListener("click", () => {
+  // Navigate with context (§2.6): “Add account…” used to land on Add
+  // source without a word about what to do there. The guidance line
+  // says where the two paths live and where the new account shows up.
+  workspace.store.setView("sources");
+  addSourceGuidance.textContent =
+    "Add it here: pick a file export under “Import files”, or connect a mailbox under “Connect email (IMAP)” — the new account appears in the Accounts panel.";
+  addSourceGuidance.hidden = false;
+});
+// The guidance is arrival context: leaving the view anywhere else has
+// served its purpose — it must not linger on a later, self-directed
+// visit to Add source.
+workspace.store.subscribe(({ view }) => {
+  if (view !== "sources") addSourceGuidance.hidden = true;
+});
 watchButton.addEventListener("click", () => void watchTypedPath());
 watchPathInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") void watchTypedPath();

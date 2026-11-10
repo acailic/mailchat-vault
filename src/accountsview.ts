@@ -49,11 +49,26 @@ export function accountKindLabel(account: AccountView): string {
   return account.kind === "imap" ? "Email (IMAP)" : "Import";
 }
 
-/** The account's headline label: the label itself plus the username for
- * IMAP accounts (the label already carries `imap:host:port:user`, but the
- * username is what the user knows the account by). */
+/** The account's headline label — the identity the user knows the
+ * account by, never the exposed implementation token. An IMAP account
+ * is known by its address and server (`ana@gmail.com · imap.gmail.com`),
+ * not by the stored `imap:host:port:user` connector label; an import
+ * keeps its label (the source name, already user-facing). */
 export function accountTitle(account: AccountView): string {
+  if (account.kind === "imap" && account.imap) {
+    return `${account.imap.username} · ${account.imap.host}`;
+  }
   return account.label;
+}
+
+/** The tooltip of the account title: the full stored label (the
+ * stable source identity) for anyone who needs it — support, bug
+ * reports — without making the raw connector key the name everyone
+ * reads. Empty when the title already is the stored label. */
+export function accountTitleDetail(account: AccountView): string {
+  return accountTitle(account) === account.label
+    ? ""
+    : `Stored source: ${account.label}`;
 }
 
 /** One-line per-account sync state: connected/paused/failed/never-synced,
@@ -180,7 +195,10 @@ export function renderAccounts(
     main.className = "account-main";
     const title = document.createElement("span");
     title.className = "account-label";
-    title.textContent = accountTitle(account);
+    const displayName = accountTitle(account);
+    title.textContent = displayName;
+    const titleDetail = accountTitleDetail(account);
+    if (titleDetail) title.title = titleDetail;
     const kind = document.createElement("span");
     kind.className = "account-kind meta";
     kind.textContent = accountKindLabel(account);
@@ -202,8 +220,8 @@ export function renderAccounts(
       syncNow.type = "button";
       syncNow.className = "account-sync-btn";
       syncNow.textContent = "Sync now";
-      syncNow.title = `Sync ${account.label} now, reusing its stored credentials`;
-      syncNow.setAttribute("aria-label", `Sync account ${account.label} now`);
+      syncNow.title = `Sync ${displayName} now, reusing its stored credentials`;
+      syncNow.setAttribute("aria-label", `Sync account ${displayName} now`);
       syncNow.addEventListener("click", () => opts.onSyncNow(account));
 
       const pause = document.createElement("button");
@@ -211,11 +229,11 @@ export function renderAccounts(
       pause.className = "account-pause-btn";
       pause.textContent = account.excluded ? "Resume" : "Pause";
       pause.title = account.excluded
-        ? `Include ${account.label} in auto-sync rounds again`
-        : `Skip ${account.label} in auto-sync rounds (archive and cursors kept)`;
+        ? `Include ${displayName} in auto-sync rounds again`
+        : `Skip ${displayName} in auto-sync rounds (archive and cursors kept)`;
       pause.setAttribute(
         "aria-label",
-        `${account.excluded ? "Resume" : "Pause"} account ${account.label}`,
+        `${account.excluded ? "Resume" : "Pause"} account ${displayName}`,
       );
       pause.addEventListener("click", () => opts.onTogglePause(account));
 
@@ -223,8 +241,8 @@ export function renderAccounts(
       forget.type = "button";
       forget.className = "account-forget-btn";
       forget.textContent = "Forget credentials";
-      forget.title = `Remove ${account.label}'s stored password and Google sign-in from the OS keyring (the archive stays)`;
-      forget.setAttribute("aria-label", `Forget stored credentials of account ${account.label}`);
+      forget.title = `Remove ${displayName}'s stored password and Google sign-in from the OS keyring (the archive stays)`;
+      forget.setAttribute("aria-label", `Forget stored credentials of account ${displayName}`);
       forget.addEventListener("click", () => opts.onForget(account));
 
       actions.append(syncNow, pause, forget);

@@ -3,7 +3,13 @@
 /// Pure builders like render.ts — every dynamic string goes through
 /// textContent, tested via happy-dom in render2.test.ts.
 
-import { formatSentAt, snippet as truncateBody } from "./format";
+import {
+  conversationConfidenceLabel,
+  formatSentAt,
+  snippet as truncateBody,
+  timeConfidenceDetail,
+  timeConfidenceLabel,
+} from "./format";
 import {
   appendSegments,
 } from "./render";
@@ -342,29 +348,46 @@ export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
 
   const meta = document.createElement("dl");
   meta.className = "meta-table";
-  const metaRow = (label: string, value: string) => {
+  const metaRow = (label: string, value: string, title?: string) => {
     const dt = document.createElement("dt");
     dt.textContent = label;
     const dd = document.createElement("dd");
     dd.textContent = value;
+    if (title) dd.title = title;
     meta.append(dt, dd);
   };
   metaRow("source", detail.source_label);
   metaRow("from", detail.author || "unknown");
   if (detail.subject) metaRow("subject", detail.subject);
   if (detail.conversation_label) {
+    // The pane's unverified flag is the backend's `legacy_unresolved`
+    // grouping surfacing as the anchor-only view; anything else uses the
+    // confidence the detail itself carries.
+    const unverified =
+      ctx.unverified_conversation || detail.conversation_confidence === "legacy_unresolved";
+    const qualifier = unverified
+      ? "unverified grouping"
+      : conversationConfidenceLabel(detail.conversation_confidence);
     metaRow(
       "conversation",
-      ctx.unverified_conversation
-        ? `${detail.conversation_label} (could not be verified)`
-        : detail.conversation_label,
+      qualifier ? `${detail.conversation_label} (${qualifier})` : detail.conversation_label,
+      unverified
+        ? "The source did not confirm these messages belong to one thread — the reading pane shows the selected message only."
+        : qualifier
+          ? "How the archive knows these messages form one conversation."
+          : undefined,
     );
   }
+  const timeLabelText = timeConfidenceLabel(detail.time_confidence);
+  const timeDetailText = timeConfidenceDetail(detail.time_confidence);
   metaRow(
     "date",
     detail.sent_at
-      ? `${formatSentAt(detail.sent_at)} (${detail.time_confidence})`
-      : `unknown (${detail.time_confidence})`,
+      ? `${formatSentAt(detail.sent_at)} (${timeLabelText})`
+      : `unknown (${timeLabelText})`,
+    timeDetailText
+      ? `Time certainty: ${timeLabelText} — ${timeDetailText}`
+      : `Time certainty: ${timeLabelText}`,
   );
   if (detail.original_timestamp) {
     metaRow("original timestamp", detail.original_timestamp);

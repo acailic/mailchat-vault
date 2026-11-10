@@ -280,7 +280,13 @@ describe("copy text", () => {
     expect(text).toContain("Source: mbox (uuid-1)");
     expect(text).toContain("From: Ana <ana@example.com>");
     expect(text).toContain("Subject: Delivery date");
-    expect(text).toContain("Date: 2026-01-02T10:00:00Z (legacy_assumed)");
+    // Confidence reaches the reader as words, never the store's raw
+    // tokens (F08): `legacy_assumed` → "assumed", `legacy_unresolved`
+    // → "unverified grouping".
+    expect(text).toContain("Date: 2026-01-02T10:00:00Z (assumed)");
+    expect(text).toContain("Conversation: thread-a (unverified grouping)");
+    expect(text).not.toContain("legacy_assumed");
+    expect(text).not.toContain("legacy_unresolved");
     expect(text).toContain("Original timestamp: Fri, 02 Jan 2026 11:00:00 +0100 (Europe/Zagreb)");
     expect(text).toContain("The vault arrives Friday.");
     expect(text).toContain("spec.pdf [document] (available, 99 bytes)");
@@ -299,9 +305,28 @@ describe("copy text", () => {
       occurrences: [],
       revisions: [],
     });
-    expect(text).toContain("Date: unknown (missing)");
+    expect(text).toContain("Date: unknown (no time recorded)");
     expect(text).not.toContain("Original timestamp:");
     expect(text).not.toContain("Attachments:");
+  });
+
+  it("an exact time and a verified thread read plainly, an absent qualifier prints no empty fragment", () => {
+    const exact = messageToText({
+      ...detail,
+      time_confidence: "explicit_offset",
+      conversation_confidence: "verified",
+    });
+    expect(exact).toContain("Date: 2026-01-02T10:00:00Z (exact)");
+    expect(exact).toContain("Conversation: thread-a (verified)");
+    expect(exact).not.toContain("explicit_offset");
+
+    const bare = messageToText({ ...detail, conversation_confidence: null });
+    expect(bare).toContain("Conversation: thread-a\n");
+    expect(bare).not.toContain("()");
+
+    // An unrecognized future token surfaces verbatim — never blanked.
+    const future = messageToText({ ...detail, time_confidence: "some_future_token" });
+    expect(future).toContain("(some_future_token)");
   });
 });
 
