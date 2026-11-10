@@ -127,7 +127,9 @@ import {
 import { renderWatchEvents, renderWatchFolders, watchStatusText } from "./watchview";
 import { autoSyncStatusText, isIntervalChoice } from "./schedview";
 import {
+  passwordStoreNote,
   renderAccounts,
+  syncFailureText,
   syncNowRequest,
   type SyncNowRequest,
 } from "./accountsview";
@@ -1651,13 +1653,8 @@ async function oauthLogin(): Promise<void> {
 
 function renderImapSyncOutcome(outcome: ipc.ImapSyncOutcome): void {
   const lines = outcome.folders.map(folderSummaryLine);
-  const note =
-    outcome.saved_to === "memory"
-      ? " Password kept in memory only for this session (no OS keyring available)."
-      : outcome.saved_to === "os_keyring"
-        ? " Password stored in the OS keyring."
-        : "";
-  imapStatus.textContent = lines.join(" · ") + note;
+  const note = passwordStoreNote(outcome.saved_to);
+  imapStatus.textContent = lines.join(" · ") + (note ? ` ${note}` : "");
 }
 
 async function syncImap(): Promise<void> {
@@ -1700,7 +1697,15 @@ async function syncImap(): Promise<void> {
     void refreshDashboard();
     void refreshAccounts();
   } catch (e) {
-    imapStatus.textContent = `Sync failed: ${e}`;
+    // The classified, actionable failure (never a raw errno) — including
+    // where an entered password already lives, because it is saved before
+    // the connection is attempted.
+    imapStatus.textContent = `Sync failed: ${syncFailureText(e)}`;
+    // The failed attempt still registered the account (host/port/user
+    // are kept — the user retypes nothing); refresh so the panel shows
+    // the new row with its error state instead of a stale empty list.
+    void refreshAccounts();
+    await refreshStats();
   } finally {
     imapSyncButton.disabled = false;
   }
@@ -1810,13 +1815,8 @@ async function refreshAccounts(): Promise<void> {
 /** The per-folder outcome of one account sync, as one line. */
 function accountSyncOutcomeLine(account: AccountView, outcome: ipc.ImapSyncOutcome): string {
   const lines = outcome.folders.map(folderSummaryLine);
-  const note =
-    outcome.saved_to === "memory"
-      ? " (password kept in memory only for this session — no OS keyring available)"
-      : outcome.saved_to === "os_keyring"
-        ? " (password stored in the OS keyring)"
-        : "";
-  return `Synced ${account.label}: ${lines.join(" · ") || "no folders"}${note}`;
+  const note = passwordStoreNote(outcome.saved_to);
+  return `Synced ${account.label}: ${lines.join(" · ") || "no folders"}${note ? ` ${note}` : ""}`;
 }
 
 /** Sync one listed account now: `sync_imap` with the account's stored
@@ -1837,7 +1837,12 @@ async function syncAccountNow(account: AccountView): Promise<void> {
     await refreshAccounts();
     accountsStatus.textContent = accountSyncOutcomeLine(account, outcome);
   } catch (e) {
-    accountsStatus.textContent = `Sync failed for ${account.label}: ${e}`;
+    // Classified, actionable text (never a raw errno); the account row
+    // itself carries the persisted error state after this refresh. The
+    // refresh runs first so re-rendering the panel cannot overwrite the
+    // failure line the user must see.
+    await refreshAccounts();
+    accountsStatus.textContent = `Sync failed for ${account.label}: ${syncFailureText(e)}`;
   }
 }
 

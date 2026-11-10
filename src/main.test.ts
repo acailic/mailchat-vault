@@ -2215,6 +2215,70 @@ describe("IMAP sync auth mode", () => {
     );
   });
 
+  it("a failed first sync shows the classified message, the credential note, and refreshes the accounts panel", async () => {
+    await boot();
+    // The failed account as the panel lists it after the failure: the
+    // durable error state recorded by the backend (survives restarts).
+    const FAILED_FIRST_SYNC = {
+      source_id: "inst-imap-failed",
+      kind: "imap",
+      label: "imap:127.0.0.1:59993:first@h.invalid",
+      imap: {
+        host: "127.0.0.1",
+        port: 59993,
+        username: "first@h.invalid",
+        folders: [],
+        has_password: true,
+        has_oauth: false,
+      },
+      message_count: 0,
+      failed_items: 0,
+      state: "disconnected",
+      excluded: false,
+      last_attempt_at: "2026-11-09 23:00:00",
+      last_success_at: null,
+      last_error:
+        "nothing answered at that host and port — check the server address and port (993 for IMAP over TLS)",
+      last_error_at: "2026-11-09 23:00:01",
+    };
+    let syncCalled = false;
+    tauri.handlers.set("accounts_list", () => (syncCalled ? [FAILED_FIRST_SYNC] : []));
+    tauri.handlers.set("sync_imap", () => {
+      syncCalled = true;
+      return Promise.reject({
+        class: "connection_refused",
+        message:
+          "nothing answered at that host and port — check the server address and port (993 for IMAP over TLS)",
+        saved_to: "memory",
+      });
+    });
+    input("#imap-host").value = "127.0.0.1";
+    input("#imap-port").value = "59993";
+    input("#imap-user").value = "first@h.invalid";
+    input("#imap-pass").value = "not-a-real-password";
+    await clickSync();
+
+    await vi.waitFor(() =>
+      expect($("#imap-status").textContent).toContain("Sync failed: nothing answered"),
+    );
+    // No raw errno ever reaches the user.
+    expect($("#imap-status").textContent).not.toContain("os error");
+    // The honest credential rule: the password was saved (session memory)
+    // before the connection was attempted, and a restart clears it.
+    expect($("#imap-status").textContent).toContain(
+      "kept in memory only for this session",
+    );
+    // The panel refreshes after the failure: the account row is there with
+    // its durable error state — not a stale "No accounts yet".
+    await vi.waitFor(() =>
+      expect(
+        $("#accounts-list .account-row[data-source-id='inst-imap-failed'] .account-sync")
+          .textContent,
+      ).toContain("sync failed at 2026-11-09 23:00:01"),
+    );
+    expect(($<HTMLButtonElement>("#imap-sync-btn") as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("switching to Google sign-in hides the password field, shows the sign-in button and a hint", async () => {
     await boot();
     tauri.handlers.set("oauth_status", () => ({ configured: true, signed_in: false }));
@@ -3768,6 +3832,8 @@ const IMAP_ACCOUNT = {
   excluded: false,
   last_attempt_at: "2026-01-02 10:00:00",
   last_success_at: "2026-01-02 10:00:05",
+  last_error: null,
+  last_error_at: null,
 } as const;
 
 const IMPORT_ACCOUNT = {
@@ -3781,6 +3847,8 @@ const IMPORT_ACCOUNT = {
   excluded: false,
   last_attempt_at: null,
   last_success_at: null,
+  last_error: null,
+  last_error_at: null,
 } as const;
 
 const OAUTH_ACCOUNT = {

@@ -11,6 +11,28 @@ and viewable in the app, AI answers run only behind your explicit
 consent, new mail can notify you, and the Linux packages install as
 real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
 
+### Added (first-sync failure loop — resilience)
+
+- **A failed first sync keeps the account** — connecting an email account
+  that fails (wrong host, wrong port, server down) still registers the
+  account with everything you entered: host, port, username, folders.
+  The accounts panel shows the row with what fell, why, and when — and
+  that state survives restarts, so you fix the typo instead of retyping
+  the whole form.
+- **Understandable sync errors** — failures are classified and stated in
+  plain terms instead of raw OS error codes: "the server address could
+  not be resolved (DNS) — check the host name", "nothing answered at
+  that host and port — check the server address and port (993 for IMAP
+  over TLS)", "the server rejected the login — check the username and
+  password (Gmail requires an app password…)", and timeout / no-route /
+  TLS variants. The same classification covers the "Sync now" action and
+  scheduled rounds.
+- **Honest password rules** — the sync form states up front where a
+  password lives (OS keyring when available, session memory otherwise —
+  and that restarting the app then clears it), and every sync result,
+  success or failure, repeats where the entered password was just kept —
+  a failed connection attempt has already saved it.
+
 ### Added (first-source journey)
 
 - **First-run guidance** — an empty archive now presents "Add your

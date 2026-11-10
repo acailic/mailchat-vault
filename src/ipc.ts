@@ -56,6 +56,18 @@ export interface ImapSyncOutcome {
   saved_to: "os_keyring" | "memory" | null;
 }
 
+/** The rejection shape of a failed `sync_imap`: the classified,
+ * actionable message (never a raw errno string), the stable failure
+ * class token, and — when a password was entered — where it was already
+ * saved before the connection was attempted (the honest-credential
+ * rule: a failed sync can still have stored one). Older/degraded paths
+ * may reject with a plain string; use `syncFailureText` to normalize. */
+export interface SyncFailure {
+  class: string;
+  message: string;
+  saved_to: "os_keyring" | "memory" | null;
+}
+
 export interface OAuthLoginOutcome {
   username: string;
   saved_to: "os_keyring" | "memory";

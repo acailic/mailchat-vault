@@ -222,15 +222,34 @@ fn sync_one<T: Read + Write, S: SyncStorage>(
     let instance = sink.ensure_instance(config)?;
     debug_assert_eq!(instance, instance_id, "connector key maps to one instance");
     sink.record_attempt(&instance)?;
-    let mut session = connect(config)?;
-    let folders = config.effective_folders();
-    // One media budget per source round (M4.2): attachment stores dedup
-    // against what earlier folders of the same account already stored.
-    let mut budget = crate::object_store::Capacity::default();
-    let mut media = media_data_dir.map(|dir| crate::media::MailMedia::new(dir, &mut budget));
-    let summaries = imap::sync_session(&mut session, sink, &instance, &folders, media.as_mut());
-    // Best-effort logout; a failed logout must not mask a sync error.
-    let _ = session.logout();
-    sink.record_success(&instance)?;
-    Ok(summaries)
+    let result = (|| -> crate::Result<Vec<imap::FolderSyncSummary>> {
+        let mut session = connect(config)?;
+        let folders = config.effective_folders();
+        // One media budget per source round (M4.2): attachment stores dedup
+        // against what earlier folders of the same account already stored.
+        let mut budget = crate::object_store::Capacity::default();
+        let mut media = media_data_dir.map(|dir| crate::media::MailMedia::new(dir, &mut budget));
+        let summaries = imap::sync_session(&mut session, sink, &instance, &folders, media.as_mut());
+        // Best-effort logout; a failed logout must not mask a sync error.
+        let _ = session.logout();
+        Ok(summaries)
+    })();
+    match result {
+        Ok(summaries) => {
+            // Stamp the success *outside* the recorded span: a failed stamp
+            // write must not classify as a sync failure (the mail did sync).
+            sink.record_success(&instance)?;
+            Ok(summaries)
+        }
+        Err(e) => {
+            // The same account-level error state the manual sync records
+            // (cold review §2.2/#5): best-effort, never masking the error.
+            let failure = imap::SyncFailure::classify(&e);
+            let _ = sink.record_failure(&instance, &failure, &failure.describe(&e));
+            Err(e)
+        }
+    }
 }
+
+#[cfg(test)]
+mod stamp_span_tests;

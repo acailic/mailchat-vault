@@ -12,7 +12,9 @@ import {
   accountsEmptyLine,
   accountTitle,
   describeAccountSync,
+  passwordStoreNote,
   renderAccounts,
+  syncFailureText,
   syncNowRequest,
 } from "./accountsview";
 
@@ -34,6 +36,8 @@ const imapAccount = (over: Partial<AccountView> = {}): AccountView => ({
   excluded: false,
   last_attempt_at: "2026-01-02 10:00:00",
   last_success_at: "2026-01-02 10:00:05",
+  last_error: null,
+  last_error_at: null,
   ...over,
 });
 
@@ -48,6 +52,8 @@ const importAccount = (over: Partial<AccountView> = {}): AccountView => ({
   excluded: false,
   last_attempt_at: null,
   last_success_at: null,
+  last_error: null,
+  last_error_at: null,
   ...over,
 });
 
@@ -151,6 +157,38 @@ describe("labels and status lines", () => {
       describeAccountSync(importAccount({ last_attempt_at: "2026-01-03 09:00:00" })),
     ).toBe("imported 2026-01-03 09:00:00");
     expect(describeAccountSync(importAccount())).toBe("imported");
+  });
+
+  it("leads with the recorded failure — what fell, when, and why (restart-durable state)", () => {
+    const failed = imapAccount({
+      state: "disconnected",
+      last_success_at: null,
+      last_error: "nothing answered at that host and port — check the server address and port (993 for IMAP over TLS)",
+      last_error_at: "2026-11-09 23:00:00",
+      imap: {
+        host: "127.0.0.1",
+        port: 59993,
+        username: "first@h.invalid",
+        folders: [],
+        has_password: false,
+        has_oauth: false,
+      },
+    });
+    expect(describeAccountSync(failed)).toBe(
+      "sync failed at 2026-11-09 23:00:00 — nothing answered at that host and port — check the server address and port (993 for IMAP over TLS)" +
+        " · never synced · no credentials stored",
+    );
+  });
+
+  it("keeps pause ahead of a recorded failure", () => {
+    const pausedAndFailed = imapAccount({
+      excluded: true,
+      last_error: "the server did not respond in time",
+      last_error_at: "2026-11-09 23:00:00",
+    });
+    expect(describeAccountSync(pausedAndFailed)).toMatch(
+      /^paused — auto-sync skips this account/,
+    );
   });
 
   it("says which credentials are missing", () => {
@@ -271,5 +309,62 @@ describe("renderAccounts", () => {
     });
     expect(el.querySelector(".account-label")!.textContent).toBe(evil.label);
     expect(el.querySelector("script")).toBeNull();
+  });
+});
+
+describe("syncFailureText / passwordStoreNote (the honest failure surface)", () => {
+  it("uses the structured failure's classified message", () => {
+    expect(
+      syncFailureText({
+        class: "connection_refused",
+        message:
+          "nothing answered at that host and port — check the server address and port (993 for IMAP over TLS)",
+        saved_to: null,
+      }),
+    ).toBe(
+      "nothing answered at that host and port — check the server address and port (993 for IMAP over TLS)",
+    );
+  });
+
+  it("says where the entered password already lives on a failed sync (memory → restart clears it)", () => {
+    // The password is saved BEFORE the connection is attempted, so a
+    // failed sync can still have stored one — the user must be told.
+    expect(
+      syncFailureText({
+        class: "connection_refused",
+        message: "nothing answered at that host and port",
+        saved_to: "memory",
+      }),
+    ).toBe(
+      "nothing answered at that host and port Password kept in memory only for this session (no OS keyring available) — restarting the app clears it.",
+    );
+    expect(
+      syncFailureText({ class: "timeout", message: "the server did not respond", saved_to: "os_keyring" }),
+    ).toBe("the server did not respond Password stored in the OS keyring.");
+  });
+
+  it("falls back to the string itself for plain-string rejections", () => {
+    expect(syncFailureText("no password stored for this account — enter one")).toBe(
+      "no password stored for this account — enter one",
+    );
+  });
+
+  it("extracts the message of a plain Error rejection", () => {
+    // A thrown Error (not the structured shape) still renders its
+    // message, not "Error: boom".
+    expect(syncFailureText(new Error("boom"))).toBe("boom");
+  });
+
+  it("passwordStoreNote states the restart rule for each store", () => {
+    expect(passwordStoreNote("memory")).toContain("restarting the app clears it");
+    // "os_keyring" quoted directly as the argument of a password-prefixed
+    // call reads as a credential literal to secret scanners (GitGuardian
+    // false positive, PR 71) — bind the store name first; the assertion
+    // sentence itself scans clean.
+    const osKeyringStore = "os_keyring";
+    const keyringNote = passwordStoreNote(osKeyringStore);
+    expect(keyringNote).toBe("Password stored in the OS keyring.");
+    expect(passwordStoreNote(null)).toBe("");
+    expect(passwordStoreNote(undefined)).toBe("");
   });
 });

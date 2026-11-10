@@ -672,6 +672,24 @@ const MIGRATIONS: &[(i64, &str)] = &[
         );
         "#,
     ),
+    (
+        14,
+        // Account-level sync error state (cold review §2.2/#5: the
+        // first-sync failure loop). Additive: `source_instances` gains
+        // the record of the last failed sync — a stable failure class
+        // token (see `imap::SyncFailure::as_str`), the user-facing
+        // message, and when it happened — so the accounts panel can show
+        // *what fell and why* after a restart, with the entered
+        // configuration intact. `record_source_success` clears all three;
+        // the row's `state` stays within its existing CHECK domain
+        // ('disconnected' while an error is recorded, 'connected' after
+        // a success), so no CHECK rebuild is needed.
+        r#"
+        ALTER TABLE source_instances ADD COLUMN last_error_class TEXT;
+        ALTER TABLE source_instances ADD COLUMN last_error TEXT;
+        ALTER TABLE source_instances ADD COLUMN last_error_at TEXT;
+        "#,
+    ),
 ];
 
 /// Rust halves of migrations, for backfill logic that SQL alone cannot
@@ -1055,7 +1073,8 @@ impl Storage {
     pub fn list_source_instances(&self) -> Result<Vec<SourceInstance>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, label, connector_key, config_json, state,
-                    excluded, last_attempt_at, last_success_at, created_at
+                    excluded, last_attempt_at, last_success_at, created_at,
+                    last_error_class, last_error, last_error_at
              FROM source_instances ORDER BY created_at, id",
         )?;
         let rows = stmt
@@ -1077,13 +1096,36 @@ impl Storage {
     }
 
     /// Stamp a successful sync on a source instance and mark it connected
-    /// (`last_success_at`, `state = 'connected'`).
+    /// (`last_success_at`, `state = 'connected'`). A previously recorded
+    /// failure is cleared — the error record is the state of the *last*
+    /// finished attempt.
     pub fn record_source_success(&self, id: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE source_instances
-             SET last_success_at = datetime('now'), state = 'connected'
+             SET last_success_at = datetime('now'), state = 'connected',
+                 last_error_class = NULL, last_error = NULL, last_error_at = NULL
              WHERE id = ?1",
             params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Record a failed sync on a source instance: `state =
+    /// 'disconnected'`, the stable failure class token (see
+    /// [`crate::imap::SyncFailure::as_str`]), the user-facing message, and
+    /// the time — the account-level error state that survives restarts
+    /// (the accounts panel shows what fell and why, with the entered
+    /// configuration intact). A later success clears it (see
+    /// [`Storage::record_source_success`]). Unknown ids are a no-op,
+    /// exactly like attempt stamps: recording must never fail a sync.
+    pub fn record_source_failure(&self, id: &str, class: &str, message: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE source_instances
+             SET state = 'disconnected',
+                 last_error_class = ?2, last_error = ?3,
+                 last_error_at = datetime('now')
+             WHERE id = ?1",
+            params![id, class, message],
         )?;
         Ok(())
     }
@@ -3182,13 +3224,21 @@ pub struct SourceInstance {
     pub connector_key: Option<String>,
     /// Non-secret configuration JSON.
     pub config_json: String,
-    /// `"connected"` after a successful sync, `"disconnected"` otherwise.
+    /// `"connected"` after a successful sync, `"disconnected"`
+    /// otherwise (including while a failure is recorded).
     pub state: String,
     /// Per-source exclusion (M2.3): coordinator rounds skip excluded
     /// sources while keeping their archive and cursors.
     pub excluded: bool,
     pub last_attempt_at: Option<String>,
     pub last_success_at: Option<String>,
+    /// The last failed sync's stable class token (see
+    /// [`crate::imap::SyncFailure::as_str`]); `None` after a success.
+    pub last_error_class: Option<String>,
+    /// The last failed sync's user-facing message; `None` after a success.
+    pub last_error: Option<String>,
+    /// When the last failed sync was recorded.
+    pub last_error_at: Option<String>,
     pub created_at: String,
 }
 
@@ -3204,6 +3254,9 @@ fn source_instance_from_row(row: &Row<'_>) -> rusqlite::Result<SourceInstance> {
         last_attempt_at: row.get(7)?,
         last_success_at: row.get(8)?,
         created_at: row.get(9)?,
+        last_error_class: row.get(10)?,
+        last_error: row.get(11)?,
+        last_error_at: row.get(12)?,
     })
 }
 

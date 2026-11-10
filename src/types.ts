@@ -318,6 +318,11 @@ export interface AccountView {
   excluded: boolean;
   last_attempt_at: string | null;
   last_success_at: string | null;
+  /** The last failed sync's user-facing message — the account-level
+   * error state that survives restarts; `null` after a success. */
+  last_error: string | null;
+  /** When the last failed sync was recorded. */
+  last_error_at: string | null;
 }
 
 
