@@ -360,11 +360,7 @@ export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
   metaRow("from", detail.author || "unknown");
   if (detail.subject) metaRow("subject", detail.subject);
   if (detail.conversation_label) {
-    // The pane's unverified flag is the backend's `legacy_unresolved`
-    // grouping surfacing as the anchor-only view; anything else uses the
-    // confidence the detail itself carries.
-    const unverified =
-      ctx.unverified_conversation || detail.conversation_confidence === "legacy_unresolved";
+    const unverified = ctx.unverified_conversation;
     const qualifier = unverified
       ? "unverified grouping"
       : conversationConfidenceLabel(detail.conversation_confidence);
