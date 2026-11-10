@@ -1819,8 +1819,6 @@ function accountSyncOutcomeLine(account: AccountView, outcome: ipc.ImapSyncOutco
   return `Synced ${account.label}: ${lines.join(" · ") || "no folders"}${note ? ` ${note}` : ""}`;
 }
 
-}
-
 /** Sync one listed account now: `sync_imap` with the account's stored
  * identity and an empty password — the backend resolves the stored
  * keyring credential (or runs the Google sign-in refresh for OAuth). */
