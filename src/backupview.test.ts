@@ -11,14 +11,19 @@ import {
   gateBusy,
   GATE_BUSY_MESSAGE,
   humanBytes,
+  lastBackupLine,
   manifestLine,
+  noBackupLine,
   previewLine,
   recoveryLine,
   restoreDoneLine,
   switchStopped,
   SWITCH_STOPPED_MARKER,
   slotLine,
+  vaultOriginLine,
   type BackupManifest,
+  type LastBackupView,
+  type LastSwitchView,
   type RecoveryStatusView,
   type RestoreOutcomeView,
   type RestorePreviewView,
@@ -152,6 +157,8 @@ describe("recovery lines", () => {
       journal_created_at: null,
       staged_preview: false,
       previous: [],
+      last_switch: null,
+      data_dir: "/home/me/.local/share/mailchat-vault",
     };
     expect(recoveryLine(empty)).toContain("No previous-vault snapshots");
   });
@@ -164,6 +171,8 @@ describe("recovery lines", () => {
       previous: [
         { id: "previous-20261127153045-abc123", created_at: "2026-11-27T15:30:45Z", total_bytes: 1024, files: 3 },
       ],
+      last_switch: null,
+      data_dir: "/home/me/.local/share/mailchat-vault",
     };
     const line = recoveryLine(status);
     expect(line).toContain("1 previous-vault snapshot kept:");
@@ -198,6 +207,67 @@ describe("recovery lines", () => {
         files: 12,
       }),
     ).toBe("2026-11-27T15:30:45Z · 2 MiB · 12 files");
+  });
+});
+
+describe("lastBackupLine (U05: persisted last verified backup)", () => {
+  const record: LastBackupView = {
+    created_at: "2026-11-27T15:30:45Z",
+    path: "/media/vault-2026-11-27.mcbackup",
+    size: 2048,
+    counts: { messages: 1234, sources: 3, media_objects: 57 },
+    still_present: true,
+  };
+
+  it("names when, what, where, and how big — the panel's boot line", () => {
+    const line = lastBackupLine(record);
+    expect(line).toContain("Last verified backup: 2026-11-27T15:30:45Z");
+    expect(line).toContain("1234 messages · 3 sources · 57 media objects");
+    expect(line).toContain("/media/vault-2026-11-27.mcbackup");
+    expect(line).toContain("2 KiB");
+    expect(line).not.toContain("no longer");
+  });
+
+  it("honestly flags a container the user moved or deleted", () => {
+    expect(lastBackupLine({ ...record, still_present: false })).toContain(
+      "the file is no longer at that path",
+    );
+  });
+
+  it("the empty state explains what the line means", () => {
+    expect(noBackupLine()).toContain("No verified backup yet");
+    expect(noBackupLine()).toContain("survives restarts");
+  });
+});
+
+describe("vaultOriginLine (U05: restart after restore/return)", () => {
+  const restored: LastSwitchView = {
+    kind: "restored",
+    archive: "/media/vault-2026-11-27.mcbackup",
+    since: "2026-11-27T15:30:45Z",
+    recovery: "none",
+  };
+
+  it("says what is active, since when, from where", () => {
+    expect(vaultOriginLine(restored)).toBe(
+      "Active vault: switched in from the backup /media/vault-2026-11-27.mcbackup at 2026-11-27T15:30:45Z.",
+    );
+    // A return has no archive — the origin is a previous-vault snapshot.
+    expect(vaultOriginLine({ ...restored, kind: "returned", archive: null })).toBe(
+      "Active vault: switched in from a previous-vault snapshot at 2026-11-27T15:30:45Z.",
+    );
+  });
+
+  it("a rollback resolved at startup says which vault is active", () => {
+    const line = vaultOriginLine({ ...restored, recovery: "rolled_back" });
+    expect(line).toContain("interrupted and rolled back at startup");
+    expect(line).toContain("the vault from before it is active");
+  });
+
+  it("a roll-forward resolved at startup names the switched-in vault", () => {
+    const line = vaultOriginLine({ ...restored, recovery: "rolled_forward" });
+    expect(line).toContain("interrupted and completed at startup");
+    expect(line).toContain("the switched-in vault is active");
   });
 });
 

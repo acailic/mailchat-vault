@@ -81,6 +81,17 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
 
 ### Changed
 
+- **The vault's backup state survives restarts** — Settings →
+  Storage & backup now leads the Settings view (the safety and
+  location questions before provider tuning) and answers them plainly:
+  where the archive lives, when the last verified backup was made
+  (with its size, captured counts, and destination — flagged honestly
+  if the file is no longer there), and, after a restore or a return to
+  a previous vault, exactly what is active now, since when, and from
+  where — including what an interrupted switch's startup recovery
+  decided (rolled back or completed). A synced folder's status line
+  also reports its media counters (stored/deduped/missing attachments)
+  alongside the message counts.
 - **New workspace layout** — the main window is now a three-pane
   workspace (navigation / results / reading) with a consistent design
   system, replacing the single-pane v0 flow.

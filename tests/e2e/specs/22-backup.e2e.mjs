@@ -169,6 +169,19 @@ export async function run(ctx) {
       const leftovers = readdirSync(backupDir).filter((n) => n.includes("-snapshot-"));
       assert.equal(leftovers.length, 0, `no snapshot temp files remain: ${leftovers}`);
 
+      // U05: the finished backup is persisted in the vault's own
+      // metadata — readable over live IPC before any restart, and the
+      // container still sits where it was written.
+      const record = await ipc(browser, "last_backup");
+      assert.ok(record, "the verified backup is recorded");
+      assert.equal(record.path, backupPath, "the record names the destination");
+      assert.equal(
+        record.counts.messages,
+        summary.manifest.counts.messages,
+        "the record carries the manifest counts",
+      );
+      assert.equal(record.still_present, true, "the container is still on disk");
+
       // The Activity panel lists the finished backup job through the real
       // job-event stream.
       log("      [vault-backup] litter checked; opening activity");
@@ -316,6 +329,32 @@ export async function run(ctx) {
       );
       await saveScreenshot(browser, "22-backup-restored-vault-slot.png");
 
+      // U05: the restart UX answers "what is active now, since when,
+      // from where" and where the archive lives — and the restored
+      // vault honestly reports no last verified backup of its own (the
+      // record rode the replaced vault.db; the container's snapshot
+      // predates the record of itself).
+      await ui.waitForText(
+        browser,
+        "#vault-origin",
+        (t) => t.startsWith("Active vault: switched in from the backup") && t.includes(backupPath),
+        { timeoutMsg: "the restart origin line never named the restored-from backup" },
+      );
+      await ui.waitForText(
+        browser,
+        "#vault-location",
+        (t) => t.startsWith("Archive location: "),
+        { timeoutMsg: "the archive location line never rendered" },
+      );
+      await ui.waitForText(
+        browser,
+        "#backup-status",
+        (t) => t.includes("No verified backup yet"),
+        { timeoutMsg: "the restored vault never showed its honest empty backup state" },
+      );
+      const restartedRecord = await ipc(browser, "last_backup");
+      assert.equal(restartedRecord, null, "the restored vault carries no backup record");
+
       // Return to the previous vault through the real switch path.
       const slots = await ipc(browser, "recovery_status");
       assert.equal(slots.previous.length, 1, "the restored boot sees one slot");
@@ -354,6 +393,17 @@ export async function run(ctx) {
       assert.ok(
         after.previous[0].id !== returnedSlotId,
         "the remaining slot is the replaced restored vault, not the consumed one",
+      );
+      // U05: after the return-and-restart, the origin line names the
+      // previous-vault snapshot the active vault came from.
+      assert.equal(after.last_switch.kind, "returned", "the journal's origin is the return");
+      assert.equal(after.last_switch.recovery, "none", "the return completed before the restart");
+      await openBackupPanel(browser, ui);
+      await ui.waitForText(
+        browser,
+        "#vault-origin",
+        (t) => t.startsWith("Active vault: switched in from a previous-vault snapshot"),
+        { timeoutMsg: "the origin line never named the returned-to snapshot" },
       );
     }, { keepData: true });
 

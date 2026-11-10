@@ -649,6 +649,19 @@ fn imap_mail_attachments_are_stored_and_linked() {
     );
     let _ = s.logout();
     assert_eq!(summaries[0].inserted, 1);
+    // U05 (media-consolidation follow-up): the folder summary carries
+    // the media pass's counters, filled from the shared handle's delta
+    // for this folder — they reach the sync status line instead of
+    // dropping with the handle.
+    assert_eq!(
+        summaries[0].media,
+        Some(vimap::FolderMediaSummary {
+            stored: 1,
+            deduped: 0,
+            missing: 0,
+        }),
+        "the attachment the pass stored is reported on the folder"
+    );
 
     // The attachment landed in the vault's store, hash-named.
     let store = data_dir.join("media");
@@ -730,10 +743,46 @@ fn imap_mail_attachments_are_stored_and_linked() {
     let _ = s2.logout();
     assert_eq!(summaries[0].inserted, 1, "the new mail");
     assert_eq!(summaries[0].skipped, 0);
+    // The dedup is the folder's own media counter too: same bytes,
+    // already in the store, reported instead of silently absorbed.
+    assert_eq!(
+        summaries[0].media,
+        Some(vimap::FolderMediaSummary {
+            stored: 0,
+            deduped: 1,
+            missing: 0,
+        })
+    );
     assert_eq!(
         std::fs::read_dir(&store).unwrap().count(),
         1,
         "identical attachment bytes stay one object"
     );
     assert_eq!(media2.deduped, 1, "the re-sent attachment deduped");
+}
+
+#[test]
+fn folder_media_counters_are_none_without_a_media_pass() {
+    // A sync that runs without a media data dir (media: None) reports
+    // no media counters — `None` means "the pass did not run", not
+    // "it ran and stored nothing".
+    let plain = String::from(
+        "From: D <d@example.com>\r\n\
+         To: E <e@example.com>\r\n\
+         Subject: bez priloga\r\n\
+         Message-ID: <no-attach@example.com>\r\n\
+         Date: Sat, 1 Nov 2026 13:00:00 +0100\r\n\
+         \r\n\
+         telo\r\n",
+    )
+    .into_bytes();
+    let server = MockImap::start();
+    server.set_mailbox("INBOX", MockMailbox::new(9, vec![plain]));
+    let storage = Storage::open_in_memory().unwrap();
+    let instance = instance(&storage);
+    let mut s = session(&server);
+    let summaries = vimap::sync_session(&mut s, &storage, &instance, &["INBOX".to_string()], None);
+    let _ = s.logout();
+    assert_eq!(summaries[0].inserted, 1);
+    assert_eq!(summaries[0].media, None);
 }

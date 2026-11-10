@@ -3997,3 +3997,156 @@ describe("accounts panel", () => {
     await vi.waitFor(() => expect(listed).toBeGreaterThan(before));
   });
 });
+
+// Storage & backup panel (U05: persisted last verified backup + the
+// restart-after-switch origin line + the section's first-class spot)
+// ---------------------------------------------------------------------------
+
+describe("storage & backup panel (U05)", () => {
+  it("opens Settings on Storage & backup first — before the provider controls", async () => {
+    // F10's targeted half: the safety/location questions lead, provider
+    // configuration follows. (No full U08 reorg — the sections keep
+    // their shapes, only the order changes.)
+    await boot();
+    const sections = [...win.document.querySelectorAll("#view-settings > section")].map(
+      (s) => s.id,
+    );
+    expect(sections[0]).toBe("backup");
+    expect(sections.indexOf("settings")).toBeGreaterThan(0);
+  });
+
+  it("shows the persisted last verified backup when Settings opens", async () => {
+    tauri.handlers.set("last_backup", () => ({
+      created_at: "2026-11-27T15:30:45Z",
+      path: "/media/vault-2026-11-27.mcbackup",
+      size: 2048,
+      counts: { messages: 1234, sources: 3, media_objects: 57 },
+      still_present: true,
+    }));
+    await boot();
+    $(".nav-view-btn[data-view-target='settings']").click();
+    await vi.waitFor(() =>
+      expect($("#backup-status").textContent).toContain("Last verified backup: 2026-11-27T15:30:45Z"),
+    );
+    expect($("#backup-status").textContent).toContain("/media/vault-2026-11-27.mcbackup");
+  });
+
+  it("the empty state explains what the last-backup line means", async () => {
+    tauri.handlers.set("last_backup", () => null);
+    await boot();
+    $(".nav-view-btn[data-view-target='settings']").click();
+    await vi.waitFor(() =>
+      expect($("#backup-status").textContent).toContain("No verified backup yet"),
+    );
+  });
+
+  it("a flag is raised when the recorded container is no longer on disk", async () => {
+    tauri.handlers.set("last_backup", () => ({
+      created_at: "2026-11-27T15:30:45Z",
+      path: "/media/moved-away.mcbackup",
+      size: 2048,
+      counts: { messages: 1, sources: 1, media_objects: 0 },
+      still_present: false,
+    }));
+    await boot();
+    $(".nav-view-btn[data-view-target='settings']").click();
+    await vi.waitFor(() =>
+      expect($("#backup-status").textContent).toContain("the file is no longer at that path"),
+    );
+  });
+
+  it("says what the active vault is, since when, from where, and where it lives", async () => {
+    tauri.handlers.set("recovery_status", () => ({
+      journal_state: "completed",
+      journal_created_at: "2026-11-27T15:30:45Z",
+      staged_preview: false,
+      previous: [],
+      last_switch: {
+        kind: "restored",
+        archive: "/media/vault-2026-11-27.mcbackup",
+        since: "2026-11-27T15:30:45Z",
+        recovery: "none",
+      },
+      data_dir: "/home/me/.local/share/mailchat-vault",
+    }));
+    await boot();
+    $(".nav-view-btn[data-view-target='settings']").click();
+    await vi.waitFor(() =>
+      expect($("#vault-origin").textContent).toBe(
+        "Active vault: switched in from the backup /media/vault-2026-11-27.mcbackup at 2026-11-27T15:30:45Z.",
+      ),
+    );
+    expect($("#vault-location").textContent).toBe(
+      "Archive location: /home/me/.local/share/mailchat-vault",
+    );
+  });
+
+  it("a never-switched vault shows no origin line, just the location", async () => {
+    tauri.handlers.set("recovery_status", () => ({
+      journal_state: null,
+      journal_created_at: null,
+      staged_preview: false,
+      previous: [],
+      last_switch: null,
+      data_dir: "/home/me/.local/share/mailchat-vault",
+    }));
+    await boot();
+    $(".nav-view-btn[data-view-target='settings']").click();
+    await vi.waitFor(() =>
+      expect($("#vault-location").textContent).toContain("Archive location:"),
+    );
+    expect($("#vault-origin").textContent).toBe("");
+  });
+
+  it("an interrupted switch resolved by startup recovery is said out loud", async () => {
+    tauri.handlers.set("recovery_status", () => ({
+      journal_state: "completed",
+      journal_created_at: "2026-11-27T15:30:45Z",
+      staged_preview: false,
+      previous: [],
+      last_switch: {
+        kind: "restored",
+        archive: "/media/vault-2026-11-27.mcbackup",
+        since: "2026-11-27T15:30:45Z",
+        recovery: "rolled_back",
+      },
+      data_dir: "/home/me/.local/share/mailchat-vault",
+    }));
+    await boot();
+    $(".nav-view-btn[data-view-target='settings']").click();
+    await vi.waitFor(() =>
+      expect($("#vault-origin").textContent).toContain("interrupted and rolled back at startup"),
+    );
+  });
+
+  it("a sync with attachments renders the folder's media counters", async () => {
+    await boot();
+    tauri.handlers.set("sync_imap", () => ({
+      folders: [
+        {
+          folder: "INBOX",
+          uidvalidity: 7,
+          reset: false,
+          seen: 2,
+          inserted: 2,
+          skipped: 0,
+          failed: 0,
+          resolved_failures: 0,
+          conflicting_revisions: 0,
+          error: null,
+          media: { stored: 2, deduped: 1, missing: 0 },
+        },
+      ],
+      saved_to: null,
+    }));
+    input("#imap-host").value = "imap.example.com";
+    input("#imap-user").value = "a@b.c";
+    input("#imap-pass").value = "pw";
+    await clickSync();
+    await vi.waitFor(() =>
+      expect($("#imap-status").textContent).toContain(
+        "INBOX: 2 new, 0 already present, media: 2 stored, 1 deduped",
+      ),
+    );
+  });
+});

@@ -1254,6 +1254,7 @@ fn interrupted_return_recovery_keeps_the_return_target_slot() {
         recovery,
         SwitchRecovery::RolledBack {
             previous_slot: staged.file_name().unwrap().to_string_lossy().into_owned(),
+            journal_created_at: "2026-01-01T00:00:00Z".to_string(),
         }
     );
     // The active vault is the displaced one, whole (the "new" vault).
@@ -1476,4 +1477,129 @@ fn backups_never_carry_credential_material() {
             "no key material in settings: {text}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// U05: the persisted "last verified backup" + the restart-after-switch
+// origin line
+// ---------------------------------------------------------------------------
+
+#[test]
+fn last_verified_backup_record_round_trips_and_overwrites() {
+    let sb = Sandbox::new("last-backup");
+    sb.seed_vault("lb", 3);
+
+    // Before any backup: no record, no error.
+    assert!(sb
+        .with_pool(|s| backup::last_backup_record(s).unwrap())
+        .is_none());
+
+    // The app layer records the finished job through the pool's write
+    // queue, exactly as run_backup_create does after "backup verified".
+    let summary = sb.backup("lb.mcbackup");
+    let recorded = summary.clone();
+    sb.with_pool(move |s| backup::record_last_backup(s, &recorded))
+        .unwrap();
+    let record = sb
+        .with_pool(|s| backup::last_backup_record(s).unwrap())
+        .expect("the finished backup is recorded");
+    assert_eq!(record.path, summary.path);
+    assert_eq!(record.size, summary.size);
+    assert_eq!(record.counts, summary.manifest.counts);
+    assert_eq!(record.created_at, summary.manifest.created_at);
+    assert_eq!(record.schema_version, summary.manifest.schema_version);
+
+    // A second finished backup overwrites: one last-backup, not a history.
+    let second = sb.backup("lb-2.mcbackup");
+    let recorded = second.clone();
+    sb.with_pool(move |s| backup::record_last_backup(s, &recorded))
+        .unwrap();
+    let record = sb
+        .with_pool(|s| backup::last_backup_record(s).unwrap())
+        .unwrap();
+    assert_eq!(record.path, second.path, "the newest backup wins");
+
+    // A malformed record must not take the panel down: the tolerant read
+    // reports none (the next finished backup overwrites the junk).
+    sb.with_pool(|s| s.set_archive_meta(backup::LAST_BACKUP_KEY, "not json"))
+        .unwrap();
+    assert!(sb
+        .with_pool(|s| backup::last_backup_record(s).unwrap())
+        .is_none());
+}
+
+#[test]
+fn a_restore_replaces_the_last_backup_record_with_the_restored_vaults_own() {
+    // The record rides vault.db, and the container's snapshot predates
+    // the record of itself — so a vault restored from its own backup
+    // reports *no* last verified backup: honest "the current vault has
+    // none of its own" instead of the replaced vault's stale claim.
+    let sb = Sandbox::new("restore-record");
+    sb.seed_vault("rr", 3);
+    let summary = sb.backup("rr.mcbackup");
+    let recorded = summary.clone();
+    sb.with_pool(move |s| backup::record_last_backup(s, &recorded))
+        .unwrap();
+    assert!(sb
+        .with_pool(|s| backup::last_backup_record(s).unwrap())
+        .is_some());
+
+    let fp = sb.fingerprint();
+    backup::restore_backup(
+        &sb.data_dir(),
+        &summary.path,
+        &fp,
+        &no_progress,
+        &RestoreOptions::default(),
+        &keyring_has_everything,
+    )
+    .unwrap();
+    assert!(
+        sb.with_pool(|s| backup::last_backup_record(s).unwrap())
+            .is_none(),
+        "the restored vault carries its own (empty) backup history"
+    );
+}
+
+#[test]
+fn recovery_status_reports_the_active_vaults_origin() {
+    let sb = Sandbox::new("origin");
+    sb.seed_vault("og", 2);
+
+    // No switch ever ran: no origin to report.
+    let status = backup::recovery_status(&sb.data_dir()).unwrap();
+    assert!(status.last_switch.is_none());
+
+    // A committed restore reports where the active vault came from.
+    let sb2 = Sandbox::new("origin-after");
+    sb2.seed_vault("oga", 1);
+    let after = sb2.backup("oga.mcbackup");
+    let fp = sb.fingerprint();
+    backup::restore_backup(
+        &sb.data_dir(),
+        &after.path,
+        &fp,
+        &no_progress,
+        &RestoreOptions::default(),
+        &keyring_has_everything,
+    )
+    .unwrap();
+    let status = backup::recovery_status(&sb.data_dir()).unwrap();
+    let origin = status
+        .last_switch
+        .expect("a completed restore reports its origin");
+    assert!(matches!(origin.kind, backup::SwitchOriginKind::Restored));
+    assert_eq!(origin.archive.as_deref(), Some(after.path.as_path()));
+    assert!(!origin.created_at.is_empty());
+
+    // A return flips the origin to the previous-slot kind, archive-less.
+    let slot = status.previous[0].id.clone();
+    backup::return_to_previous_vault(&sb.data_dir(), &slot, &no_progress, &keyring_has_everything)
+        .unwrap();
+    let status = backup::recovery_status(&sb.data_dir()).unwrap();
+    let origin = status
+        .last_switch
+        .expect("a completed return reports its origin");
+    assert!(matches!(origin.kind, backup::SwitchOriginKind::Returned));
+    assert!(origin.archive.is_none());
 }

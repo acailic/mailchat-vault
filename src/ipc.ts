@@ -42,17 +42,11 @@ import type {
 // Wire types that only the IPC layer needs
 // ---------------------------------------------------------------------------
 
-export interface FolderSyncSummary {
-  folder: string;
-  uidvalidity: number;
-  reset: boolean;
-  seen: number;
-  inserted: number;
-  skipped: number;
-  failed: number;
-  /** Why the folder failed to sync; null on success. */
-  error: string | null;
-}
+// `FolderSyncSummary` (the per-folder sync outcome) is mirrored once,
+// fully, in types.ts — this boundary re-exports it so `imap_sync`'s
+// wire shape and the coordinator's share one definition.
+export type { FolderSyncSummary } from "./types";
+import type { FolderSyncSummary } from "./types";
 
 export interface ImapSyncOutcome {
   folders: FolderSyncSummary[];
@@ -195,10 +189,12 @@ export function mediaReconcile(): Promise<ReconcileReportView> {
 export type {
   BackupManifest,
   BackupSummaryView,
+  LastBackupView,
   RecoveryStatusView,
   RestoreOutcomeView,
   RestorePreviewView,
 } from "./backupview";
+import type { LastBackupView } from "./backupview";
 
 /** Quick manifest read of a picked container (pre-restore summary). */
 export function backupInspect(archive: string): Promise<BackupManifest> {
@@ -214,6 +210,12 @@ export function restoreCommit(previewId: string): Promise<RestoreOutcomeView> {
 /** The recovery state: journal, staged preview, previous-vault slots. */
 export function recoveryStatus(): Promise<RecoveryStatusView> {
   return invoke<RecoveryStatusView>("recovery_status");
+}
+
+/** The persisted "last verified backup" of the personal vault
+ *  (read from the vault's own metadata; survives restarts). */
+export function lastBackup(): Promise<LastBackupView | null> {
+  return invoke<LastBackupView | null>("last_backup");
 }
 
 /** Explicitly forget one previous-vault slot. */
