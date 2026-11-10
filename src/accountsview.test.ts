@@ -11,6 +11,7 @@ import {
   accountStatsLine,
   accountsEmptyLine,
   accountTitle,
+  accountTitleDetail,
   describeAccountSync,
   passwordStoreNote,
   renderAccounts,
@@ -119,6 +120,24 @@ describe("labels and status lines", () => {
 
   it("titles rows with the account label", () => {
     expect(accountTitle(importAccount())).toBe("mbox:archive.mbox");
+  });
+
+  it("titles an IMAP account by its address and server, never the raw connector label", () => {
+    // §2.6: the stored `imap:host:port:user` label is an implementation
+    // token; the row is titled by the identity the user knows.
+    expect(accountTitle(imapAccount())).toBe("ana@gmail.com · imap.gmail.com");
+    // The full stored label stays reachable as the title's tooltip for
+    // support and bug reports — progressive disclosure, not the name.
+    expect(accountTitleDetail(imapAccount())).toBe(
+      "Stored source: imap:imap.gmail.com:993:ana@gmail.com",
+    );
+    // An IMAP-shaped row without a parsed identity falls back to the
+    // label rather than crashing.
+    expect(accountTitle(imapAccount({ imap: null }))).toBe(
+      "imap:imap.gmail.com:993:ana@gmail.com",
+    );
+    // An import's label already is its user-facing name: no tooltip.
+    expect(accountTitleDetail(importAccount())).toBe("");
   });
 
   it("describes a connected, synced email account with its credentials", () => {
@@ -245,8 +264,11 @@ describe("renderAccounts", () => {
     expect(rows.length).toBe(2);
     expect((rows[0] as HTMLElement).dataset.sourceId).toBe("inst-imap-1");
     expect(rows[0].querySelector(".account-label")!.textContent).toBe(
-      "imap:imap.gmail.com:993:ana@gmail.com",
+      "ana@gmail.com · imap.gmail.com",
     );
+    expect(
+      (rows[0].querySelector(".account-label") as HTMLElement).title,
+    ).toBe("Stored source: imap:imap.gmail.com:993:ana@gmail.com");
     expect(rows[0].querySelector(".account-kind")!.textContent).toBe("Email (IMAP)");
     expect(rows[0].querySelector(".account-stats")!.textContent).toBe("1,234 messages");
     expect(rows[0].querySelector(".account-sync")!.textContent).toContain(
@@ -307,7 +329,11 @@ describe("renderAccounts", () => {
       onTogglePause: () => {},
       onForget: () => {},
     });
-    expect(el.querySelector(".account-label")!.textContent).toBe(evil.label);
+    // The stored label is disclosed only as the title's tooltip, and
+    // still lands as an attribute value — never markup.
+    expect((el.querySelector(".account-label") as HTMLElement).title).toBe(
+      `Stored source: ${evil.label}`,
+    );
     expect(el.querySelector("script")).toBeNull();
   });
 });

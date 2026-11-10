@@ -15,6 +15,10 @@ import type {
   SearchArchiveRequest,
   SearchSort,
 } from "./v2types";
+import {
+  conversationConfidenceLabel,
+  timeConfidenceLabel,
+} from "./format";
 
 // ---------------------------------------------------------------------------
 // Filter model + chips
@@ -306,16 +310,19 @@ export function messageToText(detail: MessageDetail): string {
   lines.push(`=== Message ${detail.id} ===`);
   lines.push(`Source: ${detail.source_label} (${detail.source_id})`);
   if (detail.conversation_label) {
+    const qualifier = conversationConfidenceLabel(detail.conversation_confidence);
     lines.push(
-      `Conversation: ${detail.conversation_label} (${detail.conversation_confidence ?? ""})`,
+      qualifier
+        ? `Conversation: ${detail.conversation_label} (${qualifier})`
+        : `Conversation: ${detail.conversation_label}`,
     );
   }
   lines.push(`From: ${detail.author}`);
   if (detail.subject) lines.push(`Subject: ${detail.subject}`);
   lines.push(
     detail.sent_at
-      ? `Date: ${detail.sent_at} (${detail.time_confidence})`
-      : `Date: unknown (${detail.time_confidence})`,
+      ? `Date: ${detail.sent_at} (${timeConfidenceLabel(detail.time_confidence)})`
+      : `Date: unknown (${timeConfidenceLabel(detail.time_confidence)})`,
   );
   if (detail.original_timestamp) {
     const tz = detail.timezone || "timezone unknown";

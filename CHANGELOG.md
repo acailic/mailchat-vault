@@ -91,7 +91,22 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
   counts, last-sync stamps, pause state, and which credentials are
   stored (never the secrets themselves). Email accounts can be synced,
   paused, and have their keyring credentials forgotten right from the
-  row, while the archive stays untouched.
+  row, while the archive stays untouched. Email accounts are named by
+  the identity you know them by (address · server) instead of the raw
+  `imap:host:port:user` token, which stays reachable as a tooltip, and
+  every panel status line uses the same name.
+- **Readable certainty labels in the reading pane** — raw internal
+  tokens like `explicit_offset` and `legacy_unresolved` no longer reach
+  the screen: the date row says `(exact)`, `(confirmed)`, `(assumed)`,
+  `(unresolved)` or `(no time recorded)` with a one-sentence tooltip
+  explaining what the archive actually knows, an unverified conversation
+  row reads `(unverified grouping)`, and Copy message / text exports
+  carry the same wording on both the TypeScript and Rust sides.
+- **“Add account…” arrives with context** — the Accounts panel's
+  “Add account…” button no longer dead-ends on the Add source page: a
+  status line says where the import and connect-email paths live and
+  that the new account appears back in the Accounts panel (it retires
+  once you navigate away).
 - **Headless `--version` / `--help`** — the packaged binary answers
   `--version`/`-V` and `--help`/`-h` and exits before touching any
   GUI, so installed copies can be smoke-tested without a display.

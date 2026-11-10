@@ -1,12 +1,54 @@
 import { describe, expect, it } from "vitest";
 import {
+  conversationConfidenceLabel,
   folderSummaryLine,
   formatSentAt,
   humanSize,
   mediaSummaryPart,
   snippet,
+  timeConfidenceDetail,
+  timeConfidenceLabel,
 } from "./format";
 import type { FolderSyncSummary } from "./types";
+
+describe("confidence labels (F08: tokens never reach the user)", () => {
+  it("maps every canonical time-confidence token to a user word", () => {
+    expect(timeConfidenceLabel("explicit_offset")).toBe("exact");
+    expect(timeConfidenceLabel("user_confirmed")).toBe("confirmed");
+    expect(timeConfidenceLabel("legacy_assumed")).toBe("assumed");
+    expect(timeConfidenceLabel("unresolved")).toBe("unresolved");
+    expect(timeConfidenceLabel("missing")).toBe("no time recorded");
+  });
+
+  it("passes unknown future tokens through verbatim — never blanked", () => {
+    expect(timeConfidenceLabel("some_future_token")).toBe("some_future_token");
+    expect(timeConfidenceLabel("")).toBe("");
+  });
+
+  it("explains each token in one sentence (the tooltip depth)", () => {
+    for (const token of [
+      "explicit_offset",
+      "user_confirmed",
+      "legacy_assumed",
+      "unresolved",
+      "missing",
+    ]) {
+      expect(timeConfidenceDetail(token).length).toBeGreaterThan(10);
+      expect(timeConfidenceDetail(token)).toMatch(/[.)]$/);
+    }
+    expect(timeConfidenceDetail("some_future_token")).toBe("");
+  });
+
+  it("maps conversation confidence and never prints an empty qualifier", () => {
+    expect(conversationConfidenceLabel("verified")).toBe("verified");
+    expect(conversationConfidenceLabel("user_linked")).toBe("user-linked");
+    expect(conversationConfidenceLabel("legacy_unresolved")).toBe("unverified grouping");
+    expect(conversationConfidenceLabel(null)).toBe("");
+    expect(conversationConfidenceLabel(undefined)).toBe("");
+    expect(conversationConfidenceLabel("")).toBe("");
+    expect(conversationConfidenceLabel("some_future_token")).toBe("some_future_token");
+  });
+});
 
 describe("formatSentAt", () => {
   it("renders a compact local timestamp", () => {

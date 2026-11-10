@@ -1169,6 +1169,35 @@ pub struct SelectionExportSummary {
     pub missing: u64,
 }
 
+/// The user-facing label of one time-confidence token: a short word (or
+/// two) that says how much to trust the shown time. The raw store/wire
+/// token never reaches user-readable text; an unknown future token
+/// surfaces verbatim — never blanked, never guessed. Mirrors the
+/// TypeScript `timeConfidenceLabel` (src/format.ts).
+fn time_confidence_label(confidence: &str) -> &str {
+    match confidence {
+        "explicit_offset" => "exact",
+        "user_confirmed" => "confirmed",
+        "legacy_assumed" => "assumed",
+        "unresolved" => "unresolved",
+        "missing" => "no time recorded",
+        other => other,
+    }
+}
+
+/// The user-facing label of one conversation-confidence token; empty for
+/// an absent token (no empty "()" fragment ever prints). Mirrors the
+/// TypeScript `conversationConfidenceLabel` (src/format.ts).
+fn conversation_confidence_label(confidence: Option<&str>) -> &str {
+    match confidence {
+        Some("verified") => "verified",
+        Some("user_linked") => "user-linked",
+        Some("legacy_unresolved") => "unverified grouping",
+        Some(other) => other,
+        None => "",
+    }
+}
+
 /// Render one message detail as readable UTF-8 text with provenance
 /// (what “Copy message” puts on the clipboard, too).
 pub fn detail_as_text(detail: &MessageDetail) -> String {
@@ -1181,19 +1210,24 @@ pub fn detail_as_text(detail: &MessageDetail) -> String {
         detail.source_label, detail.source_id
     );
     if let Some(label) = &detail.conversation_label {
-        let confidence = detail.conversation_confidence.as_deref().unwrap_or("");
-        let _ = writeln!(out, "Conversation: {label} ({confidence})");
+        let qualifier = conversation_confidence_label(detail.conversation_confidence.as_deref());
+        if qualifier.is_empty() {
+            let _ = writeln!(out, "Conversation: {label}");
+        } else {
+            let _ = writeln!(out, "Conversation: {label} ({qualifier})");
+        }
     }
     let _ = writeln!(out, "From: {}", detail.author);
     if let Some(subject) = &detail.subject {
         let _ = writeln!(out, "Subject: {subject}");
     }
+    let confidence = time_confidence_label(&detail.time_confidence);
     match &detail.sent_at {
         Some(at) => {
-            let _ = writeln!(out, "Date: {at} ({})", detail.time_confidence);
+            let _ = writeln!(out, "Date: {at} ({confidence})");
         }
         None => {
-            let _ = writeln!(out, "Date: unknown ({})", detail.time_confidence);
+            let _ = writeln!(out, "Date: unknown ({confidence})");
         }
     }
     if !detail.original_timestamp.is_empty() {
@@ -1920,6 +1954,58 @@ mod tests {
         assert_eq!(parsed[0].body, "body of a");
         assert_eq!(parsed[0].occurrences.len(), 1);
         assert!(SelectionFormat::parse("csv").is_err());
+    }
+
+    #[test]
+    fn detail_text_speaks_confidence_in_user_words() {
+        // F08 discipline: the store's confidence tokens never reach a
+        // user-readable surface — the copy/export text (this function,
+        // mirrored by the TS `messageToText`) translates every known
+        // token, passes unknown ones through verbatim, and never prints
+        // an empty "()" for an absent conversation qualifier.
+        let s = Storage::open_in_memory().unwrap();
+        let mut msg = NewMessage::new(
+            "demo",
+            "m1",
+            "Ana",
+            "2026-01-01T10:00:00Z",
+            "legacy grouped body",
+        );
+        msg.channel = "chat".into();
+        msg.chat_id = "oldgroup".into(); // legacy grouping, never verified
+        s.insert_message(&msg).unwrap();
+        let detail = s.message_detail(1).unwrap().unwrap();
+        let text = detail_as_text(&detail);
+        assert!(
+            text.contains("Conversation: oldgroup (unverified grouping)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Date: 2026-01-01T10:00:00Z (assumed)"),
+            "{text}"
+        );
+        assert!(!text.contains("legacy_assumed"), "{text}");
+        assert!(!text.contains("legacy_unresolved"), "{text}");
+
+        let mut exact = detail.clone();
+        exact.time_confidence = "explicit_offset".into();
+        exact.conversation_confidence = Some("verified".into());
+        let text = detail_as_text(&exact);
+        assert!(
+            text.contains("Date: 2026-01-01T10:00:00Z (exact)"),
+            "{text}"
+        );
+        assert!(text.contains("Conversation: oldgroup (verified)"), "{text}");
+
+        // An unknown future token and an absent conversation qualifier
+        // never crash, never blank, never print "()".
+        let mut future = detail.clone();
+        future.time_confidence = "some_future_token".into();
+        future.conversation_confidence = None;
+        let text = detail_as_text(&future);
+        assert!(text.contains("(some_future_token)"), "{text}");
+        assert!(text.contains("Conversation: oldgroup\n"), "{text}");
+        assert!(!text.contains("()"), "{text}");
     }
 }
 

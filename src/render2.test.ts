@@ -300,7 +300,15 @@ describe("reading pane", () => {
     expect(table).toContain("mbox");
     expect(table).toContain("e2e-m-3");
     expect(table).toContain("Delivery date");
-    expect(table).toContain("(legacy_assumed)");
+    // F08: confidence reads as a word, never the raw store token, and
+    // the tooltip carries the one-sentence explanation.
+    expect(table).toContain("(assumed)");
+    expect(table).not.toContain("legacy_assumed");
+    expect(table).toContain("thread-a (verified)");
+    const dateCell = [...card.querySelectorAll(".meta-table dd")].find((dd) =>
+      dd.textContent?.includes("(assumed)"),
+    ) as HTMLElement;
+    expect(dateCell.title).toContain("Time certainty: assumed — ");
     expect(card.querySelectorAll("ol.thread li.thread-row").length).toBe(3);
     expect(card.querySelectorAll("li.thread-row.current").length).toBe(1);
   });
@@ -327,6 +335,8 @@ describe("reading pane", () => {
     const unverified = { ...ctx, unverified_conversation: true, before: [], after: [] };
     const el = render({ ctx: unverified, entries: contextEntries(unverified) });
     expect(el.textContent).toContain("Conversation could not be verified");
+    // The conversation row itself says why in user terms.
+    expect(el.textContent).toContain("thread-a (unverified grouping)");
     expect(el.querySelectorAll("li.thread-row").length).toBe(1);
   });
 

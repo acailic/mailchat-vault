@@ -140,7 +140,7 @@ export async function run(ctx) {
       "no password stored for this account",
       { timeoutMsg: "the sync-now guidance never surfaced" },
     );
-    assert.includes(syncErr, "Sync failed for imap:mail.test:993:credless@h.invalid", "the failure names the account");
+    assert.includes(syncErr, "Sync failed for credless@h.invalid · mail.test", "the failure names the account the way the user knows it (address · server, §2.6)");
     await browser.execute(() =>
       document.querySelector("#accounts-status")?.scrollIntoView({ block: "center" }),
     );
