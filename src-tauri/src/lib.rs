@@ -805,10 +805,11 @@ fn startup_recovery_word(
 #[tauri::command]
 async fn recovery_status(state: State<'_, AppState>) -> Result<RecoveryStatusView, String> {
     let data_dir = state.data_dir.clone();
-    let status = tauri::async_runtime::spawn_blocking(move || backup::recovery_status(&data_dir))
-        .await
-        .map_err(|e| format!("status task failed: {e}"))?
-        .map_err(|e| e.to_string())?;
+    let mut status =
+        tauri::async_runtime::spawn_blocking(move || backup::recovery_status(&data_dir))
+            .await
+            .map_err(|e| format!("status task failed: {e}"))?
+            .map_err(|e| e.to_string())?;
     let last_switch = status.last_switch.as_ref().map(|origin| {
         last_switch_view(
             origin,

@@ -1900,10 +1900,7 @@ pub struct RecoveryStatus {
     /// the vault). The journal alone cannot say whether this session's
     /// startup recovery rolled the switch back — the app layer merges
     /// that in.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_switch: Option<LastSwitchOrigin>,
 }
 
