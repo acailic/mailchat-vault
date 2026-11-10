@@ -108,7 +108,7 @@ use chrono::Utc;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
-use vault_core::backup::{self, BackupManifest, RecoveryStatus, RestoreOutcome};
+use vault_core::backup::{self, BackupCounts, BackupManifest, RecoveryStatus, RestoreOutcome};
 use vault_core::bounded::{import_id_for, BoundedRun, Flow, MediaPass, StreamItem, StreamSource};
 use vault_core::chat_export::{self, ChatImportOutcome};
 use vault_core::export::{self, ExportFormat, ExportSummary};
@@ -206,6 +206,13 @@ struct AppState {
     /// `recovery_forget` and the `backup_create` / `restore_preview`
     /// jobs (see [`SwitchGate`]).
     switch_gate: Arc<SwitchGate>,
+    /// What startup recovery did to an interrupted switch this session
+    /// (U05 restart UX), scoped to the journal it resolved: `RolledBack`/
+    /// `RolledForward` mean the recorded journal was resolved here, not
+    /// before the restart — and only while that same journal is still
+    /// the recorded one (a later in-session switch overwrites the
+    /// journal; the old outcome must not leak onto the new switch).
+    startup_recovery: StartupRecovery,
     /// U02 (first-source journey): the isolated sample archive.
     /// `Some` while the user browses the built-in demo corpus inside a
     /// private in-memory vault — reads route there, personal-vault
@@ -703,15 +710,163 @@ fn needs_reauth_after_restore(
     }
 }
 
+/// The recovery state the Settings panel renders, plus the two
+/// facts only the app layer knows: the vault's data dir (the
+/// "where does my archive live" answer) and what this session's
+/// startup recovery did to the recorded switch (the journal alone
+/// cannot distinguish a clean restart-after-switch from a rollback
+/// that resolved an interrupted one).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct RecoveryStatusView {
+    #[serde(flatten)]
+    status: RecoveryStatus,
+    /// The vault root (app data dir).
+    data_dir: PathBuf,
+    /// How the active vault came to be, when a switch ever ran — the
+    /// origin from the journal, resolved by the startup outcome.
+    last_switch: Option<LastSwitchView>,
+}
+
+/// One line of "what is active now, since when, from where": the
+/// journal's switch origin plus this session's recovery outcome.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct LastSwitchView {
+    /// `"restored"` (from a backup container) or `"returned"` (to a
+    /// recorded previous-vault slot).
+    kind: &'static str,
+    /// The container path for a restore (`null` for a return).
+    archive: Option<PathBuf>,
+    /// RFC 3339 UTC — when the switch ran.
+    since: String,
+    /// What happened to this switch at this session's startup:
+    /// `"none"` it completed before the restart; `"rolled_back"` /
+    /// `"rolled_forward"` an interrupted switch was resolved here.
+    recovery: &'static str,
+}
+
+/// Merge the journal's switch origin with this session's startup
+/// recovery outcome: a rolled-back switch means the *pre-switch*
+/// vault is active, so the origin line must say so instead of claiming
+/// the restored one.
+fn last_switch_view(origin: &backup::LastSwitchOrigin, recovery: &'static str) -> LastSwitchView {
+    LastSwitchView {
+        kind: match origin.kind {
+            backup::SwitchOriginKind::Restored => "restored",
+            backup::SwitchOriginKind::Returned => "returned",
+        },
+        archive: origin.archive.clone(),
+        since: origin.created_at.clone(),
+        recovery,
+    }
+}
+
+/// What this session's startup recovery did, and to which journal (see
+/// [`AppState::startup_recovery`]): the resolved journal's `created_at`
+/// scopes the outcome — after a later in-session switch overwrites the
+/// journal, the stale outcome stops applying.
+#[derive(Debug, Clone)]
+struct StartupRecovery {
+    outcome: backup::SwitchRecovery,
+}
+
+/// The recovery word for the origin line: `"rolled_back"` /
+/// `"rolled_forward"` only while the recorded journal is still the one
+/// this session's startup recovery resolved; otherwise `"none"`.
+fn startup_recovery_word(
+    startup: &StartupRecovery,
+    journal_created_at: Option<&str>,
+) -> &'static str {
+    let resolved_journal = match &startup.outcome {
+        backup::SwitchRecovery::RolledBack {
+            journal_created_at, ..
+        }
+        | backup::SwitchRecovery::RolledForward {
+            journal_created_at, ..
+        } => Some(journal_created_at.as_str()),
+        _ => None,
+    };
+    let scoped = matches!(
+        (journal_created_at, resolved_journal),
+        (Some(recorded), Some(resolved)) if recorded == resolved,
+    );
+    if scoped {
+        match startup.outcome {
+            backup::SwitchRecovery::RolledBack { .. } => return "rolled_back",
+            backup::SwitchRecovery::RolledForward { .. } => return "rolled_forward",
+            _ => {}
+        }
+    }
+    "none"
+}
+
 /// The recovery state: the switch journal, a staged (validated,
-/// uncommitted) restore, and the recorded previous-vault slots.
+/// uncommitted) restore, and the recorded previous-vault slots —
+/// plus the vault's data dir and the resolved switch origin.
 #[tauri::command]
-async fn recovery_status(state: State<'_, AppState>) -> Result<RecoveryStatus, String> {
+async fn recovery_status(state: State<'_, AppState>) -> Result<RecoveryStatusView, String> {
     let data_dir = state.data_dir.clone();
-    tauri::async_runtime::spawn_blocking(move || backup::recovery_status(&data_dir))
-        .await
-        .map_err(|e| format!("status task failed: {e}"))?
-        .map_err(|e| e.to_string())
+    let mut status =
+        tauri::async_runtime::spawn_blocking(move || backup::recovery_status(&data_dir))
+            .await
+            .map_err(|e| format!("status task failed: {e}"))?
+            .map_err(|e| e.to_string())?;
+    let last_switch = status.last_switch.as_ref().map(|origin| {
+        last_switch_view(
+            origin,
+            startup_recovery_word(
+                &state.startup_recovery,
+                status.journal_created_at.as_deref(),
+            ),
+        )
+    });
+    // The flattened `status` carries its own `last_switch` under the
+    // same JSON key as the view's resolved one; drop it so exactly one
+    // shape — the app-merged view — reaches the frontend.
+    status.last_switch = None;
+    Ok(RecoveryStatusView {
+        data_dir: state.data_dir.clone(),
+        status,
+        last_switch,
+    })
+}
+
+/// The persisted "last verified backup" of the personal vault (U05):
+/// written into `archive_meta` when a `backup_create` job's container
+/// finished verifying, read here at boot so the safety state survives
+/// restarts. `still_present` honestly flags a container the user moved
+/// or deleted since — "verified" describes creation time, and the
+/// panel must not promise a file that is no longer there.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct LastBackupView {
+    /// RFC 3339 UTC — when the container finished verifying.
+    created_at: String,
+    /// The destination the container was written to.
+    path: PathBuf,
+    /// The container's size in bytes.
+    size: u64,
+    /// The counts of the vault the snapshot captured.
+    counts: BackupCounts,
+    /// Whether the container still sits at the recorded path.
+    still_present: bool,
+}
+
+#[tauri::command]
+async fn last_backup(state: State<'_, AppState>) -> Result<Option<LastBackupView>, String> {
+    let pool = Arc::clone(&state.pool);
+    tauri::async_runtime::spawn_blocking(move || {
+        let record = pool
+            .with_read(backup::last_backup_record)
+            .map_err(|e| e.to_string())?;
+        Ok(record.map(|record| LastBackupView {
+            created_at: record.created_at,
+            path: record.path.clone(),
+            size: record.size,
+            counts: record.counts,
+            still_present: record.path.is_file(),
+        }))
+    })
+    .await
+    .map_err(|e| format!("last-backup task failed: {e}"))?
 }
 
 /// Explicitly forget one previous-vault slot (releases its disk).
@@ -1952,6 +2107,16 @@ fn run_backup_create(
     backup::discard_snapshot(&snapshot_tmp);
     let summary = summary?;
     ctx.progress(1, 1, "backup verified");
+    // U05: persist the finished (verified) backup in the vault's own
+    // `archive_meta` so the Storage & backup panel can say "last
+    // verified backup …" after a restart, not only in this session.
+    // The record rides `vault.db`, so a restore replaces it with the
+    // restored vault's own history — never the replaced vault's.
+    ctx.write({
+        let summary = summary.clone();
+        move |s| backup::record_last_backup(s, &summary)
+    })
+    .map_err(backup_job_error)?;
     Ok(serde_json::to_value(&summary).unwrap_or(Value::Null))
 }
 
@@ -2717,15 +2882,23 @@ pub fn run() {
             // A failed recovery fails CLOSED: opening anyway could spawn
             // the pool over a missing vault.db (a fresh empty database)
             // whose new session writes the next restart's rollback would
-            // then silently discard.
-            if let Err(e) = backup::recover_interrupted_switch(&data_dir) {
-                return Err(format!(
-                    "an interrupted vault switch could not be resolved: {e} — \
-                     the vault will not be opened in this state; check the \
-                     recovery directory or restore from a healthy backup"
-                )
-                .into());
-            }
+            // then silently discard. The outcome is kept for the U05
+            // restart UX: the recovery panel says which vault ended up
+            // active when a restart resolved an interrupted switch. A
+            // resolved (rolled) outcome carries the `created_at` of the
+            // journal it resolved, so a later in-session switch that
+            // overwrites the journal never inherits the stale word.
+            let startup_recovery = match backup::recover_interrupted_switch(&data_dir) {
+                Ok(recovery) => StartupRecovery { outcome: recovery },
+                Err(e) => {
+                    return Err(format!(
+                        "an interrupted vault switch could not be resolved: {e} — \
+                         the vault will not be opened in this state; check the \
+                         recovery directory or restore from a healthy backup"
+                    )
+                    .into());
+                }
+            };
             // M2.1: one pool over the vault file — writer worker + two
             // read connections. Job events stream to the UI; the same
             // events are recoverable by polling `job_events_since`.
@@ -2793,6 +2966,7 @@ pub fn run() {
                 scheduler,
                 data_dir,
                 switch_gate: Arc::new(SwitchGate::default()),
+                startup_recovery,
                 demo: Arc::new(Mutex::new(None)),
             });
             app.manage(Arc::clone(&secrets));
@@ -2849,6 +3023,7 @@ pub fn run() {
             backup_inspect,
             restore_commit,
             recovery_status,
+            last_backup,
             recovery_forget,
             return_to_previous_vault
         ])
@@ -2862,6 +3037,89 @@ mod tests {
 
     fn params(map: Value) -> Value {
         map
+    }
+
+    #[test]
+    fn last_switch_view_merges_origin_with_startup_recovery() {
+        // U05 restart UX: the journal says where the switch came from;
+        // only this session's startup recovery knows whether a restart
+        // resolved it — the merged line must never claim the restored
+        // vault is active after a rollback.
+        let restored = backup::LastSwitchOrigin {
+            kind: backup::SwitchOriginKind::Restored,
+            archive: Some(PathBuf::from("/media/vault.mcbackup")),
+            created_at: "2026-11-27T15:30:45Z".to_string(),
+        };
+        let rolled = StartupRecovery {
+            outcome: backup::SwitchRecovery::RolledBack {
+                previous_slot: "previous-20261127153045-abc123".to_string(),
+                journal_created_at: "2026-11-27T15:30:45Z".to_string(),
+            },
+        };
+        let clean = last_switch_view(
+            &restored,
+            startup_recovery_word(
+                &StartupRecovery {
+                    outcome: backup::SwitchRecovery::AlreadyCompleted {
+                        previous_slot: None,
+                    },
+                },
+                Some("2026-11-27T15:30:45Z"),
+            ),
+        );
+        assert_eq!(clean.kind, "restored");
+        assert_eq!(
+            clean.archive.as_deref(),
+            Some(Path::new("/media/vault.mcbackup"))
+        );
+        assert_eq!(clean.recovery, "none");
+
+        let rolled_back = last_switch_view(
+            &restored,
+            startup_recovery_word(&rolled, Some("2026-11-27T15:30:45Z")),
+        );
+        assert_eq!(rolled_back.recovery, "rolled_back");
+
+        let rolled_forward = last_switch_view(
+            &restored,
+            startup_recovery_word(
+                &StartupRecovery {
+                    outcome: backup::SwitchRecovery::RolledForward {
+                        previous_slot: "previous-20261127153045-abc123".to_string(),
+                        journal_created_at: "2026-11-27T15:30:45Z".to_string(),
+                    },
+                },
+                Some("2026-11-27T15:30:45Z"),
+            ),
+        );
+        assert_eq!(rolled_forward.recovery, "rolled_forward");
+
+        // A later in-session switch overwrites the journal: the stale
+        // rolled-back outcome must not leak onto the new switch's
+        // origin — it completed cleanly in this session.
+        let newer = last_switch_view(
+            &restored,
+            startup_recovery_word(&rolled, Some("2026-11-27T18:00:00Z")),
+        );
+        assert_eq!(newer.recovery, "none");
+
+        let returned = backup::LastSwitchOrigin {
+            kind: backup::SwitchOriginKind::Returned,
+            archive: None,
+            created_at: "2026-11-27T16:00:00Z".to_string(),
+        };
+        let view = last_switch_view(
+            &returned,
+            startup_recovery_word(
+                &StartupRecovery {
+                    outcome: backup::SwitchRecovery::None,
+                },
+                Some("2026-11-27T16:00:00Z"),
+            ),
+        );
+        assert_eq!(view.kind, "returned");
+        assert_eq!(view.archive, None);
+        assert_eq!(view.since, "2026-11-27T16:00:00Z");
     }
 
     #[test]

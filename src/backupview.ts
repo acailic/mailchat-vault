@@ -55,12 +55,47 @@ export interface PreviousVaultSlot {
   files: number;
 }
 
-/** Mirrors `vault_core::backup::RecoveryStatus`. */
+/** Mirrors `vault_core::backup::RecoveryStatus` plus the app-layer
+ *  additions (`data_dir`, the resolved `last_switch`) — see the
+ *  `recovery_status` command in src-tauri's lib.rs. */
 export interface RecoveryStatusView {
   journal_state: SwitchState | null;
   journal_created_at: string | null;
   staged_preview: boolean;
   previous: PreviousVaultSlot[];
+  /** `null` when no switch ever ran. */
+  last_switch: LastSwitchView | null;
+  /** The vault root (app data dir) — the "where does my archive
+   *  live" answer the Storage & backup panel leads with. */
+  data_dir: string;
+}
+
+/** How the active vault came to be (the `recovery_status` command's
+ *  merge of the journal's origin with this session's startup
+ *  recovery outcome): "restored" from a backup container or
+ *  "returned" to a previous-vault slot. */
+export interface LastSwitchView {
+  kind: "restored" | "returned";
+  /** The container path for a restore (null for a return). */
+  archive: string | null;
+  /** RFC 3339 UTC — when the switch ran. */
+  since: string;
+  /** `"none"` the switch completed before the restart;
+   *  `"rolled_back"` / `"rolled_forward"` an interrupted switch was
+  *  resolved by this session's startup recovery. */
+  recovery: "none" | "rolled_back" | "rolled_forward";
+}
+
+/** Mirrors the `last_backup` command's view: the persisted record of
+ *  the last backup the vault verified, read from `archive_meta` so it
+ *  survives restarts. */
+export interface LastBackupView {
+  created_at: string;
+  path: string;
+  size: number;
+  counts: BackupCounts;
+  /** Whether the container still sits at the recorded path. */
+  still_present: boolean;
 }
 
 /** The restore flow's UI state machine (pure transitions; the wiring in
@@ -172,6 +207,42 @@ export function gateBusy(e: unknown): boolean {
 /** One line per previous-vault slot. */
 export function slotLine(slot: PreviousVaultSlot): string {
   return `${slot.created_at} · ${humanBytes(slot.total_bytes)} · ${slot.files} files`;
+}
+
+/** The persisted last-backup line (U05): what the Storage & backup
+ *  panel shows at boot — the safety state survives restarts instead
+ *  of living only in one session's job-event stream. "Verified" is
+ *  creation-time honesty (every entry re-hashed before the container
+ *  was published); a moved or deleted file is flagged, never
+ *  promised. */
+export function lastBackupLine(view: LastBackupView): string {
+  const missing = view.still_present ? "" : " — the file is no longer at that path";
+  return `Last verified backup: ${view.created_at} · ${countsLine(view.counts)} · ${view.path} (${humanBytes(view.size)})${missing}.`;
+}
+
+/** The honest empty state for the last-backup line: says what the
+ *  line means, not just "nothing here". */
+export function noBackupLine(): string {
+  return "No verified backup yet — the first backup you create is recorded here and survives restarts.";
+}
+
+/** The restart-after-switch line (U05): what vault is active now,
+ * since when, and from where — including what this session's startup
+ * recovery did to an interrupted switch. Empty on a never-switched
+ *  vault. */
+export function vaultOriginLine(last: LastSwitchView): string {
+  const from =
+    last.kind === "restored" && last.archive
+      ? `from the backup ${last.archive}`
+      : "from a previous-vault snapshot";
+  switch (last.recovery) {
+    case "none":
+      return `Active vault: switched in ${from} at ${last.since}.`;
+    case "rolled_back":
+      return `A switch started at ${last.since} was interrupted and rolled back at startup — the vault from before it is active.`;
+    case "rolled_forward":
+      return `A switch started at ${last.since} was interrupted and completed at startup — the switched-in vault is active.`;
+  }
 }
 
 /** The recovery panel's headline: journal state + slot count. */

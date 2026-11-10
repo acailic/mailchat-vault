@@ -331,9 +331,36 @@
             </section>
           </section>
 
-          <!-- Settings: appearance, AI providers, storage notes. -->
+          <!-- Settings: storage & backup first (the safety/location
+               questions), then AI providers, then the media store. -->
           <section id="view-settings" class="view" aria-label="Settings">
             <h2 class="view-heading">Settings</h2>
+
+            <section id="backup" aria-label="Storage and backup">
+              <h2>Storage &amp; backup</h2>
+              <p class="meta">
+                A backup is one versioned file with the whole vault: a consistent database snapshot,
+                your settings, and every preserved attachment — each part checksummed. Passwords and
+                API keys are never part of a backup; restored accounts need to be reconnected.
+              </p>
+              <p id="vault-origin" class="meta" role="status"></p>
+              <p id="vault-location" class="meta"></p>
+              <div class="row">
+                <span id="backup-status" class="meta" style="flex: 1" role="status"></span>
+                <div class="spacer"></div>
+                <button id="backup-create-btn" type="button" title="Write a versioned backup of the whole vault to a file you pick">Create backup…</button>
+                <button id="restore-pick-btn" type="button" title="Validate a backup file and offer a staged, journaled restore">Restore from backup…</button>
+              </div>
+              <div id="restore-flow"></div>
+              <h3 class="meta" style="margin-top: 12px">Previous vaults</h3>
+              <div class="row">
+                <span id="recovery-line" class="meta" style="flex: 1" role="status"></span>
+                <div class="spacer"></div>
+                <button id="recovery-refresh-btn" type="button">Refresh</button>
+              </div>
+              <div id="recovery-slots"></div>
+            </section>
+
             <section id="settings">
               <div id="settings-note" class="meta" role="status"></div>
               <div id="env-info" class="meta"></div>
@@ -388,29 +415,6 @@
                 <button id="media-reconcile-btn" type="button" title="Verify every object's hash against its name and the archive's references">Reconcile…</button>
               </div>
               <div id="media-usage"></div>
-            </section>
-
-            <section id="backup" aria-label="Storage and backup">
-              <h2>Storage &amp; backup</h2>
-              <p class="meta">
-                A backup is one versioned file with the whole vault: a consistent database snapshot,
-                your settings, and every preserved attachment — each part checksummed. Passwords and
-                API keys are never part of a backup; restored accounts need to be reconnected.
-              </p>
-              <div class="row">
-                <span id="backup-status" class="meta" style="flex: 1" role="status"></span>
-                <div class="spacer"></div>
-                <button id="backup-create-btn" type="button" title="Write a versioned backup of the whole vault to a file you pick">Create backup…</button>
-                <button id="restore-pick-btn" type="button" title="Validate a backup file and offer a staged, journaled restore">Restore from backup…</button>
-              </div>
-              <div id="restore-flow"></div>
-              <h3 class="meta" style="margin-top: 12px">Previous vaults</h3>
-              <div class="row">
-                <span id="recovery-line" class="meta" style="flex: 1" role="status"></span>
-                <div class="spacer"></div>
-                <button id="recovery-refresh-btn" type="button">Refresh</button>
-              </div>
-              <div id="recovery-slots"></div>
             </section>
           </section>
         </main>

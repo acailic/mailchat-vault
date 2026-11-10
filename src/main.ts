@@ -8,7 +8,7 @@ import "./styles/tokens.css";
 import "./styles/app.css";
 
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { formatSentAt, humanSize, snippet } from "./format";
+import { folderSummaryLine, formatSentAt, humanSize, snippet } from "./format";
 import {
   objectNameOf,
   renderMediaUsage,
@@ -17,11 +17,14 @@ import {
 import {
   backupDoneLine,
   canCommit,
+  lastBackupLine,
+  noBackupLine,
   previewLine,
   recoveryLine,
   renderRecoverySlots,
   renderRestoreFlow,
   restoreDoneLine,
+  vaultOriginLine,
   gateBusy,
   switchStopped,
   type BackupSummaryView,
@@ -237,6 +240,8 @@ const backupStatus = document.querySelector<HTMLElement>("#backup-status")!;
 const backupCreateButton = document.querySelector<HTMLButtonElement>("#backup-create-btn")!;
 const restorePickButton = document.querySelector<HTMLButtonElement>("#restore-pick-btn")!;
 const restoreFlowPanel = document.querySelector<HTMLElement>("#restore-flow")!;
+const vaultOriginEl = document.querySelector<HTMLElement>("#vault-origin")!;
+const vaultLocationEl = document.querySelector<HTMLElement>("#vault-location")!;
 const recoveryLineEl = document.querySelector<HTMLElement>("#recovery-line")!;
 const recoveryRefreshButton = document.querySelector<HTMLButtonElement>("#recovery-refresh-btn")!;
 const recoverySlotsEl = document.querySelector<HTMLElement>("#recovery-slots")!;
@@ -1645,13 +1650,7 @@ async function oauthLogin(): Promise<void> {
 }
 
 function renderImapSyncOutcome(outcome: ipc.ImapSyncOutcome): void {
-  const lines = outcome.folders.map(
-    (f) =>
-      `${f.folder}: ${f.inserted} new, ${f.skipped} already present` +
-      (f.failed > 0 ? `, ${f.failed} failed to parse` : "") +
-      (f.reset ? " (full rescan)" : "") +
-      (f.error ? ` — failed: ${f.error}` : ""),
-  );
+  const lines = outcome.folders.map(folderSummaryLine);
   const note =
     outcome.saved_to === "memory"
       ? " Password kept in memory only for this session (no OS keyring available)."
@@ -1810,13 +1809,7 @@ async function refreshAccounts(): Promise<void> {
 
 /** The per-folder outcome of one account sync, as one line. */
 function accountSyncOutcomeLine(account: AccountView, outcome: ipc.ImapSyncOutcome): string {
-  const lines = outcome.folders.map(
-    (f) =>
-      `${f.folder}: ${f.inserted} new, ${f.skipped} already present` +
-      (f.failed > 0 ? `, ${f.failed} failed to parse` : "") +
-      (f.reset ? " (full rescan)" : "") +
-      (f.error ? ` — failed: ${f.error}` : ""),
-  );
+  const lines = outcome.folders.map(folderSummaryLine);
   const note =
     outcome.saved_to === "memory"
       ? " (password kept in memory only for this session — no OS keyring available)"
@@ -2346,10 +2339,16 @@ async function commitRestore(preview: RestorePreviewView): Promise<void> {
   renderRestorePanel();
 }
 
-/** Load and render the recovery surface (previous-vault slots). */
+/** Load and render the recovery surface (previous-vault slots) plus
+ *  the U05 restart lines: where the active vault came from (and what
+ *  startup recovery did to an interrupted switch) and where the
+ *  archive lives — the "what is active now, since when, from where"
+ *  answers a restart-after-restore user opens Settings for. */
 async function refreshRecovery(): Promise<void> {
   try {
     const status = await ipc.recoveryStatus();
+    vaultOriginEl.textContent = status.last_switch ? vaultOriginLine(status.last_switch) : "";
+    vaultLocationEl.textContent = `Archive location: ${status.data_dir}`;
     // The staged-preview claim is session-bound: only this session's
     // validated flow can commit; anything else is a leftover from an
     // earlier session and says so.
@@ -2360,6 +2359,26 @@ async function refreshRecovery(): Promise<void> {
     });
   } catch (e) {
     recoveryLineEl.textContent = `Recovery status failed: ${e}`;
+  }
+}
+
+/** Load the persisted "last verified backup" into the panel's status
+ *  line (U05): the record survives restarts, so a fresh session still
+ *  shows the vault's safety state. Skipped while a backup job's live
+ *  message owns the line, and never clobbers the restart-required
+ *  messages a committed switch left. */
+async function refreshLastBackup(): Promise<void> {
+  if (pendingBackupJob !== null || vaultSwitched) return;
+  try {
+    const record = await ipc.lastBackup();
+    // The guards were true before the await; re-check after it — a
+    // backup job may have started (or a switch committed) in between,
+    // and the persisted record must not clobber the live line.
+    if (pendingBackupJob !== null || vaultSwitched) return;
+    backupStatus.textContent = record ? lastBackupLine(record) : noBackupLine();
+  } catch {
+    // The pool is drained (a switch just ran) or the backend is busy:
+    // leave whatever the flow already rendered there.
   }
 }
 
@@ -2531,6 +2550,7 @@ workspace.store.subscribe((current) => {
   if (current.view === "settings") {
     void refreshMediaUsage();
     void refreshRecovery();
+    void refreshLastBackup();
   }
 });
 themeSelect.addEventListener("change", () => applyTheme(themeSelect.value as SettingsView["theme"]));

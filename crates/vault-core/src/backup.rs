@@ -204,6 +204,70 @@ pub struct BackupSummary {
 }
 
 // ---------------------------------------------------------------------------
+// Persisted "last verified backup" (U05)
+// ---------------------------------------------------------------------------
+
+/// The `archive_meta` key holding the persisted last-backup record
+/// (U05): the Storage & backup panel reads it at boot so the vault's
+/// safety state survives restarts instead of living only in one
+/// session's job-event stream.
+pub const LAST_BACKUP_KEY: &str = "last_verified_backup";
+
+/// The persisted record of the last backup a `backup_create` run
+/// verified: written into the vault's own `archive_meta` after the
+/// container finished verifying (every entry re-hashed) and was
+/// renamed into place. Because the record lives in `vault.db`, a
+/// restore naturally replaces it — the restored vault reports the
+/// backup state it carried at snapshot time, never the replaced
+/// vault's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastBackupRecord {
+    /// RFC 3339 UTC — when the container finished verifying.
+    pub created_at: String,
+    /// The destination the container was written to.
+    pub path: PathBuf,
+    /// The container's size in bytes.
+    pub size: u64,
+    /// The counts of the vault the snapshot captured.
+    pub counts: BackupCounts,
+    /// The snapshot's schema version (a future restore refuses newer).
+    pub schema_version: i64,
+}
+
+/// Record a finished, verified backup in the vault's `archive_meta`
+/// (overwrites any earlier record — one last-backup, not a history).
+pub fn record_last_backup(
+    storage: &crate::storage::Storage,
+    summary: &BackupSummary,
+) -> Result<()> {
+    let record = LastBackupRecord {
+        created_at: summary.manifest.created_at.clone(),
+        path: summary.path.clone(),
+        size: summary.size,
+        counts: summary.manifest.counts,
+        schema_version: summary.manifest.schema_version,
+    };
+    let json = serde_json::to_string(&record).map_err(Error::Json)?;
+    storage
+        .set_archive_meta(LAST_BACKUP_KEY, &json)
+        .map_err(|e| bad(format!("cannot record the finished backup: {e}")))
+}
+
+/// Read the persisted last-backup record. `Ok(None)` when this vault
+/// was never backed up, and — deliberately — when the stored record is
+/// unreadable: a malformed record must not take the panel down, and
+/// the next finished backup overwrites it.
+pub fn last_backup_record(storage: &crate::storage::Storage) -> Result<Option<LastBackupRecord>> {
+    let Some(json) = storage
+        .archive_meta(LAST_BACKUP_KEY)
+        .map_err(|e| bad(format!("cannot read the last-backup record: {e}")))?
+    else {
+        return Ok(None);
+    };
+    Ok(serde_json::from_str(&json).ok())
+}
+
+// ---------------------------------------------------------------------------
 // Progress and options
 // ---------------------------------------------------------------------------
 
@@ -1694,10 +1758,21 @@ pub enum SwitchRecovery {
     AlreadyCompleted { previous_slot: Option<String> },
     /// An interrupted switch was rolled **back**: the active vault is
     /// the pre-switch one, verified.
-    RolledBack { previous_slot: String },
+    RolledBack {
+        previous_slot: String,
+        /// The `created_at` of the journal this outcome resolved —
+        /// carried out so callers never re-read the journal to learn
+        /// which one was resolved (a re-read can fail and silently
+        /// degrade the U05 origin line).
+        journal_created_at: String,
+    },
     /// An interrupted switch was rolled **forward**: the active vault
     /// is the switched-in one, verified.
-    RolledForward { previous_slot: String },
+    RolledForward {
+        previous_slot: String,
+        /// See [`SwitchRecovery::RolledBack`].
+        journal_created_at: String,
+    },
 }
 
 /// Resolve an interrupted switch at startup (before any connection is
@@ -1742,6 +1817,7 @@ pub fn recover_interrupted_switch(data_dir: &Path) -> Result<SwitchRecovery> {
             verify_active_vault(data_dir)?;
             Ok(SwitchRecovery::RolledBack {
                 previous_slot: slot_id(),
+                journal_created_at: journal.created_at.clone(),
             })
         }
         SwitchState::Staged => {
@@ -1759,6 +1835,7 @@ pub fn recover_interrupted_switch(data_dir: &Path) -> Result<SwitchRecovery> {
             verify_active_vault(data_dir)?;
             Ok(SwitchRecovery::RolledForward {
                 previous_slot: slot_id(),
+                journal_created_at: journal.created_at.clone(),
             })
         }
     }
@@ -1816,6 +1893,38 @@ pub struct RecoveryStatus {
     pub staged_preview: bool,
     /// Previous-vault slots, newest first.
     pub previous: Vec<PreviousVaultSlot>,
+    /// What the most recent *completed* switch switched in from — the
+    /// "what is active now, since when, from where" of the U05 restart
+    /// UX. `None` when no switch ever ran, or while the journal is
+    /// unresolved (startup recovery resolves it before the app opens
+    /// the vault). The journal alone cannot say whether this session's
+    /// startup recovery rolled the switch back — the app layer merges
+    /// that in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_switch: Option<LastSwitchOrigin>,
+}
+
+/// How the active vault came to be: the origin of the most recent
+/// completed switch, read from its journal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastSwitchOrigin {
+    /// Whether the vault switched in from a backup container
+    /// (a restore) or a recorded previous-vault slot (a return).
+    pub kind: SwitchOriginKind,
+    /// The restore's container path (a return has no archive).
+    pub archive: Option<PathBuf>,
+    /// RFC 3339 UTC — when the switch started.
+    pub created_at: String,
+}
+
+/// Which kind of source a completed switch switched the vault in from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchOriginKind {
+    /// A validated restore from a backup container (`archive` set).
+    Restored,
+    /// A return to a recorded previous-vault slot.
+    Returned,
 }
 
 /// Read the recovery state (read-only).
@@ -1845,11 +1954,24 @@ pub fn recovery_status(data_dir: &Path) -> Result<RecoveryStatus> {
         }
     }
     previous.sort_by(|a, b| b.id.cmp(&a.id));
+    let last_switch = match &journal {
+        Some(journal) if journal.state == SwitchState::Completed => Some(LastSwitchOrigin {
+            kind: if journal.archive.is_some() {
+                SwitchOriginKind::Restored
+            } else {
+                SwitchOriginKind::Returned
+            },
+            archive: journal.archive.clone(),
+            created_at: journal.created_at.clone(),
+        }),
+        _ => None,
+    };
     Ok(RecoveryStatus {
         journal_state: journal.as_ref().map(|j| j.state),
         journal_created_at: journal.map(|j| j.created_at),
         staged_preview: staging_dir(data_dir).join(PREVIEW_FILE).is_file(),
         previous,
+        last_switch,
     })
 }
 
