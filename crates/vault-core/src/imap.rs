@@ -457,7 +457,8 @@ impl SyncFailure {
 
     /// Classify an I/O error by kind first, then by the resolver's message
     /// shapes (getaddrinfo failures arrive as uncategorized io errors whose
-    /// text differs by libc: glibc, musl, and Apple's libsystem).
+    /// text differs by libc: glibc, musl, Apple's libsystem, and Windows
+    /// Winsock).
     fn classify_io(io: &std::io::Error) -> Self {
         use std::io::ErrorKind;
         match io.kind() {
@@ -476,6 +477,7 @@ impl SyncFailure {
                     || msg.contains("name or service not known")
                     || msg.contains("nodename nor servname")
                     || msg.contains("temporary failure in name resolution")
+                    || msg.contains("no such host is known")
                 {
                     Self::HostNotFound
                 } else {

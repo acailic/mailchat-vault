@@ -62,7 +62,8 @@ fn classification_connection_refused() {
 #[test]
 fn classification_dns_failure_by_resolver_message() {
     // getaddrinfo failures arrive as uncategorized io errors whose text
-    // differs by libc (glibc here, musl and Apple variants matched too).
+    // differs by libc (glibc here; musl, Apple, and Windows variants
+    // matched too).
     for shape in [
         "failed to lookup address information: Name or service not known",
         "nodename nor servname provided, or not known",
@@ -75,6 +76,23 @@ fn classification_dns_failure_by_resolver_message() {
             "shape must classify as host-not-found: {shape}"
         );
     }
+    // Windows: WSAHOST_NOT_FOUND surfaces as an uncategorized io error
+    // whose text embeds the errno ("No such host is known. (os error
+    // 11001)") — classified, and the errno stays out of the user line.
+    let err = Error::Io(std::io::Error::other(
+        "No such host is known. (os error 11001)",
+    ));
+    assert_eq!(
+        SyncFailure::classify(&err),
+        SyncFailure::HostNotFound,
+        "the Windows host-not-found shape: {err}"
+    );
+    let line = SyncFailure::classify(&err).describe(&err);
+    assert!(line.contains("resolved"), "actionable DNS text: {line}");
+    assert!(
+        !line.contains("os error"),
+        "no raw errno in the user line: {line}"
+    );
     let err = Error::Io(std::io::Error::other(
         "failed to lookup address information: Name or service not known",
     ));
