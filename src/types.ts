@@ -334,6 +334,16 @@ export interface FailedItem {
   last_failed_at: string;
 }
 
+/** Media-pass counters of one folder's sync round (mirrors
+ *  `vault_core::imap::FolderMediaSummary`): what the shared mail
+ *  media handle stored, deduped, and failed to stage for this
+ *  folder's fetches. */
+export interface FolderMediaSummary {
+  stored: number;
+  deduped: number;
+  missing: number;
+}
+
 /** Per-folder outcome of one IMAP sync (mirrors `vault_core::imap::FolderSyncSummary`). */
 export interface FolderSyncSummary {
   folder: string;
@@ -347,6 +357,9 @@ export interface FolderSyncSummary {
   resolved_failures: number;
   conflicting_revisions: number;
   error: string | null;
+  /** Media-pass counters for this folder's round; null when the sync
+   *  ran without a media pass (no media data dir). */
+  media: FolderMediaSummary | null;
 }
 
 /** What happened to one source in a coordinator round (tagged by `status`). */

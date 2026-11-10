@@ -2425,6 +2425,34 @@ impl Storage {
         archive_revision_on(&self.conn)
     }
 
+    /// Read one `archive_meta` key's value (M3.2's table — vault-level
+    /// metadata that survives restarts without a schema bump).
+    /// `None` when the key is absent.
+    pub fn archive_meta(&self, key: &str) -> Result<Option<String>> {
+        let value: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM archive_meta WHERE key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value)
+    }
+
+    /// Write one `archive_meta` key's value (idempotent upsert).
+    /// Not a content change: the archive revision is *not* bumped —
+    /// meta keys describe the vault, they never change what a
+    /// paginated search returns.
+    pub fn set_archive_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO archive_meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [key, value],
+        )?;
+        Ok(())
+    }
+
     /// The live connection (writer when reached through the pool's write
     /// queue). Backup/maintenance operations that need the connection
     /// itself — the SQLite backup API, whole-file snapshots — use this;

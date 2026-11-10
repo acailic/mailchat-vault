@@ -277,6 +277,31 @@ pub struct FolderSyncSummary {
     /// Why syncing this folder failed, when it did; the remaining folders
     /// are still synced and reported.
     pub error: Option<String>,
+    /// Media-pass counters for this folder's round (U05 follow-up of the
+    /// media-consolidation work): filled from the run's shared
+    /// [`crate::media::MailMedia`] handle — the delta this folder's
+    /// fetches accumulated — while the handle is still alive, so the
+    /// attachment pass's honesty counters reach the sync status line
+    /// instead of dropping with the handle. `None` when the sync ran
+    /// without a media pass (no media data dir).
+    #[serde(default)]
+    pub media: Option<FolderMediaSummary>,
+}
+
+/// The media-pass counters of one folder's sync round: what the shared
+/// [`crate::media::MailMedia`] handle stored, deduped, and failed to
+/// stage for this folder's fetches. Mirrors the run-wide counters the
+/// import paths report ("N stored, N deduped, N missing").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FolderMediaSummary {
+    /// Attachments newly written into the object store.
+    pub stored: u64,
+    /// Attachments whose content was already in the store (hash match).
+    pub deduped: u64,
+    /// References whose bytes could not be staged (budget, disk error)
+    /// — recorded as missing `media` entries on the message, counted
+    /// here so nothing is silently dropped.
+    pub missing: u64,
 }
 
 /// Fixed ledger reason for an item whose bytes arrived but could not be
@@ -828,7 +853,14 @@ pub fn sync_folder<T: Read + Write, S: SyncStorage>(
         resolved_failures: 0,
         conflicting_revisions: 0,
         error: None,
+        media: None,
     };
+    // The media-pass counters are cumulative on the shared handle (one
+    // budget spans the whole run); this folder's own counts are the
+    // delta it accumulated, snapshotted before and read after the
+    // round — filled here rather than at the handle's drop site so a
+    // direct `sync_folder` caller reports them too.
+    let media_before = media.as_ref().map(|m| (m.stored, m.deduped, m.missing));
     if let Err(e) = run(
         session,
         storage,
@@ -838,6 +870,13 @@ pub fn sync_folder<T: Read + Write, S: SyncStorage>(
         &mut media,
     ) {
         summary.error = Some(e.to_string());
+    }
+    if let (Some(handle), Some(before)) = (media.as_ref(), media_before) {
+        summary.media = Some(FolderMediaSummary {
+            stored: handle.stored - before.0,
+            deduped: handle.deduped - before.1,
+            missing: handle.missing - before.2,
+        });
     }
     summary
 }

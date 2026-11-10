@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { formatSentAt, humanSize, snippet } from "./format";
+import {
+  folderSummaryLine,
+  formatSentAt,
+  humanSize,
+  mediaSummaryPart,
+  snippet,
+} from "./format";
+import type { FolderSyncSummary } from "./types";
 
 describe("formatSentAt", () => {
   it("renders a compact local timestamp", () => {
@@ -69,5 +76,60 @@ describe("snippet", () => {
 
   it("keeps short bodies untouched", () => {
     expect(snippet("short body", 200)).toBe("short body");
+  });
+});
+
+describe("folderSummaryLine (sync outcome lines, shared)", () => {
+  const base: FolderSyncSummary = {
+    folder: "INBOX",
+    uidvalidity: 7,
+    reset: false,
+    seen: 3,
+    inserted: 1,
+    skipped: 2,
+    failed: 0,
+    resolved_failures: 0,
+    conflicting_revisions: 0,
+    error: null,
+    media: null,
+  };
+
+  it("keeps the insert/skip line for a clean folder", () => {
+    expect(folderSummaryLine(base)).toBe("INBOX: 1 new, 2 already present");
+  });
+
+  it("appends only the non-zero extras in order (failed, media, rescan, error)", () => {
+    const line = folderSummaryLine({
+      ...base,
+      failed: 2,
+      reset: true,
+      error: "io error",
+      media: { stored: 3, deduped: 1, missing: 0 },
+    });
+    expect(line).toBe(
+      "INBOX: 1 new, 2 already present, 2 failed to parse, media: 3 stored, 1 deduped (full rescan) — failed: io error",
+    );
+  });
+
+  it("a zero media pass or a pass that did not run says nothing", () => {
+    expect(folderSummaryLine({ ...base, media: { stored: 0, deduped: 0, missing: 0 } })).toBe(
+      "INBOX: 1 new, 2 already present",
+    );
+    expect(folderSummaryLine({ ...base, media: null })).toBe("INBOX: 1 new, 2 already present");
+  });
+});
+
+describe("mediaSummaryPart (only-non-zero, S2 style)", () => {
+  it("lists every non-zero counter in order", () => {
+    expect(mediaSummaryPart({ stored: 2, deduped: 1, missing: 1 })).toBe(
+      "2 stored, 1 deduped, 1 missing",
+    );
+    expect(mediaSummaryPart({ stored: 0, deduped: 0, missing: 3 })).toBe("3 missing");
+  });
+
+  it("empty for null/undefined/all-zero", () => {
+    expect(mediaSummaryPart(null)).toBe("");
+    expect(mediaSummaryPart(undefined)).toBe("");
+    expect(mediaSummaryPart({ stored: 0, deduped: 0, missing: 0 })).toBe("");
   });
 });
