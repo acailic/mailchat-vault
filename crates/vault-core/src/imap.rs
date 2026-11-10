@@ -745,11 +745,13 @@ pub fn sync(
 /// the bounded write queue so the network waits between calls never
 /// occupy the write lane.
 ///
-/// A failure after the instance is registered is recorded on the
+/// A failure inside the connect–sync–logout span is recorded on the
 /// account row ([`SyncStorage::record_failure`]) as a best effort — the
 /// recorded class and message are exactly what the accounts panel shows
 /// after a restart — and then propagates; recording must never mask the
-/// original error.
+/// original error. A failure of the final success stamp propagates
+/// *without* a recorded failure: the mail did sync, so the account must
+/// not be durably labeled as failed.
 pub fn sync_with<S: SyncStorage>(
     config: &ImapConfig,
     storage: &S,
@@ -758,7 +760,10 @@ pub fn sync_with<S: SyncStorage>(
     let instance = storage.ensure_instance(config)?;
     storage.record_attempt(&instance)?;
     match run_session_sync(config, storage, &instance, media_data_dir) {
-        Ok(summaries) => Ok(summaries),
+        Ok(summaries) => {
+            storage.record_success(&instance)?;
+            Ok(summaries)
+        }
         Err(e) => {
             let failure = SyncFailure::classify(&e);
             let _ = storage.record_failure(&instance, &failure, &failure.describe(&e));
@@ -767,10 +772,11 @@ pub fn sync_with<S: SyncStorage>(
     }
 }
 
-/// The connect–sync–stamp flow of [`sync_with`] after the instance and
-/// attempt stamp exist: connect, sync every folder, logout, and stamp the
-/// success (which clears any recorded failure). Split out so the failure
-/// recording in [`sync_with`] wraps exactly this span.
+/// The connect–sync–logout span of [`sync_with`] after the instance and
+/// attempt stamp exist: connect, sync every folder, logout. Split out so
+/// the failure recording in [`sync_with`] wraps exactly this span — the
+/// success stamp (which clears any recorded failure) happens after it,
+/// so a failed stamp write never classifies as a sync failure.
 fn run_session_sync<S: SyncStorage>(
     config: &ImapConfig,
     storage: &S,
@@ -784,7 +790,6 @@ fn run_session_sync<S: SyncStorage>(
     let summaries = sync_session(&mut session, storage, instance, &folders, media.as_mut());
     // Best-effort logout; a failed logout must not mask a sync error.
     let _ = session.logout();
-    storage.record_success(instance)?;
     Ok(summaries)
 }
 

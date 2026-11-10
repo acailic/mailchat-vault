@@ -232,11 +232,15 @@ fn sync_one<T: Read + Write, S: SyncStorage>(
         let summaries = imap::sync_session(&mut session, sink, &instance, &folders, media.as_mut());
         // Best-effort logout; a failed logout must not mask a sync error.
         let _ = session.logout();
-        sink.record_success(&instance)?;
         Ok(summaries)
     })();
     match result {
-        Ok(summaries) => Ok(summaries),
+        Ok(summaries) => {
+            // Stamp the success *outside* the recorded span: a failed stamp
+            // write must not classify as a sync failure (the mail did sync).
+            sink.record_success(&instance)?;
+            Ok(summaries)
+        }
         Err(e) => {
             // The same account-level error state the manual sync records
             // (cold review §2.2/#5): best-effort, never masking the error.
@@ -246,3 +250,6 @@ fn sync_one<T: Read + Write, S: SyncStorage>(
         }
     }
 }
+
+#[cfg(test)]
+mod stamp_span_tests;
