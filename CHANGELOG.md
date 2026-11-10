@@ -99,10 +99,9 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
   tokens like `explicit_offset` and `legacy_unresolved` no longer reach
   the screen: the date row says `(exact)`, `(confirmed)`, `(assumed)`,
   `(unresolved)` or `(no time recorded)` with a one-sentence tooltip
-  explaining what
-  the archive actually knows, an unverified conversation row reads
-  `(unverified grouping)`, and Copy message / text exports carry the
-  same wording on both the TypeScript and Rust sides.
+  explaining what the archive actually knows, an unverified conversation
+  row reads `(unverified grouping)`, and Copy message / text exports
+  carry the same wording on both the TypeScript and Rust sides.
 - **“Add account…” arrives with context** — the Accounts panel's
   “Add account…” button no longer dead-ends on the Add source page: a
   status line says where the import and connect-email paths live and
