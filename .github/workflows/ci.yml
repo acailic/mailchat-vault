@@ -121,7 +121,8 @@ jobs:
             librsvg2-dev \
             webkit2gtk-driver \
             xvfb \
-            sqlite3
+            sqlite3 \
+            xdotool
 
       - name: Cache tauri-driver
         uses: actions/cache@v4

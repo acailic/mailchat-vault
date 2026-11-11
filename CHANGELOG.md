@@ -56,6 +56,37 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
   boot and after imports instead of showing zero rows until something
   is typed or filtered.
 
+### Added (background keep-alive — always-fresh archive)
+
+- **Keep running in the background (opt-in, off by default)** — a new
+  Settings toggle: closing the window hides the app to a **tray icon**
+  instead of exiting, so the opt-in auto-sync schedule, folder watching,
+  and new-mail notifications keep working between opens. The tray menu
+  offers *Show Mailchat Vault*, *Sync now* (exactly the manual sync-all
+  round — an ordinary job, visible in the jobs panel), and *Quit*.
+- **Start automatically at login (opt-in, off by default)** — a second
+  Settings toggle registers the app as an OS login item (applied the
+  moment Settings are saved, removed when it is turned off).
+- **Single instance** — launching the app a second time focuses the
+  existing window instead of opening a second app over the same vault.
+- **Honest degradation** — with the toggle off, closing exits exactly as
+  before; where the tray icon cannot be built (the appindicator library
+  is missing on Linux, or the tray build fails), keep-alive falls back
+  to that same close-and-exit — loudly logged, and never a hidden,
+  unreachable process via a missing tray. (A desktop that accepts the
+  icon but renders no status area — e.g. GNOME without the AppIndicator
+  extension — leaves the icon invisible; recovery is a second launch,
+  which the single-instance guard focuses.) There is deliberately no
+  headless daemon — background operation is this tray keep-alive, never
+  a second process over the vault (`docs/decisions.md`, D10 amendment).
+- The Linux deb now **declares** its runtime dependencies explicitly
+  (`libwebkit2gtk-4.1-0`, `libgtk-3-0`, and the tray's
+  `libayatana-appindicator3-1` — the bundler writes the Depends field
+  verbatim from this declaration); the AppImage does not bundle the
+  dlopen'd tray library, so on systems without it the tray degrades as
+  above. Empirical packaged-tray evidence is owned by the release
+  validation route.
+
 ### Added
 
 - **Email attachments** — synced mail now stores its MIME attachments

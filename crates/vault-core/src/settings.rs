@@ -92,6 +92,20 @@ pub struct Options {
     /// enabled.
     #[serde(default = "default_notifications")]
     pub notifications: bool,
+    /// Keep the app running in the background when the window is closed
+    /// (M7: window close hides to the tray instead of exiting). Strictly
+    /// opt-in, so older settings files without the field default to
+    /// **disabled** — closing must keep its pre-M7 meaning (exit) until
+    /// the user asks for keep-alive (unlike `notifications`, which
+    /// backfills to enabled because it merely continues the documented
+    /// pre-Settings behavior).
+    #[serde(default)]
+    pub keep_running_in_background: bool,
+    /// Start the app automatically when the user logs in (M7: OS
+    /// login-item registration, applied when Settings are saved).
+    /// Strictly opt-in; older files default to disabled.
+    #[serde(default)]
+    pub start_at_login: bool,
 }
 
 /// `Options::notifications` serde default (see the field docs).
@@ -105,6 +119,8 @@ impl Default for Options {
             theme: Theme::System,
             summarize_top: crate::llm::DEFAULT_SUMMARIZE_TOP as u32,
             notifications: default_notifications(),
+            keep_running_in_background: false,
+            start_at_login: false,
         }
     }
 }
@@ -558,6 +574,10 @@ mod tests {
         assert_eq!(Settings::default().options.summarize_top, 8);
         assert_eq!(Settings::default().options.theme, Theme::System);
         assert!(Settings::default().options.notifications);
+        // M7 keep-alive is strictly opt-in: the defaults (and therefore a
+        // fresh install) never keep the process running or autostart it.
+        assert!(!Settings::default().options.keep_running_in_background);
+        assert!(!Settings::default().options.start_at_login);
     }
 
     #[test]
@@ -620,6 +640,40 @@ mod tests {
                 .options
                 .notifications
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn keepalive_options_round_trip_and_backfill_off() {
+        let dir = std::env::temp_dir().join(format!("mcv-settings-ka-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        // A file written before the M7 options existed: both fields are
+        // absent and must backfill to OFF (strict opt-in) while the
+        // notifications backfill stays enabled — one file, two rules.
+        let older = serde_json::json!({
+            "version": SETTINGS_VERSION,
+            "providers": [],
+            "default_provider": null,
+            "options": {"theme": "system", "summarize_top": 8, "notifications": true}
+        });
+        fs::write(&path, serde_json::to_vec(&older).unwrap()).unwrap();
+        let loaded = Settings::load(&path).unwrap().expect("file exists");
+        assert!(loaded.options.notifications);
+        assert!(!loaded.options.keep_running_in_background);
+        assert!(!loaded.options.start_at_login);
+        // An explicit opt-in survives a save/load round trip, on disk and
+        // back, together with an explicit notifications opt-out.
+        let mut s = loaded;
+        s.options.keep_running_in_background = true;
+        s.options.start_at_login = true;
+        s.options.notifications = false;
+        s.save(&path).unwrap();
+        let reloaded = Settings::load(&path).unwrap().unwrap();
+        assert!(reloaded.options.keep_running_in_background);
+        assert!(reloaded.options.start_at_login);
+        assert!(!reloaded.options.notifications);
+        assert_eq!(reloaded, s);
         fs::remove_dir_all(&dir).ok();
     }
 

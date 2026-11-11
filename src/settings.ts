@@ -39,6 +39,11 @@ export interface SettingsView {
   summarize_top: number;
   /** Desktop notifications for new mail after sync/watch cycles. */
   notifications: boolean;
+  /** Keep running in the background when the window is closed (M7:
+   * close hides to the tray instead of exiting; opt-in, default off). */
+  keep_running_in_background: boolean;
+  /** Start the app automatically at login (M7; opt-in, default off). */
+  start_at_login: boolean;
   env: EnvProviderView | null;
   env_error: string | null;
   settings_error: string | null;
@@ -53,6 +58,10 @@ export interface SaveSettingsPayload {
   summarize_top: number;
   /** Desktop notifications for new mail after sync/watch cycles. */
   notifications: boolean;
+  /** Keep running in the background when the window is closed (M7). */
+  keep_running_in_background: boolean;
+  /** Start the app automatically at login (M7). */
+  start_at_login: boolean;
   /** Non-empty key = store for that provider id; empty string = clear. */
   api_keys: Array<{ id: string; key: string }>;
 }
