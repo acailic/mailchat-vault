@@ -1156,10 +1156,10 @@ fn settings_get(state: State<AppState>) -> Result<SettingsView, String> {
 /// error and nothing is written), then the file, then the keyring, then
 /// the registry — and only after the save has succeeded end to end do
 /// the OS-level applications run (the M7 tray reconcile and the OS
-/// login-item registration), so a failed save never leaves keys
-/// orphaned in the keyring, an invalid file on disk, or the OS
-/// autostart contradicting the settings file. Returns the fresh view
-/// the UI re-renders from.
+/// login-item registration); every failure up to those OS calls leaves
+/// no keys orphaned in the keyring and no invalid file on disk, and a
+/// failure in one of the OS calls surfaces as a save error the user can
+/// retry. Returns the fresh view the UI re-renders from.
 #[tauri::command]
 fn settings_save(
     app: AppHandle,
@@ -1226,13 +1226,15 @@ fn settings_save(
         }
     }
 
-    let mut registry = state
-        .registry
-        .lock()
-        .map_err(|e| format!("registry lock poisoned: {e}"))?;
     let keep_alive = settings.options.keep_running_in_background;
     let start_at_login = settings.options.start_at_login;
-    registry.update(settings, key_store, |id| secrets.load_llm_key(id));
+    {
+        let mut registry = state
+            .registry
+            .lock()
+            .map_err(|e| format!("registry lock poisoned: {e}"))?;
+        registry.update(settings, key_store, |id| secrets.load_llm_key(id));
+    }
     // M7: the tray exists exactly while keep-alive is on — reconcile to
     // what was just saved. A failed build only degrades (the close
     // handler hides only when the tray icon is actually up).
@@ -1245,10 +1247,10 @@ fn settings_save(
     }
     // M7: apply the OS login-item registration only after the save has
     // succeeded end to end — never re-armed behind the user's back by a
-    // boot, and a failed save can never leave the OS autostart armed
-    // while settings.json says off (an autostart failure surfaces as a
-    // save error the user can retry). Disabling when already disabled is
-    // a no-op (the plugin normalizes the not-found case).
+    // boot. Every failure up to this call leaves the OS autostart
+    // consistent with the settings file; a genuine enable/disable failure
+    // here surfaces as a save error the user can retry (on the disable
+    // path that can leave the OS armed while the file says off).
     let autostart = app.autolaunch();
     if start_at_login {
         autostart
@@ -1259,6 +1261,10 @@ fn settings_save(
             .disable()
             .map_err(|e| format!("could not remove start-at-login: {e}"))?;
     }
+    let registry = state
+        .registry
+        .lock()
+        .map_err(|e| format!("registry lock poisoned: {e}"))?;
     Ok(SettingsView::from(&*registry))
 }
 
