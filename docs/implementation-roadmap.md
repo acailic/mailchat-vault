@@ -86,6 +86,16 @@ Addresses P09 and F09. Depends on all earlier release milestones; platform compi
 
 M6 exit: [platform release matrix](validation-and-release.md#platform-and-release-matrix) passes. Signing/notarization credentials are an external dependency; do not publish unsigned artifacts as the completed public release. The implementation task itself does not authorize publishing or acquiring signing accounts.
 
+## M7: Always-fresh archive — background keep-alive
+
+Addresses P10 (the [D10 amendment](decisions.md#d10-read-only-mail-ingestion-and-opt-in-scheduling)). Depends on M2's job/scheduler machinery (already landed — this slice changes no scheduler, coordinator, or job code). Scope per the 2026-11-11 milestone decision: keep the process alive between opens so the existing opt-in schedule, folder watching, and new-mail notifications actually span window closes; the "what's new since your last visit" boot surface is deliberately **out of scope** here (a follow-up candidate, not part of this slice).
+
+| Slice | Concrete deliverable | Completion evidence |
+| --- | --- | --- |
+| M7.1 | Opt-in default-off Settings toggles ("keep running in the background", "start automatically at login"); window close hides to a tray icon (Show / Sync now as an ordinary `imap_sync_all` job / Quit) while keep-alive is on; single-instance guard (a second launch focuses the existing window over the same vault); honest degradation where no tray stack exists (close exits as today) | Settings round-trip/backfill units in vault-core, the registry, and the frontend payload; e2e spec: process stays alive and the window is hidden after a close request (Xvfb-friendly assertions); existing suites stay green |
+
+M7 exit: the keep-alive never changes what runs — only whether the process lives between window closes, and only when the user asked for it. A hidden unreachable process must never be possible: without a usable tray stack, close behaves exactly as before. No scheduler/coordinator/jobs/watch changes ship in this slice; a headless daemon stays a documented non-goal (see the D10 amendment).
+
 ## Completion tracking
 
 - [x] M1: identity, provenance, time, migration — record below
@@ -94,6 +104,7 @@ M6 exit: [platform release matrix](validation-and-release.md#platform-and-releas
 - [ ] M4: originals/media, storage, backup/restore (code landed: #49 M4.1, #58 M4.3 media display, #60 M4.2 message media, M4.4 backup/restore landed; completion records outstanding for M4.1/M4.2/M4.3 — M4.4's is below)
 - [ ] M5: explicit AI consent and evidence navigation (code landed: #48; consent-gate and citation evidence recorded below — the M5.1 persisted consent switch and M5.2 job-backed approval flow keep the box open)
 - [ ] M6: three-platform installation, upgrade, and release validation (code landed: #17 bundling + #45 fix, #47 M6.3 Linux distributions, #52 M6.2 Windows installer smoke, #62 M6.1 macOS dmg smoke; M6.4 record and release-fix addendum below — the one-command release validation matrix harness with the Linux column green, the macOS/Windows columns ready and host-waiting, and the release-fix change attached checksums to `v0.1.0` and reran the Linux gates on the published artifacts; M6.5 prep — the v0.2.0 changelog, version bump, and local draft-release/verify script (`prepare-release.sh`), with tag/publish deferred to the captain's (a)/(b)/(c) decision; signing, real-host smoke runs, and the usability/recovery evidence keep the box open)
+- [ ] M7: background keep-alive — tray close-to-tray, opt-in autostart, single instance (P10, D10 amendment 2026-11-11; code and record below)
 
 Update this checklist with links to implementation revisions and validation records. Changes to milestone scope require corresponding changes to the [product plan](product-plan.md), not only a checked box.
 

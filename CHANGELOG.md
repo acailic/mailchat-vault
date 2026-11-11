@@ -56,6 +56,30 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
   boot and after imports instead of showing zero rows until something
   is typed or filtered.
 
+### Added (background keep-alive — always-fresh archive)
+
+- **Keep running in the background (opt-in, off by default)** — a new
+  Settings toggle: closing the window hides the app to a **tray icon**
+  instead of exiting, so the opt-in auto-sync schedule, folder watching,
+  and new-mail notifications keep working between opens. The tray menu
+  offers *Show Mailchat Vault*, *Sync now* (exactly the manual sync-all
+  round — an ordinary job, visible in the jobs panel), and *Quit*.
+- **Start automatically at login (opt-in, off by default)** — a second
+  Settings toggle registers the app as an OS login item (applied the
+  moment Settings are saved, removed when it is turned off).
+- **Single instance** — launching the app a second time focuses the
+  existing window instead of opening a second app over the same vault.
+- **Honest degradation** — with the toggle off, closing exits exactly as
+  before; where the desktop provides no tray stack (a window manager
+  without a status area, or the appindicator library), keep-alive falls
+  back to that same close-and-exit instead of ever leaving a hidden,
+  unreachable process. There is deliberately no headless daemon —
+  background operation is this tray keep-alive, never a second process
+  over the vault (`docs/decisions.md`, D10 amendment).
+- The Linux deb gains the `libayatana-appindicator3-1` runtime dependency
+  and the AppImage bundles the library (automatic with the tray feature),
+  so packaged installs have a working tray out of the box.
+
 ### Added
 
 - **Email attachments** — synced mail now stores its MIME attachments
