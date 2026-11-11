@@ -1153,11 +1153,13 @@ fn settings_get(state: State<AppState>) -> Result<SettingsView, String> {
 
 /// Save the settings file and apply API-key updates. Order matters:
 /// validate first (an invalid configuration is refused with the pairing
-/// error and nothing is written), then the OS login-item registration
-/// (M7: an autostart failure refuses the save before anything is
-/// written or any key moves), then the file, then the keyring — so a
-/// failed save never leaves keys orphaned in the keyring or an invalid
-/// file on disk. Returns the fresh view the UI re-renders from.
+/// error and nothing is written), then the file, then the keyring, then
+/// the registry — and only after the save has succeeded end to end do
+/// the OS-level applications run (the M7 tray reconcile and the OS
+/// login-item registration), so a failed save never leaves keys
+/// orphaned in the keyring, an invalid file on disk, or the OS
+/// autostart contradicting the settings file. Returns the fresh view
+/// the UI re-renders from.
 #[tauri::command]
 fn settings_save(
     app: AppHandle,
@@ -1179,21 +1181,6 @@ fn settings_save(
     };
     settings.normalize();
     settings.validate().map_err(|e| e.to_string())?;
-
-    // M7: apply the OS login-item registration here, at save time — not
-    // at boot — so an OS-level removal done outside the app is never
-    // re-armed behind the user's back; disabling when already disabled
-    // is a no-op (the plugin normalizes the not-found case).
-    let autostart = app.autolaunch();
-    if settings.options.start_at_login {
-        autostart
-            .enable()
-            .map_err(|e| format!("could not set up start-at-login: {e}"))?;
-    } else {
-        autostart
-            .disable()
-            .map_err(|e| format!("could not remove start-at-login: {e}"))?;
-    }
 
     // Key updates must reference configured providers (ids are opaque, so
     // a stale id from a removed row is a client bug we refuse, not ignore).
@@ -1244,16 +1231,33 @@ fn settings_save(
         .lock()
         .map_err(|e| format!("registry lock poisoned: {e}"))?;
     let keep_alive = settings.options.keep_running_in_background;
+    let start_at_login = settings.options.start_at_login;
     registry.update(settings, key_store, |id| secrets.load_llm_key(id));
     // M7: the tray exists exactly while keep-alive is on — reconcile to
     // what was just saved. A failed build only degrades (the close
-    // handler re-probes tray availability before hiding a window).
+    // handler hides only when the tray icon is actually up).
     if keep_alive {
         if let Err(e) = tray::ensure(&app) {
             eprintln!("tray not available: {e}");
         }
     } else {
         tray::remove(&app);
+    }
+    // M7: apply the OS login-item registration only after the save has
+    // succeeded end to end — never re-armed behind the user's back by a
+    // boot, and a failed save can never leave the OS autostart armed
+    // while settings.json says off (an autostart failure surfaces as a
+    // save error the user can retry). Disabling when already disabled is
+    // a no-op (the plugin normalizes the not-found case).
+    let autostart = app.autolaunch();
+    if start_at_login {
+        autostart
+            .enable()
+            .map_err(|e| format!("could not set up start-at-login: {e}"))?;
+    } else {
+        autostart
+            .disable()
+            .map_err(|e| format!("could not remove start-at-login: {e}"))?;
     }
     Ok(SettingsView::from(&*registry))
 }
@@ -2967,10 +2971,11 @@ enum CloseAction {
 }
 
 /// The close decision: hide **only** when the user opted into
-/// keep-alive AND a tray stack is usable — a hidden process without a
-/// way back must never exist (the D10 amendment's degradation rule).
-fn close_action(keep_running_in_background: bool, tray_available: bool) -> CloseAction {
-    if keep_running_in_background && tray_available {
+/// keep-alive AND the tray icon is actually up — a hidden process
+/// without a way back must never exist (the D10 amendment's degradation
+/// rule).
+fn close_action(keep_running_in_background: bool, tray_up: bool) -> CloseAction {
+    if keep_running_in_background && tray_up {
         CloseAction::HideToTray
     } else {
         CloseAction::Close
@@ -3144,7 +3149,7 @@ pub fn run() {
             // M7: with keep-alive saved on, the tray must exist from the
             // first moment the window could close — build it at boot. A
             // failed build only degrades (close exits); the close
-            // handler probes availability again before hiding.
+            // handler hides only when the tray icon is actually up.
             let keep_alive = app
                 .state::<AppState>()
                 .registry
@@ -3161,8 +3166,8 @@ pub fn run() {
             Ok(())
         })
         // M7 keep-alive (D10 amendment): with the opt-in option on AND a
-        // usable tray stack, a window close hides to the tray instead of
-        // exiting — the process (and with it the opt-in scheduler,
+        // tray icon actually up, a window close hides to the tray instead
+        // of exiting — the process (and with it the opt-in scheduler,
         // folder watching, and notifications) spans window closes. Any
         // other combination keeps the exact pre-M7 behavior.
         .on_window_event(|window, event| {
@@ -3180,7 +3185,15 @@ pub fn run() {
                             .keep_running_in_background
                     })
                     .unwrap_or(false);
-                if close_action(keep_running, tray::available()) == CloseAction::HideToTray {
+                let tray_up = tray::exists(window.app_handle());
+                if keep_running && !tray_up {
+                    // Loud degradation warning: keep-alive is on but there
+                    // is no tray to hide to — closing exits.
+                    eprintln!(
+                        "keep-alive on but the tray icon is not up: closing the window exits"
+                    );
+                }
+                if close_action(keep_running, tray_up) == CloseAction::HideToTray {
                     api.prevent_close();
                     let _ = window.hide();
                 }
@@ -3258,10 +3271,10 @@ mod tests {
         // Pre-M7 default (and the toggle off): close exits, everywhere.
         assert_eq!(close_action(false, true), CloseAction::Close);
         assert_eq!(close_action(false, false), CloseAction::Close);
-        // Opt-in with a tray stack: hide to tray.
+        // Opt-in with the tray icon up: hide to tray.
         assert_eq!(close_action(true, true), CloseAction::HideToTray);
-        // Opt-in but no tray stack: never a hidden unreachable process —
-        // closing degrades to the pre-M7 exit instead.
+        // Opt-in but the tray icon never came up: never a hidden
+        // unreachable process — closing degrades to the pre-M7 exit.
         assert_eq!(close_action(true, false), CloseAction::Close);
     }
 

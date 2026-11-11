@@ -16,10 +16,10 @@
 //!   window-close exit; the pool and jobs end exactly as they always
 //!   have on exit.
 //!
-//! Honest degradation is the rule (see the D10 amendment): where the
-//! desktop provides no tray stack, keep-alive must never leave a hidden
-//! unreachable process — the close handler re-probes [`available()`]
-//! before hiding, so without a usable tray the window close behaves
+//! Honest degradation is the rule (see the D10 amendment): keep-alive
+//! must never leave a hidden unreachable process — the close handler
+//! hides only when the tray icon actually exists ([`exists()`]), so
+//! wherever the tray could not be built the window close behaves
 //! exactly as before the option existed. The Linux tray renders through
 //! appindicator, which the tray-icon stack loads with `dlopen` and
 //! *panics* on when absent — hence the explicit probe below instead of
@@ -100,6 +100,13 @@ pub fn ensure(app: &AppHandle) -> Result<(), String> {
         .build(app)
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Whether the tray icon is actually up — the result of a successful
+/// [`ensure`]. Keep-alive trusts only this, never the library probe: a
+/// hidden window must always have its way back in place.
+pub fn exists(app: &AppHandle) -> bool {
+    app.tray_by_id(TRAY_ID).is_some()
 }
 
 /// Drop the tray icon (the window close exits the app again, exactly as

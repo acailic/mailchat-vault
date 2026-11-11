@@ -12,11 +12,11 @@
 //     still exists under /proc after the close.
 //
 // Everything runs under Xvfb (the CI e2e job's environment): no tray
-// host is needed for the assertions — the appindicator library is what
-// the close handler probes (installed alongside the dev stack the e2e
-// runners install), and the tray object registers with whatever
-// StatusNotifier host it finds (none here; that is fine — the icon
-// simply has nowhere to render).
+// host is needed for the assertions — the appindicator library the e2e
+// runners install (alongside the dev stack) is what lets the tray icon
+// build (registering with whatever StatusNotifier host it finds — none
+// here, where the icon simply has nowhere to render), and the close
+// handler hides only when that icon was actually built.
 //
 // The teardown kills the driver tree (and with it the app) even with
 // the window hidden, so nothing leaks from this spec.
