@@ -401,6 +401,12 @@
                 <label class="meta" title="Native desktop notification when a sync or folder-watch cycle brings new mail; silent while the app window is focused">Desktop notifications
                   <input id="notify-toggle" type="checkbox" checked />
                 </label>
+                <label class="meta" title="Off by default: closing the window hides the app to the tray instead of exiting, so auto-sync, folder watching, and notifications keep working between opens (the tray menu shows, syncs, and quits)">Keep running in background
+                  <input id="keepalive-toggle" type="checkbox" />
+                </label>
+                <label class="meta" title="Off by default: launch the app automatically when you log in (OS login-item registration; applied when you save)">Start at login
+                  <input id="autostart-toggle" type="checkbox" />
+                </label>
                 <div class="spacer"></div>
                 <button id="settings-save-btn" type="button">Save settings</button>
               </div>

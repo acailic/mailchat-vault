@@ -2932,6 +2932,8 @@ function viewWith(mutate: (v: Record<string, unknown>) => void = () => {}): Reco
     theme: "system",
     summarize_top: 8,
     notifications: true,
+    keep_running_in_background: false,
+    start_at_login: false,
     env: null,
     env_error: null,
     settings_error: null,
@@ -3063,6 +3065,8 @@ describe("settings screen", () => {
       theme: "light",
       summarize_top: 20,
       notifications: true,
+      keep_running_in_background: false,
+      start_at_login: false,
       api_keys: [
         { id: "zai", key: "secret-1" }, // trimmed
         { id: "custom", key: "secret-2" },
@@ -3073,6 +3077,43 @@ describe("settings screen", () => {
     expect(rowInput("zai", "prov-key").value).toBe("");
     expect(document.documentElement.style.colorScheme).toBe("light");
     expect($("#settings-note").textContent).toContain("session memory");
+  });
+
+  it("renders the M7 keep-alive toggles from the view and saves them back", async () => {
+    // Boot with both options on: the checkboxes must render the saved
+    // state (the HTML ships them unchecked, so a checked box proves the
+    // settings round-trip rendered it).
+    tauri.handlers.set("settings_get", () =>
+      viewWith((v) => {
+        v.keep_running_in_background = true;
+        v.start_at_login = true;
+      }),
+    );
+    let saved: unknown;
+    tauri.handlers.set("settings_save", (args: unknown) => {
+      saved = (args as { payload: unknown }).payload;
+      return viewWith((v) => {
+        v.keep_running_in_background = false;
+        v.start_at_login = false;
+      });
+    });
+    await boot();
+    await vi.waitFor(() => expect($<HTMLInputElement>("#keepalive-toggle").checked).toBe(true));
+    expect($<HTMLInputElement>("#autostart-toggle").checked).toBe(true);
+
+    // Opt back out of both and save: the payload carries the explicit
+    // opt-out (never a silent drop), and the response re-renders them
+    // unchecked — the same contract as the notifications toggle.
+    $("#keepalive-toggle").click();
+    $("#autostart-toggle").click();
+    $("#settings-save-btn").click();
+    await vi.waitFor(() => expect($("#settings-note").textContent).toContain("Saved."));
+    expect(saved).toMatchObject({
+      keep_running_in_background: false,
+      start_at_login: false,
+    });
+    expect($<HTMLInputElement>("#keepalive-toggle").checked).toBe(false);
+    expect($<HTMLInputElement>("#autostart-toggle").checked).toBe(false);
   });
 
   it("a validation refusal shows the backend error and saves nothing", async () => {
