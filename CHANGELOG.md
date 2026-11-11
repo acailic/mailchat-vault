@@ -190,9 +190,12 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
 - **macOS/Windows bundles for this release wait on a maintainer
   decision** — real machines versus temporarily re-enabling GitHub
   Actions; the Linux column is fully validated at this tree.
-- **No backup/restore yet** — the versioned backup feature is planned
-  but not shipped in 0.2.0; copy the data directory manually if you
-  need a snapshot.
+- **Backups are manual and never carry credentials** — versioned
+  backup/restore is shipped in 0.2.0 (Settings → Storage & backup);
+  what remains a limitation: backups run only when you start one (no
+  automatic schedule), and passwords/API keys are deliberately never
+  backed up, so an account needs reconnecting after a restore when
+  this machine's keyring lacks its credentials.
 - **No auto-update** — new releases are a fresh download; there is no
   in-app updater.
 
