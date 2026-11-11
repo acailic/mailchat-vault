@@ -97,6 +97,16 @@
 //! sync jobs, v1 sync outcomes, and watch snapshots, and stays silent
 //! while the window is focused, when the Settings option is off, or when
 //! the OS denies permission — see that module for the contract.
+//!
+//! Background keep-alive (M7, the D10 amendment of 2026-11-11) makes
+//! that whole background surface span window closes, strictly opt-in:
+//! two default-off Settings options (keep running in the background /
+//! start automatically at login), a tray (Show / Sync now / Quit) that
+//! exists exactly while keep-alive is on, a single-instance guard that
+//! focuses this window on a second launch, and a close handler that
+//! hides instead of exits only when the option is on AND a tray stack
+//! is usable (otherwise it degrades to the pre-M7 close-exit so a
+//! hidden unreachable process can never exist). See `src/tray.rs`.
 
 use std::collections::HashSet;
 use std::io::{BufWriter, Write};
@@ -108,6 +118,7 @@ use chrono::Utc;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_autostart::ManagerExt;
 use vault_core::backup::{self, BackupCounts, BackupManifest, RecoveryStatus, RestoreOutcome};
 use vault_core::bounded::{import_id_for, BoundedRun, Flow, MediaPass, StreamItem, StreamSource};
 use vault_core::chat_export::{self, ChatImportOutcome};
@@ -142,6 +153,7 @@ use vault_core::{demo, message, Error, Result as CoreResult};
 mod media_proto;
 mod registry;
 mod secrets;
+mod tray;
 
 use registry::{LlmRegistry, SaveSettingsPayload, Selection, SettingsView};
 
@@ -1141,11 +1153,16 @@ fn settings_get(state: State<AppState>) -> Result<SettingsView, String> {
 
 /// Save the settings file and apply API-key updates. Order matters:
 /// validate first (an invalid configuration is refused with the pairing
-/// error and nothing is written), then the file, then the keyring — so a
-/// failed save never leaves keys orphaned in the keyring or an invalid
-/// file on disk. Returns the fresh view the UI re-renders from.
+/// error and nothing is written), then the file, then the keyring, then
+/// the registry — and only after the save has succeeded end to end do
+/// the OS-level applications run (the M7 tray reconcile and the OS
+/// login-item registration); every failure up to those OS calls leaves
+/// no keys orphaned in the keyring and no invalid file on disk, and a
+/// failure in one of the OS calls surfaces as a save error the user can
+/// retry. Returns the fresh view the UI re-renders from.
 #[tauri::command]
 fn settings_save(
+    app: AppHandle,
     state: State<'_, AppState>,
     secrets: State<'_, Arc<secrets::Secrets>>,
     payload: SaveSettingsPayload,
@@ -1158,6 +1175,8 @@ fn settings_save(
             theme: payload.theme,
             summarize_top: payload.summarize_top,
             notifications: payload.notifications,
+            keep_running_in_background: payload.keep_running_in_background,
+            start_at_login: payload.start_at_login,
         },
     };
     settings.normalize();
@@ -1207,11 +1226,45 @@ fn settings_save(
         }
     }
 
-    let mut registry = state
+    let keep_alive = settings.options.keep_running_in_background;
+    let start_at_login = settings.options.start_at_login;
+    {
+        let mut registry = state
+            .registry
+            .lock()
+            .map_err(|e| format!("registry lock poisoned: {e}"))?;
+        registry.update(settings, key_store, |id| secrets.load_llm_key(id));
+    }
+    // M7: the tray exists exactly while keep-alive is on — reconcile to
+    // what was just saved. A failed build only degrades (the close
+    // handler hides only when the tray icon is actually up).
+    if keep_alive {
+        if let Err(e) = tray::ensure(&app) {
+            eprintln!("tray not available: {e}");
+        }
+    } else {
+        tray::remove(&app);
+    }
+    // M7: apply the OS login-item registration only after the save has
+    // succeeded end to end — never re-armed behind the user's back by a
+    // boot. Every failure up to this call leaves the OS autostart
+    // consistent with the settings file; a genuine enable/disable failure
+    // here surfaces as a save error the user can retry (on the disable
+    // path that can leave the OS armed while the file says off).
+    let autostart = app.autolaunch();
+    if start_at_login {
+        autostart
+            .enable()
+            .map_err(|e| format!("could not set up start-at-login: {e}"))?;
+    } else {
+        autostart
+            .disable()
+            .map_err(|e| format!("could not remove start-at-login: {e}"))?;
+    }
+    let registry = state
         .registry
         .lock()
         .map_err(|e| format!("registry lock poisoned: {e}"))?;
-    registry.update(settings, key_store, |id| secrets.load_llm_key(id));
     Ok(SettingsView::from(&*registry))
 }
 
@@ -1964,13 +2017,7 @@ fn job_submit(
     kind: String,
     params: Value,
 ) -> Result<JobHandle, String> {
-    // Every job kind writes the personal vault (imports, syncs, seeds,
-    // embeddings, backups, restores) — none may run under the demo.
-    state.refuse_in_demo()?;
     let spec = JobSpec::parse(&kind, &params)?;
-    let pool = Arc::clone(&state.pool);
-    let embedder = state.embedder;
-    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     // Parity with the v1 sync command: an entered password is kept in the
     // keyring; an empty one resolves the stored secret. Resolved here (on
     // the command thread) so the job body carries a ready config.
@@ -1993,8 +2040,28 @@ fn job_submit(
         }
         other => other,
     };
+    submit_job_spec(&app, &state, secrets.inner(), spec)
+}
+
+/// Submit one validated [`JobSpec`] through the shared job engine —
+/// the single submission path behind `job_submit` and the tray's
+/// *Sync now* (M7), so both take the same demo lockout, queue, and
+/// job-record semantics. `Err` is the user-facing refusal (demo
+/// lockout, queue full).
+fn submit_job_spec(
+    app: &AppHandle,
+    state: &AppState,
+    secrets: &Arc<secrets::Secrets>,
+    spec: JobSpec,
+) -> Result<JobHandle, String> {
+    // Every job kind writes the personal vault (imports, syncs, seeds,
+    // embeddings, backups, restores) — none may run under the demo.
+    state.refuse_in_demo()?;
+    let pool = Arc::clone(&state.pool);
+    let embedder = state.embedder;
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let job_pool = Arc::clone(&pool);
-    let secrets = Arc::clone(secrets.inner());
+    let secrets = Arc::clone(secrets);
     let switch_gate = Arc::clone(&state.switch_gate);
     pool.try_submit_job(spec.kind(), move |ctx: &JobContext| {
         run_job_spec(
@@ -2009,6 +2076,15 @@ fn job_submit(
     })
     .map(|id| JobHandle { id })
     .map_err(|e| e.to_string())
+}
+
+/// The tray's *Sync now* (M7): an ordinary `imap_sync_all` round —
+/// the same submission path as the jobs panel's manual round, so the
+/// tray sync is visible in the jobs panel like any manual one.
+fn submit_sync_now(app: &AppHandle) -> Result<JobHandle, String> {
+    let state = app.state::<AppState>();
+    let secrets = app.state::<Arc<secrets::Secrets>>();
+    submit_job_spec(app, &state, &secrets, JobSpec::ImapSyncAll)
 }
 
 /// Execute one validated [`JobSpec`] on the job runner thread. All storage
@@ -2888,6 +2964,30 @@ fn cli_flag_response(args: &[String]) -> Option<String> {
     None
 }
 
+/// What a window-close request should do (M7 keep-alive). Pure so the
+/// decision is unit-testable; the `on_window_event` handler applies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseAction {
+    /// Default (pre-M7, unchanged) behavior: the window closes, and the
+    /// app exits when its last window is gone.
+    Close,
+    /// Keep-alive: prevent the close and hide the window; the tray keeps
+    /// the process reachable between opens.
+    HideToTray,
+}
+
+/// The close decision: hide **only** when the user opted into
+/// keep-alive AND the tray icon is actually up — a hidden process
+/// without a way back must never exist (the D10 amendment's degradation
+/// rule).
+fn close_action(keep_running_in_background: bool, tray_up: bool) -> CloseAction {
+    if keep_running_in_background && tray_up {
+        CloseAction::HideToTray
+    } else {
+        CloseAction::Close
+    }
+}
+
 pub fn run() {
     // Headless CLI flags: handle them before any GUI/window-server work
     // so the packaged binary answers `--version`/`--help` anywhere,
@@ -2902,6 +3002,23 @@ pub fn run() {
         return;
     }
     tauri::Builder::default()
+        // M7 single-instance guard — registered first, before any other
+        // plugin could race a second launch. A second launch focuses
+        // this instance's window instead of opening a second pool over
+        // the same vault; the guard is scoped per user session and app
+        // identity (on Linux, the session bus name), which for the
+        // shipped app equals per-vault (one app data dir per user).
+        // Where no desktop IPC channel exists (a bus-less CI display),
+        // the guard is inert and launching behaves exactly as before.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tray::show_main_window(app);
+        }))
+        // M7: the OS login-item registration surface (Rust-side only —
+        // `settings_save` applies it; no frontend commands exposed).
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         // M4.3: the read-only media protocol. Registered asynchronously
@@ -3035,7 +3152,58 @@ pub fn run() {
                 demo: Arc::new(Mutex::new(None)),
             });
             app.manage(Arc::clone(&secrets));
+            // M7: with keep-alive saved on, the tray must exist from the
+            // first moment the window could close — build it at boot. A
+            // failed build only degrades (close exits); the close
+            // handler hides only when the tray icon is actually up.
+            let keep_alive = app
+                .state::<AppState>()
+                .registry
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .settings()
+                .options
+                .keep_running_in_background;
+            if keep_alive {
+                if let Err(e) = tray::ensure(app.handle()) {
+                    eprintln!("tray not available: {e}");
+                }
+            }
             Ok(())
+        })
+        // M7 keep-alive (D10 amendment): with the opt-in option on AND a
+        // tray icon actually up, a window close hides to the tray instead
+        // of exiting — the process (and with it the opt-in scheduler,
+        // folder watching, and notifications) spans window closes. Any
+        // other combination keeps the exact pre-M7 behavior.
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let keep_running = window
+                    .app_handle()
+                    .try_state::<AppState>()
+                    .map(|state| {
+                        state
+                            .registry
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .settings()
+                            .options
+                            .keep_running_in_background
+                    })
+                    .unwrap_or(false);
+                let tray_up = tray::exists(window.app_handle());
+                if keep_running && !tray_up {
+                    // Loud degradation warning: keep-alive is on but there
+                    // is no tray to hide to — closing exits.
+                    eprintln!(
+                        "keep-alive on but the tray icon is not up: closing the window exits"
+                    );
+                }
+                if close_action(keep_running, tray_up) == CloseAction::HideToTray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             search_messages,
@@ -3102,6 +3270,18 @@ mod tests {
 
     fn params(map: Value) -> Value {
         map
+    }
+
+    #[test]
+    fn close_action_hides_only_with_opt_in_and_a_usable_tray() {
+        // Pre-M7 default (and the toggle off): close exits, everywhere.
+        assert_eq!(close_action(false, true), CloseAction::Close);
+        assert_eq!(close_action(false, false), CloseAction::Close);
+        // Opt-in with the tray icon up: hide to tray.
+        assert_eq!(close_action(true, true), CloseAction::HideToTray);
+        // Opt-in but the tray icon never came up: never a hidden
+        // unreachable process — closing degrades to the pre-M7 exit.
+        assert_eq!(close_action(true, false), CloseAction::Close);
     }
 
     #[test]

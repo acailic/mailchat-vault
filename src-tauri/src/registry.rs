@@ -296,6 +296,11 @@ pub struct SettingsView {
     pub summarize_top: u32,
     /// Desktop notifications for new mail after sync/watch cycles.
     pub notifications: bool,
+    /// Keep running in the background when the window is closed (M7:
+    /// close hides to the tray instead of exiting; opt-in, default off).
+    pub keep_running_in_background: bool,
+    /// Start the app automatically at login (M7; opt-in, default off).
+    pub start_at_login: bool,
     /// The environment-fallback provider, when validly configured.
     pub env: Option<EnvProviderView>,
     /// Why the environment configuration was refused, if it was.
@@ -319,6 +324,15 @@ pub struct SaveSettingsPayload {
     /// Absent in older payloads → the option's enabled default.
     #[serde(default = "default_true")]
     pub notifications: bool,
+    /// Keep running in the background when the window is closed (M7).
+    /// Absent in older payloads → disabled (strict opt-in, unlike
+    /// `notifications`: closing must keep exiting until asked).
+    #[serde(default)]
+    pub keep_running_in_background: bool,
+    /// Start the app automatically at login (M7). Absent in older
+    /// payloads → disabled.
+    #[serde(default)]
+    pub start_at_login: bool,
     pub api_keys: Vec<ApiKeyUpdate>,
 }
 
@@ -351,6 +365,8 @@ impl From<&LlmRegistry> for SettingsView {
             theme: settings.options.theme,
             summarize_top: settings.options.summarize_top,
             notifications: settings.options.notifications,
+            keep_running_in_background: settings.options.keep_running_in_background,
+            start_at_login: settings.options.start_at_login,
             env: registry.env.as_ref().map(|e| EnvProviderView {
                 model: e.model.clone(),
                 host: e.host(),
@@ -613,6 +629,36 @@ mod tests {
         )
         .unwrap();
         assert!(!explicit.notifications);
+    }
+
+    #[test]
+    fn view_carries_keepalive_and_old_payloads_default_off() {
+        // M7: the view surfaces both keep-alive options, and payloads from
+        // frontends older than M7 (fields absent) parse as disabled —
+        // keep-alive is strictly opt-in, so an old payload can never
+        // silently keep the process running or register autostart.
+        let mut settings = Settings::default();
+        settings.options.keep_running_in_background = true;
+        settings.options.start_at_login = true;
+        let r = registry(settings, &[], None);
+        let view = SettingsView::from(&r);
+        assert!(view.keep_running_in_background);
+        assert!(view.start_at_login);
+        // Pre-M7 payload shape (no keep-alive fields, notifications
+        // explicit) → both options parse disabled.
+        let older: SaveSettingsPayload = serde_json::from_str(
+            r#"{"providers":[],"default_provider":null,"theme":"system","summarize_top":8,"notifications":true,"api_keys":[]}"#,
+        )
+        .unwrap();
+        assert!(!older.keep_running_in_background);
+        assert!(!older.start_at_login);
+        // An explicit opt-in payload round-trips both fields.
+        let explicit: SaveSettingsPayload = serde_json::from_str(
+            r#"{"providers":[],"default_provider":null,"theme":"system","summarize_top":8,"keep_running_in_background":true,"start_at_login":true,"api_keys":[]}"#,
+        )
+        .unwrap();
+        assert!(explicit.keep_running_in_background);
+        assert!(explicit.start_at_login);
     }
 
     #[test]

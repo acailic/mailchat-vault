@@ -30,7 +30,7 @@ The first user is someone with years of exports and one or more mail accounts. T
 
 ## Release boundary
 
-The first polished release includes all milestones M1–M6 in the [roadmap](implementation-roadmap.md). Earlier internal builds may exercise completed slices, but are not the agreed complete release.
+The first polished release includes all milestones M1–M7 in the [roadmap](implementation-roadmap.md). Earlier internal builds may exercise completed slices, but are not the agreed complete release.
 
 Included sources are mbox, WhatsApp text/media exports, Telegram single-chat JSON/media exports, Signal conversation JSON, Discord data packages, and TLS IMAP including Gmail app passwords and Google sign-in where the OAuth client is configured. The Google path currently requires developer configuration; its presence is not evidence of self-service consumer onboarding. Users can import a file, supported export directory, or ZIP through source-specific paths; the unified selection and preview flow remains required. A Telegram all-chats export is not implicitly supported: preview must identify an unsupported shape rather than report a successful empty import.
 
@@ -51,8 +51,9 @@ The release supports Linux x64, Windows x64, and macOS Apple Silicon/Intel. OS a
 | P07 | AI off until enabled; per-question disclosure and per-answer context approval; citations open archived evidence | [UX: Ask](ux-specification.md#optional-ask) |
 | P08 | Accessible keyboard operation and usable small-window behavior | [UX: accessibility](ux-specification.md#accessibility-and-interaction) |
 | P09 | Install, upgrade, and use keychain/recovery workflows on all supported desktop targets | [Release validation](validation-and-release.md#platform-and-release-matrix) |
+| P10 | Optional background keep-alive: close-to-tray, start at login, single instance — each opt-in and off by default, never a headless service | [D10 amendment](decisions.md#d10-read-only-mail-ingestion-and-opt-in-scheduling) |
 
-Manual sync is the default. An opt-in 15-minute schedule runs only while the app is open, avoids overlapping jobs for one source, and does not accumulate missed runs while offline or asleep. On resume it schedules one catch-up run. Disconnecting stops future sync and removes credentials; archived content remains unless the user separately deletes it.
+Manual sync is the default. An opt-in 15-minute schedule runs while the app process is running, avoids overlapping jobs for one source, and does not accumulate missed runs while offline or asleep. On resume it schedules one catch-up run. The process normally lives as long as its window; with the opt-in keep-alive (P10) it can keep running from the tray between window closes and start at login, in which case the schedule, folder watching, and new-mail notifications span those closes. A second launch focuses the existing window instead of opening a second instance over the same vault. Disconnecting stops future sync and removes credentials; archived content remains unless the user separately deletes it.
 
 ## Success criteria
 
@@ -68,7 +69,7 @@ Assess success with local test evidence and voluntary usability sessions. Do not
 
 ## Deferred work
 
-Sending/replying, shared access, cloud synchronization, a mobile app, further connectors beyond the implemented inventory, OCR, transcription, attachment-content indexing, automatic updates, and app-managed vault encryption are deferred. Binary content is preserved without claiming its contents are searchable.
+Sending/replying, shared access, cloud synchronization, a mobile app, further connectors beyond the implemented inventory, OCR, transcription, attachment-content indexing, automatic updates, and app-managed vault encryption are deferred. A separate headless daemon/service binary for background archiving is a non-goal, not deferred work (see the [D10 amendment](decisions.md#d10-read-only-mail-ingestion-and-opt-in-scheduling)): background operation is the tray keep-alive of P10, never a second process over the vault. Binary content is preserved without claiming its contents are searchable.
 
 Gmail OAuth, local hybrid ranking with hash-based vectors, automatic folder watching, Signal/Discord imports, and multi-provider configuration have already landed and are no longer classified as deferred. Their remaining onboarding, source-specific media, retrieval-quality and release gaps are assessed in the [product review](product-review.md) and [implementation assessment](project-assessment.md). Hash-based vector ranking is not a validated claim of synonym, cross-language or general semantic understanding.
 

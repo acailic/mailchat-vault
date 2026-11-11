@@ -241,6 +241,11 @@ const addProviderButton = document.querySelector<HTMLButtonElement>("#add-provid
 const themeSelect = document.querySelector<HTMLSelectElement>("#theme")!;
 const summarizeTopInput = document.querySelector<HTMLInputElement>("#summarize-top")!;
 const notifyToggle = document.querySelector<HTMLInputElement>("#notify-toggle")!;
+/** M7 keep-alive toggles: keep running in the background (close hides to
+ * the tray) and start at login (OS registration). Both ship off and are
+ * rendered from the saved settings like every other option. */
+const keepaliveToggle = document.querySelector<HTMLInputElement>("#keepalive-toggle")!;
+const autostartToggle = document.querySelector<HTMLInputElement>("#autostart-toggle")!;
 const settingsSaveButton = document.querySelector<HTMLButtonElement>("#settings-save-btn")!;
 const backupStatus = document.querySelector<HTMLElement>("#backup-status")!;
 const backupCreateButton = document.querySelector<HTMLButtonElement>("#backup-create-btn")!;
@@ -748,6 +753,8 @@ function renderSettings(view: SettingsView): void {
   summarizeTopInput.value = String(view.summarize_top);
   notifyToggle.checked = view.notifications;
   notifyEnabled = view.notifications;
+  keepaliveToggle.checked = view.keep_running_in_background;
+  autostartToggle.checked = view.start_at_login;
 
   const envLines: string[] = [];
   if (view.env) {
@@ -799,6 +806,8 @@ function collectSettings(): SaveSettingsPayload {
     theme: themeSelect.value as SettingsView["theme"],
     summarize_top: parsedSummarizeTop(summarizeTopInput.value),
     notifications: notifyToggle.checked,
+    keep_running_in_background: keepaliveToggle.checked,
+    start_at_login: autostartToggle.checked,
     api_keys,
   };
 }
