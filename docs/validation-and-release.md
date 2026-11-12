@@ -65,6 +65,8 @@ The [performance baseline](../tests/perf/BASELINE.md) now (M2.4) times the real 
 
 Use deterministic synthetic 100k-message fixtures for correctness/regression gates and 1M for informational capacity trends. Include common/frequent/rare terms, author/filename matches, combined source/date filters, no matches, browse, deep pagination, revisions and long bodies. Generate sparse/streamed large files; do not commit giant binaries. Report database/object sizes, import throughput, resident-memory peaks, startup, query timing, and cancellation delay separately.
 
+Retrieval *quality* (not speed) is measured by the [retrieval baseline](../tests/retrieval/BASELINE.md) — the U07 track: 36 labeled English/Serbian questions over a deterministic synthetic archive, recall/MRR/false-confidence/latency through the product's own FTS5 and FTS5+RRF hybrid paths, with claim-calibration notes for what the measured numbers do and do not support. Its CI gate protects the instrument only; quality findings live in the baseline document.
+
 Initial product targets on the recorded reference desktop:
 
 | Measurement | Acceptance target |

@@ -108,6 +108,20 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
   `docs/evidence/literature-review-2026-11-13.md` for the evidence
   behind these changes).
 
+### Added (retrieval quality benchmark — measurement track)
+
+- **A retrieval-quality benchmark now runs on every PR** — the U07
+  measurement track from the user success plan: 36 labeled questions
+  (English and Serbian, email and chat originals, nine categories
+  including paraphrase, word-form variation, typos and no-answer
+  probes) over a deterministic 10k-message synthetic archive, measured
+  through the app's real search paths — the ordinary FTS5 search and
+  the local FTS5+RRF hybrid ranking. Recall, MRR, false-confidence and
+  latency baselines with claim-calibration notes are recorded in
+  `tests/retrieval/BASELINE.md`; the CI gate protects the instrument
+  (corpus/label integrity, lexically-trivial floors), never a measured
+  quality level.
+
 ### Added
 
 - **Email attachments** — synced mail now stores its MIME attachments

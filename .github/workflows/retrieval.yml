@@ -1,0 +1,62 @@
+name: Retrieval
+
+# U07 retrieval-quality benchmark (see tests/retrieval/BASELINE.md).
+#
+# Runs the labeled-question harness at 10k messages on every PR with the
+# instrument gate: the gate protects the benchmark's integrity (corpus/
+# labels, lexically-trivial floors, zero FTS false confidence), never a
+# measured quality level — quality findings belong in BASELINE.md, not
+# in CI. Full JSON results are uploaded as artifacts for trend tracking.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: retrieval-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  retrieval-10k:
+    name: "instrument gate: retrieval quality @ 10k"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: tests/retrieval
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tests/retrieval
+
+      - name: Lint harness
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --all-targets -- -D warnings
+
+      - name: Build harness (release)
+        run: cargo build --release
+
+      - name: Bench retrieval quality with instrument gate
+        run: |
+          cargo run --release -- bench \
+            --count 10000 \
+            --data-dir "$RUNNER_TEMP/vault-retrieval" \
+            --gate \
+            --json "$RUNNER_TEMP/retrieval-results-10k.json"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrieval-results-10k
+          path: ${{ runner.temp }}/retrieval-results-10k.json
+          if-no-files-found: warn
