@@ -57,7 +57,7 @@ compare each path against itself across runs.
 
 **Question set** (36 labeled questions — U07 floor is 30): 30 answerable
 (one correct original each) + 6 no-answer probes; 18 English / 18
-Serbian (Latin script); 14 email / 16 chat originals. Categories:
+Serbian (Latin script); 15 email / 15 chat originals. Categories:
 `exact-term` (4), `phrase` (4), `paraphrase` (4), `inflection` (4),
 `typo` (4), `attachment` (4), `author-topic` (4), `cross-language` (2),
 `no-answer` (6). The attachment category measures finding *the message
@@ -123,10 +123,10 @@ nothing).
 | author-topic | 4 | 1.00 | 1.00 | 1.00 | 1.00 | 0/0 | 0 | 4.3 / 4.4 |
 | inflection | 4 | 0.50 | 1.00 | 1.00 | 0.71 | 0/0 | 0 | 4.2 / 4.4 |
 | typo | 4 | 0.25 | 0.75 | 0.75 | 0.36 | 0/0 | 1 | 4.2 / 4.5 |
-| paraphrase | 4 | 0.00 | 0.25 | 0.50 | 0.15 | 0/0 | 2 | 4.2 / 4.7 |
+| paraphrase | 4 | 0.00 | 0.25 | 0.50 | 0.15 | 0/0 | 3 | 4.2 / 4.7 |
 | cross-language | 2 | 0.00 | 0.00 | 0.00 | 0.00 | 0/0 | 2 | 4.2 / 4.5 |
 | no-answer | 6 | — | — | — | — | **6/6** | 0 | 4.2 / 4.5 |
-| **overall** | 36 | 0.60 | 0.80 | 0.83 | 0.68 | 6/6 | 5 | 4.2 / 4.6 |
+| **overall** | 36 | 0.60 | 0.80 | 0.83 | 0.68 | 6/6 | 6 | 4.2 / 4.6 |
 
 By language: en r@5 0.80 / MRR 0.60 · sr r@5 0.80 / MRR 0.76.
 

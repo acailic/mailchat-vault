@@ -97,31 +97,34 @@ pub fn group(results: &[&QuestionResult]) -> GroupStats {
     let mut latencies: Vec<f64> = Vec::new();
     for r in results {
         latencies.push(r.latency_ms);
-        match r.rank {
-            Some(rank) if r.answerable => {
-                stats.answerable += 1;
-                answerable_ranks.push(1.0 / rank as f64);
-                if rank <= 1 {
-                    stats.recall1 += 1.0;
+        if r.answerable {
+            stats.answerable += 1;
+            match r.rank {
+                Some(rank) => {
+                    answerable_ranks.push(1.0 / rank as f64);
+                    if rank <= 1 {
+                        stats.recall1 += 1.0;
+                    }
+                    if rank <= 5 {
+                        stats.recall5 += 1.0;
+                    }
+                    if rank <= 10 {
+                        stats.recall10 += 1.0;
+                    }
+                    if rank > 5 {
+                        stats.confident_wrong += 1;
+                    }
                 }
-                if rank <= 5 {
-                    stats.recall5 += 1.0;
-                }
-                if rank <= 10 {
-                    stats.recall10 += 1.0;
+                None => {
+                    if r.hits > 0 {
+                        stats.confident_wrong += 1;
+                    }
                 }
             }
-            _ if r.answerable => {
-                stats.answerable += 1;
-                if r.hits > 0 {
-                    stats.confident_wrong += 1;
-                }
-            }
-            _ => {
-                stats.no_answer += 1;
-                if r.false_confident {
-                    stats.false_confident += 1;
-                }
+        } else {
+            stats.no_answer += 1;
+            if r.false_confident {
+                stats.false_confident += 1;
             }
         }
     }

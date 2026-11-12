@@ -118,9 +118,8 @@ const fn confuser(
     }
 }
 
-/// The question set. Counts (asserted at startup): 36 questions, 30
-/// answerable, 6 no-answer; en 19 / sr 17; email 14 / chat 16 among the
-/// answerable.
+/// The question set. Counts: 36 questions, 30 answerable, 6 no-answer;
+/// en 18 / sr 18; email 15 / chat 15 among the answerable.
 pub const QUESTIONS: &[Question] = &[
     // -----------------------------------------------------------------
     // exact-term: one distinctive term, exactly one corpus occurrence.
