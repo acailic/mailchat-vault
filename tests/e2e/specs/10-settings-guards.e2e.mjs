@@ -51,7 +51,7 @@ export async function run(ctx) {
         await ui.waitForApp(browser);
 
         // --- the form configures a provider --------------------------------
-        await ui.openView(browser, "settings");
+        await ui.openSettingsSection(browser, "ai");
         await setSelect(browser, "#add-kind", "custom");
         await browser.$("#add-provider-btn").click();
         const row = await browser.$('.provider-row[data-id="custom"]');
@@ -60,7 +60,7 @@ export async function run(ctx) {
         await row.$(".prov-model").setValue("settings-model");
         await row.$(".prov-key").setValue("guard-key");
         await row.$('input[type="radio"]').click();
-        await browser.$("#settings-save-btn").click();
+        await browser.$("#settings-save-ai").click();
         await ui.waitForText(browser, "#settings-note", "Saved.");
 
         // settings.json holds the profile but never the key.
@@ -135,12 +135,12 @@ export async function run(ctx) {
         assert.equal(mock.requests.length, 1, "local mode sends nothing");
 
         // --- mis-paired provider refused BEFORE saving ----------------------
-        await ui.openView(browser, "settings");
+        await ui.openSettingsSection(browser, "ai");
         await setSelect(browser, "#add-kind", "zai");
         await browser.$("#add-provider-btn").click();
         const zaiRow = await browser.$('.provider-row[data-id="zai"]');
         await zaiRow.$(".prov-url").setValue("https://api.anthropic.com");
-        await browser.$("#settings-save-btn").click();
+        await browser.$("#settings-save-ai").click();
         const misPair = await ui.waitForText(browser, "#settings-note", "Not saved");
         assert.includes(
           misPair,
@@ -165,7 +165,7 @@ export async function run(ctx) {
         await (
           await browser.$('.provider-row[data-id="custom"] .prov-url')
         ).setValue("http://attacker.example/api");
-        await browser.$("#settings-save-btn").click();
+        await browser.$("#settings-save-ai").click();
         const plaintext = await ui.waitForText(browser, "#settings-note", "Not saved");
         assert.includes(
           plaintext,
@@ -228,7 +228,7 @@ export async function run(ctx) {
       },
       async (browser) => {
       await ui.waitForApp(browser);
-      await ui.openView(browser, "settings");
+      await ui.openSettingsSection(browser, "ai");
 
       // The refusal is VISIBLE in the Settings screen.
       const problem = await ui.waitForText(

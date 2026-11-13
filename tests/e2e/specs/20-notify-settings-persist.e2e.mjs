@@ -52,7 +52,7 @@ export async function run(ctx) {
   // --- boot 1: the absent field backfills to enabled ---------------------
   await withSession({ dataDir }, async (browser) => {
     await ui.waitForApp(browser);
-    await ui.openView(browser, "settings");
+    await ui.openSettingsSection(browser, "general");
     const toggle = await browser.$("#notify-toggle");
     await browser.waitUntil(async () => {
       try {
@@ -67,10 +67,19 @@ export async function run(ctx) {
     );
     await saveScreenshot(browser, "20-backfill-checked.png");
 
-    // Opt out and save: the file must record the explicit opt-out.
+    // Opt out and save: the file must record the explicit opt-out. The
+    // save confirmation lives on the AI page (hidden while General is up;
+    // WebKit getText of a hidden element is ""), so the settle reads the
+    // app's own note through the DOM.
     await toggle.click();
-    await (await browser.$("#settings-save-btn")).click();
-    await ui.waitForText(browser, "#settings-note", "Saved.");
+    await (await browser.$("#settings-save-general")).click();
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(
+          () => document.querySelector("#settings-note")?.textContent ?? "",
+        )).startsWith("Saved."),
+      { timeoutMsg: "the opt-out save never confirmed" },
+    );
     const saved = JSON.parse(await readFile(settingsPath, "utf8"));
     assert.equal(
       saved.options.notifications,
@@ -86,7 +95,7 @@ export async function run(ctx) {
   // --- boot 2: the opt-out survives restart ------------------------------
   await withSession({ dataDir }, async (browser) => {
     await ui.waitForApp(browser);
-    await ui.openView(browser, "settings");
+    await ui.openSettingsSection(browser, "general");
     // The checkbox ships `checked` in the HTML and is corrected only when
     // the settings round-trip renders; wait for that render (the
     // summarize-top input is empty until then) before reading the toggle,
@@ -106,8 +115,14 @@ export async function run(ctx) {
 
     // Re-enable and save: true persists again.
     await toggle.click();
-    await (await browser.$("#settings-save-btn")).click();
-    await ui.waitForText(browser, "#settings-note", "Saved.");
+    await (await browser.$("#settings-save-general")).click();
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(
+          () => document.querySelector("#settings-note")?.textContent ?? "",
+        )).startsWith("Saved."),
+      { timeoutMsg: "the re-enable save never confirmed" },
+    );
     const saved = JSON.parse(await readFile(settingsPath, "utf8"));
     assert.equal(saved.options.notifications, true, "re-enable persisted");
     await saveScreenshot(browser, "20-re-enabled.png");

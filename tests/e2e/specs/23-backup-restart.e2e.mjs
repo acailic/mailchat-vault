@@ -10,7 +10,8 @@
 //     started at T was interrupted and rolled back at startup — the vault
 //     from before it is active." — instead of the false "Active vault:
 //     switched in from the backup ..." claim.
-//   - Storage & backup leads the Settings view (first section).
+//   - Storage & backup leads its Settings page (first section, before
+//     the media store).
 //
 // The backup/restore commits go through the real IPC commands inside the
 // live webview (the native save dialog is not WebDriver-reachable — the
@@ -40,9 +41,10 @@ function saveScreenshot(browser, filename) {
   return browser.saveScreenshot(file);
 }
 
-/** Open the Settings view and bring the Storage & backup panel on screen. */
+/** Open the Storage & backup settings page (backup + media store live
+ * behind the settings page nav, not on the Settings landing page). */
 async function openBackupPanel(browser, ui) {
-  await ui.openView(browser, "settings");
+  await ui.openSettingsSection(browser, "storage");
   await browser.execute(() =>
     document.querySelector("#backup")?.scrollIntoView({ block: "center" }),
   );
@@ -85,15 +87,15 @@ export async function run(ctx) {
         assert.ok(existsSync(backupPath), "the container exists on disk");
         recordCreatedAt = summary.manifest.created_at;
 
-        // Storage & backup leads Settings: #backup is the view's first
-        // section, before the provider controls.
+        // Storage & backup leads its settings page: #backup is the first
+        // section inside #settings-storage, before the media store.
         const sectionOrder = await browser.execute(() =>
-          Array.from(document.querySelectorAll("#view-settings > section"), (s) => s.id),
+          Array.from(document.querySelectorAll("#settings-storage > section"), (s) => s.id),
         );
-        assert.equal(
-          sectionOrder[0],
-          "backup",
-          `Storage & backup is the first Settings section: ${JSON.stringify(sectionOrder)}`,
+        assert.deepEqual(
+          sectionOrder,
+          ["backup", "media-store"],
+          `Storage & backup page section order: ${JSON.stringify(sectionOrder)}`,
         );
 
         // The persisted line renders in the panel.
@@ -107,11 +109,11 @@ export async function run(ctx) {
         await saveScreenshot(browser, "23-backup-line.png");
 
         // Delete the container out from under the record, then re-enter
-        // Settings — the line re-reads and flags the missing file instead
-        // of promising it.
+        // the storage page — the line re-reads and flags the missing file
+        // instead of promising it.
         await unlink(backupPath);
         await ui.openView(browser, "workspace");
-        await ui.openView(browser, "settings");
+        await openBackupPanel(browser, ui);
         await ui.waitForText(
           browser,
           "#backup-status",

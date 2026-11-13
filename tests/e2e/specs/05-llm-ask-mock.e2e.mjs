@@ -255,7 +255,8 @@ export async function run(ctx) {
 
         // Add a second network provider through the real Settings form
         // (same recorder, different model name) while the prompt is open.
-        await ui.openView(browser, "settings");
+        // Provider controls live on the AI assistance settings page.
+        await ui.openSettingsSection(browser, "ai");
         await browser.execute(() => {
           const el = document.querySelector("#add-kind");
           el.value = "custom";
@@ -267,7 +268,7 @@ export async function run(ctx) {
         await row.$(".prov-url").setValue(`http://127.0.0.1:${mockB.port}/api`);
         await row.$(".prov-model").setValue("model-beta");
         await row.$(".prov-key").setValue("beta-key");
-        await browser.$("#settings-save-btn").click();
+        await browser.$("#settings-save-ai").click();
         await ui.waitForText(browser, "#settings-note", "Saved.");
 
         // Back to the workspace: the prompt is still open and still names

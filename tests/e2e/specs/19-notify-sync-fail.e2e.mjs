@@ -113,7 +113,7 @@ export async function run(ctx) {
 
   await withSession({}, async (browser, { dataDir }) => {
     await ui.waitForApp(browser);
-    await ui.openView(browser, "sources");
+    await ui.openSourcesSection(browser, "email");
     const before = await notifyCount();
 
     // ==============================================================

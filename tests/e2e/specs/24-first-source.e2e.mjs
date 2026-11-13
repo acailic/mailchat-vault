@@ -33,16 +33,30 @@ export async function run(ctx) {
       "no demo banner on the personal vault",
     );
 
-    // The primary CTA opens the Add source view at the import controls.
+    // The primary CTA deep-links into the Sources view's import section.
     await (await browser.$("#first-run-import-btn")).click();
     await browser.waitUntil(
       async () =>
-        (await (await browser.$("#app")).getAttribute("data-view")) === "sources",
-      { timeoutMsg: "the first-run CTA did not open the Add source view" },
+        (await (await browser.$("#app")).getAttribute("data-view")) === "sources" &&
+        (await (await browser.$("#app")).getAttribute("data-sources-section")) === "import",
+      { timeoutMsg: "the first-run CTA did not open the Sources import section" },
     );
     assert.ok(
       await (await browser.$("#import-pick-btn")).isDisplayed(),
       "the import picker button is the offered action",
+    );
+    // The connect CTA deep-links the same way, into the email section.
+    await ui.openView(browser, "workspace");
+    await (await browser.$("#first-run-account-btn")).click();
+    await browser.waitUntil(
+      async () =>
+        (await (await browser.$("#app")).getAttribute("data-view")) === "sources" &&
+        (await (await browser.$("#app")).getAttribute("data-sources-section")) === "email",
+      { timeoutMsg: "the connect CTA did not open the Sources email section" },
+    );
+    assert.ok(
+      await (await browser.$("#imap-sync-btn")).isDisplayed(),
+      "the Connect and sync button is the offered action",
     );
 
     // --- 2. the isolated sample archive (U02), entered from the card -----

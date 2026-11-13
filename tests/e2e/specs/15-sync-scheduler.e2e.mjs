@@ -61,7 +61,7 @@ export async function run(ctx) {
   await withSession({}, async (browser, { dataDir }) => {
     firstDataDir = dataDir;
     await ui.waitForApp(browser);
-    await ui.openView(browser, "sources");
+    await ui.openSourcesSection(browser, "automatic");
     const db = vaultDbPath(dataDir);
 
     // 1. Opt-in default: off, 15-minute interval, nothing scheduled.
@@ -163,7 +163,7 @@ export async function run(ctx) {
   // vault — still enabled, still 30 minutes, and no immediate round.
   await withSession({ dataDir: firstDataDir }, async (browser) => {
     await ui.waitForApp(browser);
-    await ui.openView(browser, "sources");
+    await ui.openSourcesSection(browser, "automatic");
     const after = await ipc(browser, "sync_schedule_get");
     assert.equal(after.enabled, true, "the opt-in survives the restart");
     assert.equal(after.interval_minutes, 30, "the interval survives the restart");

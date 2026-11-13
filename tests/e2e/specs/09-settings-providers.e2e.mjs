@@ -50,7 +50,7 @@ export async function run(ctx) {
       async (browser, { dataDir }) => {
       await ui.waitForApp(browser);
 
-      if (!(await browser.$("#settings").isExisting())) {
+      if (!(await browser.$("#view-settings").isExisting())) {
         ctx.skip("Settings UI not present in this build");
       }
 
@@ -63,7 +63,11 @@ export async function run(ctx) {
       await ui.waitForText(browser, "#llm-note", "LLM assist is off");
 
       // --- configure a custom provider through Settings ---------------------
-      await ui.openView(browser, "settings");
+      // (provider controls live on the AI assistance page; the theme select
+      // on General is set through the same JS seam — hidden selects cannot
+      // be driven natively on this driver build, and the save collects the
+      // whole form from either page)
+      await ui.openSettingsSection(browser, "ai");
       await setSelect(browser, "#add-kind", "custom");
       await browser.$("#add-provider-btn").click();
       const row = await browser.$('.provider-row[data-id="custom"]');
@@ -74,7 +78,7 @@ export async function run(ctx) {
       await row.$('input[type="radio"]').click(); // make it the default
       await setSelect(browser, "#theme", "dark");
 
-      await browser.$("#settings-save-btn").click();
+      await browser.$("#settings-save-ai").click();
       await ui.waitForText(browser, "#settings-note", "Saved.");
       assert.ok(
         /(OS keyring|session memory)/.test(await browser.$("#settings-note").getText()),
@@ -179,13 +183,13 @@ export async function run(ctx) {
       );
 
       // --- pairing rules refuse a mis-paired provider before saving --------
-      await ui.openView(browser, "settings");
+      await ui.openSettingsSection(browser, "ai");
       await setSelect(browser, "#add-kind", "zai");
       await browser.$("#add-provider-btn").click();
       const zaiRow = await browser.$('.provider-row[data-id="zai"]');
       // A z.ai provider pointed at the Anthropic host must be refused.
       await zaiRow.$(".prov-url").setValue("https://api.anthropic.com");
-      await browser.$("#settings-save-btn").click();
+      await browser.$("#settings-save-ai").click();
       const refused = await ui.waitForText(browser, "#settings-note", "Not saved");
       assert.includes(
         refused,

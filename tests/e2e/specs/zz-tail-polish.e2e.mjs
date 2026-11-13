@@ -1,9 +1,9 @@
 // Path: the tail-polish pass (§2.6) — every surface a user reads speaks
 // in user words, never raw store tokens: the reading pane's date and
 // conversation certainty rows, the Copy-message text, the backend text
-// export, the accounts panel identity (address · server, tooltip with
-// the stored source label, actions that name the account), and the
-// "Add account…" arrival context on the Add source view.
+// export, the sources list identity (address · server, tooltip with
+// the stored source label, actions that name the source), and the
+// Add source chooser round trip on the Sources view.
 //
 // The unknown-token defense (verbatim passthrough) has no live surface —
 // the store's CHECK constraint on time_confidence makes an unknown token
@@ -155,20 +155,20 @@ export async function run(ctx) {
     assert.ok(!exportText.includes("()"), "no empty qualifier fragment in the export");
 
     // =============================================================
-    // 5. Accounts panel: an IMAP account is named "address · server",
+    // 5. Sources list: an IMAP source is named "address · server",
     //    the stored connector label survives only as a tooltip, and
-    //    the per-row actions name the account the user knows.
+    //    the per-row actions name the source the user knows.
     // =============================================================
     await ctx.sqlite.query(db, sourceRow(
       "e2e-imap-tail",
       "imap:mail.test:993:credless@h.invalid",
       "credless@h.invalid",
     ));
-    await ui.openView(browser, "accounts");
-    await (await browser.$("#accounts-refresh")).click();
+    await ui.openView(browser, "sources");
+    await (await browser.$("#sources-refresh")).click();
     const rowText = await ui.waitForText(
       browser,
-      "#accounts-list",
+      "#sources-list",
       "credless@h.invalid · mail.test",
       { timeoutMsg: "the IMAP row never showed the address · server identity" },
     );
@@ -194,45 +194,70 @@ export async function run(ctx) {
     assert.equal(
       syncAria,
       "Sync account credless@h.invalid · mail.test now",
-      "the sync action names the account the user knows",
+      "the sync action names the source the user knows",
     );
     await browser.execute(() =>
-      document.querySelector("#accounts-list")?.scrollIntoView({ block: "center" }),
+      document.querySelector("#sources-list")?.scrollIntoView({ block: "center" }),
     );
-    await saveScreenshot(browser, "zz-tail-accounts-row.png");
+    await saveScreenshot(browser, "zz-tail-sources-row.png");
 
     // =============================================================
-    // 6. "Add account…" arrives on Add source WITH context, and the
-    //    guidance retires when the user leaves the view on their own.
+    // 6. The Add source chooser: exactly two ways in (Import files /
+    //    Connect email), the email form carries visible labels, and
+    //    Back returns to the sources home.
     // =============================================================
-    await (await browser.$("#accounts-add")).click();
+    await (await browser.$("#sources-add-btn")).click();
     await browser.waitUntil(
       async () =>
-        (await browser.execute(() => document.querySelector("#app")?.getAttribute("data-view"))) ===
-        "sources",
-      { timeoutMsg: "Add account never navigated to the sources view" },
+        (await browser.execute(() => document.querySelector("#app")?.getAttribute("data-sources-section"))) ===
+        "add",
+      { timeoutMsg: "Add source never opened the chooser" },
     );
-    const guidance = await ui.waitForText(
-      browser,
-      "#add-source-guidance",
-      "Import files",
-      { timeoutMsg: "the arrival guidance never appeared" },
+    const choices = await browser.$$$("#sources-add .row button:not([id='add-back-btn'])");
+    const choiceLabels = [];
+    for (const choice of choices) choiceLabels.push(await choice.getText());
+    assert.deepEqual(
+      choiceLabels.map((t) => t.trim()),
+      ["Import files…", "Connect email…"],
+      "the chooser offers exactly the two ways in",
     );
-    assert.includes(guidance, "Connect email (IMAP)", "the guidance names the connect path");
-    assert.includes(guidance, "Accounts panel", "the guidance says where the result shows up");
+    await (await browser.$("#add-choice-email")).click();
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(() => document.querySelector("#app")?.getAttribute("data-sources-section"))) ===
+        "email",
+      { timeoutMsg: "Connect email never opened the email form" },
+    );
+    // Visible field labels (not placeholders doing the labelling).
+    for (const labelFor of ["imap-user", "imap-auth", "imap-pass"]) {
+      assert.ok(
+        await (await browser.$(`#sources-email label[for="${labelFor}"]`)).isDisplayed(),
+        `the ${labelFor} field carries a visible label`,
+      );
+    }
+    // Server/port/folders wait under Advanced, not in the primary flow.
+    assert.equal(
+      await browser.execute(() => document.querySelector("#imap-advanced")?.open ?? null),
+      false,
+      "the Advanced fold starts closed",
+    );
     await browser.execute(() =>
-      document.querySelector("#add-source-guidance")?.scrollIntoView({ block: "center" }),
+      document.querySelector("#sources-email")?.scrollIntoView({ block: "center" }),
     );
-    await saveScreenshot(browser, "zz-tail-add-source-guidance.png");
+    await saveScreenshot(browser, "zz-tail-add-source-email.png");
 
-    // Self-directed revisit: the guidance served its purpose and must
-    // not linger.
-    await ui.openView(browser, "workspace");
-    await ui.openView(browser, "sources");
-    const hidden = await browser.execute(
-      () => document.querySelector("#add-source-guidance")?.hidden,
+    // Back returns home; the chooser is gone and the list is back.
+    await (await browser.$("#email-back-btn")).click();
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(() => document.querySelector("#app")?.getAttribute("data-sources-section"))) ===
+        "home",
+      { timeoutMsg: "Back never returned to the sources home" },
     );
-    assert.equal(hidden, true, "the guidance retired once the user left the view");
+    assert.ok(
+      await (await browser.$("#sources-add-btn")).isDisplayed(),
+      "the home section (with its Add source button) is back",
+    );
 
     log("tail polish: all scenarios passed");
   });

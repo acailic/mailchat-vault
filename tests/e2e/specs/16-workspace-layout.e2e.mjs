@@ -100,6 +100,37 @@ export async function run(ctx) {
     );
     assert.ok(semantics.skipLink, "skip link present");
 
+    // --- navigation destinations: three primary + secondary Activity -----
+    // (textContent of the Activity button also carries the hidden badge
+    // spans, so the label check anchors on its leading word.)
+    const nav = await browser.execute(() => ({
+      primary: Array.from(
+        document.querySelectorAll("#nav-views .nav-view-btn"),
+        (b) => ({ target: b.dataset.viewTarget, label: b.textContent.trim() }),
+      ),
+      secondary: Array.from(
+        document.querySelectorAll("#nav-secondary .nav-view-btn"),
+        (b) => ({ target: b.dataset.viewTarget, label: b.textContent.trim() }),
+      ),
+      accountsView: !!document.querySelector("#view-accounts"),
+    }));
+    assert.deepEqual(
+      nav.primary,
+      [
+        { target: "workspace", label: "Archive" },
+        { target: "sources", label: "Sources" },
+        { target: "settings", label: "Settings" },
+      ],
+      "the primary destinations are Archive / Sources / Settings",
+    );
+    assert.equal(nav.secondary.length, 1, "exactly one secondary nav link");
+    assert.equal(nav.secondary[0].target, "activity", "Activity is the secondary link");
+    assert.ok(
+      /^Activity\b/.test(nav.secondary[0].label),
+      `the secondary link is labeled Activity (got: ${nav.secondary[0].label})`,
+    );
+    assert.equal(nav.accountsView, false, "no Accounts destination exists");
+
     // --- synthetic data for the visuals -----------------------------------
     await ui.seedDemo(browser);
     await ui.search(browser, "vault");
