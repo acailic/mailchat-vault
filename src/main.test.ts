@@ -619,7 +619,7 @@ describe("filters", () => {
     // the unique label keeps its count.
     expect(chips.map((c) => c.textContent)).toEqual([
       "mbox · import",
-      "mbox · import 2",
+      "mbox",
       "demo (3)",
     ]);
     searchRespondsWith(() => pageOf(HITS.slice(0, 1), 6));
@@ -682,7 +682,7 @@ describe("filters", () => {
     // One applied filter chip per instance id, labeled distinctly.
     const chips = [...win.document.querySelectorAll("#active-filter-chips .filter-chip")];
     expect(chips.map((c) => c.textContent?.trim())).toEqual([
-      "mbox · import 2 ×",
+      "mbox ×",
       "mbox · import ×",
     ]);
     // Removing one leaves the other instance's filter in place.
