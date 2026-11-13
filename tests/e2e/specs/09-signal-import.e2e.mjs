@@ -58,7 +58,14 @@ export async function run(ctx) {
     const statsText = await ui.waitForApp(browser);
     assert.equal(statsText, "5 messages (signal: 5)", "stats label after signal import");
 
-    const chip = await browser.$('#source-chips button.chip[data-source="signal"]');
+    // Chips key on stable instance ids (`data-source` holds the id, the
+    // text still reads `signal (5)`): resolve the label's id through the
+    // live `sources_list` instead of assuming a label-keyed chip.
+    const listed = await invoke(browser, "sources_list");
+    assert.ok(listed.ok, `sources_list succeeded: ${listed.error ?? ""}`);
+    const signalId = listed.value.find((s) => s.label === "signal")?.id;
+    assert.ok(signalId, "signal instance listed with a stable id");
+    const chip = await browser.$(`#source-chips button.chip[data-source="${signalId}"]`);
     assert.ok(await chip.isExisting(), "signal source chip rendered");
     assert.includes(await chip.getText(), "signal (5)", "chip shows source and count");
 

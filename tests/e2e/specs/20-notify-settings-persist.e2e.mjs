@@ -67,17 +67,13 @@ export async function run(ctx) {
     );
     await saveScreenshot(browser, "20-backfill-checked.png");
 
-    // Opt out and save: the file must record the explicit opt-out. The
-    // save confirmation lives on the AI page (hidden while General is up;
-    // WebKit getText of a hidden element is ""), so the settle reads the
-    // app's own note through the DOM.
+    // Opt out and save: the file must record the explicit opt-out.
     await toggle.click();
     await (await browser.$("#settings-save-general")).click();
-    await browser.waitUntil(
-      async () =>
-        (await browser.execute(
-          () => document.querySelector("#settings-note")?.textContent ?? "",
-        )).startsWith("Saved."),
+    await ui.waitForText(
+      browser,
+      "#settings-note",
+      (text) => text.startsWith("Saved."),
       { timeoutMsg: "the opt-out save never confirmed" },
     );
     const saved = JSON.parse(await readFile(settingsPath, "utf8"));
@@ -116,11 +112,10 @@ export async function run(ctx) {
     // Re-enable and save: true persists again.
     await toggle.click();
     await (await browser.$("#settings-save-general")).click();
-    await browser.waitUntil(
-      async () =>
-        (await browser.execute(
-          () => document.querySelector("#settings-note")?.textContent ?? "",
-        )).startsWith("Saved."),
+    await ui.waitForText(
+      browser,
+      "#settings-note",
+      (text) => text.startsWith("Saved."),
       { timeoutMsg: "the re-enable save never confirmed" },
     );
     const saved = JSON.parse(await readFile(settingsPath, "utf8"));

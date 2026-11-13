@@ -227,14 +227,10 @@ export async function run(ctx) {
     assert.ok(await toggle.isSelected(), "Desktop notifications on by default");
     await toggle.click();
     await (await browser.$("#settings-save-general")).click();
-    // The save confirmation line lives on the AI assistance page, hidden
-    // while General is up (WebKit getText of a hidden element is ""), so
-    // the settle reads the app's own note through the DOM instead.
-    await browser.waitUntil(
-      async () =>
-        (await browser.execute(
-          () => document.querySelector("#settings-note")?.textContent ?? "",
-        )).startsWith("Saved."),
+    await ui.waitForText(
+      browser,
+      "#settings-note",
+      (text) => text.startsWith("Saved."),
       { timeoutMsg: "settings save never confirmed" },
     );
 
@@ -254,11 +250,10 @@ export async function run(ctx) {
     await ui.openSettingsSection(browser, "general");
     await (await browser.$("#notify-toggle")).click();
     await (await browser.$("#settings-save-general")).click();
-    await browser.waitUntil(
-      async () =>
-        (await browser.execute(
-          () => document.querySelector("#settings-note")?.textContent ?? "",
-        )).startsWith("Saved."),
+    await ui.waitForText(
+      browser,
+      "#settings-note",
+      (text) => text.startsWith("Saved."),
       { timeoutMsg: "settings re-enable never confirmed" },
     );
 
