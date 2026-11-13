@@ -111,7 +111,6 @@ import type {
   MediaSummary,
   Message,
   SourceInstance,
-  Stats,
   SyncScheduleView,
   WatchSnapshot,
 } from "./types";
@@ -130,6 +129,7 @@ import {
   passwordStoreNote,
   renderAccounts,
   accountTitle,
+  sourceChipRows,
   syncFailureText,
   syncNowRequest,
   type SyncNowRequest,
@@ -223,6 +223,13 @@ const dashboardRefreshButton = document.querySelector<HTMLButtonElement>("#stats
 const exportFormatSelect = document.querySelector<HTMLSelectElement>("#export-format")!;
 // Source instances (id ↔ display label) for the v2 source filter.
 let sourceInstances: SourceInstance[] = [];
+/** Account rows (id-keyed identity detail) for chip disambiguation and
+ * the Sources list; refreshed with `refreshAccounts`. */
+let accountsCache: AccountView[] = [];
+/** The last successful `stats` response (label-keyed counts for chips). */
+let lastStats: { by_source: { source: string; count: number }[] } | null = null;
+/** id → disambiguated chip label (shared by nav chips and filter chips). */
+let sourceChipLabels = new Map<string, string>();
 // The import scopes offered by the import-scope filter.
 let importScopes: ImportScope[] = [];
 const exportButton = document.querySelector<HTMLButtonElement>("#export-btn")!;
@@ -487,7 +494,8 @@ function renderAll(): void {
   });
   renderFilterChips(activeFilterChips, {
     chips: filterChips(state.filters, {
-      source: (id) => sourceInstances.find((s) => s.id === id)?.label ?? id,
+      source: (id) =>
+        sourceChipLabels.get(id) ?? sourceInstances.find((s) => s.id === id)?.label ?? id,
       import: (id) => importScopes.find((s) => s.import_id === id)?.import_id ?? id,
     }),
     onRemove: (chip) => removeFilterChip(chip),
@@ -526,17 +534,22 @@ function renderAll(): void {
   workspace.store.setReadingOpen(state.detail !== null);
 }
 
-function refreshChips(stats: Stats): void {
+/** Render the nav source chips from the current caches (ids, labels,
+ * counts). Called after stats, sources, or accounts refresh. Also
+ * refreshes the id → label map used by the applied-filter chips. */
+function renderSourceChipsNow(): void {
+  const rows = sourceChipRows(sourceInstances, accountsCache, lastStats?.by_source ?? []);
+  sourceChipLabels = new Map(rows.map((r) => [r.id, r.label]));
   renderSourceChips(sourceChips, {
-    available: stats.by_source,
+    rows,
     selected: state.sources,
-    onToggle: (source) => {
-      state.sources = state.sources.includes(source)
-        ? state.sources.filter((s) => s !== source)
-        : [...state.sources, source];
+    onToggle: (id) => {
+      state.sources = state.sources.includes(id)
+        ? state.sources.filter((s) => s !== id)
+        : [...state.sources, id];
       // Source scoping is a search action: show the results it produced.
       workspace.store.setView("workspace");
-      refreshChips(stats);
+      renderSourceChipsNow();
       void runSearch(0);
     },
   });
@@ -547,8 +560,9 @@ async function refreshSources(): Promise<void> {
   try {
     sourceInstances = await ipc.sourcesList();
   } catch {
-    sourceInstances = []; // chips/stats still work; ids resolve on retry
+    sourceInstances = []; // ids resolve on retry; chips follow the cache
   }
+  renderSourceChipsNow();
 }
 
 /** Load the import scopes for the import-scope filter chip. */
@@ -885,11 +899,12 @@ async function refreshStats(): Promise<void> {
   try {
     const stats = await ipc.stats();
     if (!statsGuard.isCurrent(token)) return; // a newer refresh superseded this response
+    lastStats = stats;
     archiveTotal = demoActive ? archiveTotal : stats.total;
     const parts = stats.by_source.map((s) => `${s.source}: ${s.count}`).join(", ");
     statsLabel.textContent =
       stats.total === 0 ? "empty archive" : `${stats.total} messages (${parts})`;
-    refreshChips(stats);
+    renderSourceChipsNow();
     updateVaultChrome();
     maybeInitialBrowse();
   } catch {
@@ -937,22 +952,13 @@ async function refreshDashboard(): Promise<void> {
 // Search (v2: flat stable ranking, filter chips, empty browse, refresh)
 // ---------------------------------------------------------------------------
 
-/** Read the current filter controls into a filter model (names → ids). */
 function readFilters(text: string): SearchFilters {
-  const labelToIds = new Map<string, string[]>();
-  for (const instance of sourceInstances) {
-    const ids = labelToIds.get(instance.label) ?? [];
-    ids.push(instance.id);
-    labelToIds.set(instance.label, ids);
-  }
-  // A display label may cover several source instances (same IMAP account
-  // under different TLS modes): the chip filters every instance carrying
-  // that label. An unmapped name still narrows the search — a name that is
-  // not a source id matches nothing, visible rather than silently broad.
-  const sourceIds = state.sources.flatMap((name) => labelToIds.get(name) ?? [name]);
+  // Source selection is by stable instance id (chips and the Sources
+  // list both key on source_id); an unknown id matches nothing — visible
+  // rather than silently broad.
   return {
     text,
-    sourceIds,
+    sourceIds: [...state.sources],
     author: authorInput.value.trim(),
     fromDate: fromDateInput.value,
     toDate: toDateInput.value,
@@ -966,10 +972,7 @@ function readFilters(text: string): SearchFilters {
 
 /** Push a filter model back into the controls (chip removal, Clear). */
 function writeFilters(f: SearchFilters): void {
-  const idToLabel = new Map(sourceInstances.map((s) => [s.id, s.label]));
-  state.sources = [...new Set(f.sourceIds.map((id) => idToLabel.get(id) ?? ""))].filter(
-    (name) => name !== "",
-  );
+  state.sources = [...new Set(f.sourceIds)];
   authorInput.value = f.author;
   fromDateInput.value = f.fromDate;
   toDateInput.value = f.toDate;
@@ -981,18 +984,7 @@ function writeFilters(f: SearchFilters): void {
 
 /** Remove one applied filter chip and re-run (resets to page one). */
 function removeFilterChip(chip: FilterChip): void {
-  let next = state.filters;
-  if (chip.kind === "source") {
-    // One label can stand for several instances (v1 semantics: the filter
-    // matches every instance carrying the label) — remove them all.
-    const ids = sourceInstances.filter((s) => s.label === chip.label).map((s) => s.id);
-    for (const id of ids.length > 0 ? ids : [chip.value]) {
-      next = withoutChip(next, { ...chip, value: id });
-    }
-  } else {
-    next = withoutChip(next, chip);
-  }
-  writeFilters(next);
+  writeFilters(withoutChip(state.filters, chip));
   void runSearch(0);
 }
 
@@ -1822,7 +1814,9 @@ async function refreshAccounts(): Promise<void> {
   try {
     const accounts = await ipc.accountsList();
     if (!accountsGuard.isCurrent(token)) return; // a newer refresh superseded this response
+    accountsCache = accounts;
     renderAccountsPanel(accounts);
+    renderSourceChipsNow();
   } catch (e) {
     if (accountsGuard.isCurrent(token)) {
       sourcesListEl.replaceChildren();

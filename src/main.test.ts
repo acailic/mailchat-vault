@@ -543,32 +543,32 @@ describe("filters", () => {
     await boot();
     await vi.waitFor(() => expect(win.document.querySelectorAll(".chip").length).toBe(2));
     searchRespondsWith(() => pageOf(HITS.slice(0, 1), 6));
-    ($('[data-source="mbox"]') as HTMLElement).click();
+    ($('[data-source="inst-mbox"]') as HTMLElement).click();
     await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
     expect(searchCalls()[0].args).toMatchObject({
       request: { text: "", source_ids: ["inst-mbox"] },
     });
     // Browse mode: no query echo in the status line.
     expect($("#status").textContent).toBe("1–6 of 6");
-    const chip = $('[data-source="mbox"]');
+    const chip = $('[data-source="inst-mbox"]');
     expect(chip.classList.contains("on")).toBe(true);
     expect(chip.getAttribute("aria-pressed")).toBe("true");
 
     // Toggling the only filter off returns to the unfiltered browse
     // (U04: empty text browses — the second IPC round-trip).
     searchRespondsWith(() => pageOf(HITS, 9));
-    ($('[data-source="mbox"]') as HTMLElement).click();
+    ($('[data-source="inst-mbox"]') as HTMLElement).click();
     await vi.waitFor(() => expect(searchCalls()).toHaveLength(2));
     expect(searchCalls()[1].args).toMatchObject({
       request: { text: "", source_ids: [] },
     });
-    expect($('[data-source="mbox"]')).not.toBeNull();
-    expect($('[data-source="mbox"]').classList.contains("on")).toBe(false);
+    expect($('[data-source="inst-mbox"]')).not.toBeNull();
+    expect($('[data-source="inst-mbox"]').classList.contains("on")).toBe(false);
     expect($("#status").textContent).toBe("1–9 of 9");
     expect(win.document.querySelectorAll("#results .hit-item").length).toBe(3);
   });
 
-  it("a shared display label selects every instance carrying that label", async () => {
+  it("two same-named sources stay independent chips keyed by id", async () => {
     tauri.handlers.set("sources_list", () => [
       {
         id: "inst-mbox",
@@ -608,16 +608,29 @@ describe("filters", () => {
       },
     ]);
     await boot();
-    await vi.waitFor(() => expect(win.document.querySelectorAll(".chip").length).toBe(2));
+    await vi.waitFor(() => expect(win.document.querySelectorAll(".chip").length).toBe(3));
+    const chips = [...win.document.querySelectorAll(".chip")] as unknown as HTMLElement[];
+    expect(chips.map((c) => c.dataset.source)).toEqual([
+      "inst-mbox",
+      "inst-mbox2",
+      "inst-demo",
+    ]);
+    // The shared label is disambiguated and loses the (ambiguous) count;
+    // the unique label keeps its count.
+    expect(chips.map((c) => c.textContent)).toEqual([
+      "mbox · import",
+      "mbox · import 2",
+      "demo (3)",
+    ]);
     searchRespondsWith(() => pageOf(HITS.slice(0, 1), 6));
-    ($('[data-source="mbox"]') as HTMLElement).click();
+    chips[0].click();
     await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
     expect(searchCalls()[0].args).toMatchObject({
-      request: { text: "", source_ids: ["inst-mbox", "inst-mbox2"] },
+      request: { text: "", source_ids: ["inst-mbox"] },
     });
   });
 
-  it("removing a colliding-label source chip clears every instance it expanded to", async () => {
+  it("removing one same-named source chip keeps the other instance selected", async () => {
     tauri.handlers.set("sources_list", () => [
       {
         id: "inst-mbox",
@@ -657,17 +670,28 @@ describe("filters", () => {
       },
     ]);
     await boot();
-    await vi.waitFor(() => expect(win.document.querySelectorAll(".chip").length).toBe(2));
+    await vi.waitFor(() => expect(win.document.querySelectorAll(".chip").length).toBe(3));
     searchRespondsWith(() => pageOf(HITS.slice(0, 1), 6));
-    ($('[data-source="mbox"]') as HTMLElement).click();
+    ($('[data-source="inst-mbox2"]') as HTMLElement).click();
     await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
-    expect(searchCalls()[0].args).toMatchObject({
-      request: { source_ids: ["inst-mbox", "inst-mbox2"] },
+    ($('[data-source="inst-mbox"]') as HTMLElement).click();
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(2));
+    expect(searchCalls()[1].args).toMatchObject({
+      request: { source_ids: ["inst-mbox2", "inst-mbox"] },
     });
-    ($("#active-filter-chips .filter-chip") as HTMLElement).click();
-    await vi.waitFor(() => expect(searchCalls()).toHaveLength(2)); // removal re-browses unfiltered (U04)
-    expect(win.document.querySelectorAll("#active-filter-chips .filter-chip").length).toBe(0);
-    expect($("#status").textContent).toBe("1–6 of 6");
+    // One applied filter chip per instance id, labeled distinctly.
+    const chips = [...win.document.querySelectorAll("#active-filter-chips .filter-chip")];
+    expect(chips.map((c) => c.textContent?.trim())).toEqual([
+      "mbox · import 2 ×",
+      "mbox · import ×",
+    ]);
+    // Removing one leaves the other instance's filter in place.
+    (chips[0] as unknown as HTMLElement).click();
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(3));
+    expect(searchCalls()[2].args).toMatchObject({
+      request: { source_ids: ["inst-mbox"] },
+    });
+    expect(win.document.querySelectorAll("#active-filter-chips .filter-chip").length).toBe(1);
   });
 
   it("the author filter sends the trimmed substring on Enter", async () => {
@@ -700,7 +724,7 @@ describe("filters", () => {
     await boot();
     await vi.waitFor(() => expect(win.document.querySelectorAll(".chip").length).toBe(2));
     searchRespondsWith(() => pageOf(HITS, 9));
-    ($('[data-source="mbox"]') as HTMLElement).click();
+    ($('[data-source="inst-mbox"]') as HTMLElement).click();
     await vi.waitFor(() => expect(searchCalls().length).toBe(1));
     input("#author").value = "bruno";
     input("#from-date").value = "2026-01-01";
@@ -711,8 +735,8 @@ describe("filters", () => {
     expect(input("#author").value).toBe("");
     expect(input("#from-date").value).toBe("");
     expect(input("#to-date").value).toBe("");
-    expect($('[data-source="mbox"]').classList.contains("on")).toBe(false);
-    expect($('[data-source="mbox"]').getAttribute("aria-pressed")).toBe("false");
+    expect($('[data-source="inst-mbox"]').classList.contains("on")).toBe(false);
+    expect($('[data-source="inst-mbox"]').getAttribute("aria-pressed")).toBe("false");
     expect($("#status").textContent).toBe("1–9 of 9");
   });
 });
@@ -895,7 +919,7 @@ describe("v2 filters", () => {
     await boot();
     await vi.waitFor(() => expect(win.document.querySelectorAll(".chip").length).toBe(2));
     searchRespondsWith(() => pageOf(HITS.slice(0, 1), 1));
-    ($('[data-source="demo"]') as HTMLElement).click();
+    ($('[data-source="inst-demo"]') as HTMLElement).click();
     await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
     input("#author").value = "ana";
     pressKey(input("#author"), "Enter");
@@ -1834,6 +1858,35 @@ describe("stats and chips", () => {
     searchRespondsWith(() => pageOf(HITS, 3));
     await runQuery("vault");
     await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
+  });
+
+  it("chips filter by stable id; two same-named sources stay independent", async () => {
+    // Override the boot fixtures BEFORE boot so the first stats/sources
+    // refresh renders the duplicate-label pair.
+    tauri.handlers.set("sources_list", () => [
+      { id: "id-1", kind: "legacy", label: "chat", connector_key: "mbox", config_json: "{}",
+        state: "connected", excluded: false, last_attempt_at: null, last_success_at: null,
+        created_at: "2026-01-01 00:00:00" },
+      { id: "id-2", kind: "legacy", label: "chat", connector_key: "mbox", config_json: "{}",
+        state: "connected", excluded: false, last_attempt_at: null, last_success_at: null,
+        created_at: "2026-01-01 00:00:00" },
+    ]);
+    tauri.handlers.set("accounts_list", () => []);
+    tauri.handlers.set("stats", () => ({ total: 5, by_source: [{ source: "chat", count: 5 }] }));
+    await boot();
+    await vi.waitFor(() =>
+      expect([...win.document.querySelectorAll("#source-chips .chip")].length).toBe(2),
+    );
+    const chips = [...win.document.querySelectorAll("#source-chips .chip")] as unknown as HTMLElement[];
+    expect(chips.map((c) => c.dataset.source)).toEqual(["id-1", "id-2"]);
+    chips[0].click();
+    await vi.waitFor(() => expect(searchCalls().length).toBeGreaterThan(0));
+    const args = searchCalls().at(-1)!.args as { request: { source_ids: string[] } };
+    expect(args.request.source_ids).toEqual(["id-1"]);
+    // The other same-named chip is still unpressed and independent.
+    expect(
+      ([...win.document.querySelectorAll("#source-chips .chip")][1] as unknown as HTMLElement).classList.contains("on"),
+    ).toBe(false);
   });
 });
 
@@ -3634,7 +3687,7 @@ describe("workspace shell", () => {
     $(".nav-view-btn[data-view-target='settings']").click();
     expect(app().dataset.view).toBe("settings");
     searchRespondsWith(() => pageOf(HITS, 3));
-    $('[data-source="mbox"]').click();
+    $('[data-source="inst-mbox"]').click();
     await flush();
     expect(app().dataset.view).toBe("workspace");
     expect(tauri.calls.some((c) => c.cmd === "search_archive_v2")).toBe(true);
