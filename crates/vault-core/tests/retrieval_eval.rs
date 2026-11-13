@@ -47,23 +47,33 @@ const CANDIDATES: u32 = 50;
 /// limit; the harness judges the same top-10 window the metrics score).
 const FUSED_LIMIT: usize = 10;
 
-// Measured baseline (2026-11-13, commit af286c5, HashEmbedder, 40
-// fixtures / 14 queries, macro-averaged):
+// Measured baseline (2026-11-13, base 531b044 plus the mixed-channel
+// queries this commit adds, HashEmbedder, 40 fixtures / 16 queries,
+// macro-averaged):
 //
-//   fts     recall@10 = 0.857   ndcg@10 = 0.886
-//   vector  recall@10 = 0.833   ndcg@10 = 0.819
-//   fused   recall@10 = 0.952   ndcg@10 = 0.945
+//   fts     recall@10 = 0.859   ndcg@10 = 0.879
+//   vector  recall@10 = 0.839   ndcg@10 = 0.827
+//   fused   recall@10 = 0.943   ndcg@10 = 0.941
 //
-// Task 1 baseline (equal weights): fts nDCG@10 = 0.886 (commit af286c5).
-// Shipped BM25F weights (c7ece20, subject 3.0): fts nDCG@10 = 0.874.
+// History: equal-weight baseline (af286c5, 14 queries): fts 0.857/0.886.
+// Shipped BM25F weights (c7ece20, subject 3.0), still 14 queries at
+// 531b044: fts 0.857/0.874, vector 0.833/0.819, fused 0.952/0.945 — the
+// vector and fused baselines stayed valid under the shipped weights.
+// Adding the two mixed-channel queries re-derived the macros: fused moved
+// DOWN to 0.943/0.941 (the mixed "release and rollback news" query
+// measures 0.750/0.832 — its paraphrased chat is FTS-invisible and the
+// vector leg reaches only three of four), so FUSED_RECALL_FLOOR honestly
+// dropped 0.90 -> 0.89; the vector macro rose and its floors follow
+// (0.75 -> 0.76, 0.74 -> 0.75). Floors hold for the combined 16-query
+// corpus.
 //
 // Floors sit ~5-10% below the measurements: far enough to absorb
 // tie-order noise, close enough to catch a real ranking regression.
 const FTS_RECALL_FLOOR: f64 = 0.78;
 const FTS_NDCG_FLOOR: f64 = 0.80;
-const VECTOR_RECALL_FLOOR: f64 = 0.75;
-const VECTOR_NDCG_FLOOR: f64 = 0.74;
-const FUSED_RECALL_FLOOR: f64 = 0.90;
+const VECTOR_RECALL_FLOOR: f64 = 0.76;
+const VECTOR_NDCG_FLOOR: f64 = 0.75;
+const FUSED_RECALL_FLOOR: f64 = 0.89;
 const FUSED_NDCG_FLOOR: f64 = 0.89;
 
 // ---------------------------------------------------------------------
@@ -568,6 +578,42 @@ const QUERIES: &[LabeledQuery] = &[
         date_from: Some("2026-10-12"),
         date_to: Some("2026-10-14"),
         relevant: &["c-standup-01", "c-standup-02", "c-standup-03"],
+    },
+    // Mixed-channel family: "migration" lives in the four Kestrel email
+    // subjects AND in two chat bodies (the migration test, the migration
+    // docs). Every earlier query's relevant set is single-channel, so the
+    // floors never saw a term compete across channels — exactly the axis
+    // where the subject weight (3.0 over the body's 1.0, with mail bodies
+    // also carrying the subject as their prefix) systematically favors the
+    // email leg. The relevant set is complete for the term: all six
+    // "migration" mentions in the corpus.
+    LabeledQuery {
+        text: "migration updates",
+        match_expr: "\"migration\"",
+        date_from: None,
+        date_to: None,
+        relevant: &[
+            "em-kestrel-01",
+            "em-kestrel-02",
+            "em-kestrel-03",
+            "em-kestrel-04",
+            "c-lgtm-03",
+            "c-standup-01",
+        ],
+    },
+    // Mixed-channel family: "release" appears in an email subject (the
+    // Aurora release notes) and in the chat deploy saga; "rollback" is the
+    // chat-side verdict. The relevant set mixes the one release email with
+    // all three deploy chats — c-deploy-02 says "rollout … reverting" and
+    // matches neither term, so the FTS translation alone cannot reach it
+    // (the vector leg's job, same paraphrase gap as the all-chat release
+    // query above).
+    LabeledQuery {
+        text: "release and rollback news",
+        match_expr: "\"release\" OR \"rollback\"",
+        date_from: None,
+        date_to: None,
+        relevant: &["em-aurora-03", "c-deploy-01", "c-deploy-02", "c-deploy-03"],
     },
 ];
 
