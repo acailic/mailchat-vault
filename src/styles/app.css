@@ -234,6 +234,31 @@ body {
   display: block;
 }
 
+/* --- Settings view: one page at a time ----------------------------------- */
+
+.settings-page { display: none; }
+#app[data-view="settings"][data-settings-section="general"] #settings-general,
+#app[data-view="settings"][data-settings-section="storage"] #settings-storage,
+#app[data-view="settings"][data-settings-section="ai"] #settings-ai {
+  display: block;
+}
+.settings-nav { margin-bottom: var(--sp-3); }
+.settings-nav-btn {
+  padding: var(--sp-1) var(--sp-2);
+  font: inherit;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+.settings-nav-btn:hover { background: var(--panel-2); }
+.settings-nav-btn[aria-current="page"] {
+  background: var(--selection);
+  border-color: var(--border-strong);
+  font-weight: 600;
+}
+
 #view-sources,
 #view-activity,
 #view-settings {

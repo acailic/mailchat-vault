@@ -374,37 +374,85 @@
             </section>
           </section>
 
-          <!-- Settings: storage & backup first (the safety/location
-               questions), then AI providers, then the media store. -->
+          <!-- Settings: three clearly separated pages — General,
+               Storage & backup, AI assistance. -->
           <section id="view-settings" class="view" aria-label="Settings">
             <h2 class="view-heading">Settings</h2>
+            <div class="row settings-nav" aria-label="Settings pages">
+              <button type="button" class="settings-nav-btn" data-settings-target="general">General</button>
+              <button type="button" class="settings-nav-btn" data-settings-target="storage">Storage &amp; backup</button>
+              <button type="button" class="settings-nav-btn" data-settings-target="ai">AI assistance</button>
+            </div>
 
-            <section id="backup" aria-label="Storage and backup">
-              <h2>Storage &amp; backup</h2>
-              <p class="meta">
-                A backup is one versioned file with the whole vault: a consistent database snapshot,
-                your settings, and every preserved attachment — each part checksummed. Passwords and
-                API keys are never part of a backup; restored accounts need to be reconnected.
-              </p>
-              <p id="vault-origin" class="meta" role="status"></p>
-              <p id="vault-location" class="meta"></p>
+            <section id="settings-general" class="settings-page" aria-label="General">
+              <h3>General</h3>
               <div class="row">
-                <span id="backup-status" class="meta" style="flex: 1" role="status"></span>
-                <div class="spacer"></div>
-                <button id="backup-create-btn" type="button" title="Write a versioned backup of the whole vault to a file you pick">Create backup…</button>
-                <button id="restore-pick-btn" type="button" title="Validate a backup file and offer a staged, journaled restore">Restore from backup…</button>
+                <label class="meta">Theme
+                  <select id="theme">
+                    <option value="system">System</option>
+                    <option value="light">Light</option>
+                    <option value="dark">Dark</option>
+                  </select>
+                </label>
+                <label class="meta" title="Native desktop notification when a sync or folder-watch cycle brings new mail; silent while the app window is focused">Desktop notifications
+                  <input id="notify-toggle" type="checkbox" checked />
+                </label>
               </div>
-              <div id="restore-flow"></div>
-              <h3 class="meta" style="margin-top: 12px">Previous vaults</h3>
-              <div class="row">
-                <span id="recovery-line" class="meta" style="flex: 1" role="status"></span>
+              <div class="row" style="margin-top: 6px">
+                <label class="meta" title="Off by default: closing the window hides the app to the tray instead of exiting, so auto-sync, folder watching, and notifications keep working between opens (the tray menu shows, syncs, and quits)">Keep running in background
+                  <input id="keepalive-toggle" type="checkbox" />
+                </label>
+                <label class="meta" title="Off by default: launch the app automatically when you log in (OS login-item registration; applied when you save)">Start at login
+                  <input id="autostart-toggle" type="checkbox" />
+                </label>
                 <div class="spacer"></div>
-                <button id="recovery-refresh-btn" type="button">Refresh</button>
+                <button id="settings-save-general" type="button">Save</button>
               </div>
-              <div id="recovery-slots"></div>
             </section>
 
-            <section id="settings">
+            <section id="settings-storage" class="settings-page" aria-label="Storage and backup">
+              <section id="backup" aria-label="Storage and backup">
+                <h2>Storage &amp; backup</h2>
+                <p class="meta">
+                  A backup is one versioned file with the whole vault: a consistent database snapshot,
+                  your settings, and every preserved attachment — each part checksummed. Passwords and
+                  API keys are never part of a backup; restored accounts need to be reconnected.
+                </p>
+                <p id="vault-origin" class="meta" role="status"></p>
+                <p id="vault-location" class="meta"></p>
+                <div class="row">
+                  <span id="backup-status" class="meta" style="flex: 1" role="status"></span>
+                  <div class="spacer"></div>
+                  <button id="backup-create-btn" type="button" title="Write a versioned backup of the whole vault to a file you pick">Create backup…</button>
+                  <button id="restore-pick-btn" type="button" title="Validate a backup file and offer a staged, journaled restore">Restore from backup…</button>
+                </div>
+                <div id="restore-flow"></div>
+                <h3 class="meta" style="margin-top: 12px">Previous vaults</h3>
+                <div class="row">
+                  <span id="recovery-line" class="meta" style="flex: 1" role="status"></span>
+                  <div class="spacer"></div>
+                  <button id="recovery-refresh-btn" type="button">Refresh</button>
+                </div>
+                <div id="recovery-slots"></div>
+              </section>
+              <section id="media-store" aria-label="Media store">
+                <h2>Media store</h2>
+                <p class="meta">
+                  Preserved attachments live in the app data dir, content-addressed by SHA-256 and served to
+                  the reading pane read-only. Nothing is ever fetched remotely to display media.
+                </p>
+                <div class="row">
+                  <span id="media-store-status" class="meta" style="flex: 1" role="status"></span>
+                  <div class="spacer"></div>
+                  <button id="media-refresh-btn" type="button">Refresh</button>
+                  <button id="media-reconcile-btn" type="button" title="Verify every object's hash against its name and the archive's references">Reconcile…</button>
+                </div>
+                <div id="media-usage"></div>
+              </section>
+            </section>
+
+            <section id="settings-ai" class="settings-page" aria-label="AI assistance">
+              <h3>AI assistance</h3>
               <div id="settings-note" class="meta" role="status"></div>
               <div id="env-info" class="meta"></div>
               <div id="provider-rows"></div>
@@ -422,48 +470,17 @@
                 <label class="meta" title="Default provider for Ask; none = environment variables when set, else local-only">
                   <input type="radio" name="default-provider" value="" /> automatic (environment)
                 </label>
-                <label class="meta">Theme
-                  <select id="theme">
-                    <option value="system">System</option>
-                    <option value="light">Light</option>
-                    <option value="dark">Dark</option>
-                  </select>
-                </label>
                 <label class="meta" title="How many top results are sent for the summary">Results for summary
                   <input id="summarize-top" type="number" min="1" max="50" style="max-width: 70px" />
                 </label>
-                <label class="meta" title="Native desktop notification when a sync or folder-watch cycle brings new mail; silent while the app window is focused">Desktop notifications
-                  <input id="notify-toggle" type="checkbox" checked />
-                </label>
-                <label class="meta" title="Off by default: closing the window hides the app to the tray instead of exiting, so auto-sync, folder watching, and notifications keep working between opens (the tray menu shows, syncs, and quits)">Keep running in background
-                  <input id="keepalive-toggle" type="checkbox" />
-                </label>
-                <label class="meta" title="Off by default: launch the app automatically when you log in (OS login-item registration; applied when you save)">Start at login
-                  <input id="autostart-toggle" type="checkbox" />
-                </label>
                 <div class="spacer"></div>
-                <button id="settings-save-btn" type="button">Save settings</button>
+                <button id="settings-save-ai" type="button">Save</button>
               </div>
               <p class="meta" style="font-size: 12px; margin-top: 8px">
                 Providers live in settings.json in the app data dir; API keys are stored in the OS keyring
                 (session memory when none is available) — never in the settings file or the database.
                 Text is set in the bundled Source Sans 3 (SIL OFL 1.1), falling back to your system font.
               </p>
-            </section>
-
-            <section id="media-store" aria-label="Media store">
-              <h2>Media store</h2>
-              <p class="meta">
-                Preserved attachments live in the app data dir, content-addressed by SHA-256 and served to
-                the reading pane read-only. Nothing is ever fetched remotely to display media.
-              </p>
-              <div class="row">
-                <span id="media-store-status" class="meta" style="flex: 1" role="status"></span>
-                <div class="spacer"></div>
-                <button id="media-refresh-btn" type="button">Refresh</button>
-                <button id="media-reconcile-btn" type="button" title="Verify every object's hash against its name and the archive's references">Reconcile…</button>
-              </div>
-              <div id="media-usage"></div>
             </section>
           </section>
         </main>

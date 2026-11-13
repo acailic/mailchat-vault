@@ -2604,7 +2604,7 @@ describe("ask provider menu", () => {
     status = { ...status, providers: [LOCAL_ITEM, ZAI_ITEM, { ...KEYLESS_ITEM, available: true }] };
     // Save triggers a menu rebuild: selection "zai" no longer exists → the
     // new default "mine" is preselected.
-    $("#settings-save-btn").click();
+    $("#settings-save-ai").click();
     await vi.waitFor(() => expect(input("#ask-provider").value).toBe("mine"));
     expect(menuOptions().find((o) => o.value === "zai")).toBeUndefined();
     expect($("#llm-note").textContent).toContain("LLM assist is on (m via 127.0.0.1)");
@@ -2630,7 +2630,7 @@ describe("ask provider menu", () => {
     fireChange(input("#ask-provider"));
     input("#theme").value = "dark";
     fireChange(input("#theme"));
-    $("#settings-save-btn").click();
+    $("#settings-save-ai").click();
     await vi.waitFor(() => expect($("#settings-note").textContent).toContain("Saved."));
     await flush();
     expect(input("#ask-provider").value).toBe("local");
@@ -3107,7 +3107,7 @@ describe("settings screen", () => {
     input("#summarize-top").value = "20";
     input("#theme").value = "light";
 
-    $("#settings-save-btn").click();
+    $("#settings-save-general").click();
     await vi.waitFor(() => expect($("#settings-note").textContent).toContain("Saved."));
     expect(saved!.args).toEqual({
       providers: [
@@ -3159,7 +3159,7 @@ describe("settings screen", () => {
     // unchecked — the same contract as the notifications toggle.
     $("#keepalive-toggle").click();
     $("#autostart-toggle").click();
-    $("#settings-save-btn").click();
+    $("#settings-save-general").click();
     await vi.waitFor(() => expect($("#settings-note").textContent).toContain("Saved."));
     expect(saved).toMatchObject({
       keep_running_in_background: false,
@@ -3176,7 +3176,7 @@ describe("settings screen", () => {
       () => Promise.reject("settings error: provider “Mine”: a custom provider needs a base URL"),
     );
     await boot();
-    $("#settings-save-btn").click();
+    $("#settings-save-general").click();
     await vi.waitFor(() => expect($("#settings-note").textContent).toContain("Not saved"));
     expect($("#settings-note").textContent).toContain("needs a base URL");
     expect($("#settings-note").classList.contains("error")).toBe(true);
@@ -3196,7 +3196,7 @@ describe("settings screen", () => {
     await boot();
     tauri.handlers.set("settings_save", () => viewWith((v) => (v.notifications = true)));
     input("#notify-toggle").checked = true; // HTML default, not persisted state
-    $("#settings-save-btn").click();
+    $("#settings-save-general").click();
     await flush();
     expect(tauri.calls.some((c) => c.cmd === "settings_save")).toBe(false);
 
@@ -3207,7 +3207,7 @@ describe("settings screen", () => {
     );
     await vi.waitFor(() => expect(input("#notify-toggle").checked).toBe(false));
     input("#notify-toggle").checked = true;
-    $("#settings-save-btn").click();
+    $("#settings-save-general").click();
     await vi.waitFor(() => expect($("#settings-note").textContent).toContain("Saved."));
     const save = tauri.calls.find((c) => c.cmd === "settings_save");
     expect((save!.args as { payload: { notifications: boolean } }).payload.notifications).toBe(
@@ -3523,7 +3523,7 @@ describe("desktop notifications", () => {
     input("#notify-toggle").checked = true;
     fireChange(input("#notify-toggle"));
     await vi.waitFor(() => expect(notifications.requested).toBe(1));
-    $("#settings-save-btn").click();
+    $("#settings-save-general").click();
     await vi.waitFor(() => expect($("#settings-note").textContent).toContain("Saved."));
     const save = tauri.calls.find((c) => c.cmd === "settings_save");
     expect((save!.args as { payload: { notifications: boolean } }).payload.notifications).toBe(
@@ -4436,20 +4436,65 @@ describe("accounts panel", () => {
 // restart-after-switch origin line + the section's first-class spot)
 // ---------------------------------------------------------------------------
 
-describe("storage & backup panel (U05)", () => {
-  it("opens Settings on Storage & backup first — before the provider controls", async () => {
-    // F10's targeted half: the safety/location questions lead, provider
-    // configuration follows. (No full U08 reorg — the sections keep
-    // their shapes, only the order changes.)
+describe("settings pages", () => {
+  it("renders three pages with a switcher; default is General", async () => {
     await boot();
-    const sections = [...win.document.querySelectorAll("#view-settings > section")].map(
-      (s) => s.id,
+    expect(($("#app") as HTMLElement).dataset.settingsSection).toBe("general");
+    const targets = [...document.querySelectorAll(".settings-nav-btn")].map(
+      (b) => (b as HTMLElement).dataset.settingsTarget,
     );
-    expect(sections[0]).toBe("backup");
-    expect(sections.indexOf("settings")).toBeGreaterThan(0);
+    expect(targets).toEqual(["general", "storage", "ai"]);
+    // General holds the theme/notifications/background controls; the
+    // backup group lives on the storage page; providers on the AI page.
+    expect($("#settings-general")!.contains($("#theme"))).toBe(true);
+    expect($("#settings-general")!.contains($("#keepalive-toggle"))).toBe(true);
+    expect($("#settings-storage")!.contains($("#backup"))).toBe(true);
+    expect($("#settings-storage")!.contains($("#media-store"))).toBe(true);
+    expect($("#settings-ai")!.contains($("#provider-rows"))).toBe(true);
   });
 
-  it("shows the persisted last verified backup when Settings opens", async () => {
+  it("switching pages moves aria-current and loads storage data on the storage page", async () => {
+    await boot();
+    tauri.handlers.set("last_backup", () => null);
+    ($('.nav-view-btn[data-view-target="settings"]') as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.view).toBe("settings"),
+    );
+    expect(tauri.calls.some((c) => c.cmd === "media_usage")).toBe(false);
+    ($('.settings-nav-btn[data-settings-target="storage"]') as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.settingsSection).toBe("storage"),
+    );
+    await vi.waitFor(() =>
+      expect(tauri.calls.some((c) => c.cmd === "media_usage")).toBe(true),
+    );
+    expect(
+      ($('.settings-nav-btn[data-settings-target="storage"]') as HTMLElement).getAttribute("aria-current"),
+    ).toBe("page");
+    expect(
+      ($('.settings-nav-btn[data-settings-target="general"]') as HTMLElement).getAttribute("aria-current"),
+    ).toBe(null);
+  });
+
+  it("each page's Save posts the same full settings payload", async () => {
+    await boot();
+    ($('.nav-view-btn[data-view-target="settings"]') as HTMLElement).click();
+    ($("#settings-save-general") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(tauri.calls.some((c) => c.cmd === "settings_save")).toBe(true),
+    );
+  });
+});
+
+describe("storage & backup panel (U05)", () => {
+  it("the storage page leads with Storage & backup, then the media store", async () => {
+    await boot();
+    const storage = $("#settings-storage")!;
+    const kids = [...storage.querySelectorAll(":scope > section")].map((s) => s.id);
+    expect(kids).toEqual(["backup", "media-store"]);
+  });
+
+  it("shows the persisted last verified backup when the storage page opens", async () => {
     tauri.handlers.set("last_backup", () => ({
       created_at: "2026-11-27T15:30:45Z",
       path: "/media/vault-2026-11-27.mcbackup",
@@ -4459,6 +4504,7 @@ describe("storage & backup panel (U05)", () => {
     }));
     await boot();
     $(".nav-view-btn[data-view-target='settings']").click();
+    $('.settings-nav-btn[data-settings-target="storage"]').click();
     await vi.waitFor(() =>
       expect($("#backup-status").textContent).toContain("Last verified backup: 2026-11-27T15:30:45Z"),
     );
@@ -4469,6 +4515,7 @@ describe("storage & backup panel (U05)", () => {
     tauri.handlers.set("last_backup", () => null);
     await boot();
     $(".nav-view-btn[data-view-target='settings']").click();
+    $('.settings-nav-btn[data-settings-target="storage"]').click();
     await vi.waitFor(() =>
       expect($("#backup-status").textContent).toContain("No verified backup yet"),
     );
@@ -4484,6 +4531,7 @@ describe("storage & backup panel (U05)", () => {
     }));
     await boot();
     $(".nav-view-btn[data-view-target='settings']").click();
+    $('.settings-nav-btn[data-settings-target="storage"]').click();
     await vi.waitFor(() =>
       expect($("#backup-status").textContent).toContain("the file is no longer at that path"),
     );
@@ -4505,6 +4553,7 @@ describe("storage & backup panel (U05)", () => {
     }));
     await boot();
     $(".nav-view-btn[data-view-target='settings']").click();
+    $('.settings-nav-btn[data-settings-target="storage"]').click();
     await vi.waitFor(() =>
       expect($("#vault-origin").textContent).toBe(
         "Active vault: switched in from the backup /media/vault-2026-11-27.mcbackup at 2026-11-27T15:30:45Z.",
@@ -4526,6 +4575,7 @@ describe("storage & backup panel (U05)", () => {
     }));
     await boot();
     $(".nav-view-btn[data-view-target='settings']").click();
+    $('.settings-nav-btn[data-settings-target="storage"]').click();
     await vi.waitFor(() =>
       expect($("#vault-location").textContent).toContain("Archive location:"),
     );
@@ -4548,6 +4598,7 @@ describe("storage & backup panel (U05)", () => {
     }));
     await boot();
     $(".nav-view-btn[data-view-target='settings']").click();
+    $('.settings-nav-btn[data-settings-target="storage"]').click();
     await vi.waitFor(() =>
       expect($("#vault-origin").textContent).toContain("interrupted and rolled back at startup"),
     );

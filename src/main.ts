@@ -98,6 +98,7 @@ import {
 import {
   SequenceGuard,
   initialUiState,
+  type SettingsSection,
   type UiState,
 } from "./state";
 import { initWorkspace, type WorkspaceController } from "./workspace";
@@ -259,7 +260,8 @@ const notifyToggle = document.querySelector<HTMLInputElement>("#notify-toggle")!
  * rendered from the saved settings like every other option. */
 const keepaliveToggle = document.querySelector<HTMLInputElement>("#keepalive-toggle")!;
 const autostartToggle = document.querySelector<HTMLInputElement>("#autostart-toggle")!;
-const settingsSaveButton = document.querySelector<HTMLButtonElement>("#settings-save-btn")!;
+const settingsSaveGeneralButton = document.querySelector<HTMLButtonElement>("#settings-save-general")!;
+const settingsSaveAiButton = document.querySelector<HTMLButtonElement>("#settings-save-ai")!;
 const backupStatus = document.querySelector<HTMLElement>("#backup-status")!;
 const backupCreateButton = document.querySelector<HTMLButtonElement>("#backup-create-btn")!;
 const restorePickButton = document.querySelector<HTMLButtonElement>("#restore-pick-btn")!;
@@ -843,7 +845,8 @@ async function saveSettings(): Promise<void> {
   if (!settingsRendered) return;
   const payload = collectSettings();
   const previousDefault = llmStatus?.default_provider ?? null;
-  settingsSaveButton.disabled = true;
+  settingsSaveGeneralButton.disabled = true;
+  settingsSaveAiButton.disabled = true;
   settingsNote.classList.remove("error");
   settingsNote.textContent = "Saving…";
   try {
@@ -860,7 +863,8 @@ async function saveSettings(): Promise<void> {
     settingsNote.classList.add("error");
     settingsNote.textContent = `Not saved: ${e}`;
   } finally {
-    settingsSaveButton.disabled = false;
+    settingsSaveGeneralButton.disabled = false;
+    settingsSaveAiButton.disabled = false;
   }
 }
 
@@ -2627,6 +2631,27 @@ automaticBackButton.addEventListener("click", () => {
   workspace.store.setSourcesSection("home");
   sourcesAutomaticButton.focus();
 });
+// Settings pages (General / Storage & backup / AI assistance): the switcher
+// deep-links into the settings view; aria-current follows the store.
+const settingsNavButtons = [...document.querySelectorAll<HTMLButtonElement>(".settings-nav-btn")];
+for (const button of settingsNavButtons) {
+  button.addEventListener("click", () => {
+    const target = button.dataset.settingsTarget as SettingsSection;
+    if (target) workspace.store.setSettingsSection(target);
+  });
+}
+function syncSettingsNav(): void {
+  const { view, settingsSection } = workspace.store.get();
+  for (const button of settingsNavButtons) {
+    if (view === "settings" && button.dataset.settingsTarget === settingsSection) {
+      button.setAttribute("aria-current", "page");
+    } else {
+      button.removeAttribute("aria-current");
+    }
+  }
+}
+workspace.store.subscribe(syncSettingsNav);
+syncSettingsNav();
 watchButton.addEventListener("click", () => void watchTypedPath());
 watchPathInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") void watchTypedPath();
@@ -2635,17 +2660,19 @@ watchAddButton.addEventListener("click", () => void pickWatchFolder());
 dashboardRefreshButton.addEventListener("click", () => void refreshDashboard());
 exportButton.addEventListener("click", () => void exportResults());
 addProviderButton.addEventListener("click", addProviderRow);
-settingsSaveButton.addEventListener("click", () => void saveSettings());
+settingsSaveGeneralButton.addEventListener("click", () => void saveSettings());
+settingsSaveAiButton.addEventListener("click", () => void saveSettings());
 mediaRefreshButton.addEventListener("click", () => void refreshMediaUsage());
 mediaReconcileButton.addEventListener("click", () => void reconcileMediaStore());
 backupCreateButton.addEventListener("click", () => void createBackup());
 restorePickButton.addEventListener("click", () => void pickRestoreArchive());
 recoveryRefreshButton.addEventListener("click", () => void refreshRecovery());
-// The media report loads when Settings is opened (and after imports that
-// extracted media) — not eagerly at startup. The recovery surface loads
-// with it (previous-vault snapshots exist independently of imports).
+// The media report loads when the Storage & backup page is opened (and
+// after imports that extracted media) — not eagerly at startup or on the
+// other settings pages. The recovery surface loads with it (previous-vault
+// snapshots exist independently of imports).
 workspace.store.subscribe((current) => {
-  if (current.view === "settings") {
+  if (current.view === "settings" && current.settingsSection === "storage") {
     void refreshMediaUsage();
     void refreshRecovery();
     void refreshLastBackup();
