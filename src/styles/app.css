@@ -404,6 +404,11 @@ button.primary {
   border-color: var(--accent);
 }
 button.primary:hover:not(:disabled) { background: var(--accent-hover); }
+#search-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
 
 select {
   padding: var(--sp-1) var(--sp-2);
