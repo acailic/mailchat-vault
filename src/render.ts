@@ -4,6 +4,7 @@
 /// snapshots in render.test.ts.
 
 import { formatSentAt, humanSize, snippet as truncateBody } from "./format";
+import { icon } from "./icons";
 import type { SourceChipRow } from "./accountsview";
 import type {
   ArchiveStats,
@@ -300,13 +301,13 @@ export function renderDetail(el: HTMLElement, opts: DetailOptions): void {
   const exportChat = document.createElement("button");
   exportChat.type = "button";
   exportChat.className = "export-chat-btn";
-  exportChat.textContent = "⤓ Export chat…";
+  exportChat.innerHTML = `${icon("export")}Export chat…`;
   exportChat.title = "Export the whole chat thread of this message";
   exportChat.addEventListener("click", onExportChat);
   const close = document.createElement("button");
   close.type = "button";
   close.className = "close-btn";
-  close.textContent = "✕ Close (Esc)";
+  close.innerHTML = `${icon("close")}<span>Close</span><kbd>Esc</kbd>`;
   close.addEventListener("click", onClose);
   actions.append(exportChat, close);
   header.append(title, actions);

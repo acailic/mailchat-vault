@@ -403,10 +403,12 @@ select {
 }
 
 kbd {
-  font: 11px/1 var(--font-mono);
-  border: 1px solid var(--border-strong);
+  font: 600 11px var(--font-mono);
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
   border-radius: 3px;
-  padding: 1px 4px;
+  background: var(--panel-2);
   color: var(--muted);
 }
 
@@ -657,7 +659,12 @@ mark.hit {
 .detail-card header .header-actions { display: flex; gap: 6px; }
 .detail-card h2 { font-size: var(--text-section); margin: 0 0 var(--sp-2); }
 .detail-card .body { max-width: 78ch; }
-.export-chat-btn, .close-btn { font-size: var(--text-meta); }
+.export-chat-btn, .close-btn {
+  font-size: var(--text-meta);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
 .meta-table {
   display: grid;
   grid-template-columns: auto 1fr;
