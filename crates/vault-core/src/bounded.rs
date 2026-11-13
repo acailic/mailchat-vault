@@ -273,10 +273,8 @@ pub enum MediaKind {
     /// object store and records `media` entries before the batch commits.
     Mail,
     /// Facebook Messenger (DYI tree): media uris in `raw_json`
-    /// (`photos`/`videos`/…) resolve against the DYI export root.
-    /// Message-linked extraction is not wired yet — until it lands, the
-    /// configured pass is inert for messages (references stay recorded
-    /// in `raw_json`) and only the whole-tree unlinked sweep acts.
+    /// (`photos`/`videos`/… arrays, the single-object `sticker`) are
+    /// root-relative and resolve against the DYI export root.
     Messenger,
 }
 
@@ -639,12 +637,14 @@ impl RunState<'_, '_> {
                         summary.deduped += mail_media.deduped;
                         summary.missing += mail_media.missing;
                     }
-                    // Message-linked extraction arrives with the
-                    // Messenger extractor; until then a configured
-                    // Messenger pass leaves the batch untouched —
-                    // references stay in `raw_json`, and only the
-                    // whole-tree unlinked sweep acts.
-                    MediaKind::Messenger => {}
+                    MediaKind::Messenger => crate::media::extract_messenger(
+                        &mut self.batch,
+                        pass.export_root,
+                        pass.data_dir,
+                        summary,
+                        &mut self.media_budget,
+                        &mut self.consumed_paths,
+                    )?,
                 }
             }
         }

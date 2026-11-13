@@ -256,10 +256,9 @@ pub fn resolve_stream_source(
 /// stay outside every storage lock); Signal and Discord record
 /// attachments in `raw_json` only, as in [`import`]. A Messenger tree
 /// pick (directory or `.zip`) configures its media pass at the DYI
-/// export root — message-linked extraction lands separately, so until
-/// then references stay in `raw_json` and only the whole-tree unlinked
-/// sweep acts — while a single-file Messenger pick records references
-/// in `raw_json` only.
+/// export root, so message-referenced files resolve, store, and link
+/// from `raw_json`; a single-file Messenger pick says nothing about
+/// the tree around it, so its references stay in `raw_json` only.
 ///
 /// A picked `.zip` (M4.1) is expanded first — through the shared
 /// traversal/symlink/capacity fence ([`expand_zip_bounded`]) into an

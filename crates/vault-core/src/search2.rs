@@ -577,18 +577,77 @@ pub fn attachment_summaries(raw_json: &str) -> Vec<AttachmentSummary> {
             });
         }
     }
+    // Messenger DYI exports keep the original media fields verbatim
+    // (`photos`, `videos`, … arrays; the single-object `sticker`). The
+    // media pass names a stored entry by exactly the uri basenames
+    // `media::messenger_entry_names` returns — the same single-rule
+    // seam as Telegram's, so a stored file can never also render as an
+    // unavailable phantom. An empty array is no reference at all; a
+    // message with several unstored fields renders one row for the
+    // first of them (the shared name list spans the whole message, so
+    // per-field rows could not name themselves honestly).
+    if let Some(kind) = DYI_MEDIA_FIELDS
+        .iter()
+        .copied()
+        .find(|key| dyi_media_field_present(&map, key))
+    {
+        let names = crate::media::messenger_entry_names(&map);
+        if !names.iter().any(|n| media_names.contains(n)) {
+            let name = names
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| "media".to_string());
+            out.push(AttachmentSummary {
+                name,
+                kind: kind.to_string(),
+                size: 0,
+                available: false,
+                path: None,
+            });
+        }
+    }
     out
+}
+
+/// The Messenger DYI media reference fields, in the stable order
+/// [`crate::media::messenger_entry_names`] reads them.
+const DYI_MEDIA_FIELDS: [&str; 6] = [
+    "photos",
+    "videos",
+    "audio_files",
+    "files",
+    "gifs",
+    "sticker",
+];
+
+/// Whether one DYI media field holds a reference: a non-empty array of
+/// objects, or the single-object `sticker`. An empty array is no
+/// reference at all.
+fn dyi_media_field_present(map: &serde_json::Map<String, Value>, key: &str) -> bool {
+    match map.get(key) {
+        Some(Value::Array(items)) => !items.is_empty(),
+        Some(Value::Object(_)) => true,
+        _ => false,
+    }
 }
 
 /// SQL predicate (over alias `m`) matching messages with at least one
 /// attachment reference, mirroring [`attachment_summaries`] > 0.
 /// `COALESCE` keeps the boolean total order two-valued: a missing JSON
 /// path is `0`/absent, never SQL `NULL`, so `NOT (…)` filters correctly.
+/// The Messenger array fields use `json_array_length` (not `json_type`)
+/// so an empty array — no reference at all — does not match.
 const HAS_ATTACHMENT_SQL: &str = "(COALESCE(json_array_length(m.raw_json, '$.media'), 0) > 0 \
      OR json_type(m.raw_json, '$.attachment') IS NOT NULL \
      OR COALESCE(json_array_length(m.raw_json, '$.attachments'), 0) > 0 \
      OR json_type(m.raw_json, '$.photo') IS NOT NULL \
-     OR json_type(m.raw_json, '$.file') IS NOT NULL)";
+     OR json_type(m.raw_json, '$.file') IS NOT NULL \
+     OR COALESCE(json_array_length(m.raw_json, '$.photos'), 0) > 0 \
+     OR COALESCE(json_array_length(m.raw_json, '$.videos'), 0) > 0 \
+     OR COALESCE(json_array_length(m.raw_json, '$.audio_files'), 0) > 0 \
+     OR COALESCE(json_array_length(m.raw_json, '$.files'), 0) > 0 \
+     OR COALESCE(json_array_length(m.raw_json, '$.gifs'), 0) > 0 \
+     OR json_type(m.raw_json, '$.sticker') IS NOT NULL)";
 
 fn str_of<'a>(map: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a str> {
     map.get(key).and_then(Value::as_str)
@@ -2048,5 +2107,52 @@ mod attachment_summary_tests {
         let summaries = attachment_summaries(&raw);
         assert_eq!(summaries.len(), 1);
         assert!(!summaries[0].available);
+    }
+
+    #[test]
+    fn messenger_media_fields_read_as_unavailable_rows_until_stored() {
+        // No media pass ran (a single-file pick): the DYI references
+        // render one honest unavailable row, named by the first uri
+        // basename and kinded by the first present field. An empty
+        // array is no reference at all.
+        let raw = serde_json::json!({
+            "photos": [{"uri": "messages/inbox/a_1/photos/x.jpg"}],
+            "videos": [{"uri": "messages/inbox/a_1/videos/v.mp4"}],
+            "audio_files": []
+        })
+        .to_string();
+        let summaries = attachment_summaries(&raw);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].name, "x.jpg");
+        assert_eq!(summaries[0].kind, "photos");
+        assert!(!summaries[0].available);
+
+        // A sticker-only message reads the same way.
+        let raw = serde_json::json!({
+            "sticker": {"uri": "messages/inbox/a_1/stickers/s.webp"}
+        })
+        .to_string();
+        let summaries = attachment_summaries(&raw);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].name, "s.webp");
+        assert_eq!(summaries[0].kind, "sticker");
+        assert!(!summaries[0].available);
+    }
+
+    #[test]
+    fn a_stored_messenger_entry_suppresses_the_phantom_reference_row() {
+        // The media pass stored the photo: the media entry carries the
+        // uri basename — a name `messenger_entry_names` also returns —
+        // so the DYI field must not also render as unavailable.
+        let raw = serde_json::json!({
+            "photos": [{"uri": "messages/inbox/a_1/photos/x.jpg"}],
+            "media": [
+                { "sha256": "a", "path": "media/a.jpg", "name": "x.jpg", "kind": "image", "size": 9 }
+            ]
+        })
+        .to_string();
+        let summaries = attachment_summaries(&raw);
+        assert_eq!(summaries.len(), 1);
+        assert!(summaries[0].available);
     }
 }

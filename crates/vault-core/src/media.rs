@@ -74,8 +74,8 @@ impl MissingReason {
 /// The honest missing reason for a failed store: a budget-bound refusal
 /// is not unreadability.
 ///
-/// This is the one rule every store-failure arm applies — the three
-/// message passes' `Err` arms ([`extract_telegram`],
+/// This is the one rule every store-failure arm applies — the message
+/// passes' `Err` arms ([`extract_telegram`], [`extract_messenger`],
 /// [`extract_whatsapp`], [`MailMedia::store_message`] record it as a
 /// `reason` on a missing `media` entry) and the unlinked pass's `Err`
 /// arm ([`extract_unlinked`] counts it into `unlinked_dropped`, since
@@ -424,6 +424,131 @@ pub fn telegram_entry_names(obj: &Map<String, Value>) -> Vec<String> {
                     push(&mut names, name);
                 }
             }
+        }
+    }
+    names
+}
+
+/// Extract media for a Messenger (DYI) export: the media reference
+/// fields a message object carries — `photos`, `videos`, `audio_files`,
+/// `files`, `gifs` (arrays of objects) and the single-object `sticker` —
+/// each name a file by its `uri`, a path **relative to the DYI export
+/// root** (`messages/inbox/<thread>/photos/x.jpg`). Uris resolve against
+/// the root and are copied into the store; a reference whose file is
+/// absent is recorded as a missing entry, never dropped.
+///
+/// `export_root` is the DYI root (the directory holding `messages/` —
+/// guaranteed by the import wiring, which derives it from the pick via
+/// [`crate::messenger::messenger_export_root`], whatever tree level was
+/// picked). Paths are resolved and confined to it (`..` and symlink
+/// escapes count as missing); the whole original message object stays in
+/// `raw_json` with only the `media` array added. `consumed` collects the
+/// absolute paths this pass stored, so the unlinked pass can tell export
+/// files that belong to a message from files that belong to no message.
+pub fn extract_messenger(
+    messages: &mut [NewMessage],
+    export_root: &Path,
+    data_dir: &Path,
+    summary: &mut MediaSummary,
+    budget: &mut Capacity,
+    consumed: &mut HashSet<PathBuf>,
+) -> Result<()> {
+    for msg in messages.iter_mut() {
+        let mut raw: Value =
+            serde_json::from_str(&msg.raw_json).unwrap_or_else(|_| Value::Object(Map::new()));
+        let Some(obj) = raw.as_object_mut() else {
+            continue;
+        };
+        let refs = messenger_refs(obj);
+        if refs.is_empty() {
+            continue;
+        }
+        summary.referenced += 1;
+        let mut entries: Vec<Value> = Vec::new();
+        for (rel, media_type, display) in refs {
+            let name = display.unwrap_or_else(|| file_display_name(&rel));
+            let kind = media_kind(media_type.as_deref(), &name);
+            match safe_child(export_root, &rel) {
+                Some(src) => match store(data_dir, &src, &name, &kind, budget) {
+                    Ok((entry, written)) => {
+                        if written {
+                            summary.stored += 1;
+                        } else {
+                            summary.deduped += 1;
+                        }
+                        consumed.insert(src);
+                        entries.push(serde_json::to_value(&entry)?);
+                    }
+                    // Unreadable file: keep importing, record why.
+                    Err(e) => {
+                        summary.missing += 1;
+                        entries.push(missing_entry_value(&name, &kind, missing_reason(&e)));
+                    }
+                },
+                None => {
+                    summary.missing += 1;
+                    entries.push(missing_entry_value(
+                        &name,
+                        &kind,
+                        MissingReason::NotInExport,
+                    ));
+                }
+            }
+        }
+        if !entries.is_empty() {
+            obj.insert("media".to_string(), Value::Array(entries));
+            msg.raw_json = raw.to_string();
+        }
+    }
+    Ok(())
+}
+
+/// The media reference fields of one Messenger (DYI) message object, in
+/// a stable order: `(uri, None, None)` — every DYI media field is an
+/// array of objects (or a single object for `sticker`) whose `uri` is
+/// the path, relative to the DYI export root. DYI exports carry no kind
+/// hints and no display names, so both optional slots are `None` and
+/// the kind comes from the uri's own extension.
+fn messenger_refs(obj: &Map<String, Value>) -> Vec<(String, Option<String>, Option<String>)> {
+    let mut refs = Vec::new();
+    for field in ["photos", "videos", "audio_files", "files", "gifs"] {
+        if let Some(Value::Array(items)) = obj.get(field) {
+            for item in items {
+                if let Some(uri) = item.get("uri").and_then(Value::as_str) {
+                    if !uri.is_empty() {
+                        refs.push((uri.to_string(), None, None));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(uri) = obj
+        .get("sticker")
+        .and_then(Value::as_object)
+        .and_then(|s| s.get("uri"))
+        .and_then(Value::as_str)
+        .filter(|u| !u.is_empty())
+    {
+        refs.push((uri.to_string(), None, None));
+    }
+    refs
+}
+
+/// Every display name a stored Messenger (DYI) media entry can carry
+/// for this message object: the refs' `uri` basenames — the single rule
+/// both the writer ([`extract_messenger`], via [`messenger_refs`]) and
+/// the reader (`attachment_summaries`) must agree on, the same M4.2
+/// F2/R3F1 seam as [`telegram_entry_names`]. A stored entry's name is
+/// always in this list, so the read side can suppress an unavailable
+/// "phantom" row by checking this list against the entry names — by
+/// construction, not by keeping a second copy of the rule in sync.
+pub fn messenger_entry_names(obj: &Map<String, Value>) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for (rel, _hint, _display) in messenger_refs(obj) {
+        let name = file_display_name(&rel);
+        // Empty names are never display names; duplicates add nothing.
+        if !name.is_empty() && !names.contains(&name) {
+            names.push(name);
         }
     }
     names
@@ -963,5 +1088,53 @@ mod tests {
         assert_eq!(media_kind(Some("file"), "IMG-1.jpg"), "image");
         assert_eq!(media_kind(Some("media"), "clip.mp4"), "video");
         assert_eq!(media_kind(Some("document"), "plan.pdf"), "document");
+    }
+
+    #[test]
+    fn messenger_refs_read_arrays_and_the_sticker_object() {
+        // The DYI shape: array-of-object fields in a stable order, the
+        // single-object sticker last; empty uris and non-ref shapes are
+        // not references.
+        let obj = serde_json::json!({
+            "photos": [{"uri": "messages/inbox/a_1/photos/x.jpg"}, {"uri": ""}],
+            "videos": [{"uri": "messages/inbox/a_1/videos/v.mp4"}, {"creation_timestamp": 1}],
+            "audio_files": [],
+            "files": [{"uri": "messages/inbox/a_1/files/d.pdf"}],
+            "gifs": "not an array",
+            "sticker": {"uri": "messages/inbox/a_1/stickers/s.webp"}
+        });
+        let refs = messenger_refs(obj.as_object().unwrap());
+        let uris: Vec<&str> = refs.iter().map(|(r, _, _)| r.as_str()).collect();
+        assert_eq!(
+            uris,
+            [
+                "messages/inbox/a_1/photos/x.jpg",
+                "messages/inbox/a_1/videos/v.mp4",
+                "messages/inbox/a_1/files/d.pdf",
+                "messages/inbox/a_1/stickers/s.webp"
+            ]
+        );
+        // DYI exports carry no kind hints and no display names.
+        assert!(refs
+            .iter()
+            .all(|(_, hint, display)| hint.is_none() && display.is_none()));
+    }
+
+    #[test]
+    fn messenger_entry_names_are_the_uri_basenames() {
+        // The M4.2 F2/R3F1 seam: every name the writer can put on a
+        // stored entry (the uri basenames), deduplicated — nothing else.
+        let obj = serde_json::json!({
+            "photos": [
+                {"uri": "messages/inbox/a_1/photos/x.jpg"},
+                {"uri": "messages/inbox/a_1/photos/nested/x.jpg"}
+            ],
+            "sticker": {"uri": "messages/inbox/a_1/stickers/s.webp"}
+        });
+        assert_eq!(
+            messenger_entry_names(obj.as_object().unwrap()),
+            ["x.jpg".to_string(), "s.webp".to_string()]
+        );
+        assert!(messenger_entry_names(&Map::new()).is_empty());
     }
 }
