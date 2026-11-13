@@ -9,9 +9,11 @@
 //!
 //! Ordering contract (A07 — stable, flat, deterministic):
 //!
-//! - **Relevance** (text search, the default for text): FTS5 `rank`, then
-//!   ascending message id — identical input and archive always paginate
-//!   in the same order, and equal-rank rows have a stable tiebreak.
+//! - **Relevance** (text search, the default for text): weighted FTS5
+//!   `bm25()` with the shared BM25F column weights (subject boosted over
+//!   body/author — see [`crate::storage`]'s weight consts), then ascending
+//!   message id — identical input and archive always paginate in the same
+//!   order, and equal-score rows have a stable tiebreak.
 //! - **Newest** (browse with empty text, or the user's explicit choice):
 //!   `sent_instant DESC, id DESC`, with unresolved/missing instants
 //!   **last** — after every dated message, deterministically by id.
@@ -36,7 +38,7 @@ use serde_json::Value;
 use std::io::Write;
 
 use crate::query::{day_instant_utc, escape_like, parse_day};
-use crate::storage::Storage;
+use crate::storage::{Storage, BM25_WEIGHT_AUTHOR, BM25_WEIGHT_BODY, BM25_WEIGHT_SUBJECT};
 use crate::{Error, Result};
 
 /// Upper bound for search text length (Unicode characters).
@@ -817,9 +819,11 @@ impl Storage {
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             rows
         } else {
-            // Relevance: rank, then ascending id — the stable flat order.
-            // Bind order follows the SQL text: the two snippet markers,
-            // the MATCH expression, the filters, then LIMIT/OFFSET.
+            // Relevance: the shared BM25F weights (subject boosted over
+            // body/author — the same consts the storage.rs ranking sites
+            // use), then ascending id — the stable flat order. Bind order
+            // follows the SQL text: the two snippet markers, the MATCH
+            // expression, the filters, then LIMIT/OFFSET.
             let mut bind = vec![
                 SqlValue::from(crate::query::SNIPPET_OPEN_MARK.to_string()),
                 SqlValue::from(crate::query::SNIPPET_CLOSE_MARK.to_string()),
@@ -836,7 +840,8 @@ impl Storage {
                  JOIN source_instances AS si ON si.id = m.source_instance_id \
                  LEFT JOIN conversations AS c ON c.id = m.conversation_id \
                  WHERE archive_fts MATCH ?3 {} \
-                 ORDER BY rank, m.id LIMIT ? OFFSET ?",
+                 ORDER BY bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, \
+                               {BM25_WEIGHT_SUBJECT}), m.id LIMIT ? OFFSET ?",
                 filters.sql
             );
             let mut stmt = tx.prepare(&sql)?;

@@ -54,6 +54,9 @@ const FUSED_LIMIT: usize = 10;
 //   vector  recall@10 = 0.833   ndcg@10 = 0.819
 //   fused   recall@10 = 0.952   ndcg@10 = 0.945
 //
+// Task 1 baseline (equal weights): fts nDCG@10 = 0.886 (commit af286c5).
+// Shipped BM25F weights (c7ece20, subject 3.0): fts nDCG@10 = 0.874.
+//
 // Floors sit ~5-10% below the measurements: far enough to absorb
 // tie-order noise, close enough to catch a real ranking regression.
 const FTS_RECALL_FLOOR: f64 = 0.78;
