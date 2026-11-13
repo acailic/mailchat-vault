@@ -11,6 +11,7 @@
 // snapshot instead of the timeline.
 
 import type { JobEvent, JobEventsPage, JobRecord } from "./types";
+import { iconEl, type IconName } from "./icons";
 
 /** Protocol types (see crates/vault-core/src/jobs.rs). */
 
@@ -223,6 +224,14 @@ export function describeJobError(error: { kind: string; message?: string }): str
   }
 }
 
+/** Decorative state glyph for a job row; null when plain text reads best. */
+function jobStateIcon(state: string): IconName | null {
+  if (state === "running") return "spinner";
+  if (state === "succeeded") return "check";
+  if (state === "failed") return "error";
+  return null;
+}
+
 /** Render the jobs list (newest first, capped). */
 export function renderJobsList(el: HTMLElement, tracker: JobsTrackerState): void {
   const items = orderedRecords(tracker)
@@ -230,7 +239,9 @@ export function renderJobsList(el: HTMLElement, tracker: JobsTrackerState): void
     .map((record) => {
       const li = document.createElement("li");
       li.className = `job ${record.state.state}`;
-      li.textContent = describeJobState(record);
+      const glyph = jobStateIcon(record.state.state);
+      if (glyph) li.append(iconEl(glyph, glyph === "spinner" ? "icon-spin" : ""));
+      li.append(document.createTextNode(describeJobState(record)));
       return li;
     });
   el.replaceChildren(...items);

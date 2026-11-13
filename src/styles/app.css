@@ -769,6 +769,12 @@ mark.hit {
 .job.succeeded { color: var(--success); }
 .job.failed { color: var(--danger); }
 .job.cancelled { color: var(--muted); }
+.job.succeeded .icon {
+  color: var(--success);
+}
+.job.failed .icon {
+  color: var(--danger);
+}
 
 /* --- Account rows (the accounts overview on the Sources home) ------------- */
 
