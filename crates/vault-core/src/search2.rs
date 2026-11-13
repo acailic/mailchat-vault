@@ -582,10 +582,12 @@ pub fn attachment_summaries(raw_json: &str) -> Vec<AttachmentSummary> {
     // media pass names a stored entry by exactly the uri basenames
     // `media::messenger_entry_names` returns — the same single-rule
     // seam as Telegram's, so a stored file can never also render as an
-    // unavailable phantom. An empty array is no reference at all; a
-    // message with several unstored fields renders one row for the
-    // first of them (the shared name list spans the whole message, so
-    // per-field rows could not name themselves honestly).
+    // unavailable phantom. A field with no uri-bearing entry is no
+    // reference at all (Signal rows keep a uri-less `sticker` object
+    // verbatim and must not match); a message with several unstored
+    // fields renders one row for the first of them (the shared name
+    // list spans the whole message, so per-field rows could not name
+    // themselves honestly).
     if let Some(kind) = DYI_MEDIA_FIELDS
         .iter()
         .copied()
@@ -620,13 +622,24 @@ const DYI_MEDIA_FIELDS: [&str; 6] = [
     "sticker",
 ];
 
-/// Whether one DYI media field holds a reference: a non-empty array of
-/// objects, or the single-object `sticker`. An empty array is no
-/// reference at all.
+/// Whether one DYI media field holds a reference: an array counts only
+/// when at least one element is an object carrying a non-empty `uri`,
+/// and the single `sticker` only when it is an object with a non-empty
+/// `uri` — exactly the reference shapes [`crate::media::messenger_refs`]
+/// collects. The uri gate is what keeps the predicate source-aware:
+/// Signal Desktop keeps its whole message object in `raw_json` too, and
+/// its `sticker` carries no `uri` — that shape must not match. An array
+/// with no uri-bearing element is no reference at all.
 fn dyi_media_field_present(map: &serde_json::Map<String, Value>, key: &str) -> bool {
+    let has_uri = |value: &Value| {
+        value
+            .get("uri")
+            .and_then(Value::as_str)
+            .is_some_and(|uri| !uri.is_empty())
+    };
     match map.get(key) {
-        Some(Value::Array(items)) => !items.is_empty(),
-        Some(Value::Object(_)) => true,
+        Some(Value::Array(items)) => items.iter().any(has_uri),
+        Some(value @ Value::Object(_)) => has_uri(value),
         _ => false,
     }
 }
@@ -635,19 +648,22 @@ fn dyi_media_field_present(map: &serde_json::Map<String, Value>, key: &str) -> b
 /// attachment reference, mirroring [`attachment_summaries`] > 0.
 /// `COALESCE` keeps the boolean total order two-valued: a missing JSON
 /// path is `0`/absent, never SQL `NULL`, so `NOT (…)` filters correctly.
-/// The Messenger array fields use `json_array_length` (not `json_type`)
-/// so an empty array — no reference at all — does not match.
+/// The Messenger DYI fields require a `uri` member — Signal rows keep a
+/// uri-less `sticker` object (and uri-less array entries) verbatim and
+/// must not match. The arrays check the first element's `uri` (the
+/// exhaustive any-element rule lives in [`dyi_media_field_present`],
+/// which the summary side reads; exports list the uri on every element).
 const HAS_ATTACHMENT_SQL: &str = "(COALESCE(json_array_length(m.raw_json, '$.media'), 0) > 0 \
      OR json_type(m.raw_json, '$.attachment') IS NOT NULL \
      OR COALESCE(json_array_length(m.raw_json, '$.attachments'), 0) > 0 \
      OR json_type(m.raw_json, '$.photo') IS NOT NULL \
      OR json_type(m.raw_json, '$.file') IS NOT NULL \
-     OR COALESCE(json_array_length(m.raw_json, '$.photos'), 0) > 0 \
-     OR COALESCE(json_array_length(m.raw_json, '$.videos'), 0) > 0 \
-     OR COALESCE(json_array_length(m.raw_json, '$.audio_files'), 0) > 0 \
-     OR COALESCE(json_array_length(m.raw_json, '$.files'), 0) > 0 \
-     OR COALESCE(json_array_length(m.raw_json, '$.gifs'), 0) > 0 \
-     OR json_type(m.raw_json, '$.sticker') IS NOT NULL)";
+     OR json_type(m.raw_json, '$.photos[0].uri') IS NOT NULL \
+     OR json_type(m.raw_json, '$.videos[0].uri') IS NOT NULL \
+     OR json_type(m.raw_json, '$.audio_files[0].uri') IS NOT NULL \
+     OR json_type(m.raw_json, '$.files[0].uri') IS NOT NULL \
+     OR json_type(m.raw_json, '$.gifs[0].uri') IS NOT NULL \
+     OR json_type(m.raw_json, '$.sticker.uri') IS NOT NULL)";
 
 fn str_of<'a>(map: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a str> {
     map.get(key).and_then(Value::as_str)
@@ -1722,6 +1738,62 @@ mod tests {
     }
 
     #[test]
+    fn dyi_attachment_filter_requires_a_uri() {
+        // Signal keeps its message object verbatim in raw_json: a
+        // `sticker` without a `uri` (and uri-less array entries) are
+        // Signal's shapes, not Messenger DYI references — the SQL
+        // predicate must not match them.
+        let s = Storage::open_in_memory().unwrap();
+        let insert = |key: &str, json: serde_json::Value| {
+            let mut msg = NewMessage::new(
+                "demo",
+                key.to_string(),
+                "Ana",
+                "2026-01-01T10:00:00Z",
+                format!("body {key}"),
+            );
+            msg.raw_json = json.to_string();
+            s.insert_message(&msg).unwrap();
+        };
+        insert(
+            "signal-sticker",
+            serde_json::json!({
+                "conversation": "ana",
+                "sticker": {"pack": {"id": 1}, "sticker_id": 3},
+                "timestamp": 1762981200000i64
+            }),
+        );
+        insert(
+            "signal-photos",
+            serde_json::json!({ "photos": [{"creation_timestamp": 1762981200000i64}] }),
+        );
+        insert(
+            "messenger-sticker",
+            serde_json::json!({ "sticker": {"uri": "messages/inbox/a_1/stickers/s.gif"} }),
+        );
+        insert(
+            "messenger-photos",
+            serde_json::json!({ "photos": [{"uri": "messages/inbox/a_1/photos/x.jpg"}] }),
+        );
+
+        let find = |has: bool| {
+            s.search_archive(&SearchArchiveRequest {
+                has_attachment: Some(has),
+                ..SearchArchiveRequest::default()
+            })
+            .unwrap()
+            .hits
+            .iter()
+            .map(|h| h.id)
+            .collect::<Vec<i64>>()
+        };
+        // Only the uri-bearing Messenger rows match (newest first);
+        // the Signal-shaped rows are plain messages on both sides.
+        assert_eq!(find(true), vec![4, 3]);
+        assert_eq!(find(false), vec![2, 1]);
+    }
+
+    #[test]
     fn import_scope_filter_and_listing() {
         let s = Storage::open_in_memory().unwrap();
         let batch = |import_id: &str, ids: &[&str]| {
@@ -2154,5 +2226,49 @@ mod attachment_summary_tests {
         let summaries = attachment_summaries(&raw);
         assert_eq!(summaries.len(), 1);
         assert!(summaries[0].available);
+    }
+
+    #[test]
+    fn signal_shaped_fields_are_no_reference_at_all() {
+        // Signal Desktop keeps its whole message object in raw_json: a
+        // `sticker` without a `uri` and uri-less array entries are
+        // Signal's shapes, not Messenger DYI references — no row, not
+        // even a phantom "media" one.
+        let raw = serde_json::json!({
+            "conversation": "ana",
+            "sticker": {"pack": {"id": 1}, "sticker_id": 3},
+            "photos": [{"creation_timestamp": 1762981200000i64}],
+            "videos": []
+        })
+        .to_string();
+        assert!(attachment_summaries(&raw).is_empty());
+    }
+
+    #[test]
+    fn uri_bearing_dyi_references_still_match() {
+        // The Messenger sticker keeps its reference.
+        let raw = serde_json::json!({
+            "sticker": {"uri": "messages/inbox/a_1/stickers/s.gif"}
+        })
+        .to_string();
+        let summaries = attachment_summaries(&raw);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].name, "s.gif");
+        assert_eq!(summaries[0].kind, "sticker");
+        assert!(!summaries[0].available);
+
+        // A uri on any element of an array counts — the exhaustive rule
+        // the SQL predicate's first-element check approximates.
+        let raw = serde_json::json!({
+            "photos": [
+                {"creation_timestamp": 1762981200000i64},
+                {"uri": "messages/inbox/a_1/photos/x.jpg"}
+            ]
+        })
+        .to_string();
+        let summaries = attachment_summaries(&raw);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].name, "x.jpg");
+        assert_eq!(summaries[0].kind, "photos");
     }
 }
