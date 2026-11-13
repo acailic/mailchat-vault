@@ -76,14 +76,13 @@ export class SequenceGuard {
 // Workspace shell state
 // ---------------------------------------------------------------------------
 
-/** Navigation destinations. Imports, account configuration, and
- * maintenance live outside the reading surface. */
-export type WorkspaceView = "workspace" | "sources" | "accounts" | "activity" | "settings";
+/** Navigation destinations. The reading surface is Archive; source
+ * management, activity, and settings live outside it. */
+export type WorkspaceView = "workspace" | "sources" | "activity" | "settings";
 
 export const VIEW_TITLES: Record<WorkspaceView, string> = {
-  workspace: "All messages",
-  sources: "Add source",
-  accounts: "Accounts",
+  workspace: "Archive",
+  sources: "Sources",
   activity: "Activity",
   settings: "Settings",
 };

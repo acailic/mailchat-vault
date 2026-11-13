@@ -17,17 +17,11 @@
         <ul id="nav-views">
           <li>
             <button type="button" class="nav-view-btn" data-view-target="workspace" aria-current="page">
-              All messages
+              Archive
             </button>
           </li>
           <li>
-            <button type="button" class="nav-view-btn" data-view-target="sources">Add source</button>
-          </li>
-          <li>
-            <button type="button" class="nav-view-btn" data-view-target="accounts">Accounts</button>
-          </li>
-          <li>
-            <button type="button" class="nav-view-btn" data-view-target="activity">Activity</button>
+            <button type="button" class="nav-view-btn" data-view-target="sources">Sources</button>
           </li>
           <li>
             <button type="button" class="nav-view-btn" data-view-target="settings">Settings</button>
@@ -37,6 +31,15 @@
           <h2>Sources</h2>
           <div id="source-chips" title="Filter by source (none selected = all sources)"></div>
         </section>
+        <ul id="nav-secondary" aria-label="Maintenance">
+          <li>
+            <button type="button" class="nav-view-btn secondary" data-view-target="activity">
+              Activity
+              <span id="activity-count" class="nav-badge" hidden></span>
+              <span id="activity-attention" class="nav-attention" hidden>needs attention</span>
+            </button>
+          </li>
+        </ul>
         <p id="nav-foot">Local archive · search stays on this device.</p>
       </nav>
 
@@ -47,7 +50,7 @@
           <button id="nav-toggle" type="button" aria-controls="nav" aria-expanded="false">
             ☰ Menu
           </button>
-          <span class="topbar-title" id="topbar-title">All messages</span>
+          <span class="topbar-title" id="topbar-title">Archive</span>
         </header>
 
         <main id="main">
@@ -203,14 +206,20 @@
           <section id="view-sources" class="view" aria-label="Sources">
             <h2 class="view-heading">Sources</h2>
 
-            <!-- Home: the source list (Task 3 moves the Accounts list
-                 here) plus the two ways forward. -->
+            <!-- Home: the source list (the accounts overview, Task 3)
+                 plus the two ways forward. -->
             <section id="sources-home" class="sources-section" aria-label="Your sources">
               <div class="row">
                 <button id="sources-add-btn" class="primary" type="button">Add source…</button>
                 <div class="spacer"></div>
                 <button id="sources-automatic-btn" class="link-btn" type="button" title="Auto-sync and watched folders — imports that happen without a click">Automatic imports…</button>
               </div>
+              <div class="row" style="margin-top: 6px">
+                <span id="sources-status" class="meta" style="flex: 1" role="status">…</span>
+                <div class="spacer"></div>
+                <button id="sources-refresh" type="button">Refresh</button>
+              </div>
+              <ul id="sources-list" class="accounts-list" tabindex="-1" aria-label="Sources"></ul>
             </section>
 
             <!-- The Add source chooser: exactly two ways in. -->
@@ -338,29 +347,6 @@
                 New or modified .mbox, WhatsApp .txt, and Telegram / Signal .json files in watched
                 folders are imported automatically (debounced; re-imports never duplicate).
                 Unrecognized files are skipped and reported above.
-              </p>
-            </section>
-          </section>
-
-          <!-- Accounts: the multi-account overview (IMAP accounts, imports)
-               with per-account stats, sync state, and management. -->
-          <section id="view-accounts" class="view" aria-label="Accounts">
-            <h2 class="view-heading">Accounts</h2>
-            <section aria-label="Configured accounts">
-              <h2>Configured accounts</h2>
-              <div class="row">
-                <span id="accounts-status" class="meta" style="flex: 1" role="status">…</span>
-                <div class="spacer"></div>
-                <button id="accounts-refresh" type="button">Refresh</button>
-                <button id="accounts-add" type="button" title="Open Add source to connect an email account or run an import">Add account…</button>
-              </div>
-              <ul id="accounts-list" class="accounts-list" tabindex="-1" aria-label="Accounts"></ul>
-              <p id="accounts-hint" class="meta" style="margin: 6px 0 0">
-                Every configured account in one place — email (IMAP) accounts and file imports
-                (mbox / chat exports). Sync now reuses the account's stored credentials; Pause
-                skips it in auto-sync rounds (its archive and cursors are kept); Forget
-                credentials removes the stored password / Google sign-in from the OS keyring —
-                the archive always stays.
               </p>
             </section>
           </section>
