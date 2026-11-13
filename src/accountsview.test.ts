@@ -430,4 +430,21 @@ describe("sourceChipRows", () => {
     const rows = sourceChipRows([inst("x", "solo")], [], [{ source: "solo", count: 1 }]);
     expect(rows).toEqual([{ id: "x", label: "solo", count: 1 }]);
   });
+
+  it("imap twins sharing label, username, and host get numbered chip labels", () => {
+    // The TLS-twin shape: one server, one account, reachable over two
+    // TLS modes — two instances whose identity (`label · username ·
+    // host`) is identical, so the identity alone cannot disambiguate.
+    const label = "imap:127.0.0.1:993:alice";
+    const rows = sourceChipRows(
+      [inst("a", label), inst("b", label)],
+      [imap("a", label, "alice", "127.0.0.1"), imap("b", label, "alice", "127.0.0.1")],
+      [{ source: label, count: 4 }],
+    );
+    expect(rows.map((r) => r.label)).toEqual([
+      "imap:127.0.0.1:993:alice · alice · 127.0.0.1",
+      "imap:127.0.0.1:993:alice · alice · 127.0.0.1 · imap 2",
+    ]);
+    expect(rows.every((r) => r.count === null)).toBe(true);
+  });
 });

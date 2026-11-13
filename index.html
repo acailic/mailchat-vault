@@ -383,6 +383,10 @@
               <button type="button" class="settings-nav-btn" data-settings-target="storage">Storage &amp; backup</button>
               <button type="button" class="settings-nav-btn" data-settings-target="ai">AI assistance</button>
             </div>
+            <!-- Shared save feedback: every page's Save and the settings
+                 load error report here, so the note must sit above the
+                 pages (inside any one page it is hidden with its page). -->
+            <div id="settings-note" class="meta" role="status"></div>
 
             <section id="settings-general" class="settings-page" aria-label="General">
               <h3>General</h3>
@@ -453,7 +457,6 @@
 
             <section id="settings-ai" class="settings-page" aria-label="AI assistance">
               <h3>AI assistance</h3>
-              <div id="settings-note" class="meta" role="status"></div>
               <div id="env-info" class="meta"></div>
               <div id="provider-rows"></div>
               <div class="row">

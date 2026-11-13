@@ -4436,6 +4436,9 @@ describe("accounts panel", () => {
     await vi.waitFor(() => expect(($("#app") as HTMLElement).dataset.view).toBe("workspace"));
     const args = searchCalls().at(-1)!.args as { request: { source_ids: string[] } };
     expect(args.request.source_ids).toEqual(["inst-mbox"]);
+    // The focus contract: landing on the results view puts focus in the
+    // search box, so the next keystroke types a query.
+    expect(win.document.activeElement).toBe($("#search"));
   });
 
   it("Update credentials prefills the email form from the account", async () => {
@@ -4450,6 +4453,35 @@ describe("accounts panel", () => {
     expect((input("#imap-user") as HTMLInputElement).value).toBe("ana@gmail.com");
     expect((input("#imap-host") as HTMLInputElement).value).toBe("imap.gmail.com");
     expect((input("#imap-folders") as HTMLInputElement).value).toBe("INBOX");
+    // The stored password decides the form's auth mode: password mode,
+    // password row visible, focus on the password input.
+    expect(($("#imap-auth") as HTMLSelectElement).value).toBe("password");
+    expect(($("#imap-pass") as HTMLElement).hidden).toBe(false);
+    expect(win.document.activeElement).toBe($("#imap-pass"));
+    expect($("#imap-status").textContent).toBe(
+      "Re-enter the password for ana@gmail.com · imap.gmail.com, then Connect and sync.",
+    );
+  });
+
+  it("Update credentials arms OAuth mode for an OAuth-only account", async () => {
+    // bob@gmail.com has only a Google sign-in stored: the form must open
+    // in oauth mode — password row hidden, Google button shown and
+    // focused — with the sign-in-again status line.
+    tauri.handlers.set("accounts_list", () => [OAUTH_ACCOUNT]);
+    await boot();
+    ($('.nav-view-btn[data-view-target="sources"]') as HTMLElement).click();
+    await vi.waitFor(() => expect($("#sources-list .source-update-credentials-btn")).toBeTruthy());
+    ($("#sources-list .source-update-credentials-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("email"),
+    );
+    expect(($("#imap-auth") as HTMLSelectElement).value).toBe("oauth");
+    expect(($("#imap-pass") as HTMLElement).hidden).toBe(true);
+    expect(($("#imap-oauth-btn") as HTMLElement).hidden).toBe(false);
+    expect(win.document.activeElement).toBe($("#imap-oauth-btn"));
+    expect($("#imap-status").textContent).toBe(
+      "Sign in with Google again for bob@gmail.com · imap.gmail.com, then Connect and sync.",
+    );
   });
 
   it("Disconnect pauses the source, forgets credentials, and says the archive stays", async () => {
@@ -4532,6 +4564,20 @@ describe("settings pages", () => {
     await vi.waitFor(() =>
       expect(tauri.calls.some((c) => c.cmd === "settings_save")).toBe(true),
     );
+  });
+
+  it("the settings note sits under the switcher, visible from every page", async () => {
+    await boot();
+    const note = $("#settings-note")!;
+    // Inside the settings view (so it renders there) but never inside one
+    // of the pages — a page-scoped note is hidden with its page, and the
+    // save feedback ("Saving…/Saved./Not saved") must be reachable from
+    // whichever page's Save was pressed.
+    expect($("#view-settings")!.contains(note)).toBe(true);
+    expect($("#settings-general")!.contains(note)).toBe(false);
+    expect($("#settings-storage")!.contains(note)).toBe(false);
+    expect($("#settings-ai")!.contains(note)).toBe(false);
+    expect($("#settings-general")!.previousElementSibling).toBe(note);
   });
 });
 
