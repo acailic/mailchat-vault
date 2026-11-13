@@ -272,6 +272,12 @@ pub enum MediaKind {
     /// [`NewMessage::attachments`]; the pass stages their bytes into the
     /// object store and records `media` entries before the batch commits.
     Mail,
+    /// Facebook Messenger (DYI tree): media uris in `raw_json`
+    /// (`photos`/`videos`/…) resolve against the DYI export root.
+    /// Message-linked extraction is not wired yet — until it lands, the
+    /// configured pass is inert for messages (references stay recorded
+    /// in `raw_json`) and only the whole-tree unlinked sweep acts.
+    Messenger,
 }
 
 /// The media pass configuration of one bounded run (M4.2): which
@@ -633,6 +639,12 @@ impl RunState<'_, '_> {
                         summary.deduped += mail_media.deduped;
                         summary.missing += mail_media.missing;
                     }
+                    // Message-linked extraction arrives with the
+                    // Messenger extractor; until then a configured
+                    // Messenger pass leaves the batch untouched —
+                    // references stay in `raw_json`, and only the
+                    // whole-tree unlinked sweep acts.
+                    MediaKind::Messenger => {}
                 }
             }
         }
