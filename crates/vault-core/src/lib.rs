@@ -88,6 +88,7 @@ pub mod mail;
 pub mod mbox;
 pub mod media;
 pub mod message;
+pub mod messenger;
 pub mod oauth;
 pub mod object_store;
 pub mod preview;

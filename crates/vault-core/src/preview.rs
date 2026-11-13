@@ -133,6 +133,7 @@ fn format_name(format: ChatFormat) -> &'static str {
         ChatFormat::Telegram => "telegram",
         ChatFormat::Signal => "signal",
         ChatFormat::Discord => "discord",
+        ChatFormat::Messenger => "messenger",
     }
 }
 

@@ -613,7 +613,7 @@ fn directory_without_result_json_and_unknown_files_error() {
     .unwrap_err();
     assert!(
         err.to_string().contains(
-            "expected a directory containing a Telegram result.json, a Discord Data Package, or a single export file"
+            "expected a directory containing a Telegram result.json, a Discord Data Package, a Messenger message_*.json, or a single export file"
         ),
         "{err}"
     );

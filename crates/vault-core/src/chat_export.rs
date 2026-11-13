@@ -19,6 +19,7 @@ use crate::discord::{
 use crate::import_bounds::{expand_zip_bounded, ImportBounds};
 use crate::ingest::IngestSummary;
 use crate::media::MediaSummary;
+use crate::messenger::{is_messenger_export, is_messenger_export_reader, MessengerSource};
 use crate::signal::{is_signal_export, is_signal_export_reader, SignalSource};
 use crate::telegram::{is_telegram_export, is_telegram_export_reader, TelegramSource};
 use crate::whatsapp::{is_whatsapp_export, is_whatsapp_export_reader, WhatsappSource};
@@ -31,6 +32,7 @@ pub enum ChatFormat {
     Telegram,
     Signal,
     Discord,
+    Messenger,
 }
 
 /// Detect which chat export format `bytes` hold, if any.
@@ -38,13 +40,19 @@ pub enum ChatFormat {
 /// Discord wins when the JSON carries a `messages` array plus a
 /// `channel`/`guild` object (Telegram exports also have a top-level
 /// `messages` array, so the Discord shapes must be checked first);
-/// a top-level JSON array of Signal Desktop message objects is a
-/// Signal conversation export; otherwise a Telegram `messages` array
+/// a Messenger export (a `participants` array plus a `messages` array
+/// whose first element carries `sender_name`/`timestamp_ms`) is
+/// checked next, before the Telegram probe can claim it; a top-level
+/// JSON array of Signal Desktop message objects is a Signal
+/// conversation export; otherwise a Telegram `messages` array
 /// decides, then a WhatsApp header within the first lines. Anything
 /// else returns `None`.
 pub fn detect_chat_format(bytes: &[u8]) -> Option<ChatFormat> {
     if is_discord_export(bytes) {
         return Some(ChatFormat::Discord);
+    }
+    if is_messenger_export(bytes) {
+        return Some(ChatFormat::Messenger);
     }
     if is_telegram_export(bytes) {
         return Some(ChatFormat::Telegram);
@@ -68,6 +76,10 @@ pub fn detect_chat_format_reader(path: &Path) -> Result<Option<ChatFormat>> {
     use std::io::Seek as _;
     if is_discord_export_reader(&mut file) {
         return Ok(Some(ChatFormat::Discord));
+    }
+    file.rewind()?;
+    if is_messenger_export_reader(&mut file) {
+        return Ok(Some(ChatFormat::Messenger));
     }
     file.rewind()?;
     if is_telegram_export_reader(&mut file) {
@@ -172,7 +184,7 @@ fn resolve_export_file(picked: &Path) -> Result<PathBuf> {
                 continue;
             }
             return Err(Error::ChatImport(format!(
-                "unrecognized chat export format: {} (expected a directory containing a Telegram result.json, a Discord Data Package, or a single export file)",
+                "unrecognized chat export format: {} (expected a directory containing a Telegram result.json, a Discord Data Package, a Messenger message_*.json, or a single export file)",
                 picked.display()
             )));
         }
@@ -198,7 +210,7 @@ pub fn resolve_stream_source(
     }
     let format = detect_chat_format_reader(&file)?.ok_or_else(|| {
         Error::ChatImport(format!(
-            "unrecognized chat export format: {} (expected a WhatsApp .txt export, a Telegram result.json, a Signal conversation .json, or a Discord messages.json)",
+            "unrecognized chat export format: {} (expected a WhatsApp .txt export, a Telegram result.json, a Messenger message_*.json, a Signal conversation .json, or a Discord messages.json)",
             file.display()
         ))
     })?;
@@ -207,6 +219,7 @@ pub fn resolve_stream_source(
         ChatFormat::Signal => Box::new(SignalSource::new(&file)),
         ChatFormat::WhatsApp => Box::new(WhatsappSource::new(&file)),
         ChatFormat::Discord => Box::new(DiscordSource::new(&file)),
+        ChatFormat::Messenger => Box::new(MessengerSource::new(&file)),
     };
     Ok((format, file, source))
 }
@@ -274,11 +287,12 @@ pub fn import_bounded(
     if extract_media {
         if let Some(data_dir) = data_dir {
             // Signal and Discord attachments stay recorded in `raw_json`
-            // only — media extraction is not implemented for them yet.
+            // only — media extraction is not implemented for them yet —
+            // and Messenger is not wired past detection yet.
             let kind = match format {
                 ChatFormat::Telegram => Some(MediaKind::Telegram),
                 ChatFormat::WhatsApp => Some(MediaKind::WhatsApp),
-                ChatFormat::Signal | ChatFormat::Discord => None,
+                ChatFormat::Signal | ChatFormat::Discord | ChatFormat::Messenger => None,
             };
             if let Some(kind) = kind {
                 run.media = Some(MediaPass {
@@ -367,6 +381,14 @@ mod tests {
             Some(ChatFormat::Telegram)
         );
         assert_eq!(detect_chat_format(br#"{"channel": {}}"#), None);
+    }
+
+    #[test]
+    fn messenger_thread_json_is_not_telegram() {
+        // The Telegram probe is "has a messages array"; Messenger must be
+        // checked first or a DYI file would be imported as Telegram.
+        let messenger = br#"{"participants": [{"name": "Ana"}], "messages": [{"sender_name": "Ana", "timestamp_ms": 1, "content": "hi"}]}"#;
+        assert_eq!(detect_chat_format(messenger), Some(ChatFormat::Messenger));
     }
 
     #[test]
