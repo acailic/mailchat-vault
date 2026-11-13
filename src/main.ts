@@ -127,7 +127,7 @@ import { renderWatchEvents, renderWatchFolders, watchStatusText } from "./watchv
 import { autoSyncStatusText, isIntervalChoice } from "./schedview";
 import {
   passwordStoreNote,
-  renderAccounts,
+  renderSourcesList,
   accountTitle,
   sourceChipRows,
   syncFailureText,
@@ -1787,7 +1787,8 @@ void ipc.onEvent<SyncScheduleView>("scheduler-status", (payload) => {
 });
 
 // ---------------------------------------------------------------------------
-// Accounts panel on the Sources home (listing, sync now, pause, forget)
+// Sources list on the Sources home (listing, view messages, sync now,
+// pause / credentials / disconnect behind the Details fold)
 // ---------------------------------------------------------------------------
 
 /** The panel status line: a one-line summary of what is listed. */
@@ -1802,10 +1803,13 @@ function describeAccountsStatus(accounts: AccountView[]): string {
 }
 
 function renderAccountsPanel(accounts: AccountView[]): void {
-  renderAccounts(sourcesListEl, accounts, {
+  renderSourcesList(sourcesListEl, accounts, {
+    onViewMessages: viewSourceMessages,
     onSyncNow: (account) => void syncAccountNow(account),
     onTogglePause: (account) => void toggleAccountPause(account),
+    onUpdateCredentials: (account) => updateAccountCredentials(account),
     onForget: (account) => void forgetAccountCredentials(account),
+    onDisconnect: (account) => void disconnectAccount(account),
   });
   sourcesStatus.textContent = describeAccountsStatus(accounts);
 }
@@ -1892,6 +1896,44 @@ async function forgetAccountCredentials(account: AccountView): Promise<void> {
   }
 }
 
+/** Show one source's messages: scope the search to its stable id
+ * (keeping the query text and other filters) and return to results. */
+function viewSourceMessages(account: AccountView): void {
+  state.sources = [account.source_id];
+  renderSourceChipsNow();
+  void runSearch(0);
+  workspace.store.setView("workspace");
+}
+
+/** Reconnection from the source details: open the Connect email form
+ * prefilled with the account's identity (folders joined for the input). */
+function updateAccountCredentials(account: AccountView): void {
+  if (!account.imap) return;
+  imapHostInput.value = account.imap.host;
+  imapPortInput.value = String(account.imap.port);
+  imapUserInput.value = account.imap.username;
+  imapFoldersInput.value = account.imap.folders.join(", ");
+  imapPassInput.value = "";
+  imapStatus.textContent = `Re-enter the password for ${accountTitle(account)}, then Connect and sync.`;
+  workspace.store.setSourcesSection("email");
+  imapPassInput.focus();
+}
+
+/** Disconnect: stop future sync (per-source exclusion) and remove the
+ * stored credentials. The local archive always stays; deleting it is a
+ * separate, not-yet-built action by decision. */
+async function disconnectAccount(account: AccountView): Promise<void> {
+  const name = accountTitle(account);
+  try {
+    await ipc.sourceSetExcluded(account.source_id, true);
+    await ipc.accountForgetCredentials(account.source_id);
+    await refreshAccounts();
+    sourcesStatus.textContent =
+      `Disconnected ${name} — future sync is stopped and its credentials were removed; the archive stays.`;
+  } catch (e) {
+    sourcesStatus.textContent = `Could not disconnect ${name}: ${e}`;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Folder watching

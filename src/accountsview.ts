@@ -1,13 +1,14 @@
-// Pure helpers for the multi-account UI (roadmap: the accounts panel) —
+// Pure helpers for the sources UI (roadmap: the Sources list) —
 // unit tested, no DOM beyond the renderer below; every dynamic string
 // goes through textContent, so labels and errors can never inject markup.
 //
-// The accounts panel lists every account derived from the vault's durable
+// The Sources list shows every account derived from the vault's durable
 // source instances — IMAP accounts (email) and import accounts (mbox/chat
-// exports) — with per-account stats, last-sync time, and the management
-// actions: sync now (re-runs `sync_imap` for that account, reusing its
-// stored credentials), pause/resume (per-source exclusion), and forget
-// credentials (removes the keyring secrets, keeps the archive).
+// exports) — with per-source stats and last-sync time. View messages (and
+// Sync now for email) are the primary actions; the management actions —
+// pause/resume (per-source exclusion), update credentials, forget
+// credentials (removes the keyring secrets, keeps the archive), and the
+// two-step disconnect — live behind each email row's Details fold.
 
 import type { AccountView, SourceCount, SourceInstance } from "./types";
 import type { ImapAuthMode } from "./ipc";
@@ -113,9 +114,9 @@ export function describeAccountSync(account: AccountView): string {
   return parts.join(" · ");
 }
 
-/** The empty-state line when no account exists yet. */
-export function accountsEmptyLine(): string {
-  return "No accounts yet — connect an email account (IMAP) or import a chat/mbox export and it appears here.";
+/** The empty-state line when no source exists yet. */
+export function sourcesEmptyLine(): string {
+  return "No sources yet — import an export or connect an email account and it appears here.";
 }
 
 /** Where one just-saved password lives, as the user must be told it:
@@ -206,29 +207,32 @@ export function sourceChipRows(
   });
 }
 
-export interface RenderAccountsOptions {
+export interface RenderSourcesListOptions {
+  onViewMessages: (account: AccountView) => void;
   onSyncNow: (account: AccountView) => void;
   onTogglePause: (account: AccountView) => void;
+  onUpdateCredentials: (account: AccountView) => void;
   onForget: (account: AccountView) => void;
+  onDisconnect: (account: AccountView) => void;
 }
 
-/** Render the accounts list (replaces children): one row per account —
- * label, kind, stats, sync state — plus the IMAP management actions
- * (sync now / pause-resume / forget credentials). Every control is a
- * real focusable button with an account-scoped accessible name, so the
- * keyboard/screen-reader path stays usable per the workspace
- * conventions; `Esc` keeps its global meaning (drawer, reading pane). */
-export function renderAccounts(
+/** Render the Sources list (replaces children): one row per source —
+ * title, kind, stats, sync state — with View messages (and Sync now for
+ * email) as the primary actions, and pause/credentials/disconnect behind
+ * a Details fold. Every control is a real focusable button with an
+ * account-scoped accessible name. Disconnect is two-step: the first
+ * click arms the confirmation, the second fires; a re-render disarms. */
+export function renderSourcesList(
   el: HTMLElement,
   accounts: AccountView[],
-  opts: RenderAccountsOptions,
+  opts: RenderSourcesListOptions,
 ): void {
   if (accounts.length === 0) {
     const empty = document.createElement("li");
     empty.className = "account-row empty";
     const line = document.createElement("span");
     line.className = "meta";
-    line.textContent = accountsEmptyLine();
+    line.textContent = sourcesEmptyLine();
     empty.append(line);
     el.replaceChildren(empty);
     return;
@@ -256,13 +260,20 @@ export function renderAccounts(
     sync.className = "account-sync meta";
     sync.textContent = describeAccountSync(account);
     main.append(title, kind, stats, sync);
-
     li.append(main);
 
-    if (account.kind === "imap") {
-      const actions = document.createElement("div");
-      actions.className = "account-actions";
+    const actions = document.createElement("div");
+    actions.className = "account-actions";
+    const view = document.createElement("button");
+    view.type = "button";
+    view.className = "source-view-btn";
+    view.textContent = "View messages";
+    view.title = `Show this source's messages in the archive (keeps your search text)`;
+    view.setAttribute("aria-label", `View messages of source ${displayName}`);
+    view.addEventListener("click", () => opts.onViewMessages(account));
+    actions.append(view);
 
+    if (account.kind === "imap") {
       const syncNow = document.createElement("button");
       syncNow.type = "button";
       syncNow.className = "account-sync-btn";
@@ -270,6 +281,16 @@ export function renderAccounts(
       syncNow.title = `Sync ${displayName} now, reusing its stored credentials`;
       syncNow.setAttribute("aria-label", `Sync account ${displayName} now`);
       syncNow.addEventListener("click", () => opts.onSyncNow(account));
+      actions.append(syncNow);
+    }
+    li.append(actions);
+
+    if (account.kind === "imap") {
+      const details = document.createElement("details");
+      details.className = "source-details";
+      const summary = document.createElement("summary");
+      summary.textContent = "Details";
+      details.append(summary);
 
       const pause = document.createElement("button");
       pause.type = "button";
@@ -284,16 +305,44 @@ export function renderAccounts(
       );
       pause.addEventListener("click", () => opts.onTogglePause(account));
 
+      const update = document.createElement("button");
+      update.type = "button";
+      update.className = "source-update-credentials-btn";
+      update.textContent = "Update credentials…";
+      update.title = `Re-enter the password or Google sign-in for ${displayName}`;
+      update.setAttribute("aria-label", `Update credentials of account ${displayName}`);
+      update.addEventListener("click", () => opts.onUpdateCredentials(account));
+
       const forget = document.createElement("button");
       forget.type = "button";
       forget.className = "account-forget-btn";
       forget.textContent = "Forget credentials";
       forget.title = `Remove ${displayName}'s stored password and Google sign-in from the OS keyring (the archive stays)`;
-      forget.setAttribute("aria-label", `Forget stored credentials of account ${displayName}`);
+      forget.setAttribute("aria-label", `Forget stored credentials of ${displayName}`);
       forget.addEventListener("click", () => opts.onForget(account));
 
-      actions.append(syncNow, pause, forget);
-      li.append(actions);
+      const disconnect = document.createElement("button");
+      disconnect.type = "button";
+      disconnect.className = "source-disconnect-btn";
+      disconnect.textContent = "Disconnect…";
+      disconnect.title = `Disconnect ${displayName}: stop syncing and remove its credentials — the archived messages stay`;
+      disconnect.setAttribute(
+        "aria-label",
+        `Disconnect account ${displayName} (stops sync, removes credentials, keeps the archive)`,
+      );
+      let armed = false;
+      disconnect.addEventListener("click", () => {
+        if (!armed) {
+          armed = true;
+          disconnect.textContent = "Confirm disconnect";
+          disconnect.title = `Really disconnect ${displayName}: stop syncing and remove its credentials — the archived messages stay`;
+          return;
+        }
+        opts.onDisconnect(account);
+      });
+
+      details.append(pause, update, forget, disconnect);
+      li.append(details);
     }
 
     return li;

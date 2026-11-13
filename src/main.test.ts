@@ -4068,8 +4068,9 @@ describe("sources view sub-sections", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Accounts panel (multi-account UI): listing, sync-now params, pause,
-// forget credentials, empty state — the acceptance-critical wiring.
+// Accounts panel / Sources list (multi-account UI): listing, View messages,
+// sync-now params, the Details fold (pause, update credentials, forget,
+// disconnect), empty state — the acceptance-critical wiring.
 // ---------------------------------------------------------------------------
 
 const IMAP_ACCOUNT = {
@@ -4123,6 +4124,27 @@ const OAUTH_ACCOUNT = {
   },
 } as const;
 
+// The UI fixtures: source ids matching the boot `sources_list` fixtures
+// (inst-mbox / inst-demo) so View messages and the nav chips agree.
+const IMAP_ACCOUNT_UI = {
+  ...IMAP_ACCOUNT,
+  source_id: "inst-demo",
+  label: "imap:imap.gmail.com:993:ana@gmail.com",
+  imap: {
+    host: "imap.gmail.com",
+    port: 993,
+    username: "ana@gmail.com",
+    folders: ["INBOX"],
+    has_password: true,
+    has_oauth: false,
+  },
+} as const;
+
+const IMPORT_ACCOUNT_UI = {
+  ...IMPORT_ACCOUNT,
+  source_id: "inst-mbox",
+} as const;
+
 describe("accounts panel", () => {
   it("lists accounts with stats, sync state, and per-kind actions", async () => {
     tauri.handlers.set("accounts_list", () => [IMAP_ACCOUNT, IMPORT_ACCOUNT]);
@@ -4149,11 +4171,31 @@ describe("accounts panel", () => {
     );
     expect(
       [...imapRow.querySelectorAll("button")].map((b) => b.textContent),
-    ).toEqual(["Sync now", "Pause", "Forget credentials"]);
-    // The import account renders with stats but no management actions.
+    ).toEqual([
+      "View messages",
+      "Sync now",
+      "Pause",
+      "Update credentials…",
+      "Forget credentials",
+      "Disconnect…",
+    ]);
+    // The management actions sit inside the Details fold; View messages
+    // and Sync now stay primary (outside it), each with an
+    // account-scoped accessible name.
+    expect(imapRow.querySelector("details.source-details .account-pause-btn")).toBeTruthy();
+    expect(
+      imapRow.querySelector("details.source-details .source-disconnect-btn"),
+    ).toBeTruthy();
+    for (const button of imapRow.querySelectorAll("button")) {
+      expect(button.getAttribute("aria-label")).toContain("ana@gmail.com");
+    }
+    // The import account renders with stats and View messages but no
+    // management fold and no sync action.
     const importRow = $("#sources-list .account-row[data-source-id='inst-import-1']");
     expect(importRow.querySelector(".account-kind")!.textContent).toBe("Import");
-    expect(importRow.querySelectorAll("button").length).toBe(0);
+    expect(importRow.querySelector(".source-view-btn")).toBeTruthy();
+    expect(importRow.querySelector("details.source-details")).toBe(null);
+    expect(importRow.querySelector(".account-sync-btn")).toBe(null);
     expect($("#sources-status").textContent).toContain("2 accounts");
   });
 
@@ -4161,7 +4203,7 @@ describe("accounts panel", () => {
     await boot();
     await vi.waitFor(() => expect($("#sources-status").textContent).toBe(""));
     expect($("#sources-list .account-row.empty")).toBeTruthy();
-    expect($("#sources-list .account-row.empty").textContent).toContain("No accounts yet");
+    expect($("#sources-list .account-row.empty").textContent).toContain("No sources yet");
   });
 
   it("sync now triggers sync_imap with the account's stored parameters", async () => {
@@ -4257,6 +4299,9 @@ describe("accounts panel", () => {
     });
     await boot();
     await vi.waitFor(() => expect($("#sources-list .account-pause-btn")).toBeTruthy());
+    // The management actions live in the Details fold: open it first
+    // (happy-dom needs `open` set; no summary click required).
+    ($("#sources-list details.source-details") as HTMLDetailsElement).open = true;
     ($("#sources-list .account-pause-btn") as HTMLButtonElement).click();
     await vi.waitFor(() =>
       expect(
@@ -4279,6 +4324,7 @@ describe("accounts panel", () => {
     tauri.handlers.set("account_forget_credentials", () => true);
     await boot();
     await vi.waitFor(() => expect($("#sources-list .account-forget-btn")).toBeTruthy());
+    ($("#sources-list details.source-details") as HTMLDetailsElement).open = true;
     ($("#sources-list .account-forget-btn") as HTMLButtonElement).click();
     await vi.waitFor(() =>
       expect(
@@ -4328,6 +4374,61 @@ describe("accounts panel", () => {
     const before = listed;
     ($("#sources-refresh") as HTMLButtonElement).click();
     await vi.waitFor(() => expect(listed).toBeGreaterThan(before));
+  });
+
+  it("View messages scopes the archive to that source id and returns to results", async () => {
+    // The handler must be installed before boot: the panel renders from
+    // the boot-time accounts refresh.
+    tauri.handlers.set("accounts_list", () => [IMPORT_ACCOUNT_UI]); // id "inst-mbox"
+    await bootSearched();
+    ($('.nav-view-btn[data-view-target="sources"]') as HTMLElement).click();
+    await vi.waitFor(() => expect($("#sources-list .source-view-btn")).toBeTruthy());
+    ($("#sources-list .source-view-btn") as HTMLElement).click();
+    await vi.waitFor(() => expect(($("#app") as HTMLElement).dataset.view).toBe("workspace"));
+    const args = searchCalls().at(-1)!.args as { request: { source_ids: string[] } };
+    expect(args.request.source_ids).toEqual(["inst-mbox"]);
+  });
+
+  it("Update credentials prefills the email form from the account", async () => {
+    tauri.handlers.set("accounts_list", () => [IMAP_ACCOUNT_UI]); // username ana@gmail.com, host imap.gmail.com, folders ["INBOX"]
+    await boot();
+    ($('.nav-view-btn[data-view-target="sources"]') as HTMLElement).click();
+    await vi.waitFor(() => expect($("#sources-list .source-update-credentials-btn")).toBeTruthy());
+    ($("#sources-list .source-update-credentials-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("email"),
+    );
+    expect((input("#imap-user") as HTMLInputElement).value).toBe("ana@gmail.com");
+    expect((input("#imap-host") as HTMLInputElement).value).toBe("imap.gmail.com");
+    expect((input("#imap-folders") as HTMLInputElement).value).toBe("INBOX");
+  });
+
+  it("Disconnect pauses the source, forgets credentials, and says the archive stays", async () => {
+    tauri.handlers.set("accounts_list", () => [IMAP_ACCOUNT_UI]);
+    tauri.handlers.set("source_set_excluded", () => null);
+    tauri.handlers.set("account_forget_credentials", () => true);
+    await boot();
+    ($('.nav-view-btn[data-view-target="sources"]') as HTMLElement).click();
+    await vi.waitFor(() => expect($("#sources-list .source-disconnect-btn")).toBeTruthy());
+    ($("#sources-list details.source-details") as HTMLDetailsElement).open = true;
+    const btn = $("#sources-list .source-disconnect-btn") as HTMLButtonElement;
+    btn.click();
+    btn.click();
+    await vi.waitFor(() =>
+      expect(
+        tauri.calls.some(
+          (c) =>
+            c.cmd === "source_set_excluded" &&
+            (c.args as { excluded: boolean }).excluded === true,
+        ),
+      ).toBe(true),
+    );
+    await vi.waitFor(() =>
+      expect(tauri.calls.some((c) => c.cmd === "account_forget_credentials")).toBe(true),
+    );
+    await vi.waitFor(() =>
+      expect($("#sources-status").textContent).toContain("archive stays"),
+    );
   });
 });
 
