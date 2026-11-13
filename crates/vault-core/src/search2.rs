@@ -9,9 +9,11 @@
 //!
 //! Ordering contract (A07 — stable, flat, deterministic):
 //!
-//! - **Relevance** (text search, the default for text): FTS5 `rank`, then
-//!   ascending message id — identical input and archive always paginate
-//!   in the same order, and equal-rank rows have a stable tiebreak.
+//! - **Relevance** (text search, the default for text): weighted FTS5
+//!   `bm25()` with the shared BM25F column weights (subject boosted over
+//!   body/author — see [`crate::storage`]'s weight consts), then ascending
+//!   message id — identical input and archive always paginate in the same
+//!   order, and equal-score rows have a stable tiebreak.
 //! - **Newest** (browse with empty text, or the user's explicit choice):
 //!   `sent_instant DESC, id DESC`, with unresolved/missing instants
 //!   **last** — after every dated message, deterministically by id.
@@ -36,7 +38,7 @@ use serde_json::Value;
 use std::io::Write;
 
 use crate::query::{day_instant_utc, escape_like, parse_day};
-use crate::storage::Storage;
+use crate::storage::{Storage, BM25_WEIGHT_AUTHOR, BM25_WEIGHT_BODY, BM25_WEIGHT_SUBJECT};
 use crate::{Error, Result};
 
 /// Upper bound for search text length (Unicode characters).
@@ -833,9 +835,11 @@ impl Storage {
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             rows
         } else {
-            // Relevance: rank, then ascending id — the stable flat order.
-            // Bind order follows the SQL text: the two snippet markers,
-            // the MATCH expression, the filters, then LIMIT/OFFSET.
+            // Relevance: the shared BM25F weights (subject boosted over
+            // body/author — the same consts the storage.rs ranking sites
+            // use), then ascending id — the stable flat order. Bind order
+            // follows the SQL text: the two snippet markers, the MATCH
+            // expression, the filters, then LIMIT/OFFSET.
             let mut bind = vec![
                 SqlValue::from(crate::query::SNIPPET_OPEN_MARK.to_string()),
                 SqlValue::from(crate::query::SNIPPET_CLOSE_MARK.to_string()),
@@ -852,7 +856,8 @@ impl Storage {
                  JOIN source_instances AS si ON si.id = m.source_instance_id \
                  LEFT JOIN conversations AS c ON c.id = m.conversation_id \
                  WHERE archive_fts MATCH ?3 {} \
-                 ORDER BY rank, m.id LIMIT ? OFFSET ?",
+                 ORDER BY bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, \
+                               {BM25_WEIGHT_SUBJECT}), m.id LIMIT ? OFFSET ?",
                 filters.sql
             );
             let mut stmt = tx.prepare(&sql)?;
@@ -1349,7 +1354,8 @@ fn read_archive_revision(tx: &Connection) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::NewMessage;
+    use crate::message::{InsertOutcome, NewMessage};
+    use crate::storage::{ConnectorIdentity, MailInsertOutcome, NewSourceInstance, Occurrence};
 
     fn seeded() -> Storage {
         let s = Storage::open_in_memory().unwrap();
@@ -1468,6 +1474,109 @@ mod tests {
             .hits
             .iter()
             .all(|h| h.snippet.contains(crate::query::SNIPPET_OPEN_MARK)));
+    }
+
+    /// Insert one subject-bearing mail row through the connector path —
+    /// the only ingest that populates the FTS `subject` column (same
+    /// fixture approach as `subject_hit_outranks_denser_body_hit` in
+    /// tests/storage.rs, which pins the same ordering on the v1 page).
+    fn insert_mail(
+        s: &Storage,
+        external_id: &str,
+        author: &str,
+        sent_at: &str,
+        subject: &str,
+        body: &str,
+    ) -> i64 {
+        let instance = s
+            .ensure_source_instance(&NewSourceInstance {
+                kind: "imap",
+                label: "Subject weight mail",
+                connector_key: "imap|subject.weight.test|993|implicit-tls|sw@example.test",
+                config_json: "{}",
+            })
+            .unwrap();
+        let message = NewMessage::new(instance.clone(), external_id, author, sent_at, body);
+        let identity = ConnectorIdentity {
+            namespace: "imap",
+            external_key: external_id,
+            revision_hash: "subject-weight-1",
+        };
+        let occurrence = Occurrence {
+            scope: "INBOX",
+            provider_item_id: external_id,
+            uidvalidity: Some(1),
+        };
+        match s
+            .insert_mail_message(&instance, &message, subject, &identity, &occurrence)
+            .unwrap()
+        {
+            MailInsertOutcome::Inserted { id, .. } | MailInsertOutcome::Duplicate { id } => id,
+        }
+    }
+
+    #[test]
+    fn relevance_page_subject_hit_outranks_denser_body_hit() {
+        let s = Storage::open_in_memory().unwrap();
+        // A: the term lives in the subject line; the body is the production
+        // mail composition "{subject}\n\n{text}" with no further mentions.
+        let a = insert_mail(
+            &s,
+            "subject-hit",
+            "ana",
+            "2026-10-01T09:00:00Z",
+            "vault migration plan",
+            "vault migration plan\n\nstatus update covering the rollout steps, owners, \
+             timing, and the open questions that still need answers",
+        );
+        // B: no subject term; a longer body mentioning vault twice. Under
+        // equal column weights B won on body evidence — the shared BM25F
+        // subject weight must flip the order on the v2 relevance page too.
+        let b = match s
+            .insert_message(&NewMessage::new(
+                "demo",
+                "body-hit",
+                "bob",
+                "2026-10-02T09:00:00Z",
+                "the vault handles secrets and the vault rotates keys; this body \
+                 is longer overall and mentions the term twice somewhere inside",
+            ))
+            .unwrap()
+        {
+            InsertOutcome::Inserted(id) | InsertOutcome::Duplicate(id) => id,
+        };
+        // Unrelated filler: with the term in 2 of 8 rows "vault" carries a
+        // real idf, so the weighting operates on healthy margins.
+        for (n, body) in [
+            "lunch plans for friday at the noodle place near the office",
+            "the quarterly review slides are attached with revenue and churn numbers",
+            "gardening notes: plant the garlic beds before the first frost arrives",
+            "boarding pass and hotel confirmation for the conference trip next month",
+            "the espresso machine in the kitchen is fixed, enjoy the good coffee again",
+            "reminder about the dental appointment on thursday afternoon",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            s.insert_message(&NewMessage::new(
+                "demo",
+                format!("filler-{n}"),
+                "cid",
+                "2026-10-03T09:00:00Z",
+                body,
+            ))
+            .unwrap();
+        }
+
+        let page = s
+            .search_archive(&SearchArchiveRequest {
+                text: "vault".into(),
+                ..SearchArchiveRequest::default()
+            })
+            .unwrap();
+        assert_eq!(page.total, 2);
+        let ids: Vec<i64> = page.hits.iter().map(|h| h.id).collect();
+        assert_eq!(ids, vec![a, b], "the subject hit must rank first");
     }
 
     #[test]

@@ -352,8 +352,8 @@ fn extract_json_object(text: &str) -> Option<&str> {
 fn translation_system_prompt(today: NaiveDate) -> String {
     let mut prompt = String::from(
         "You convert a natural-language question about a personal message archive into a search plan.\n\n\
-         The archive is a SQLite FTS5 full-text index with two columns: `body` (message text; for email it includes the subject) and `author` (display name or address).\n\n\
-         FTS5 MATCH syntax you may use: quoted phrases (\"exact phrase\"), prefix terms (\"proj*\"), AND (implicit between terms), OR, NOT, parentheses; terms are case-insensitive; the column filters `body:` and `author:` are allowed.\n\n\
+         The archive is a SQLite FTS5 full-text index with three columns: `body` (message text; for email it includes the subject), `author` (display name or address), and `subject` (email subject lines; chat messages have none).\n\n\
+         FTS5 MATCH syntax you may use: quoted phrases (\"exact phrase\"), prefix terms (\"proj*\"), AND (implicit between terms), OR, NOT, parentheses; terms are case-insensitive; the column filters `body:`, `author:`, and `subject:` are allowed.\n\n\
          Also extract any date range the question implies (for example \"last march\", \"before June\", \"in 2024\"), resolving relative wording against today's date: ",
     );
     prompt.push_str(&today.to_string());
@@ -557,6 +557,22 @@ fn context_block(msg: &Message, index: usize) -> String {
     format!("[{index}] author: {author} · {date}\n{body}")
 }
 
+/// Prompt order for the summary context blocks, given `n` ranked
+/// messages (0-based ranks): all even indices ascending first, then all
+/// odd indices descending — n=8 → `0,2,4,6,7,5,3,1` (1-based
+/// `1,3,5,7,8,6,4,2`).
+///
+/// This is the "Lost in the Middle" placement (Liu et al. 2023,
+/// "Lost in the Middle: How Language Models Use Long Contexts",
+/// arXiv:2307.03172): positional degradation is largest mid-context, so
+/// the strongest evidence (lowest ranks) sits at the beginning and the
+/// end of the prompt. Citation numbers still follow rank, not position.
+fn lim_order(n: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..n).filter(|i| i % 2 == 0).collect();
+    order.extend((0..n).filter(|i| i % 2 == 1).rev());
+    order
+}
+
 /// Outcome of the summary step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Summarized {
@@ -566,7 +582,9 @@ pub struct Summarized {
 
 /// Step 3 of the pipeline: synthesize a short answer over the top `top`
 /// results. Only those rows (truncated) are sent — the privacy guarantee.
-/// Skipped entirely when there are no results.
+/// Skipped entirely when there are no results. Blocks are placed in
+/// [`lim_order`] (strongest evidence at the prompt's edges) while their
+/// `[k]` numbers stay by rank.
 pub fn summarize_results(
     llm: &dyn Llm,
     question: &str,
@@ -579,14 +597,13 @@ pub fn summarize_results(
             notes: Vec::new(),
         };
     }
-    let contexts: String = results
-        .iter()
-        .take(top)
-        .enumerate()
-        .map(|(i, m)| context_block(m, i + 1))
+    let top_messages: Vec<&Message> = results.iter().take(top).collect();
+    let contexts: String = lim_order(top_messages.len())
+        .into_iter()
+        .map(|i| context_block(top_messages[i], i + 1))
         .collect::<Vec<_>>()
         .join("\n\n");
-    let user = format!("Question: {question}\n\nMessages (most relevant first):\n\n{contexts}");
+    let user = format!("Question: {question}\n\nMessages (numbered by relevance):\n\n{contexts}");
     match llm.complete(SUMMARY_SYSTEM_PROMPT, &user) {
         Ok(answer) => Summarized {
             answer: Some(answer),
@@ -938,6 +955,27 @@ mod tests {
     }
 
     #[test]
+    fn translation_system_prompt_offers_all_three_columns() {
+        let prompt = translation_system_prompt(today());
+        assert!(prompt.contains("three columns"), "{prompt}");
+        for column in ["`body`", "`author`", "`subject`"] {
+            assert!(
+                prompt.contains(column),
+                "prompt must name {column}: {prompt}"
+            );
+        }
+        assert!(
+            prompt.contains("`subject` (email subject lines; chat messages have none)"),
+            "the subject column needs its chat caveat: {prompt}"
+        );
+        assert!(
+            prompt.contains("the column filters `body:`, `author:`, and `subject:` are allowed"),
+            "the subject: filter must be explicitly allowed: {prompt}"
+        );
+        assert!(!prompt.contains("two columns"), "{prompt}");
+    }
+
+    #[test]
     fn extract_json_object_variants() {
         assert_eq!(extract_json_object("  {\"a\":1}  "), Some("{\"a\":1}"));
         assert_eq!(extract_json_object("pre {\"a\":1} post"), Some("{\"a\":1}"));
@@ -970,5 +1008,130 @@ mod tests {
         let s = summarize_results(&llm, "q", &[], DEFAULT_SUMMARIZE_TOP);
         assert_eq!(s.answer, None);
         assert!(llm.prompts().is_empty(), "no LLM call without results");
+    }
+
+    #[test]
+    fn lim_order_places_strongest_first_and_last() {
+        // Exact permutations from the plan (0-based ranks).
+        assert_eq!(lim_order(0), Vec::<usize>::new());
+        assert_eq!(lim_order(1), vec![0]);
+        assert_eq!(lim_order(2), vec![0, 1]);
+        assert_eq!(lim_order(3), vec![0, 2, 1]);
+        assert_eq!(lim_order(8), vec![0, 2, 4, 6, 7, 5, 3, 1]); // 1-based 1,3,5,7,8,6,4,2
+
+        // Invariants for any n: a permutation of 0..n, rank 0 (the
+        // strongest evidence) placed first.
+        for n in 0..=13usize {
+            let order = lim_order(n);
+            let mut sorted = order.clone();
+            sorted.sort();
+            assert_eq!(sorted, (0..n).collect::<Vec<_>>(), "n={n}");
+            if n > 0 {
+                assert_eq!(order.first(), Some(&0), "n={n}");
+            }
+        }
+    }
+
+    /// Fixture: message of rank `rank` with a distinctive body marker.
+    fn lim_msg(rank: usize) -> Message {
+        Message {
+            id: rank as i64,
+            source: "test".into(),
+            external_id: format!("lim{rank}"),
+            channel: "email".into(),
+            chat_id: String::new(),
+            author: format!("author{rank}"),
+            sent_at: "2026-10-01".into(),
+            body: format!("lim marker {rank:02} about vault"),
+            raw_json: "{}".into(),
+        }
+    }
+
+    /// The `[k]` citation markers of the summary prompt, in prompt order.
+    fn marker_order(user: &str, n: usize) -> Vec<usize> {
+        let mut located: Vec<(usize, usize)> = (1..=n)
+            .map(|k| {
+                let at = user
+                    .find(&format!("[{k}] author"))
+                    .unwrap_or_else(|| panic!("block [{k}] missing from prompt: {user}"));
+                (at, k)
+            })
+            .collect();
+        located.sort();
+        located.into_iter().map(|(_, k)| k).collect()
+    }
+
+    #[test]
+    fn summary_prompt_orders_blocks_lost_in_the_middle() {
+        let msgs: Vec<Message> = (0..8).map(lim_msg).collect();
+        let llm = MockLlm::with_replies(["summary"]);
+        let s = summarize_results(&llm, "vault?", &msgs, DEFAULT_SUMMARIZE_TOP);
+        assert_eq!(s.answer.as_deref(), Some("summary"));
+        let user = &llm.prompts()[0].1;
+
+        // The block order in the prompt is 1,3,5,7,8,6,4,2 — odd ranks
+        // ascending, then even ranks descending.
+        assert_eq!(marker_order(user, 8), vec![1, 3, 5, 7, 8, 6, 4, 2]);
+
+        // Numbering stays by rank: block [k] carries ranked message k-1.
+        for k in 1..=8usize {
+            let rank = k - 1;
+            assert!(
+                user.contains(&format!(
+                    "[{k}] author: author{rank} · 2026-10-01\nlim marker {rank:02} about vault"
+                )),
+                "block [{k}] must cite ranked message {rank}: {user}"
+            );
+        }
+    }
+
+    #[test]
+    fn summary_prompt_permutations_for_small_n() {
+        for (n, expected) in [(1usize, vec![1usize]), (2, vec![1, 2]), (3, vec![1, 3, 2])] {
+            let msgs: Vec<Message> = (0..n).map(lim_msg).collect();
+            let llm = MockLlm::with_replies(["summary"]);
+            summarize_results(&llm, "vault?", &msgs, n);
+            let user = &llm.prompts()[0].1;
+            assert_eq!(marker_order(user, n), expected, "n={n}");
+        }
+    }
+
+    #[test]
+    fn summary_prompt_truncates_top_rows_before_permuting() {
+        let msgs: Vec<Message> = (0..5).map(lim_msg).collect();
+        let llm = MockLlm::with_replies(["summary"]);
+        summarize_results(&llm, "vault?", &msgs, 3);
+        let user = &llm.prompts()[0].1;
+
+        // Exactly the top-3 ranked rows are sent, then permuted (1,3,2).
+        for rank in 0..3 {
+            assert!(
+                user.contains(&format!("lim marker {rank:02} about vault")),
+                "top row {rank} missing: {user}"
+            );
+        }
+        for rank in 3..5 {
+            assert!(
+                !user.contains(&format!("lim marker {rank:02}")),
+                "row outside the top-3 leaked into the prompt: {user}"
+            );
+        }
+        assert_eq!(marker_order(user, 3), vec![1, 3, 2]);
+    }
+
+    #[test]
+    fn summary_prompt_header_says_numbered_by_relevance() {
+        let msgs: Vec<Message> = (0..2).map(lim_msg).collect();
+        let llm = MockLlm::with_replies(["summary"]);
+        summarize_results(&llm, "vault?", &msgs, DEFAULT_SUMMARIZE_TOP);
+        let user = &llm.prompts()[0].1;
+        assert!(
+            user.contains("Messages (numbered by relevance):"),
+            "header must say numbered by relevance: {user}"
+        );
+        assert!(
+            !user.contains("most relevant first"),
+            "the old header is false once block order differs from numbering: {user}"
+        );
     }
 }
