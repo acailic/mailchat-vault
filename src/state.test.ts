@@ -113,6 +113,55 @@ describe("WorkspaceStore", () => {
   });
 });
 
+describe("WorkspaceStore sub-view sections", () => {
+  it("starts on the sources home and the general settings page", () => {
+    const store = new WorkspaceStore();
+    expect(store.get().sourcesSection).toBe("home");
+    expect(store.get().settingsSection).toBe("general");
+  });
+
+  it("setSourcesSection navigates to sources, closes the drawer, keeps reading", () => {
+    const store = new WorkspaceStore();
+    store.setReadingOpen(true);
+    store.setView("settings");
+    store.setNavOpen(true);
+    store.setSourcesSection("import");
+    const s = store.get();
+    expect(s.view).toBe("sources");
+    expect(s.sourcesSection).toBe("import");
+    expect(s.navOpen).toBe(false);
+    expect(s.reading.open).toBe(true);
+  });
+
+  it("setView lands each destination on its home section", () => {
+    const store = new WorkspaceStore();
+    store.setSourcesSection("email");
+    store.setView("sources");
+    expect(store.get().sourcesSection).toBe("home");
+    store.setSettingsSection("storage");
+    store.setView("settings");
+    expect(store.get().settingsSection).toBe("general");
+  });
+
+  it("section setters are no-ops only when already showing that section", () => {
+    const store = new WorkspaceStore();
+    let notifications = 0;
+    store.subscribe(() => notifications++);
+    store.setSourcesSection("home"); // view was workspace → navigates
+    expect(notifications).toBe(1);
+    store.setSourcesSection("home"); // true no-op
+    expect(notifications).toBe(1);
+  });
+
+  it("section changes notify subscribers with the new state", () => {
+    const store = new WorkspaceStore();
+    const seen: string[] = [];
+    store.subscribe((s) => seen.push(`${s.view}:${s.settingsSection}`));
+    store.setSettingsSection("ai");
+    expect(seen).toEqual(["settings:ai"]);
+  });
+});
+
 describe("initialUiState", () => {
   it("boots empty with no selection", () => {
     const s = initialUiState();
