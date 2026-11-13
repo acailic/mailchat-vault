@@ -95,7 +95,9 @@ describe("flat results", () => {
       onToggleSelect: () => {},
     });
     const badges = el.querySelectorAll(".badge.attachments");
-    expect(badges[0].textContent).toBe("📎 1/2");
+    expect(badges[0].textContent).toBe("1/2");
+    expect(badges[0].getAttribute("aria-label")).toBe("attachments: 1 of 2");
+    expect(badges[0].innerHTML).toContain("#i-paperclip");
     expect(el.querySelector(".badge.conflict")?.textContent).toBe("revisions");
   });
 

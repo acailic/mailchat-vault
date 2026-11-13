@@ -10,6 +10,7 @@ import {
   timeConfidenceDetail,
   timeConfidenceLabel,
 } from "./format";
+import { icon } from "./icons";
 import {
   appendSegments,
 } from "./render";
@@ -98,10 +99,15 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
       hit.available_attachment_count < hit.attachment_count
         ? `${hit.attachment_count} attachment references, ${hit.available_attachment_count} preserved`
         : `${hit.attachment_count} attachments`;
-    files.textContent =
-      hit.available_attachment_count < hit.attachment_count
-        ? `📎 ${hit.available_attachment_count}/${hit.attachment_count}`
-        : `📎 ${hit.attachment_count}`;
+    files.setAttribute(
+      "aria-label",
+      `attachments: ${hit.available_attachment_count} of ${hit.attachment_count}`,
+    );
+    files.innerHTML =
+      icon("paperclip") +
+      (hit.available_attachment_count < hit.attachment_count
+        ? `${hit.available_attachment_count}/${hit.attachment_count}`
+        : `${hit.attachment_count}`);
     meta.append(" ", files);
   }
   if (hit.has_conflicting_revision) {

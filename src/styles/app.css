@@ -22,6 +22,49 @@
  * This guard applies to every view's .row rules at once. */
 [hidden] { display: none !important; }
 
+/* --- Icon system: sprite symbols rendered via <use href="#i-…"> -------- */
+
+.icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  vertical-align: -2px; /* sits on the text baseline when inline */
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.icon-lg {
+  width: 20px;
+  height: 20px;
+}
+.icon-spin {
+  animation: icon-spin 0.9s linear infinite;
+}
+@keyframes icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .icon-spin {
+    animation: none;
+  }
+}
+
+/* --- Small layout utilities (replace one-off inline styles) ------------- */
+
+.grow {
+  flex: 1;
+}
+.mt-s {
+  margin-top: 6px;
+}
+.m-0 {
+  margin: 0;
+}
+
 html, body { height: 100%; }
 
 body {
@@ -91,10 +134,27 @@ body {
   min-width: 0;
 }
 
-#nav h1 {
+#app-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
   font-size: var(--text-section);
   font-weight: 600;
   margin: 0;
+}
+
+/* Brand mark: envelope strokes inherit currentColor from .icon; the chat
+ * bubble and its dots are the two-tone accent fills (inlined in index.html,
+ * not a sprite <use> — variables do not cross the <use> shadow boundary). */
+.logo-mark .logo-bubble {
+  fill: var(--accent);
+  stroke: none;
+}
+.logo-mark .logo-dots {
+  fill: none;
+  stroke: var(--accent-fg);
+  stroke-width: 2;
+  stroke-linecap: round;
 }
 
 #stats {
@@ -113,7 +173,9 @@ body {
 }
 
 .nav-view-btn {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
   width: 100%;
   text-align: left;
   padding: var(--sp-1) var(--sp-2);
@@ -198,6 +260,12 @@ body {
 #topbar .topbar-title {
   font-size: var(--text-meta);
   color: var(--muted);
+}
+
+#nav-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
 }
 
 #main {
@@ -336,6 +404,11 @@ button.primary {
   border-color: var(--accent);
 }
 button.primary:hover:not(:disabled) { background: var(--accent-hover); }
+#search-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
 
 select {
   padding: var(--sp-1) var(--sp-2);
@@ -347,10 +420,12 @@ select {
 }
 
 kbd {
-  font: 11px/1 var(--font-mono);
-  border: 1px solid var(--border-strong);
+  font: 600 11px var(--font-mono);
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
   border-radius: 3px;
-  padding: 1px 4px;
+  background: var(--panel-2);
   color: var(--muted);
 }
 
@@ -601,7 +676,12 @@ mark.hit {
 .detail-card header .header-actions { display: flex; gap: 6px; }
 .detail-card h2 { font-size: var(--text-section); margin: 0 0 var(--sp-2); }
 .detail-card .body { max-width: 78ch; }
-.export-chat-btn, .close-btn { font-size: var(--text-meta); }
+.export-chat-btn, .close-btn {
+  font-size: var(--text-meta);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
 .meta-table {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -706,6 +786,12 @@ mark.hit {
 .job.succeeded { color: var(--success); }
 .job.failed { color: var(--danger); }
 .job.cancelled { color: var(--muted); }
+.job.succeeded .icon {
+  color: var(--success);
+}
+.job.failed .icon {
+  color: var(--danger);
+}
 
 /* --- Account rows (the accounts overview on the Sources home) ------------- */
 
@@ -864,4 +950,15 @@ mark.hit {
 @media (prefers-reduced-motion: no-preference) {
   .hit-item, .chip, button, .nav-view-btn { transition: background-color var(--motion-fast) ease-out; }
   #nav { transition: transform var(--motion-fast) ease-out; }
+}
+
+button:active:not(:disabled),
+.chip:active:not(:disabled) {
+  transform: translateY(0.5px);
+}
+@media (prefers-reduced-motion: reduce) {
+  button:active:not(:disabled),
+  .chip:active:not(:disabled) {
+    transform: none;
+  }
 }

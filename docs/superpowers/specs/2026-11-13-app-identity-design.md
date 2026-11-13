@@ -67,7 +67,7 @@ Arrows inside keyboard hints (`→`) stay — they are typography, not icons.
 
 - **Empty states:** empty archive, no-search-results, empty Sources list, empty Activity — each a heading, one explanatory sentence, and a primary action where one exists (e.g. "Add source"). No illustrations.
 - **Micro-states:** consistent hover/active treatment across buttons, chips, and list rows; spinner with the running-job rows in Activity.
-- **Consistency audit:** spacing and type-scale pass across the four views; remove inline `style` attributes (`index.html:360`, `:368`); give `#stats` the initial value "No archive open" instead of `…`.
+- **Consistency audit:** spacing and type-scale pass across the four views; remove inline `style` attributes (`index.html:360`, `:368`); give `#stats` the initial value "Loading…" instead of `…` (amended during implementation: the app always opens an archive, so "No archive open" would be false).
 - **Motion:** nothing new beyond the spinner; `prefers-reduced-motion` handling already exists (`tokens.css:162`) and the spinner must respect it (static or hidden when reduced).
 
 ## 7. Testing and verification

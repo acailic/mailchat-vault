@@ -261,7 +261,7 @@ with:
 
 ```html
         <h1 id="app-title">
-          <svg class="icon icon-lg logo-mark" aria-hidden="true" focusable="false">
+          <svg class="icon icon-lg logo-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
             <rect x="3" y="4.5" width="13" height="9.5" rx="1.5"/>
             <path d="M3.8 5.9 9.5 10l5.7-4.1"/>
             <path class="logo-bubble" d="M14.6 12h4.1a2 2 0 0 1 2 2v3.2a2 2 0 0 1-2 2h-2.3l-2.1 1.8v-1.8h-.6a2 2 0 0 1-2-2V14a2 2 0 0 1 2-2Z"/>
@@ -640,7 +640,7 @@ Run:
 convert src-tauri/icons/source.png -resize 3x3! -depth 8 txt: | head -15
 ```
 
-Read the output: the dominant dark color is the navy background (expected near `#1B2E4A`), the bright cyan/teal is the bubble (expected near `#3FB8AF`). Record both hex values; use them verbatim in Steps 2–3. If sampling is ambiguous, use `#1B2E4A` (navy) and `#3FB8AF` (teal) — they match the shipped art.
+Read the output: the dominant dark color is the navy background (expected near `#1B2E4A`), the bright cyan/teal is the bubble (expected near `#3FB8AF`). Record both hex values; use them verbatim in Steps 2–3. If sampling is ambiguous, use `#2A3876` (navy) and `#24C4AA` (teal) — they match the shipped art.
 
 - [ ] **Step 2: Create `public/favicon.svg`**
 

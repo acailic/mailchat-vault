@@ -15,6 +15,14 @@ export function equal(actual, expected, message) {
   }
 }
 
+export function notEqual(actual, expected, message) {
+  if (actual === expected) {
+    throw new Error(
+      `assert notEqual failed: ${message}\n  both were: ${JSON.stringify(actual)}`,
+    );
+  }
+}
+
 export function includes(haystack, needle, message) {
   if (typeof haystack !== "string" || !haystack.includes(needle)) {
     throw new Error(

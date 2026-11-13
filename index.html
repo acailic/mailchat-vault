@@ -4,6 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Mailchat Vault</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />
     <!-- Styles and the bundled Source Sans 3 font are imported from
          src/main.ts so Vite bundles (and hashes) them into the app. -->
   </head>
@@ -12,19 +14,31 @@
 
     <div id="app" data-view="workspace" data-layout="wide" data-nav="closed" data-reading="closed">
       <nav id="nav" aria-label="Workspace">
-        <h1 id="app-title">Mailchat Vault</h1>
-        <p id="stats" role="status">…</p>
+        <h1 id="app-title">
+          <svg class="icon icon-lg logo-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <rect x="3" y="4.5" width="13" height="9.5" rx="1.5"/>
+            <path d="M3.8 5.9 9.5 10l5.7-4.1"/>
+            <path class="logo-bubble" d="M14.6 12h4.1a2 2 0 0 1 2 2v3.2a2 2 0 0 1-2 2h-2.3l-2.1 1.8v-1.8h-.6a2 2 0 0 1-2-2V14a2 2 0 0 1 2-2Z"/>
+            <path class="logo-dots" d="M16.3 15.3h.01M18.6 15.3h.01M17.45 17.2h.01"/>
+          </svg>
+          <span>Mailchat Vault</span>
+        </h1>
+        <p id="stats" role="status">Loading…</p>
         <ul id="nav-views">
           <li>
             <button type="button" class="nav-view-btn" data-view-target="workspace" aria-current="page">
-              Archive
+              <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-archive"></use></svg><span>Archive</span>
             </button>
           </li>
           <li>
-            <button type="button" class="nav-view-btn" data-view-target="sources">Sources</button>
+            <button type="button" class="nav-view-btn" data-view-target="sources">
+              <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-sources"></use></svg><span>Sources</span>
+            </button>
           </li>
           <li>
-            <button type="button" class="nav-view-btn" data-view-target="settings">Settings</button>
+            <button type="button" class="nav-view-btn" data-view-target="settings">
+              <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-settings"></use></svg><span>Settings</span>
+            </button>
           </li>
         </ul>
         <section id="nav-sources" aria-label="Sources">
@@ -34,7 +48,7 @@
         <ul id="nav-secondary" aria-label="Maintenance">
           <li>
             <button type="button" class="nav-view-btn secondary" data-view-target="activity">
-              Activity
+              <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-activity"></use></svg><span>Activity</span>
               <span id="activity-count" class="nav-badge" hidden></span>
               <span id="activity-attention" class="nav-attention" hidden>needs attention</span>
             </button>
@@ -48,7 +62,7 @@
       <div id="content">
         <header id="topbar">
           <button id="nav-toggle" type="button" aria-controls="nav" aria-expanded="false">
-            ☰ Menu
+            <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-menu"></use></svg><span>Menu</span>
           </button>
           <span class="topbar-title" id="topbar-title">Archive</span>
         </header>
@@ -59,7 +73,7 @@
             <div id="results-col">
               <!-- U02: shown while the isolated sample archive is open. -->
               <div id="demo-banner" class="row banner" hidden>
-                <span class="meta" style="flex: 1">Sample archive — an isolated demo. Nothing you see here is saved to your vault.</span>
+                <span class="meta grow">Sample archive — an isolated demo. Nothing you see here is saved to your vault.</span>
                 <button id="demo-leave-btn" type="button">Leave sample</button>
               </div>
               <section>
@@ -67,7 +81,9 @@
                 <div class="row">
                   <label class="visually-hidden" for="search">Search messages</label>
                   <input id="search" type="text" placeholder="Search messages…" autofocus />
-                  <button id="search-btn" class="primary" type="button">Search</button>
+                  <button id="search-btn" class="primary" type="button">
+                    <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-search"></use></svg><span>Search</span>
+                  </button>
                 </div>
                 <div id="filters">
                   <label class="meta">author
@@ -97,7 +113,7 @@
                   <button id="clear-filters" type="button" title="Reset all filters">Clear</button>
                 </div>
                 <div id="active-filter-chips" class="row" style="gap: 6px; margin-top: 6px"></div>
-                <div id="refresh-notice" class="row" style="margin-top: 6px" hidden></div>
+                <div id="refresh-notice" class="row mt-s" hidden></div>
                 <div id="status" role="status" aria-live="polite"></div>
                 <!-- U02: the first-run state — an empty archive offers the
                      first source instead of a dead search box. -->
@@ -358,7 +374,7 @@
             <section id="jobs" aria-label="Background jobs">
               <h2>Background jobs</h2>
               <div class="row">
-                <span id="jobs-status" class="meta" style="flex: 1" role="status"></span>
+                <span id="jobs-status" class="meta grow" role="status"></span>
               </div>
               <ul id="jobs-list" class="jobs-list" title="v2 job protocol: live events plus cursor-based polling recovery"></ul>
             </section>
@@ -366,7 +382,7 @@
             <section id="dashboard-section" aria-label="Statistics">
               <h2>Statistics</h2>
               <div class="row">
-                <div id="dashboard-status" class="meta" style="margin: 0" role="status"></div>
+                <div id="dashboard-status" class="meta m-0" role="status"></div>
                 <div class="spacer"></div>
                 <button id="stats-refresh" type="button">Refresh</button>
               </div>
@@ -491,5 +507,77 @@
     </div>
 
     <script type="module" src="/src/main.ts"></script>
+
+    <!-- Icon sprite: stroke-only symbols, 24×24 grid, 1.5px round strokes.
+         Referenced via <use href="#i-…">; presentation (color/size/stroke)
+         comes from the .icon classes in app.css. Keep symbols free of
+         fill/stroke attributes so currentColor inheritance works. -->
+    <svg xmlns="http://www.w3.org/2000/svg" hidden>
+      <symbol id="i-archive" viewBox="0 0 24 24">
+        <rect x="3.5" y="4.5" width="17" height="5" rx="1.2"/>
+        <path d="M5 9.5v8.3a1.7 1.7 0 0 0 1.7 1.7h10.6a1.7 1.7 0 0 0 1.7-1.7V9.5"/>
+        <path d="M10 13h4"/>
+      </symbol>
+      <symbol id="i-sources" viewBox="0 0 24 24">
+        <path d="M3.5 13.5 6 6h12l2.5 7.5"/>
+        <path d="M3.5 13.5v4a1.5 1.5 0 0 0 1.5 1.5h14a1.5 1.5 0 0 0 1.5-1.5v-4"/>
+        <path d="M3.5 13.5h5l1.4 2.2h4.2l1.4-2.2h5"/>
+      </symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24">
+        <path d="M4 6.5H7.2"/><circle cx="10" cy="6.5" r="2"/><path d="M12.8 6.5H20"/>
+        <path d="M4 12h7.2"/><circle cx="14" cy="12" r="2"/><path d="M16.8 12H20"/>
+        <path d="M4 17.5H5.2"/><circle cx="8" cy="17.5" r="2"/><path d="M10.8 17.5H20"/>
+      </symbol>
+      <symbol id="i-activity" viewBox="0 0 24 24">
+        <path d="M3.5 12h4l2.5-6.5 4 13 2.5-6.5h4"/>
+      </symbol>
+      <symbol id="i-menu" viewBox="0 0 24 24">
+        <path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/>
+      </symbol>
+      <symbol id="i-search" viewBox="0 0 24 24">
+        <circle cx="11" cy="11" r="6"/><path d="m15.5 15.5 4.5 4.5"/>
+      </symbol>
+      <symbol id="i-close" viewBox="0 0 24 24">
+        <path d="m6 6 12 12"/><path d="M18 6 6 18"/>
+      </symbol>
+      <symbol id="i-export" viewBox="0 0 24 24">
+        <path d="M12 4v10"/><path d="m8 10.5 4 4 4-4"/>
+        <path d="M4.5 15.5V18a1.5 1.5 0 0 0 1.5 1.5h12a1.5 1.5 0 0 0 1.5-1.5v-2.5"/>
+      </symbol>
+      <symbol id="i-paperclip" viewBox="0 0 24 24">
+        <path d="M9 11.5l6.3-6.3a3.5 3.5 0 0 1 4.9 4.9l-8.4 8.4a5.5 5.5 0 0 1-7.8-7.8L11 3.7"/>
+      </symbol>
+      <symbol id="i-check" viewBox="0 0 24 24">
+        <path d="m5 12.5 4.5 4.5L19 7.5"/>
+      </symbol>
+      <symbol id="i-warning" viewBox="0 0 24 24">
+        <path d="M12 4.2 21 19.5H3Z"/>
+        <path d="M12 10v4.5"/><path d="M12 17.3h.01"/>
+      </symbol>
+      <symbol id="i-error" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="7.5"/>
+        <path d="m9.5 9.5 5 5"/><path d="m14.5 9.5-5 5"/>
+      </symbol>
+      <symbol id="i-spinner" viewBox="0 0 24 24">
+        <path d="M12 4a8 8 0 1 1-8 8"/>
+      </symbol>
+      <symbol id="i-mail" viewBox="0 0 24 24">
+        <rect x="3.5" y="5.5" width="17" height="13" rx="1.5"/>
+        <path d="m4.5 7.5 7.5 5.5 7.5-5.5"/>
+      </symbol>
+      <symbol id="i-chat" viewBox="0 0 24 24">
+        <path d="M4.5 6.5A1.5 1.5 0 0 1 6 5h12a1.5 1.5 0 0 1 1.5 1.5v7a1.5 1.5 0 0 1-1.5 1.5h-7l-4.5 4v-4A1.5 1.5 0 0 1 4.5 13.5Z"/>
+        <path d="M9 10h.01"/><path d="M12 10h.01"/><path d="M15 10h.01"/>
+      </symbol>
+      <symbol id="i-file" viewBox="0 0 24 24">
+        <path d="M6 3.5h7.5L18.5 8.5V19a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 19V5A1.5 1.5 0 0 1 6 3.5Z"/>
+        <path d="M13.5 3.5V8.5h5"/><path d="M8.5 12.5h7"/><path d="M8.5 16h7"/>
+      </symbol>
+      <symbol id="i-server" viewBox="0 0 24 24">
+        <rect x="4" y="4.5" width="16" height="6" rx="1.5"/>
+        <rect x="4" y="13.5" width="16" height="6" rx="1.5"/>
+        <path d="M7.5 7.5h.01"/><path d="M7.5 16.5h.01"/>
+      </symbol>
+    </svg>
   </body>
 </html>

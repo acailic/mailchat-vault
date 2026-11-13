@@ -405,6 +405,11 @@ function renderAsk(outcome: AskOutcome): void {
   if (outcome.answer) {
     renderAnswerLinked(outcome.answer, sources, llmStatus?.summarize_top ?? 8);
     answerBox.hidden = false;
+    // The answer is the point of the ask: when it lands below the ask
+    // panel's fold (tall consent/provider controls above it) it must be
+    // brought into view, or it arrives invisibly. Same nearest-block
+    // scroll the reading pane uses for a freshly opened message.
+    answerBox.scrollIntoView({ block: "nearest" });
   } else {
     answerBox.hidden = true;
   }

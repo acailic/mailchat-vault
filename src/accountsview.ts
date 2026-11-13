@@ -12,6 +12,7 @@
 
 import type { AccountView, SourceCount, SourceInstance } from "./types";
 import type { ImapAuthMode } from "./ipc";
+import { iconEl } from "./icons";
 
 /** The arguments of one `sync_imap` invocation for a stored account. */
 export interface SyncNowRequest {
@@ -252,6 +253,7 @@ export function renderSourcesList(
 
     const main = document.createElement("div");
     main.className = "account-main";
+    main.append(iconEl(account.kind === "imap" ? "mail" : "file"));
     const title = document.createElement("span");
     title.className = "account-label";
     const displayName = accountTitle(account);
