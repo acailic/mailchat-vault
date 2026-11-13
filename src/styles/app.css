@@ -53,6 +53,18 @@
   }
 }
 
+/* --- Small layout utilities (replace one-off inline styles) ------------- */
+
+.grow {
+  flex: 1;
+}
+.mt-s {
+  margin-top: 6px;
+}
+.m-0 {
+  margin: 0;
+}
+
 html, body { height: 100%; }
 
 body {
@@ -933,4 +945,15 @@ mark.hit {
 @media (prefers-reduced-motion: no-preference) {
   .hit-item, .chip, button, .nav-view-btn { transition: background-color var(--motion-fast) ease-out; }
   #nav { transition: transform var(--motion-fast) ease-out; }
+}
+
+button:active:not(:disabled),
+.chip:active:not(:disabled) {
+  transform: translateY(0.5px);
+}
+@media (prefers-reduced-motion: reduce) {
+  button:active:not(:disabled),
+  .chip:active:not(:disabled) {
+    transform: none;
+  }
 }
