@@ -196,12 +196,17 @@ fn resolve_dir_source(root: &Path, display: &Path) -> Result<PreviewSource> {
             })
         }
         Err(e) => {
-            let has_eml = walk_eml_count(root);
+            // The same wrapped-folder descent the mail import pick
+            // applies, so the preview and the import agree on the
+            // "compress folder" zip shape (a lone subdirectory holding
+            // the `.eml` files).
+            let eml_root = crate::mbox::descend_wrapped_eml_dir(root.to_path_buf());
+            let has_eml = walk_eml_count(&eml_root);
             if has_eml > 0 {
                 return Ok(PreviewSource {
                     kind: "eml".into(),
                     source: MBOX_SOURCE.to_string(),
-                    stream: Box::new(EmlDirSource::new(root)),
+                    stream: Box::new(EmlDirSource::new(eml_root)),
                     export_root: None,
                     tree_input: true,
                     size_root: root.to_path_buf(),
@@ -594,6 +599,38 @@ mod tests {
         let preview = preview_import(&zip_path).expect("eml zip preview");
         assert_eq!(preview.kind, "eml");
         assert_eq!(preview.messages_seen, 2);
+    }
+
+    #[test]
+    fn wrapped_zip_of_eml_folder_previews_as_eml() {
+        // The default "right-click folder → compress" shape: the zip's
+        // root holds one wrapper directory, the `.eml` files inside it.
+        // The chat side rejects it; the eml fallback must descend the
+        // wrapper exactly as the import pick does.
+        let dir = tempdir();
+        let zip_path = dir.path().join("mail.zip");
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        for (name, bytes) in [
+            (
+                "mail/1.eml",
+                b"Subject: a\nMessage-ID: <1@x>\n\nA\n".as_slice().to_vec(),
+            ),
+            (
+                "mail/2.eml",
+                b"Subject: b\nMessage-ID: <2@x>\n\nB\n".as_slice().to_vec(),
+            ),
+        ] {
+            zip.start_file(name, zip::write::FileOptions::<()>::default())
+                .unwrap();
+            zip.write_all(&bytes).unwrap();
+        }
+        zip.finish().unwrap();
+        let preview = preview_import(&zip_path).expect("wrapped eml zip preview");
+        assert_eq!(preview.kind, "eml");
+        assert_eq!(preview.source, "mbox");
+        assert_eq!(preview.messages_seen, 2);
+        assert_eq!(preview.parse_failures, 0);
     }
 
     #[test]

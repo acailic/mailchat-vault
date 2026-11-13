@@ -82,6 +82,15 @@ pub struct EmlDirSource {
     path: PathBuf,
 }
 
+/// A regular file with the `.eml` extension (case-insensitive).
+fn is_eml_file(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("eml"))
+}
+
 impl EmlDirSource {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
@@ -93,12 +102,7 @@ impl EmlDirSource {
         let mut files = Vec::new();
         for entry in fs::read_dir(&self.path)? {
             let path = entry?.path();
-            let is_eml = path.is_file()
-                && path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|e| e.eq_ignore_ascii_case("eml"));
-            if is_eml {
+            if is_eml_file(&path) {
                 files.push(path);
             }
         }
@@ -117,6 +121,19 @@ fn parse_eml(bytes: &[u8]) -> Option<NewMessage> {
         .filter(|msg| !msg.author.is_empty() || !msg.body.is_empty())
 }
 
+/// The shared nothing-to-import error of the collect and stream arms:
+/// a directory whose listing holds no `.eml` file is a bad pick, not a
+/// silent zero-message import.
+fn no_eml_error(path: &Path) -> Error {
+    Error::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "no .eml files found under {} — pick the folder that holds them",
+            path.display()
+        ),
+    ))
+}
+
 impl Source for EmlDirSource {
     fn name(&self) -> &str {
         MBOX_SOURCE
@@ -133,13 +150,7 @@ impl Source for EmlDirSource {
             }
         }
         if messages.is_empty() && failed == 0 {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "no .eml files found under {} — pick the folder that holds them",
-                    self.path.display()
-                ),
-            )));
+            return Err(no_eml_error(&self.path));
         }
         Ok(Collected { messages, failed })
     }
@@ -156,6 +167,11 @@ impl StreamSource for EmlDirSource {
 
     fn stream(&self, skip: u64, emit: &mut dyn FnMut(StreamItem) -> Result<Flow>) -> Result<()> {
         let files = self.files()?;
+        if files.is_empty() {
+            // The same bad-pick error the collect arm raises — a
+            // streaming pick must not silently import nothing either.
+            return Err(no_eml_error(&self.path));
+        }
         let mut failure: Option<crate::Error> = None;
         {
             let mut state = crate::bounded::ConsumerState {
@@ -190,15 +206,56 @@ impl StreamSource for EmlDirSource {
     }
 }
 
+/// Descend the wrapped-folder shape: while a directory holds no direct
+/// `.eml` file and exactly one plain subdirectory (hidden/`__MACOSX`/
+/// `._*` entries excluded — the same fence rules the chat resolver and
+/// the zip expander apply), step into that subdirectory. This is the
+/// shape the default "right-click folder → compress" produces
+/// (`mail/1.eml` inside the zip); a small cap keeps a pathological
+/// self-nesting tree finite, like the chat resolver's descent.
+pub(crate) fn descend_wrapped_eml_dir(mut dir: PathBuf) -> PathBuf {
+    for _ in 0..4 {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return dir;
+        };
+        let mut subdirs = Vec::new();
+        let mut has_eml = false;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') || name == "__MACOSX" || name.starts_with("._") {
+                continue; // hidden / macOS archive junk
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if file_type.is_dir() {
+                subdirs.push(path);
+            } else if is_eml_file(&path) {
+                has_eml = true;
+            }
+        }
+        if has_eml || subdirs.len() != 1 {
+            return dir;
+        }
+        dir = subdirs.remove(0);
+    }
+    dir
+}
+
 /// Resolve a mail-import pick to its streaming source: a directory is an
-/// `.eml` folder, a `.zip` expands through the shared import fence into a
-/// temp tree (the returned guard keeps it alive for the whole run) that
-/// imports as an `.eml` folder, anything else is a single mbox/.eml file.
+/// `.eml` folder (descending the wrapped-folder shape first — see
+/// [`descend_wrapped_eml_dir`]), a `.zip` expands through the shared
+/// import fence into a temp tree (the returned guard keeps it alive for
+/// the whole run) that imports the same way, anything else is a single
+/// mbox/.eml file.
 pub fn mail_source_for_pick(
     path: &Path,
 ) -> Result<(Box<dyn StreamSource + Send>, Option<tempfile::TempDir>)> {
     if path.is_dir() {
-        return Ok((Box::new(EmlDirSource::new(path)), None));
+        let dir = descend_wrapped_eml_dir(path.to_path_buf());
+        return Ok((Box::new(EmlDirSource::new(dir)), None));
     }
     if path
         .extension()
@@ -206,7 +263,7 @@ pub fn mail_source_for_pick(
     {
         let extracted = tempfile::tempdir().map_err(Error::from)?;
         expand_zip_bounded(path, extracted.path(), &ImportBounds::default())?;
-        let root = extracted.path().to_path_buf();
+        let root = descend_wrapped_eml_dir(extracted.path().to_path_buf());
         Ok((Box::new(EmlDirSource::new(root)), Some(extracted)))
     } else {
         Ok((Box::new(MboxSource::new(path)), None))
@@ -494,6 +551,18 @@ mod tests {
         assert!(EmlDirSource::new(dir.path()).collect().is_err());
     }
 
+    #[test]
+    fn eml_dir_stream_without_eml_files_errors_too_not_silent_nothing() {
+        // The streaming arm must not report a clean zero-message run for
+        // the same bad pick the collect arm rejects.
+        let dir = tempfile::tempdir().unwrap();
+        let source = EmlDirSource::new(dir.path());
+        let err = source
+            .stream(0, &mut |_item: StreamItem| Ok(Flow::Continue))
+            .unwrap_err();
+        assert!(err.to_string().contains("no .eml files found"), "{err}");
+    }
+
     /// Stream one source to completion, returning `(messages, failures)`.
     fn count_streamed(source: &(dyn StreamSource + Send)) -> (u64, u64) {
         let mut messages = 0;
@@ -556,6 +625,52 @@ mod tests {
         assert_eq!(count_streamed(source.as_ref()), (2, 0));
         // The guard kept the extracted tree alive for the whole stream.
         assert!(extracted.path().join("2.eml").is_file());
+    }
+
+    #[test]
+    fn mail_source_for_pick_descends_the_wrapped_folder_zip() {
+        use std::io::Write as _;
+        // The default "right-click folder → compress" shape: the zip's
+        // root holds one wrapper directory, the `.eml` files inside it.
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("mail.zip");
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        for (name, bytes) in [
+            (
+                "mail/1.eml",
+                b"Subject: a\nMessage-ID: <1@x>\n\nA\n".as_slice().to_vec(),
+            ),
+            (
+                "mail/2.eml",
+                b"Subject: b\nMessage-ID: <2@x>\n\nB\n".as_slice().to_vec(),
+            ),
+        ] {
+            zip.start_file(name, zip::write::FileOptions::<()>::default())
+                .unwrap();
+            zip.write_all(&bytes).unwrap();
+        }
+        zip.finish().unwrap();
+
+        let (source, guard) = mail_source_for_pick(&zip_path).unwrap();
+        let extracted = guard.expect("a .zip pick returns its temp-tree guard");
+        assert_eq!(count_streamed(source.as_ref()), (2, 0));
+        assert!(extracted.path().join("mail/2.eml").is_file());
+    }
+
+    #[test]
+    fn mail_source_for_pick_descends_a_wrapped_directory_pick() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = dir.path().join("mail");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("1.eml"), b"Subject: a\nMessage-ID: <1@x>\n\nA\n").unwrap();
+        std::fs::write(inner.join("2.eml"), b"Subject: b\nMessage-ID: <2@x>\n\nB\n").unwrap();
+        // macOS compress siblings are fence-excluded, not descent blockers.
+        std::fs::create_dir_all(dir.path().join("__MACOSX/mail")).unwrap();
+
+        let (source, guard) = mail_source_for_pick(dir.path()).unwrap();
+        assert!(guard.is_none(), "a directory pick needs no temp tree");
+        assert_eq!(count_streamed(source.as_ref()), (2, 0));
     }
 
     #[test]
