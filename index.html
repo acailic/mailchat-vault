@@ -12,19 +12,31 @@
 
     <div id="app" data-view="workspace" data-layout="wide" data-nav="closed" data-reading="closed">
       <nav id="nav" aria-label="Workspace">
-        <h1 id="app-title">Mailchat Vault</h1>
+        <h1 id="app-title">
+          <svg class="icon icon-lg logo-mark" aria-hidden="true" focusable="false">
+            <rect x="3" y="4.5" width="13" height="9.5" rx="1.5"/>
+            <path d="M3.8 5.9 9.5 10l5.7-4.1"/>
+            <path class="logo-bubble" d="M14.6 12h4.1a2 2 0 0 1 2 2v3.2a2 2 0 0 1-2 2h-2.3l-2.1 1.8v-1.8h-.6a2 2 0 0 1-2-2V14a2 2 0 0 1 2-2Z"/>
+            <path class="logo-dots" d="M16.3 15.3h.01M18.6 15.3h.01M17.45 17.2h.01"/>
+          </svg>
+          <span>Mailchat Vault</span>
+        </h1>
         <p id="stats" role="status">…</p>
         <ul id="nav-views">
           <li>
             <button type="button" class="nav-view-btn" data-view-target="workspace" aria-current="page">
-              Archive
+              <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-archive"></use></svg><span>Archive</span>
             </button>
           </li>
           <li>
-            <button type="button" class="nav-view-btn" data-view-target="sources">Sources</button>
+            <button type="button" class="nav-view-btn" data-view-target="sources">
+              <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-sources"></use></svg><span>Sources</span>
+            </button>
           </li>
           <li>
-            <button type="button" class="nav-view-btn" data-view-target="settings">Settings</button>
+            <button type="button" class="nav-view-btn" data-view-target="settings">
+              <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-settings"></use></svg><span>Settings</span>
+            </button>
           </li>
         </ul>
         <section id="nav-sources" aria-label="Sources">
@@ -34,7 +46,7 @@
         <ul id="nav-secondary" aria-label="Maintenance">
           <li>
             <button type="button" class="nav-view-btn secondary" data-view-target="activity">
-              Activity
+              <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-activity"></use></svg><span>Activity</span>
               <span id="activity-count" class="nav-badge" hidden></span>
               <span id="activity-attention" class="nav-attention" hidden>needs attention</span>
             </button>
@@ -48,7 +60,7 @@
       <div id="content">
         <header id="topbar">
           <button id="nav-toggle" type="button" aria-controls="nav" aria-expanded="false">
-            ☰ Menu
+            <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-menu"></use></svg><span>Menu</span>
           </button>
           <span class="topbar-title" id="topbar-title">Archive</span>
         </header>
@@ -67,7 +79,9 @@
                 <div class="row">
                   <label class="visually-hidden" for="search">Search messages</label>
                   <input id="search" type="text" placeholder="Search messages…" autofocus />
-                  <button id="search-btn" class="primary" type="button">Search</button>
+                  <button id="search-btn" class="primary" type="button">
+                    <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-search"></use></svg><span>Search</span>
+                  </button>
                 </div>
                 <div id="filters">
                   <label class="meta">author

@@ -122,10 +122,27 @@ body {
   min-width: 0;
 }
 
-#nav h1 {
+#app-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
   font-size: var(--text-section);
   font-weight: 600;
   margin: 0;
+}
+
+/* Brand mark: envelope strokes inherit currentColor from .icon; the chat
+ * bubble and its dots are the two-tone accent fills (inlined in index.html,
+ * not a sprite <use> — variables do not cross the <use> shadow boundary). */
+.logo-mark .logo-bubble {
+  fill: var(--accent);
+  stroke: none;
+}
+.logo-mark .logo-dots {
+  fill: none;
+  stroke: var(--accent-fg);
+  stroke-width: 2;
+  stroke-linecap: round;
 }
 
 #stats {
@@ -144,7 +161,9 @@ body {
 }
 
 .nav-view-btn {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
   width: 100%;
   text-align: left;
   padding: var(--sp-1) var(--sp-2);
@@ -229,6 +248,12 @@ body {
 #topbar .topbar-title {
   font-size: var(--text-meta);
   color: var(--muted);
+}
+
+#nav-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
 }
 
 #main {
