@@ -1334,12 +1334,17 @@ async fn import_mbox(
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let pool = Arc::clone(&state.pool);
     tauri::async_runtime::spawn_blocking(move || {
-        let source = MboxSource::new(&path);
-        let mut run = BoundedRun::new(import_id_for("mbox-import", Path::new(&path)));
+        let path = Path::new(&path);
+        let source: Box<dyn vault_core::bounded::StreamSource + Send> = if path.is_dir() {
+            Box::new(vault_core::mbox::EmlDirSource::new(path))
+        } else {
+            Box::new(vault_core::mbox::MboxSource::new(path))
+        };
+        let mut run = BoundedRun::new(import_id_for("mbox-import", path));
         run.media = Some(MediaPass::mail(&data_dir));
         let mut sink = PoolSink(&pool);
         let mut no_progress = |_: u64, _: u64, _: &str| {};
-        run.run(&source, &mut sink, &|| false, &mut no_progress)
+        run.run(source.as_ref(), &mut sink, &|| false, &mut no_progress)
             .map(ChatImportOutcome::from)
             .map_err(|e: Error| e.to_string())
     })

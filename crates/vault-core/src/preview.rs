@@ -25,7 +25,7 @@ use serde_json::{Map, Value};
 use crate::bounded::{Flow, StreamItem, StreamSource};
 use crate::chat_export::{self, ChatFormat};
 use crate::import_bounds::{expand_zip_bounded, walk_bounded, ImportBounds};
-use crate::mbox::{MboxSource, MBOX_SOURCE};
+use crate::mbox::{EmlDirSource, MboxSource, MBOX_SOURCE};
 use crate::{Error, Result};
 
 /// How many items (messages + parse failures) one preview scans before
@@ -56,8 +56,8 @@ pub struct ImportPreviewSample {
 /// Bounded preview of one picked import input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportPreview {
-    /// Machine-readable format id: `mbox`, `whatsapp`, `telegram`,
-    /// `signal`, or `discord`.
+    /// Machine-readable format id: `mbox`, `eml`, `whatsapp`,
+    /// `telegram`, `signal`, or `discord`.
     pub kind: String,
     /// The dedup namespace the import will store under (`source.name()`).
     pub source: String,
@@ -110,6 +110,23 @@ fn looks_like_mbox(path: &Path) -> Result<bool> {
     Ok(first.starts_with("From "))
 }
 
+/// Does the file start like a bare mail (an RFC 5322 header line —
+/// `Name: value`)? Only consulted when the mbox `From ` sniff failed,
+/// and only when the field name leads with a letter — chat exports
+/// must stay on their own path (JSON leads with `{`, a WhatsApp `.txt`
+/// with `[date`, whose name also holds a space). (Bounded: one line.)
+fn looks_like_eml(path: &Path) -> Result<bool> {
+    let file = fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut first = String::new();
+    reader.read_line(&mut first)?;
+    let Some((name, _rest)) = first.split_once(':') else {
+        return Ok(false);
+    };
+    Ok(name.bytes().next().is_some_and(|b| b.is_ascii_alphabetic())
+        && name.bytes().all(|b| (33..=126).contains(&b) && b != b':'))
+}
+
 fn format_name(format: ChatFormat) -> &'static str {
     match format {
         ChatFormat::WhatsApp => "whatsapp",
@@ -137,30 +154,62 @@ fn resolve_chat_file(file: &Path) -> Result<PreviewSource> {
 }
 
 /// Resolve a directory pick (or an extracted `.zip` root) to a chat
-/// export source. `display` is only used in error messages.
+/// export source — or, when the chat side does not recognize the
+/// folder but it holds `.eml` files, to an Outlook drag-out folder
+/// (one mail per file). `display` is only used in error messages.
 fn resolve_dir_source(root: &Path, display: &Path) -> Result<PreviewSource> {
-    chat_export::resolve_stream_source(root)
-        .map(|(format, file, stream)| {
+    match chat_export::resolve_stream_source(root) {
+        Ok((format, file, stream)) => {
             let export_root = file
                 .parent()
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| root.to_path_buf());
-            PreviewSource {
+            Ok(PreviewSource {
                 kind: format_name(format).into(),
                 source: stream.name().to_string(),
                 stream,
                 export_root: Some(export_root),
                 tree_input: true,
                 size_root: root.to_path_buf(),
+            })
+        }
+        Err(e) => {
+            let has_eml = walk_eml_count(root);
+            if has_eml > 0 {
+                return Ok(PreviewSource {
+                    kind: "eml".into(),
+                    source: MBOX_SOURCE.to_string(),
+                    stream: Box::new(EmlDirSource::new(root)),
+                    export_root: None,
+                    tree_input: true,
+                    size_root: root.to_path_buf(),
+                });
             }
-        })
-        .map_err(|e| {
-            Error::ChatImport(format!(
+            Err(Error::ChatImport(format!(
                 "unrecognized export in {} — expected a Telegram result.json export folder, \
                  a Discord Data Package, or a folder holding one chat export file ({e})",
                 display.display()
-            ))
+            )))
+        }
+    }
+}
+
+/// `.eml` files directly inside the directory (bounded: one read_dir).
+fn walk_eml_count(dir: &Path) -> usize {
+    fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| {
+                    e.path().is_file()
+                        && e.path()
+                            .extension()
+                            .and_then(|x| x.to_str())
+                            .is_some_and(|x| x.eq_ignore_ascii_case("eml"))
+                })
+                .count()
         })
+        .unwrap_or(0)
 }
 
 /// Resolve a picked path to the source that would import it, or a
@@ -193,6 +242,23 @@ fn resolve_preview_source(picked: &Path) -> Result<(PreviewSource, Option<tempfi
             return Ok((
                 PreviewSource {
                     kind: "mbox".into(),
+                    source: MBOX_SOURCE.to_string(),
+                    stream: Box::new(MboxSource::new(picked)),
+                    export_root: None,
+                    tree_input: false,
+                    size_root: picked.to_path_buf(),
+                },
+                None,
+            ));
+        }
+        let is_eml = picked
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("eml"))
+            || looks_like_eml(picked)?;
+        if is_eml {
+            return Ok((
+                PreviewSource {
+                    kind: "eml".into(),
                     source: MBOX_SOURCE.to_string(),
                     stream: Box::new(MboxSource::new(picked)),
                     export_root: None,
@@ -398,6 +464,62 @@ mod tests {
         assert_eq!(preview.samples.len(), 2);
         assert_eq!(preview.input_bytes, std::fs::metadata(&path).unwrap().len());
         assert!(preview.warnings.is_empty());
+    }
+
+    #[test]
+    fn previews_eml_file() {
+        let dir = tempdir();
+        let path = dir.path().join("mail.eml");
+        write(
+            &path,
+            "From: a@b.c\nSubject: eml prev\nMessage-ID: <p@x>\n\nPozdrav\n",
+        );
+        let preview = preview_import(&path).expect("eml preview");
+        assert_eq!(preview.kind, "eml");
+        assert_eq!(preview.source, "mbox");
+        assert_eq!(preview.messages_seen, 1);
+    }
+
+    #[test]
+    fn previews_eml_directory() {
+        let dir = tempdir();
+        write(
+            &dir.path().join("1.eml"),
+            "Subject: a\nMessage-ID: <1@x>\n\nA\n",
+        );
+        write(
+            &dir.path().join("2.eml"),
+            "Subject: b\nMessage-ID: <2@x>\n\nB\n",
+        );
+        let preview = preview_import(dir.path()).expect("eml dir preview");
+        assert_eq!(preview.kind, "eml");
+        assert_eq!(preview.messages_seen, 2);
+    }
+
+    #[test]
+    fn zip_of_eml_files_previews_as_eml() {
+        let dir = tempdir();
+        let zip_path = dir.path().join("emls.zip");
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        for (name, bytes) in [
+            (
+                "1.eml",
+                b"Subject: a\nMessage-ID: <1@x>\n\nA\n".as_slice().to_vec(),
+            ),
+            (
+                "2.eml",
+                b"Subject: b\nMessage-ID: <2@x>\n\nB\n".as_slice().to_vec(),
+            ),
+        ] {
+            zip.start_file(name, zip::write::FileOptions::<()>::default())
+                .unwrap();
+            zip.write_all(&bytes).unwrap();
+        }
+        zip.finish().unwrap();
+        let preview = preview_import(&zip_path).expect("eml zip preview");
+        assert_eq!(preview.kind, "eml");
+        assert_eq!(preview.messages_seen, 2);
     }
 
     #[test]

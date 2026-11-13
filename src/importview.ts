@@ -21,6 +21,8 @@ export function formatLabel(kind: string): string {
   switch (kind) {
     case "mbox":
       return "Email archive (.mbox)";
+    case "eml":
+      return "Email messages (.eml)";
     case "whatsapp":
       return "WhatsApp export";
     case "telegram":
@@ -39,6 +41,8 @@ export function formatHint(kind: string): string | null {
   switch (kind) {
     case "mbox":
       return "Any mail app can export folders as .mbox (Thunderbird: ImportExportTools NG).";
+    case "eml":
+      return "Drag messages out of Outlook (or any mail app) as .eml files; a folder of them imports together.";
     case "whatsapp":
       return "WhatsApp → chat → ⋮ → More → Export chat (with or without media).";
     case "telegram":
