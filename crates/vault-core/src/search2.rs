@@ -152,10 +152,26 @@ impl SearchArchiveRequest {
         source_ids.retain(|s| !s.is_empty());
         source_ids.dedup();
 
-        let tz_label = if self.timezone.trim().is_empty() {
-            iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string())
-        } else {
+        // An explicit request timezone wins. Otherwise the fallback walks
+        // the POSIX TZ environment variable before the OS-configured zone:
+        // chrono's `Local` (the v1 filter path) resolves day bounds in TZ
+        // when it is set, while iana-time-zone reads only /etc/localtime
+        // and /etc/timezone — so skipping TZ made v2 silently disagree
+        // with both v1 and the webview (whose Intl timezone follows TZ)
+        // on any machine where TZ overrides the system zone. A TZ value
+        // that is not a named zone (e.g. a path or a POSIX spec string)
+        // falls through to the OS zone rather than erroring the search.
+        let tz_label = if !self.timezone.trim().is_empty() {
             self.timezone.trim().to_string()
+        } else {
+            match std::env::var("TZ")
+                .ok()
+                .map(|raw| raw.trim().to_string())
+                .filter(|raw| !raw.is_empty())
+            {
+                Some(raw) if raw.parse::<chrono_tz::Tz>().is_ok() => raw,
+                _ => iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string()),
+            }
         };
         let tz: chrono_tz::Tz = tz_label
             .parse()
