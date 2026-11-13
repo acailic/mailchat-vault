@@ -196,7 +196,8 @@ export class WorkspaceStore {
 export interface UiState {
   /** The filters of the currently rendered results (canonical). */
   filters: SearchFilters;
-  /** Source display names selected via chips (mapped to ids per search). */
+  /** Source instance ids selected via chips / the Sources list (stable
+   * ids; passed to the search as `sourceIds`). */
   sources: string[];
   offset: number;
   total: number;

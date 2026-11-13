@@ -10,7 +10,8 @@ import {
   renderResults,
   renderSourceChips,
 } from "./render";
-import type { ArchiveStats, ChatContext, Message, SearchHit, SourceCount } from "./types";
+import type { SourceChipRow } from "./accountsview";
+import type { ArchiveStats, ChatContext, Message, SearchHit } from "./types";
 import { groupHits, pageModel } from "./viewmodel";
 
 // Snapshots must not depend on the machine timezone: render the raw
@@ -202,34 +203,34 @@ describe("pagination", () => {
 
 describe("source chips", () => {
   it("renders toggles with counts and pressed state", () => {
-    const available: SourceCount[] = [
-      { source: "mbox", count: 900 },
-      { source: "whatsapp", count: 80 },
+    const rows: SourceChipRow[] = [
+      { id: "inst-mbox", label: "mbox", count: 900 },
+      { id: "inst-whatsapp", label: "whatsapp", count: 80 },
     ];
     const el = document.createElement("div");
-    renderSourceChips(el, { available, selected: ["whatsapp"], onToggle: () => {} });
+    renderSourceChips(el, { rows, selected: ["inst-whatsapp"], onToggle: () => {} });
     expect(el.innerHTML).toMatchSnapshot();
-    expect(el.querySelector('[data-source="whatsapp"]')?.getAttribute("aria-pressed")).toBe("true");
+    expect(el.querySelector('[data-source="inst-whatsapp"]')?.getAttribute("aria-pressed")).toBe("true");
   });
 
-  it("toggling fires with the source name", () => {
+  it("toggling fires with the source instance id", () => {
     let toggled = "";
     const el = document.createElement("div");
     renderSourceChips(el, {
-      available: [{ source: "mbox", count: 1 }],
+      rows: [{ id: "inst-mbox", label: "mbox", count: 1 }],
       selected: [],
-      onToggle: (s) => (toggled = s),
+      onToggle: (id) => (toggled = id),
     });
     (el.querySelector(".chip") as HTMLElement).click();
-    expect(toggled).toBe("mbox");
+    expect(toggled).toBe("inst-mbox");
   });
 
   it("renders all chips unselected by default (snapshot)", () => {
     const el = document.createElement("div");
     renderSourceChips(el, {
-      available: [
-        { source: "mbox", count: 900 },
-        { source: "telegram", count: 80 },
+      rows: [
+        { id: "inst-mbox", label: "mbox", count: 900 },
+        { id: "inst-telegram", label: "telegram", count: 80 },
       ],
       selected: [],
       onToggle: () => {},

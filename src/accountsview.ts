@@ -9,7 +9,7 @@
 // stored credentials), pause/resume (per-source exclusion), and forget
 // credentials (removes the keyring secrets, keeps the archive).
 
-import type { AccountView } from "./types";
+import type { AccountView, SourceCount, SourceInstance } from "./types";
 import type { ImapAuthMode } from "./ipc";
 
 /** The arguments of one `sync_imap` invocation for a stored account. */
@@ -157,6 +157,53 @@ export function syncFailureText(e: unknown): string {
 export function accountStatsLine(account: AccountView): string {
   const messages = `${account.message_count.toLocaleString()} message${account.message_count === 1 ? "" : "s"}`;
   return account.failed_items > 0 ? `${messages} · ${account.failed_items} failing` : messages;
+}
+
+export interface SourceChipRow {
+  /** Stable source-instance id (selection key). */
+  id: string;
+  /** Disambiguated, user-facing label. */
+  label: string;
+  /** Message count when it belongs to this row alone; null when the
+   * label is shared and a per-row count would be a lie. */
+  count: number | null;
+}
+
+/** Build the navigation chip rows from the canonical instances, the
+ * account rows (identity detail), and the label-keyed counts. Selection
+ * is by stable id; two sources that share a display label stay
+ * independent and get distinct labels. Only sources whose label is
+ * present in the counts (≥1 message) get a chip: an empty archive or a
+ * not-yet-loaded stats keeps the chip bar empty. */
+export function sourceChipRows(
+  instances: SourceInstance[],
+  accounts: AccountView[],
+  counts: SourceCount[],
+): SourceChipRow[] {
+  const accountById = new Map(accounts.map((a) => [a.source_id, a]));
+  const countByLabel = new Map(counts.map((c) => [c.source, c.count]));
+  const present = instances.filter((s) => countByLabel.has(s.label));
+  const labelCounts = new Map<string, number>();
+  for (const s of present) {
+    labelCounts.set(s.label, (labelCounts.get(s.label) ?? 0) + 1);
+  }
+  const importSeen = new Map<string, number>();
+  return present.map((s) => {
+    const duplicated = (labelCounts.get(s.label) ?? 0) > 1;
+    if (!duplicated) {
+      return { id: s.id, label: s.label, count: countByLabel.get(s.label) ?? null };
+    }
+    const account = accountById.get(s.id);
+    let label: string;
+    if (account && account.kind === "imap" && account.imap) {
+      label = `${s.label} · ${account.imap.username} · ${account.imap.host}`;
+    } else {
+      const n = (importSeen.get(s.label) ?? 0) + 1;
+      importSeen.set(s.label, n);
+      label = n === 1 ? `${s.label} · import` : `${s.label} · import ${n}`;
+    }
+    return { id: s.id, label, count: null };
+  });
 }
 
 export interface RenderAccountsOptions {

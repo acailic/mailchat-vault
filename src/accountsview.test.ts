@@ -5,7 +5,7 @@
 // status/kind/stats wording, and the DOM builder (rows, focusable action
 // buttons, empty state) — all through textContent.
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AccountView } from "./types";
+import type { AccountView, SourceCount, SourceInstance } from "./types";
 import {
   accountKindLabel,
   accountStatsLine,
@@ -15,6 +15,7 @@ import {
   describeAccountSync,
   passwordStoreNote,
   renderAccounts,
+  sourceChipRows,
   syncFailureText,
   syncNowRequest,
 } from "./accountsview";
@@ -392,5 +393,60 @@ describe("syncFailureText / passwordStoreNote (the honest failure surface)", () 
     expect(keyringNote).toBe("Password stored in the OS keyring.");
     expect(passwordStoreNote(null)).toBe("");
     expect(passwordStoreNote(undefined)).toBe("");
+  });
+});
+
+describe("sourceChipRows", () => {
+  const inst = (id: string, label: string): SourceInstance => ({
+    id, kind: "legacy", label, connector_key: "mbox", config_json: "{}",
+    state: "connected", excluded: false,
+    last_attempt_at: null, last_success_at: null, created_at: "2026-01-01 00:00:00",
+  });
+  const imap = (id: string, label: string, user: string, host: string): AccountView => ({
+    source_id: id, kind: "imap", label, imap: {
+      host, port: 993, username: user, folders: [], has_password: true, has_oauth: false,
+    }, message_count: 0, failed_items: 0, state: "connected", excluded: false,
+    last_attempt_at: null, last_success_at: null, last_error: null, last_error_at: null,
+  });
+  const imp = (id: string, label: string): AccountView => ({
+    source_id: id, kind: "import", label, imap: null,
+    message_count: 0, failed_items: 0, state: "connected", excluded: false,
+    last_attempt_at: null, last_success_at: null, last_error: null, last_error_at: null,
+  });
+
+  it("one row per instance, keyed by id, with the label's count when unique", () => {
+    const counts: SourceCount[] = [
+      { source: "mbox", count: 3 },
+      { source: "demo", count: 5 },
+    ];
+    const rows = sourceChipRows(
+      [inst("a", "mbox"), inst("b", "demo")],
+      [imp("a", "mbox"), imp("b", "demo")],
+      counts,
+    );
+    expect(rows).toEqual([
+      { id: "a", label: "mbox", count: 3 },
+      { id: "b", label: "demo", count: 5 },
+    ]);
+  });
+
+  it("duplicate labels are disambiguated and lose the shared count", () => {
+    const rows = sourceChipRows(
+      [inst("a", "chat"), inst("b", "chat"), inst("c", "chat")],
+      [imp("a", "chat"), imap("b", "chat", "ana@gmail.com", "imap.gmail.com"), imp("c", "chat")],
+      [{ source: "chat", count: 9 }],
+    );
+    expect(rows.map((r) => r.id)).toEqual(["a", "b", "c"]);
+    expect(rows.every((r) => r.count === null)).toBe(true);
+    expect(rows.map((r) => r.label)).toEqual([
+      "chat · import",
+      "chat · ana@gmail.com · imap.gmail.com",
+      "chat · import 2",
+    ]);
+  });
+
+  it("instances without an account row still appear (id, label, label count)", () => {
+    const rows = sourceChipRows([inst("x", "solo")], [], [{ source: "solo", count: 1 }]);
+    expect(rows).toEqual([{ id: "x", label: "solo", count: 1 }]);
   });
 });

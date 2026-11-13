@@ -4,12 +4,12 @@
 /// snapshots in render.test.ts.
 
 import { formatSentAt, humanSize, snippet as truncateBody } from "./format";
+import type { SourceChipRow } from "./accountsview";
 import type {
   ArchiveStats,
   ChatContext,
   Message,
   SearchHit,
-  SourceCount,
 } from "./types";
 import {
   type HitGroup,
@@ -140,21 +140,23 @@ export function renderPagination(
 }
 
 export interface SourceChipsOptions {
-  available: SourceCount[];
+  rows: SourceChipRow[];
   selected: string[];
-  onToggle: (source: string) => void;
+  onToggle: (id: string) => void;
 }
 
-/** Toggle chips for the source filter (none selected = all sources). */
+/** Toggle chips for the source filter (none selected = all sources).
+ * Selection keys are stable source-instance ids. */
 export function renderSourceChips(el: HTMLElement, opts: SourceChipsOptions): void {
-  const chips = opts.available.map((sc) => {
+  const chips = opts.rows.map((row) => {
     const chip = document.createElement("button");
     chip.type = "button";
-    chip.className = "chip" + (opts.selected.includes(sc.source) ? " on" : "");
-    chip.dataset.source = sc.source;
-    chip.setAttribute("aria-pressed", opts.selected.includes(sc.source) ? "true" : "false");
-    chip.textContent = `${sc.source} (${sc.count})`;
-    chip.addEventListener("click", () => opts.onToggle(sc.source));
+    chip.className = "chip" + (opts.selected.includes(row.id) ? " on" : "");
+    chip.dataset.source = row.id;
+    chip.setAttribute("aria-pressed", opts.selected.includes(row.id) ? "true" : "false");
+    chip.textContent =
+      row.count === null ? row.label : `${row.label} (${row.count.toLocaleString()})`;
+    chip.addEventListener("click", () => opts.onToggle(row.id));
     return chip;
   });
   el.replaceChildren(...chips);
