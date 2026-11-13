@@ -3850,6 +3850,99 @@ describe("workspace shell", () => {
   });
 });
 
+describe("sources view sub-sections", () => {
+  it("renders five sub-sections and defaults to home", async () => {
+    await boot();
+    const app = $("#app") as HTMLElement;
+    expect(app.dataset.sourcesSection).toBe("home");
+    for (const id of ["#sources-home", "#sources-add", "#sources-import", "#sources-email", "#sources-automatic"]) {
+      expect($(id), id).toBeTruthy();
+    }
+  });
+
+  it("the Add source chooser navigates to import / email and Back returns home", async () => {
+    await boot();
+    ($("#sources-add-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("add"),
+    );
+    ($("#add-choice-import") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("import"),
+    );
+    ($("#import-back-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("home"),
+    );
+    ($("#add-choice-email") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("email"),
+    );
+    ($("#email-back-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("home"),
+    );
+  });
+
+  it("the Automatic imports link opens the automatic section and Back returns", async () => {
+    await boot();
+    ($("#sources-automatic-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("automatic"),
+    );
+    // The relocated scheduler and watch controls are inside that section.
+    expect($("#sources-automatic")!.contains($("#auto-sync-toggle"))).toBe(true);
+    expect($("#sources-automatic")!.contains($("#watch-folders"))).toBe(true);
+    ($("#automatic-back-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("home"),
+    );
+  });
+
+  it("nav to sources resets to the home section from a deep section", async () => {
+    await boot();
+    ($("#sources-add-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("add"),
+    );
+    ($('.nav-view-btn[data-view-target="sources"]') as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("home"),
+    );
+  });
+
+  it("the email form keeps ids, hides the password row in oauth mode, and shows server/port under Advanced", async () => {
+    await boot();
+    ($("#sources-add-btn") as HTMLElement).click();
+    ($("#add-choice-email") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("email"),
+    );
+    expect($("#imap-user")).toBeTruthy();
+    expect($("#imap-pass")).toBeTruthy();
+    expect($("#imap-advanced")).toBeTruthy();
+    // Default: app-password mode shows the password row.
+    expect(($("#imap-pass-label") as HTMLElement).hidden).toBe(false);
+    input("#imap-auth").value = "oauth";
+    fireChange(input("#imap-auth"));
+    expect(($("#imap-pass") as HTMLElement).hidden).toBe(true);
+    expect(($("#imap-pass-label") as HTMLElement).hidden).toBe(true);
+  });
+
+  it("first-run buttons deep-link into the import / email sections", async () => {
+    tauri.handlers.set("stats", () => ({ total: 0, by_source: [] }));
+    await boot();
+    ($("#first-run-import-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("import"),
+    );
+    ($("#first-run-account-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("email"),
+    );
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Accounts panel (multi-account UI): listing, sync-now params, pause,
 // forget credentials, empty state — the acceptance-critical wiring.
@@ -4075,26 +4168,6 @@ describe("accounts panel", () => {
     await vi.waitFor(() =>
       expect($("#accounts-status").textContent).toContain("Forgot stored credentials"),
     );
-  });
-
-  it("Add account… opens the Add source view with orientation, not a dead end", async () => {
-    await boot();
-    const guidance = $("#add-source-guidance") as HTMLElement;
-    expect(guidance.hidden).toBe(true);
-    ($("#accounts-add") as HTMLButtonElement).click();
-    expect($("#app").dataset.view).toBe("sources");
-    // §2.6: the arrival carries its own context — where the two paths
-    // live and where the result shows up.
-    expect(guidance.hidden).toBe(false);
-    expect(guidance.textContent).toContain("Import files");
-    expect(guidance.textContent).toContain("Connect email (IMAP)");
-    expect(guidance.textContent).toContain("Accounts panel");
-    // Leaving the view retires the guidance — a later, self-directed
-    // visit to Add source does not start with a leftover message.
-    $('.nav-view-btn[data-view-target="workspace"]').click();
-    expect(guidance.hidden).toBe(true);
-    $('.nav-view-btn[data-view-target="sources"]').click();
-    expect(guidance.hidden).toBe(true);
   });
 
   it("the Accounts navigation destination switches the workspace view", async () => {

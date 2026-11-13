@@ -61,11 +61,13 @@ export function initWorkspace(): WorkspaceController {
   // -----------------------------------------------------------------
 
   function render(): void {
-    const { view, layout, reading, navOpen } = store.get();
+    const { view, layout, reading, navOpen, sourcesSection, settingsSection } = store.get();
     app.dataset.view = view;
     app.dataset.layout = layout;
     app.dataset.reading = reading.open ? "open" : "closed";
     app.dataset.nav = navOpen ? "open" : "closed";
+    app.dataset.sourcesSection = sourcesSection;
+    app.dataset.settingsSection = settingsSection;
     for (const button of viewButtons) {
       const target = button.dataset.viewTarget as WorkspaceView | undefined;
       if (target === view) button.setAttribute("aria-current", "page");

@@ -4,7 +4,7 @@
  * states, and component styling on top of the semantic tokens.
  *
  * Layout states are data attributes on #app, kept in sync by src/workspace.ts:
- *   data-view    workspace | sources | activity | settings
+ *   data-view    workspace (Archive) | sources (Sources) | activity (Activity) | settings (Settings)
  *   data-layout  wide (>=1100px) | medium (800–1099px) | compact (<800px)
  *   data-reading open | closed   (a message is open in the reading pane)
  *   data-nav     open | closed   (compact navigation drawer)
@@ -198,6 +198,17 @@ body {
 #app[data-view="accounts"] #view-accounts { display: block; }
 #app[data-view="activity"] #view-activity { display: block; }
 #app[data-view="settings"] #view-settings { display: block; }
+
+/* --- Sources view: one sub-section at a time ----------------------------- */
+
+.sources-section { display: none; }
+#app[data-view="sources"][data-sources-section="home"] #sources-home,
+#app[data-view="sources"][data-sources-section="add"] #sources-add,
+#app[data-view="sources"][data-sources-section="import"] #sources-import,
+#app[data-view="sources"][data-sources-section="email"] #sources-email,
+#app[data-view="sources"][data-sources-section="automatic"] #sources-automatic {
+  display: block;
+}
 
 #view-sources,
 #view-accounts,

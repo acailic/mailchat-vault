@@ -168,6 +168,15 @@ const chatMediaToggle = document.querySelector<HTMLInputElement>("#chat-media")!
 const importPreviewEl = document.querySelector<HTMLElement>("#import-preview")!;
 const importStatus = document.querySelector<HTMLElement>("#import-status")!;
 const importFollowup = document.querySelector<HTMLElement>("#import-followup")!;
+const sourcesAddButton = document.querySelector<HTMLButtonElement>("#sources-add-btn")!;
+const sourcesAutomaticButton = document.querySelector<HTMLButtonElement>("#sources-automatic-btn")!;
+const addChoiceImportButton = document.querySelector<HTMLButtonElement>("#add-choice-import")!;
+const addChoiceEmailButton = document.querySelector<HTMLButtonElement>("#add-choice-email")!;
+const addBackButton = document.querySelector<HTMLButtonElement>("#add-back-btn")!;
+const importBackButton = document.querySelector<HTMLButtonElement>("#import-back-btn")!;
+const emailBackButton = document.querySelector<HTMLButtonElement>("#email-back-btn")!;
+const automaticBackButton = document.querySelector<HTMLButtonElement>("#automatic-back-btn")!;
+const imapPassLabel = document.querySelector<HTMLElement>("#imap-pass-label")!;
 const demoBanner = document.querySelector<HTMLElement>("#demo-banner")!;
 const demoLeaveButton = document.querySelector<HTMLButtonElement>("#demo-leave-btn")!;
 const firstRunCard = document.querySelector<HTMLElement>("#first-run")!;
@@ -206,10 +215,6 @@ const watchEventsList = document.querySelector<HTMLUListElement>("#watch-events"
 const accountsStatus = document.querySelector<HTMLElement>("#accounts-status")!;
 const accountsListEl = document.querySelector<HTMLUListElement>("#accounts-list")!;
 const accountsRefreshButton = document.querySelector<HTMLButtonElement>("#accounts-refresh")!;
-const accountsAddButton = document.querySelector<HTMLButtonElement>("#accounts-add")!;
-/** §2.6: the orientation line shown when “Add account…” lands the user
- * on the Add source view (hidden on every other path into the view). */
-const addSourceGuidance = document.querySelector<HTMLParagraphElement>("#add-source-guidance")!;
 const jobsStatus = document.querySelector<HTMLElement>("#jobs-status")!;
 const jobsList = document.querySelector<HTMLUListElement>("#jobs-list")!;
 const dashboard = document.querySelector<HTMLElement>("#dashboard")!;
@@ -1560,7 +1565,7 @@ function updateVaultChrome(): void {
   demoBanner.hidden = !demoActive;
   exportControls.hidden = firstRun;
   const locked = demoActive;
-  for (const button of [importPickButton, importFolderButton, imapSyncButton, imapOauthButton, watchButton, watchAddButton]) {
+  for (const button of [sourcesAddButton, addChoiceImportButton, addChoiceEmailButton, importPickButton, importFolderButton, imapSyncButton, imapOauthButton, watchButton, watchAddButton]) {
     button.disabled = locked;
   }
 }
@@ -1607,6 +1612,7 @@ function imapAuthMode(): ipc.ImapAuthMode {
 function applyImapAuthMode(): void {
   const oauth = imapAuthMode() === "oauth";
   imapPassInput.hidden = oauth;
+  imapPassLabel.hidden = oauth;
   imapOauthButton.hidden = !oauth;
   imapOauthHint.textContent = "";
   if (oauth) {
@@ -2532,12 +2538,12 @@ importPickButton.addEventListener("click", () => void pickImportInput(false));
 importFolderButton.addEventListener("click", () => void pickImportInput(true));
 demoLeaveButton.addEventListener("click", () => void leaveDemo());
 firstRunImportButton.addEventListener("click", () => {
-  workspace.store.setView("sources");
+  workspace.store.setSourcesSection("import");
   importPickButton.focus();
 });
 firstRunAccountButton.addEventListener("click", () => {
-  workspace.store.setView("sources");
-  imapHostInput.focus();
+  workspace.store.setSourcesSection("email");
+  imapUserInput.focus();
 });
 firstRunDemoButton.addEventListener("click", () => void enterDemo());
 imapAuthSelect.addEventListener("change", applyImapAuthMode);
@@ -2550,21 +2556,20 @@ autoSyncToggle.addEventListener("change", onAutoSyncToggle);
 autoSyncInterval.addEventListener("change", onAutoSyncIntervalChange);
 embedButton.addEventListener("click", () => void runEmbedJob());
 accountsRefreshButton.addEventListener("click", () => void refreshAccounts());
-accountsAddButton.addEventListener("click", () => {
-  // Navigate with context (§2.6): “Add account…” used to land on Add
-  // source without a word about what to do there. The guidance line
-  // says where the two paths live and where the new account shows up.
-  workspace.store.setView("sources");
-  addSourceGuidance.textContent =
-    "Add it here: pick a file export under “Import files”, or connect a mailbox under “Connect email (IMAP)” — the new account appears in the Accounts panel.";
-  addSourceGuidance.hidden = false;
+sourcesAddButton.addEventListener("click", () => workspace.store.setSourcesSection("add"));
+addChoiceImportButton.addEventListener("click", () => {
+  workspace.store.setSourcesSection("import");
+  importPickButton.focus();
 });
-// The guidance is arrival context: leaving the view anywhere else has
-// served its purpose — it must not linger on a later, self-directed
-// visit to Add source.
-workspace.store.subscribe(({ view }) => {
-  if (view !== "sources") addSourceGuidance.hidden = true;
+addChoiceEmailButton.addEventListener("click", () => {
+  workspace.store.setSourcesSection("email");
+  imapUserInput.focus();
 });
+sourcesAutomaticButton.addEventListener("click", () => workspace.store.setSourcesSection("automatic"));
+addBackButton.addEventListener("click", () => workspace.store.setSourcesSection("home"));
+importBackButton.addEventListener("click", () => workspace.store.setSourcesSection("home"));
+emailBackButton.addEventListener("click", () => workspace.store.setSourcesSection("home"));
+automaticBackButton.addEventListener("click", () => workspace.store.setSourcesSection("home"));
 watchButton.addEventListener("click", () => void watchTypedPath());
 watchPathInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") void watchTypedPath();

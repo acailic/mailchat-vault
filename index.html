@@ -197,20 +197,44 @@
             </aside>
           </section>
 
-          <!-- Sources: imports and account configuration live outside the
-               reading surface. -->
-          <section id="view-sources" class="view" aria-label="Add source">
-            <h2 class="view-heading">Add source</h2>
-            <!-- §2.6: arriving from the Accounts panel's “Add account…” lands
-                 here with context — what to do on this page and where the
-                 result shows up. Hidden on every other path into the view. -->
-            <p id="add-source-guidance" class="meta" style="margin: 6px 0 0" role="status" hidden></p>
+          <!-- Sources: the merged source screen — the source list, the
+               Add source chooser, and its two flows. Sub-sections are
+               switched by data-sources-section on #app. -->
+          <section id="view-sources" class="view" aria-label="Sources">
+            <h2 class="view-heading">Sources</h2>
 
-            <section aria-label="Import files">
-              <h2>Import files</h2>
-              <!-- U03: the picker→preview→confirm flow. No typed paths:
-                   every import starts from the native picker and shows a
-                   bounded preview before anything is stored. -->
+            <!-- Home: the source list (Task 3 moves the Accounts list
+                 here) plus the two ways forward. -->
+            <section id="sources-home" class="sources-section" aria-label="Your sources">
+              <div class="row">
+                <button id="sources-add-btn" class="primary" type="button">Add source…</button>
+                <div class="spacer"></div>
+                <button id="sources-automatic-btn" class="link-btn" type="button" title="Auto-sync and watched folders — imports that happen without a click">Automatic imports…</button>
+              </div>
+            </section>
+
+            <!-- The Add source chooser: exactly two ways in. -->
+            <section id="sources-add" class="sources-section" aria-label="Add a source">
+              <div class="row">
+                <button id="add-choice-import" class="primary" type="button">Import files…</button>
+                <button id="add-choice-email" type="button">Connect email…</button>
+                <div class="spacer"></div>
+                <button id="add-back-btn" type="button">Back to sources</button>
+              </div>
+              <p class="meta" style="margin: 6px 0 0">
+                Import an export you already have — a file or a folder — or connect an
+                email account that syncs over IMAP. Everything lands in the same
+                searchable archive.
+              </p>
+            </section>
+
+            <!-- Import: the U03 picker → preview → confirm flow. -->
+            <section id="sources-import" class="sources-section" aria-label="Import files">
+              <div class="row">
+                <h3>Import files</h3>
+                <div class="spacer"></div>
+                <button id="import-back-btn" type="button">Back to sources</button>
+              </div>
               <div class="row">
                 <button id="import-pick-btn" class="primary" type="button">Import file…</button>
                 <button id="import-folder-btn" type="button" title="Import a Telegram export folder, a Discord Data Package, or a folder holding one chat export">Import folder…</button>
@@ -229,38 +253,67 @@
               <div id="import-followup" class="row" style="margin-top: 6px" hidden></div>
             </section>
 
-            <section aria-label="Connect email">
-              <h2>Connect email (IMAP)</h2>
+            <!-- Connect email: visible field labels; server/port/folders
+                 under Advanced (Gmail works with the defaults). -->
+            <section id="sources-email" class="sources-section" aria-label="Connect email">
               <div class="row">
-                <label class="visually-hidden" for="imap-host">IMAP host</label>
-                <input id="imap-host" type="text" placeholder="imap.gmail.com" value="imap.gmail.com" />
-                <label class="visually-hidden" for="imap-port">IMAP port</label>
-                <input id="imap-port" type="number" placeholder="993" value="993" style="max-width: 90px" />
+                <h3>Connect email</h3>
+                <div class="spacer"></div>
+                <button id="email-back-btn" type="button">Back to sources</button>
               </div>
               <div class="row">
-                <label class="visually-hidden" for="imap-auth">Authentication method</label>
+                <label for="imap-user">Email address</label>
+                <input id="imap-user" type="text" placeholder="you@gmail.com" />
+                <label for="imap-auth">Sign-in method</label>
                 <select id="imap-auth" style="max-width: 15em" title="How to authenticate with the server">
                   <option value="password">App password</option>
-                  <option value="oauth">Google sign-in (OAuth)</option>
+                  <option value="oauth">Google sign-in</option>
                 </select>
-                <label class="visually-hidden" for="imap-user">Username</label>
-                <input id="imap-user" type="text" placeholder="you@gmail.com" />
-                <label class="visually-hidden" for="imap-pass">Password</label>
-                <input id="imap-pass" type="password" placeholder="App password" autocomplete="off" />
                 <button id="imap-oauth-btn" type="button" hidden>Sign in with Google…</button>
               </div>
-              <div id="imap-oauth-hint" class="meta" style="margin-top: 4px" role="status"></div>
               <div class="row">
-                <label class="visually-hidden" for="imap-folders">Folders to sync</label>
-                <input id="imap-folders" type="text" placeholder="INBOX (comma-separated folders)" />
-                <button id="imap-sync-btn" type="button">Sync</button>
+                <label for="imap-pass" id="imap-pass-label">Password</label>
+                <input id="imap-pass" type="password" placeholder="App password" autocomplete="off" />
+              </div>
+              <div id="imap-oauth-hint" class="meta" style="margin-top: 4px" role="status"></div>
+              <details id="imap-advanced">
+                <summary class="meta">Advanced — server, port, folders</summary>
+                <div class="row" style="margin-top: 6px">
+                  <label for="imap-host">Server</label>
+                  <input id="imap-host" type="text" placeholder="imap.gmail.com" value="imap.gmail.com" />
+                  <label for="imap-port">Port</label>
+                  <input id="imap-port" type="number" placeholder="993" value="993" style="max-width: 90px" />
+                </div>
+                <div class="row" style="margin-top: 6px">
+                  <label for="imap-folders">Folders</label>
+                  <input id="imap-folders" type="text" placeholder="INBOX (comma-separated folders)" />
+                </div>
+              </details>
+              <div class="row" style="margin-top: 8px">
+                <button id="imap-sync-btn" class="primary" type="button">Connect and sync</button>
+                <span id="imap-status" class="meta" role="status"></span>
               </div>
               <p id="imap-cred-note" class="meta" style="margin: 4px 0 0">
                 The password is stored in the OS keyring when available; without a keyring it is kept
                 in memory for this session only — restarting the app then clears it. It is never
                 written to the vault archive.
               </p>
+            </section>
+
+            <!-- Automatic imports: the shared opt-in scheduler and the
+                 watched folders, separate from individual accounts. -->
+            <section id="sources-automatic" class="sources-section" aria-label="Automatic imports">
               <div class="row">
+                <h3>Automatic imports</h3>
+                <div class="spacer"></div>
+                <button id="automatic-back-btn" type="button">Back to sources</button>
+              </div>
+              <p class="meta" style="margin: 6px 0 0">
+                Two opt-in helpers that import without a click: a shared auto-sync round over
+                every connected email account, and watched folders that pick up new export
+                files. Both are off unless you turn them on here.
+              </p>
+              <div class="row" style="margin-top: 6px">
                 <label class="meta" title="Opt-in: round over every configured IMAP source through the background job system. Rounds never overlap; missed time (sleep/offline) never queues.">
                   <input id="auto-sync-toggle" type="checkbox" /> Auto-sync every
                   <select id="auto-sync-interval" style="max-width: 5em" aria-label="Auto-sync interval in minutes">
@@ -272,12 +325,7 @@
                 </label>
               </div>
               <div id="auto-sync-status" class="meta" style="margin-top: 6px; min-height: 1em" role="status"></div>
-              <div id="imap-status" class="meta" style="margin-top: 6px" role="status"></div>
-            </section>
-
-            <section aria-label="Folder watching">
-              <h2>Folder watching</h2>
-              <div class="row">
+              <div class="row" style="margin-top: 12px">
                 <label class="visually-hidden" for="watch-path">Folder to watch</label>
                 <input id="watch-path" type="text" placeholder="/path/to/folder with .mbox / chat exports" />
                 <button id="watch-btn" type="button">Watch</button>
