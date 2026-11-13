@@ -14,7 +14,8 @@ use std::path::PathBuf;
 use crate::bounded::{EntryOutcome, Flow, StreamItem, StreamSource};
 use crate::ingest::{Collected, Source};
 use crate::mail::parse_raw_mail;
-use crate::Result;
+use crate::message::NewMessage;
+use crate::{Error, Result};
 
 /// Source name and dedup namespace for mbox imports.
 pub const MBOX_SOURCE: &str = "mbox";
@@ -69,6 +70,122 @@ impl StreamSource for MboxSource {
             skip,
             emit,
         )
+    }
+}
+
+/// A picked directory of `.eml` files (e.g. messages dragged out of
+/// Outlook): every `*.eml` imports as one mail, sorted by file name.
+/// Unreadable or unparseable files count as failed; the run continues.
+#[derive(Debug, Clone)]
+pub struct EmlDirSource {
+    path: PathBuf,
+}
+
+impl EmlDirSource {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// The `*.eml` files of the directory, sorted by name (single level —
+    /// the same flat-listing contract as the Discord channel files).
+    fn files(&self) -> Result<Vec<PathBuf>> {
+        let mut files = Vec::new();
+        for entry in fs::read_dir(&self.path)? {
+            let path = entry?.path();
+            let is_eml = path.is_file()
+                && path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("eml"));
+            if is_eml {
+                files.push(path);
+            }
+        }
+        files.sort();
+        Ok(files)
+    }
+}
+
+/// Parse one `.eml` file's bytes. The RFC 5322 parser is lenient — it
+/// tolerates a headerless blob as "a mail with nothing in it" — so a
+/// result with no recognizable mail content at all (no author, no
+/// subject, no body: binary junk wearing the `.eml` extension) counts
+/// as failed, exactly like a hard parse error.
+fn parse_eml(bytes: &[u8]) -> Option<NewMessage> {
+    parse_raw_mail(bytes, MBOX_SOURCE, "")
+        .filter(|msg| !msg.author.is_empty() || !msg.body.is_empty())
+}
+
+impl Source for EmlDirSource {
+    fn name(&self) -> &str {
+        MBOX_SOURCE
+    }
+
+    fn collect(&self) -> Result<Collected> {
+        let mut messages = Vec::new();
+        let mut failed: u64 = 0;
+        for file in self.files()? {
+            let bytes = fs::read(&file)?;
+            match parse_eml(&bytes) {
+                Some(msg) => messages.push(msg),
+                None => failed += 1,
+            }
+        }
+        if messages.is_empty() && failed == 0 {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "no .eml files found under {} — pick the folder that holds them",
+                    self.path.display()
+                ),
+            )));
+        }
+        Ok(Collected { messages, failed })
+    }
+}
+
+/// The bounded streaming path: files are read one at a time (sorted, as
+/// the collect path is), one file's bytes alive at a time. An unreadable
+/// or unparseable file is a `Failed` item naming the file; the run
+/// continues with the next one.
+impl StreamSource for EmlDirSource {
+    fn name(&self) -> &str {
+        MBOX_SOURCE
+    }
+
+    fn stream(&self, skip: u64, emit: &mut dyn FnMut(StreamItem) -> Result<Flow>) -> Result<()> {
+        let files = self.files()?;
+        let mut failure: Option<crate::Error> = None;
+        {
+            let mut state = crate::bounded::ConsumerState {
+                skip,
+                emit,
+                stopped: false,
+                failure: &mut failure,
+            };
+            for file in &files {
+                let outcome = match fs::read(file) {
+                    Ok(bytes) => match parse_eml(&bytes) {
+                        Some(msg) => EntryOutcome::Message(msg),
+                        None => EntryOutcome::Failed {
+                            external_ref: String::new(),
+                            reason: "mail part failed to parse".to_string(),
+                        },
+                    },
+                    Err(e) => EntryOutcome::Failed {
+                        external_ref: file.display().to_string(),
+                        reason: format!("unreadable file: {e}"),
+                    },
+                };
+                if !state.offer(outcome) {
+                    break;
+                }
+            }
+        }
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        Ok(())
     }
 }
 
@@ -304,5 +421,52 @@ mod tests {
         assert_eq!(collected.messages.len(), 1);
         assert!(collected.messages[0].body.contains("From the desk of Ana"));
         assert!(collected.messages[0].body.contains("line two"));
+    }
+
+    #[test]
+    fn eml_dir_imports_each_file_as_one_message() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("b.eml"),
+            b"Subject: drugi\nMessage-ID: <b@x>\n\nBody B\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("a.eml"),
+            b"Subject: prvi\nMessage-ID: <a@x>\n\nBody A\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"ignored").unwrap();
+
+        let source = EmlDirSource::new(dir.path());
+        let collected = source.collect().unwrap();
+        // Both `Source` and `StreamSource` are in scope here; pin the
+        // collect-side name.
+        assert_eq!(Source::name(&source), MBOX_SOURCE);
+        assert_eq!(collected.messages.len(), 2);
+        assert_eq!(collected.failed, 0);
+        // Sorted by file name: a.eml first.
+        assert!(collected.messages[0].body.contains("Body A"));
+        assert!(collected.messages[1].body.contains("Body B"));
+    }
+
+    #[test]
+    fn eml_dir_counts_broken_files_and_continues() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("good.eml"),
+            b"Subject: ok\nMessage-ID: <g@x>\n\nOK\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("bad.eml"), b"\x80\x81 not a mail").unwrap();
+        let collected = EmlDirSource::new(dir.path()).collect().unwrap();
+        assert_eq!(collected.messages.len(), 1);
+        assert_eq!(collected.failed, 1);
+    }
+
+    #[test]
+    fn eml_dir_without_eml_files_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(EmlDirSource::new(dir.path()).collect().is_err());
     }
 }
