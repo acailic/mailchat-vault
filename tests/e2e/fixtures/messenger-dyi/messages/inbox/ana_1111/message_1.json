@@ -1,0 +1,34 @@
+{
+  "participants": [{ "name": "Ana Peric" }, { "name": "Marko Horvat" }],
+  "title": "Ana Peric",
+  "is_still_participant": true,
+  "thread_type": "Regular",
+  "thread_path": "inbox/ana_1111",
+  "messages": [
+    {
+      "sender_name": "Ana Peric",
+      "timestamp_ms": 1762981200000,
+      "content": "Zdravo! Kako si?"
+    },
+    {
+      "sender_name": "Marko Horvat",
+      "timestamp_ms": 1762981260000,
+      "content": "Dobro, hvala."
+    },
+    {
+      "sender_name": "Ana Peric",
+      "timestamp_ms": 1762981320000,
+      "photos": [
+        {
+          "uri": "messages/inbox/ana_1111/photos/ana.jpg",
+          "creation_timestamp": 1762981320
+        }
+      ]
+    },
+    {
+      "sender_name": "Ana Peric",
+      "timestamp_ms": 1762981380000,
+      "reactions": [{ "reaction": "❤" }]
+    }
+  ]
+}
