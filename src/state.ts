@@ -88,6 +88,12 @@ export const VIEW_TITLES: Record<WorkspaceView, string> = {
   settings: "Settings",
 };
 
+/** The pages inside the Sources view (the merged source screen). */
+export type SourcesSection = "home" | "add" | "import" | "email" | "automatic";
+
+/** The pages inside the Settings view. */
+export type SettingsSection = "general" | "storage" | "ai";
+
 /** State of the message-reading pane (drives the medium/compact swap and
  * the wide empty state). */
 export interface ReadingState {
@@ -101,6 +107,10 @@ export interface WorkspaceState {
   reading: ReadingState;
   /** Compact navigation drawer. */
   navOpen: boolean;
+  /** The visible Sources page (drives the sources sub-sections). */
+  sourcesSection: SourcesSection;
+  /** The visible Settings page (drives the settings sub-sections). */
+  settingsSection: SettingsSection;
 }
 
 export type WorkspaceListener = (state: WorkspaceState) => void;
@@ -117,6 +127,8 @@ export class WorkspaceStore {
       layout: "wide",
       reading: { open: false },
       navOpen: false,
+      sourcesSection: "home",
+      settingsSection: "general",
       ...initial,
     };
   }
@@ -137,8 +149,27 @@ export class WorkspaceStore {
 
   setView(view: WorkspaceView): void {
     // Leaving the workspace does not close the reading pane; returning
-    // restores it (the reading pane is part of the workspace view).
-    this.#set({ view, navOpen: false });
+    // restores it (the reading pane is part of the workspace view). Nav
+    // destinations land on their home section; the section setters below
+    // are the deep links (Add source, first-run, reconnect, …).
+    this.#set({
+      view,
+      navOpen: false,
+      sourcesSection: "home",
+      settingsSection: "general",
+    });
+  }
+
+  /** Deep-link into a Sources page (navigates to the sources view). */
+  setSourcesSection(section: SourcesSection): void {
+    if (this.#state.view === "sources" && this.#state.sourcesSection === section) return;
+    this.#set({ view: "sources", sourcesSection: section, navOpen: false });
+  }
+
+  /** Deep-link into a Settings page (navigates to the settings view). */
+  setSettingsSection(section: SettingsSection): void {
+    if (this.#state.view === "settings" && this.#state.settingsSection === section) return;
+    this.#set({ view: "settings", settingsSection: section, navOpen: false });
   }
 
   setLayout(layout: LayoutMode): void {
