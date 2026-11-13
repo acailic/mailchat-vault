@@ -1,21 +1,21 @@
 // @vitest-environment happy-dom
-// Unit tests for the multi-account view helpers (roadmap: the accounts
-// panel): the `sync_imap` request derivation (the acceptance-critical
-// mapping from a stored account to the right sync parameters), the
-// status/kind/stats wording, and the DOM builder (rows, focusable action
-// buttons, empty state) — all through textContent.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+// Unit tests for the sources view helpers (roadmap: the Sources list):
+// the `sync_imap` request derivation (the acceptance-critical mapping
+// from a stored account to the right sync parameters), the
+// status/kind/stats wording, and the DOM builder (rows, primary actions,
+// the Details fold, empty state) — all through textContent.
+import { describe, expect, it, vi } from "vitest";
 import type { AccountView, SourceCount, SourceInstance } from "./types";
 import {
   accountKindLabel,
   accountStatsLine,
-  accountsEmptyLine,
   accountTitle,
   accountTitleDetail,
   describeAccountSync,
   passwordStoreNote,
-  renderAccounts,
+  renderSourcesList,
   sourceChipRows,
+  sourcesEmptyLine,
   syncFailureText,
   syncNowRequest,
 } from "./accountsview";
@@ -58,6 +58,10 @@ const importAccount = (over: Partial<AccountView> = {}): AccountView => ({
   last_error_at: null,
   ...over,
 });
+
+/** The row fixtures the DOM tests render: one email account, one import. */
+const IMAP_ACCOUNT = imapAccount();
+const IMPORT_ACCOUNT = importAccount();
 
 describe("syncNowRequest", () => {
   it("derives the sync_imap request from the stored account", () => {
@@ -234,102 +238,79 @@ describe("labels and status lines", () => {
   });
 
   it("words the empty state", () => {
-    expect(accountsEmptyLine()).toContain("No accounts yet");
+    expect(sourcesEmptyLine()).toContain("No sources yet");
   });
 });
 
-describe("renderAccounts", () => {
-  let el: HTMLElement;
-  beforeEach(() => {
-    el = document.createElement("ul");
+describe("renderSourcesList", () => {
+  function render(accounts: AccountView[]) {
+    const el = document.createElement("ul");
+    const opts = {
+      onViewMessages: vi.fn(),
+      onSyncNow: vi.fn(),
+      onTogglePause: vi.fn(),
+      onUpdateCredentials: vi.fn(),
+      onForget: vi.fn(),
+      onDisconnect: vi.fn(),
+    };
+    renderSourcesList(el, accounts, opts);
+    return { el, opts };
+  }
+
+  it("shows View messages for every row and Sync now only for email", () => {
+    const { el } = render([IMAP_ACCOUNT, IMPORT_ACCOUNT]);
+    const rows = [...el.querySelectorAll(".account-row")];
+    expect(rows.every((r) => r.querySelector(".source-view-btn"))).toBe(true);
+    expect(rows[0].querySelector(".account-sync-btn")).toBeTruthy();
+    expect(rows[1].querySelector(".account-sync-btn")).toBe(null);
+  });
+
+  it("management actions live inside the Details fold", () => {
+    const { el, opts } = render([IMAP_ACCOUNT]);
+    const details = el.querySelector("details.source-details")!;
+    expect(details.querySelector(".account-pause-btn")).toBeTruthy();
+    expect(details.querySelector(".source-update-credentials-btn")).toBeTruthy();
+    expect(details.querySelector(".account-forget-btn")).toBeTruthy();
+    (details.querySelector(".account-pause-btn") as HTMLElement).click();
+    expect(opts.onTogglePause).toHaveBeenCalledWith(IMAP_ACCOUNT);
+  });
+
+  it("import rows have primary actions but no management fold", () => {
+    const { el } = render([IMPORT_ACCOUNT]);
+    expect(el.querySelector("details.source-details")).toBe(null);
+    expect(el.querySelector(".source-view-btn")).toBeTruthy();
+  });
+
+  it("View messages reports its account", () => {
+    const { el, opts } = render([IMPORT_ACCOUNT]);
+    (el.querySelector(".source-view-btn") as HTMLElement).click();
+    expect(opts.onViewMessages).toHaveBeenCalledWith(IMPORT_ACCOUNT);
+  });
+
+  it("Disconnect is two-step and resets on re-render", () => {
+    const { el, opts } = render([IMAP_ACCOUNT]);
+    const btn = el.querySelector(".source-disconnect-btn") as HTMLButtonElement;
+    btn.click();
+    expect(opts.onDisconnect).not.toHaveBeenCalled();
+    expect(btn.textContent).toBe("Confirm disconnect");
+    btn.click();
+    expect(opts.onDisconnect).toHaveBeenCalledWith(IMAP_ACCOUNT);
+    // Re-rendering the same list disarms the confirmation.
+    renderSourcesList(el, [IMAP_ACCOUNT], opts);
+    const again = el.querySelector(".source-disconnect-btn") as HTMLButtonElement;
+    expect(again.textContent).toBe("Disconnect…");
   });
 
   it("renders the empty state as a single row", () => {
-    renderAccounts(el, [], {
-      onSyncNow: () => {},
-      onTogglePause: () => {},
-      onForget: () => {},
-    });
+    const { el } = render([]);
     expect(el.children.length).toBe(1);
-    expect(el.querySelector(".account-row.empty")!.textContent).toContain("No accounts yet");
+    expect(el.querySelector(".account-row.empty")!.textContent).toContain("No sources yet");
     expect(el.querySelectorAll("button").length).toBe(0);
-  });
-
-  it("renders one row per account with kind, stats, and sync state", () => {
-    renderAccounts(el, [imapAccount(), importAccount()], {
-      onSyncNow: () => {},
-      onTogglePause: () => {},
-      onForget: () => {},
-    });
-    const rows = [...el.querySelectorAll(".account-row")];
-    expect(rows.length).toBe(2);
-    expect((rows[0] as HTMLElement).dataset.sourceId).toBe("inst-imap-1");
-    expect(rows[0].querySelector(".account-label")!.textContent).toBe(
-      "ana@gmail.com · imap.gmail.com",
-    );
-    expect(
-      (rows[0].querySelector(".account-label") as HTMLElement).title,
-    ).toBe("Stored source: imap:imap.gmail.com:993:ana@gmail.com");
-    expect(rows[0].querySelector(".account-kind")!.textContent).toBe("Email (IMAP)");
-    expect(rows[0].querySelector(".account-stats")!.textContent).toBe("1,234 messages");
-    expect(rows[0].querySelector(".account-sync")!.textContent).toContain(
-      "last synced 2026-01-02 10:00:05",
-    );
-    expect((rows[1] as HTMLElement).dataset.sourceId).toBe("inst-import-1");
-    expect(rows[1].querySelector(".account-kind")!.textContent).toBe("Import");
-  });
-
-  it("gives email accounts the three management actions, imports none", () => {
-    renderAccounts(el, [imapAccount(), importAccount()], {
-      onSyncNow: () => {},
-      onTogglePause: () => {},
-      onForget: () => {},
-    });
-    const imapRow = el.querySelector('.account-row[data-source-id="inst-imap-1"]')!;
-    const buttons = [...imapRow.querySelectorAll("button")];
-    expect(buttons.map((b) => b.textContent)).toEqual([
-      "Sync now",
-      "Pause",
-      "Forget credentials",
-    ]);
-    // Every action is a focusable button with an account-scoped label.
-    for (const button of buttons) {
-      expect(button.getAttribute("aria-label")).toContain("ana@gmail.com");
-    }
-    const importRow = el.querySelector('.account-row[data-source-id="inst-import-1"]')!;
-    expect(importRow.querySelectorAll("button").length).toBe(0);
-  });
-
-  it("flips the pause button for a paused account", () => {
-    renderAccounts(el, [imapAccount({ excluded: true })], {
-      onSyncNow: () => {},
-      onTogglePause: () => {},
-      onForget: () => {},
-    });
-    const pause = el.querySelector<HTMLButtonElement>(".account-pause-btn")!;
-    expect(pause.textContent).toBe("Resume");
-  });
-
-  it("wires every action to its callback with the account", () => {
-    const onSyncNow = vi.fn();
-    const onTogglePause = vi.fn();
-    const onForget = vi.fn();
-    renderAccounts(el, [imapAccount()], { onSyncNow, onTogglePause, onForget });
-    (el.querySelector(".account-sync-btn") as HTMLButtonElement).click();
-    (el.querySelector(".account-pause-btn") as HTMLButtonElement).click();
-    (el.querySelector(".account-forget-btn") as HTMLButtonElement).click();
-    expect(onSyncNow).toHaveBeenCalledWith(imapAccount());
-    expect(onTogglePause).toHaveBeenCalledWith(imapAccount());
-    expect(onForget).toHaveBeenCalledWith(imapAccount());
   });
 
   it("escapes nothing by construction: labels land via textContent", () => {
     const evil = imapAccount({ label: '<script>alert("x")</script>' });
-    renderAccounts(el, [evil], {
-      onSyncNow: () => {},
-      onTogglePause: () => {},
-      onForget: () => {},
-    });
+    const { el } = render([evil]);
     // The stored label is disclosed only as the title's tooltip, and
     // still lands as an attribute value — never markup.
     expect((el.querySelector(".account-label") as HTMLElement).title).toBe(
