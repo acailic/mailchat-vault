@@ -713,6 +713,26 @@ pub struct Storage {
     pub(crate) conn: Connection,
 }
 
+/// BM25F column weights every FTS ranking site orders by
+/// ([`Storage::search_filtered`], [`Storage::search_page`],
+/// [`Storage::search_export_stream`]).
+///
+/// Term evidence is field-dependent: a term hitting the subject line says
+/// more about a message than the same term buried in a long body, and an
+/// author hit sits in between (BM25F; Robertson & Zaragoza 2009, "The
+/// Probabilistic Relevance Framework: BM25 and Beyond"). FTS5's `bm25()`
+/// auxiliary function takes one weight per column in declared order —
+/// `(body, author, subject)` here — and returns negative scores where
+/// more negative is more relevant, so ordering by it ascending keeps the
+/// exact direction of the old `ORDER BY rank`. The weights are formatted
+/// into the SQL text as literals: they are compile-time constants, never
+/// user input, and FTS5 auxiliary-function arguments cannot be bound
+/// parameters. Tuned against `tests/retrieval_eval.rs`; body stays the
+/// 1.0 anchor.
+const BM25_WEIGHT_BODY: f32 = 1.0;
+const BM25_WEIGHT_AUTHOR: f32 = 1.0;
+const BM25_WEIGHT_SUBJECT: f32 = 3.0;
+
 impl Storage {
     /// Open (and migrate) a database file, creating it when missing.
     ///
@@ -1528,7 +1548,7 @@ impl Storage {
             }
             None => None,
         };
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             r#"
             SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id,
                    m.channel, m.chat_id, m.author,
@@ -1540,10 +1560,10 @@ impl Storage {
               AND (?2 IS NULL OR m.sent_instant >= ?2)
               AND (?3 IS NULL OR m.sent_instant < ?3)
               AND ((?2 IS NULL AND ?3 IS NULL) OR m.sent_instant IS NOT NULL)
-            ORDER BY rank, m.id
+            ORDER BY bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, {BM25_WEIGHT_SUBJECT}), m.id
             LIMIT ?4
             "#,
-        )?;
+        ))?;
         let rows = stmt
             .query_map(
                 params![match_query, from, to_exclusive, limit],
@@ -1660,7 +1680,8 @@ impl Storage {
                  JOIN archive_messages AS m ON m.id = archive_fts.rowid \
                  JOIN source_instances AS si ON si.id = m.source_instance_id \
                  WHERE archive_fts MATCH ?3 {} \
-                 ORDER BY rank, m.id LIMIT ? OFFSET ?",
+                 ORDER BY bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, \
+                               {BM25_WEIGHT_SUBJECT}), m.id LIMIT ? OFFSET ?",
                 filters.sql
             );
             let mut stmt = self.conn.prepare(&sql)?;
@@ -1722,7 +1743,8 @@ impl Storage {
                      JOIN archive_messages AS m ON m.id = archive_fts.rowid \
                      JOIN source_instances AS si ON si.id = m.source_instance_id \
                      WHERE archive_fts MATCH ?1 {} \
-                     ORDER BY rank, m.id",
+                     ORDER BY bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, \
+                                   {BM25_WEIGHT_SUBJECT}), m.id",
                     filters.sql
                 ),
                 bind,

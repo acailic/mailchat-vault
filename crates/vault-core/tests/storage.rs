@@ -1,7 +1,10 @@
+use vault_core::llm::{run_plan, validate, PlanSource, QueryPlan};
 use vault_core::message::{InsertOutcome, NewMessage};
 use vault_core::query::SearchQuery;
 use vault_core::search::build_match_query;
-use vault_core::storage::Storage;
+use vault_core::storage::{
+    ConnectorIdentity, MailInsertOutcome, NewSourceInstance, Occurrence, Storage,
+};
 
 fn msg(external_id: &str, author: &str, body: &str) -> NewMessage {
     NewMessage::new("test", external_id, author, "2026-01-01T00:00:00Z", body)
@@ -113,6 +116,176 @@ fn fts_search_orders_by_relevance() {
         hits[0].message.external_id, "dense",
         "denser document should rank first"
     );
+}
+
+/// Insert one subject-bearing mail row through the connector path — the
+/// only ingest that populates the FTS `subject` column. `body` is the
+/// caller's composition (production mail stores `"{subject}\n\n{text}"`).
+fn insert_mail(
+    s: &Storage,
+    external_id: &str,
+    author: &str,
+    sent_at: &str,
+    subject: &str,
+    body: &str,
+) -> i64 {
+    let instance = s
+        .ensure_source_instance(&NewSourceInstance {
+            kind: "imap",
+            label: "Subject test mail",
+            connector_key: "imap|subject.test|993|implicit-tls|subj@example.test",
+            config_json: "{}",
+        })
+        .unwrap();
+    let message = NewMessage::new(instance.clone(), external_id, author, sent_at, body);
+    let identity = ConnectorIdentity {
+        namespace: "imap",
+        external_key: external_id,
+        revision_hash: "subject-test-1",
+    };
+    let occurrence = Occurrence {
+        scope: "INBOX",
+        provider_item_id: external_id,
+        uidvalidity: Some(1),
+    };
+    match s
+        .insert_mail_message(&instance, &message, subject, &identity, &occurrence)
+        .unwrap()
+    {
+        MailInsertOutcome::Inserted { id, .. } | MailInsertOutcome::Duplicate { id } => id,
+    }
+}
+
+#[test]
+fn subject_column_filter_flows_through_the_ask_plan() {
+    let s = storage();
+    let subject_id = insert_mail(
+        &s,
+        "subj-mail",
+        "ana",
+        "2026-10-01T09:00:00Z",
+        "vault migration plan",
+        "vault migration plan\n\nstatus update covering the rollout steps, owners, \
+         timing, and the open questions that still need answers",
+    );
+    s.insert_message(&NewMessage::new(
+        "test",
+        "body-only",
+        "bob",
+        "2026-10-02T09:00:00Z",
+        "notes about the vault and its rotation keys",
+    ))
+    .unwrap();
+
+    // `subject:` filters compile against archive_fts — the old restriction
+    // lived in the translation prompt only.
+    assert!(s.is_valid_match("subject: vault"));
+    assert!(s.is_valid_match("subject: \"vault migration\""));
+
+    // So the plan an LLM may now produce survives vetting unchanged.
+    let plan = QueryPlan {
+        match_expr: "subject: vault".into(),
+        date_from: None,
+        date_to: None,
+    };
+    let vetted = validate(&s, "vault migration plan", Ok(plan));
+    assert_eq!(vetted.source, PlanSource::Llm);
+    assert!(vetted.notes.is_empty());
+
+    // run_plan returns exactly the subject-bearing message; the body-only
+    // row a plain `vault` term also reaches stays out of a subject filter.
+    let run: Vec<i64> = run_plan(&s, &vetted, 10)
+        .unwrap()
+        .iter()
+        .map(|m| m.id)
+        .collect();
+    assert_eq!(run, vec![subject_id]);
+
+    let filtered: Vec<i64> = s
+        .search_filtered("subject: vault", None, None, 10)
+        .unwrap()
+        .iter()
+        .map(|m| m.id)
+        .collect();
+    assert_eq!(filtered, vec![subject_id]);
+
+    let plain: Vec<i64> = s
+        .search_filtered("\"vault\"", None, None, 10)
+        .unwrap()
+        .iter()
+        .map(|m| m.id)
+        .collect();
+    assert_eq!(plain.len(), 2, "a plain term still matches both rows");
+}
+
+#[test]
+fn subject_hit_outranks_denser_body_hit() {
+    let s = storage();
+    // A: the term lives in the subject line; the body is the production
+    // mail composition "{subject}\n\n{text}" with no further mentions.
+    let a = insert_mail(
+        &s,
+        "subject-hit",
+        "ana",
+        "2026-10-01T09:00:00Z",
+        "vault migration plan",
+        "vault migration plan\n\nstatus update covering the rollout steps, owners, \
+         timing, and the open questions that still need answers",
+    );
+    // B: no subject term; a longer body mentioning vault twice. Under the
+    // old equal-column-weight ranking B won on body evidence; the subject
+    // column weight must flip the order.
+    let b = match s
+        .insert_message(&NewMessage::new(
+            "test",
+            "body-hit",
+            "bob",
+            "2026-10-02T09:00:00Z",
+            "the vault handles secrets and the vault rotates keys; this body \
+             is longer overall and mentions the term twice somewhere inside",
+        ))
+        .unwrap()
+    {
+        InsertOutcome::Inserted(id) | InsertOutcome::Duplicate(id) => id,
+    };
+    // Unrelated filler: with the term in 2 of 8 rows "vault" carries a
+    // real idf (FTS5's bm25 zeroes the idf when a term hits half the
+    // corpus), so the weighting operates on healthy margins.
+    for (n, body) in [
+        "lunch plans for friday at the noodle place near the office",
+        "the quarterly review slides are attached with revenue and churn numbers",
+        "gardening notes: plant the garlic beds before the first frost arrives",
+        "boarding pass and hotel confirmation for the conference trip next month",
+        "the espresso machine in the kitchen is fixed, enjoy the good coffee again",
+        "reminder about the dental appointment on thursday afternoon",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        s.insert_message(&NewMessage::new(
+            "test",
+            format!("filler-{n}"),
+            "cid",
+            "2026-10-03T09:00:00Z",
+            body,
+        ))
+        .unwrap();
+    }
+
+    let paged: Vec<i64> = search(&s, "vault", 10)
+        .hits
+        .iter()
+        .map(|h| h.message.id)
+        .collect();
+    assert_eq!(paged, vec![a, b], "the subject hit must rank first");
+
+    let filtered: Vec<i64> = s
+        .search_filtered("\"vault\"", None, None, 10)
+        .unwrap()
+        .iter()
+        .map(|m| m.id)
+        .collect();
+    assert_eq!(filtered, vec![a, b]);
 }
 
 #[test]

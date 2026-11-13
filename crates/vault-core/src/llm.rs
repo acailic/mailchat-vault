@@ -352,8 +352,8 @@ fn extract_json_object(text: &str) -> Option<&str> {
 fn translation_system_prompt(today: NaiveDate) -> String {
     let mut prompt = String::from(
         "You convert a natural-language question about a personal message archive into a search plan.\n\n\
-         The archive is a SQLite FTS5 full-text index with two columns: `body` (message text; for email it includes the subject) and `author` (display name or address).\n\n\
-         FTS5 MATCH syntax you may use: quoted phrases (\"exact phrase\"), prefix terms (\"proj*\"), AND (implicit between terms), OR, NOT, parentheses; terms are case-insensitive; the column filters `body:` and `author:` are allowed.\n\n\
+         The archive is a SQLite FTS5 full-text index with three columns: `body` (message text; for email it includes the subject), `author` (display name or address), and `subject` (email subject lines; chat messages have none).\n\n\
+         FTS5 MATCH syntax you may use: quoted phrases (\"exact phrase\"), prefix terms (\"proj*\"), AND (implicit between terms), OR, NOT, parentheses; terms are case-insensitive; the column filters `body:`, `author:`, and `subject:` are allowed.\n\n\
          Also extract any date range the question implies (for example \"last march\", \"before June\", \"in 2024\"), resolving relative wording against today's date: ",
     );
     prompt.push_str(&today.to_string());
@@ -935,6 +935,27 @@ mod tests {
         }
         let ok = MockLlm::with_replies(["{\"match\": \"x\"}"]);
         assert!(translate(&ok, "q", today()).is_ok());
+    }
+
+    #[test]
+    fn translation_system_prompt_offers_all_three_columns() {
+        let prompt = translation_system_prompt(today());
+        assert!(prompt.contains("three columns"), "{prompt}");
+        for column in ["`body`", "`author`", "`subject`"] {
+            assert!(
+                prompt.contains(column),
+                "prompt must name {column}: {prompt}"
+            );
+        }
+        assert!(
+            prompt.contains("`subject` (email subject lines; chat messages have none)"),
+            "the subject column needs its chat caveat: {prompt}"
+        );
+        assert!(
+            prompt.contains("the column filters `body:`, `author:`, and `subject:` are allowed"),
+            "the subject: filter must be explicitly allowed: {prompt}"
+        );
+        assert!(!prompt.contains("two columns"), "{prompt}");
     }
 
     #[test]
