@@ -106,10 +106,13 @@ describe("WorkspaceStore", () => {
     expect(calls).toBe(1);
   });
 
-  it("every view has a user-facing title", () => {
-    for (const title of Object.values(VIEW_TITLES)) {
-      expect(title.length).toBeGreaterThan(0);
-    }
+  it("VIEW_TITLES covers exactly the four destinations", () => {
+    expect(VIEW_TITLES).toEqual({
+      workspace: "Archive",
+      sources: "Sources",
+      activity: "Activity",
+      settings: "Settings",
+    });
   });
 });
 

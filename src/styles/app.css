@@ -146,8 +146,33 @@ body {
   gap: var(--sp-1);
 }
 
+#nav-secondary {
+  list-style: none;
+  margin: auto 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.nav-view-btn.secondary { color: var(--muted); }
+.nav-badge {
+  display: inline-block;
+  min-width: 18px;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 12px;
+  text-align: center;
+}
+.nav-attention {
+  margin-left: 6px;
+  font-size: 12px;
+  color: var(--danger);
+}
 #nav-foot {
-  margin-top: auto;
+  margin-top: var(--sp-2);
   color: var(--muted);
   font-size: 12px;
 }
@@ -195,7 +220,6 @@ body {
 
 #app[data-view="workspace"] #view-workspace { display: grid; }
 #app[data-view="sources"] #view-sources { display: block; }
-#app[data-view="accounts"] #view-accounts { display: block; }
 #app[data-view="activity"] #view-activity { display: block; }
 #app[data-view="settings"] #view-settings { display: block; }
 
@@ -211,7 +235,6 @@ body {
 }
 
 #view-sources,
-#view-accounts,
 #view-activity,
 #view-settings {
   flex: 1;
@@ -226,7 +249,7 @@ body {
 }
 
 #view-sources h2:not(.view-heading),
-#view-accounts h2:not(.view-heading),
+#view-sources h3,
 #view-activity h2:not(.view-heading),
 #view-settings h2:not(.view-heading) {
   font-size: var(--text-section);
@@ -656,10 +679,8 @@ mark.hit {
 .job.failed { color: var(--danger); }
 .job.cancelled { color: var(--muted); }
 
-/* --- Accounts view (multi-account overview) ------------------------------- */
+/* --- Account rows (the accounts overview on the Sources home) ------------- */
 
-#view-accounts .row { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; margin-top: var(--sp-1); }
-#view-accounts section { margin-bottom: var(--sp-4); }
 .accounts-list { list-style: none; margin: var(--sp-1) 0 0; padding: 0; }
 .account-row {
   display: flex;

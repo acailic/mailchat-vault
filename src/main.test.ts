@@ -2272,7 +2272,7 @@ describe("IMAP sync auth mode", () => {
     // its durable error state — not a stale "No accounts yet".
     await vi.waitFor(() =>
       expect(
-        $("#accounts-list .account-row[data-source-id='inst-imap-failed'] .account-sync")
+        $("#sources-list .account-row[data-source-id='inst-imap-failed'] .account-sync")
           .textContent,
       ).toContain("sync failed at 2026-11-09 23:00:01"),
     );
@@ -3612,18 +3612,21 @@ describe("workspace shell", () => {
     expect(back.textContent).toContain("Back to results");
   });
 
-  it("navigation switches views with aria-current, results stay mounted", async () => {
+  it("navigation switches views with aria-current; results stay mounted", async () => {
     await boot();
-    await openDetailViaResult();
-    const settingsBtn = $(".nav-view-btn[data-view-target='settings']");
-    settingsBtn.click();
-    expect(app().dataset.view).toBe("settings");
-    expect(settingsBtn.getAttribute("aria-current")).toBe("page");
-    // Leaving and returning preserves the open reading pane and results.
-    $(".nav-view-btn[data-view-target='workspace']").click();
-    expect(app().dataset.view).toBe("workspace");
-    expect($("#detail").classList.contains("open")).toBe(true);
-    expect(app().dataset.reading).toBe("open");
+    const buttons = [...document.querySelectorAll(".nav-view-btn")].map(
+      (b) => (b as HTMLElement).dataset.viewTarget,
+    );
+    expect(buttons).toEqual(["workspace", "sources", "settings", "activity"]);
+    const app = $("#app") as HTMLElement;
+    const archiveBtn = $('.nav-view-btn[data-view-target="workspace"]') as HTMLElement;
+    expect(archiveBtn.getAttribute("aria-current")).toBe("page");
+    ($('.nav-view-btn[data-view-target="sources"]') as HTMLElement).click();
+    await vi.waitFor(() => expect(app.dataset.view).toBe("sources"));
+    expect(archiveBtn.getAttribute("aria-current")).toBe(null);
+    expect(($('.nav-view-btn[data-view-target="sources"]') as HTMLElement).getAttribute("aria-current")).toBe("page");
+    expect($("#results")).toBeTruthy(); // results stay mounted
+    expect($("#topbar-title").textContent).toBe("Sources");
   });
 
   it("selecting a source chip from another view returns to the workspace", async () => {
@@ -4004,9 +4007,9 @@ describe("accounts panel", () => {
     tauri.handlers.set("accounts_list", () => [IMAP_ACCOUNT, IMPORT_ACCOUNT]);
     await boot();
     await vi.waitFor(() =>
-      expect($("#accounts-list .account-row[data-source-id='inst-imap-1']")).toBeTruthy(),
+      expect($("#sources-list .account-row[data-source-id='inst-imap-1']")).toBeTruthy(),
     );
-    const imapRow = $("#accounts-list .account-row[data-source-id='inst-imap-1']");
+    const imapRow = $("#sources-list .account-row[data-source-id='inst-imap-1']");
     expect(imapRow.querySelector(".account-label")!.textContent).toBe(
       "ana@gmail.com · imap.gmail.com",
     );
@@ -4027,17 +4030,17 @@ describe("accounts panel", () => {
       [...imapRow.querySelectorAll("button")].map((b) => b.textContent),
     ).toEqual(["Sync now", "Pause", "Forget credentials"]);
     // The import account renders with stats but no management actions.
-    const importRow = $("#accounts-list .account-row[data-source-id='inst-import-1']");
+    const importRow = $("#sources-list .account-row[data-source-id='inst-import-1']");
     expect(importRow.querySelector(".account-kind")!.textContent).toBe("Import");
     expect(importRow.querySelectorAll("button").length).toBe(0);
-    expect($("#accounts-status").textContent).toContain("2 accounts");
+    expect($("#sources-status").textContent).toContain("2 accounts");
   });
 
   it("shows the empty state when no account exists", async () => {
     await boot();
-    await vi.waitFor(() => expect($("#accounts-status").textContent).toBe(""));
-    expect($("#accounts-list .account-row.empty")).toBeTruthy();
-    expect($("#accounts-list .account-row.empty").textContent).toContain("No accounts yet");
+    await vi.waitFor(() => expect($("#sources-status").textContent).toBe(""));
+    expect($("#sources-list .account-row.empty")).toBeTruthy();
+    expect($("#sources-list .account-row.empty").textContent).toContain("No accounts yet");
   });
 
   it("sync now triggers sync_imap with the account's stored parameters", async () => {
@@ -4064,8 +4067,8 @@ describe("accounts panel", () => {
       };
     });
     await boot();
-    await vi.waitFor(() => expect($("#accounts-list .account-sync-btn")).toBeTruthy());
-    ($("#accounts-list .account-sync-btn") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect($("#sources-list .account-sync-btn")).toBeTruthy());
+    ($("#sources-list .account-sync-btn") as HTMLButtonElement).click();
     await vi.waitFor(() => expect(syncArgs).not.toBeNull());
     // The acceptance-critical assertion: the stored account maps to the
     // right sync_imap parameters — identity from the vault, an empty
@@ -4079,7 +4082,7 @@ describe("accounts panel", () => {
       auth: "password",
     });
     await vi.waitFor(() =>
-      expect($("#accounts-status").textContent).toContain(
+      expect($("#sources-status").textContent).toContain(
         "Synced ana@gmail.com · imap.gmail.com: INBOX: 2 new, 1 already present",
       ),
     );
@@ -4093,8 +4096,8 @@ describe("accounts panel", () => {
       return { folders: [], saved_to: null };
     });
     await boot();
-    await vi.waitFor(() => expect($("#accounts-list .account-sync-btn")).toBeTruthy());
-    ($("#accounts-list .account-sync-btn") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect($("#sources-list .account-sync-btn")).toBeTruthy());
+    ($("#sources-list .account-sync-btn") as HTMLButtonElement).click();
     await vi.waitFor(() => expect(syncArgs).not.toBeNull());
     expect(syncArgs).toEqual({
       host: "imap.gmail.com",
@@ -4112,14 +4115,14 @@ describe("accounts panel", () => {
       throw new Error("no password stored for this account — enter one");
     });
     await boot();
-    await vi.waitFor(() => expect($("#accounts-list .account-sync-btn")).toBeTruthy());
-    ($("#accounts-list .account-sync-btn") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect($("#sources-list .account-sync-btn")).toBeTruthy());
+    ($("#sources-list .account-sync-btn") as HTMLButtonElement).click();
     await vi.waitFor(() =>
-      expect($("#accounts-status").textContent).toContain(
+      expect($("#sources-status").textContent).toContain(
         "Sync failed for ana@gmail.com · imap.gmail.com",
       ),
     );
-    expect($("#accounts-status").textContent).toContain("no password stored");
+    expect($("#sources-status").textContent).toContain("no password stored");
   });
 
   it("pause triggers source_set_excluded and re-renders the row", async () => {
@@ -4132,8 +4135,8 @@ describe("accounts panel", () => {
       return null;
     });
     await boot();
-    await vi.waitFor(() => expect($("#accounts-list .account-pause-btn")).toBeTruthy());
-    ($("#accounts-list .account-pause-btn") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect($("#sources-list .account-pause-btn")).toBeTruthy());
+    ($("#sources-list .account-pause-btn") as HTMLButtonElement).click();
     await vi.waitFor(() =>
       expect(
         tauri.calls.find(
@@ -4145,17 +4148,17 @@ describe("accounts panel", () => {
       ).toBeTruthy(),
     );
     await vi.waitFor(() =>
-      expect($("#accounts-list .account-pause-btn").textContent).toBe("Resume"),
+      expect($("#sources-list .account-pause-btn").textContent).toBe("Resume"),
     );
-    expect($("#accounts-status").textContent).toContain("paused");
+    expect($("#sources-status").textContent).toContain("paused");
   });
 
   it("forget credentials triggers the removal command and re-lists", async () => {
     tauri.handlers.set("accounts_list", () => [IMAP_ACCOUNT]);
     tauri.handlers.set("account_forget_credentials", () => true);
     await boot();
-    await vi.waitFor(() => expect($("#accounts-list .account-forget-btn")).toBeTruthy());
-    ($("#accounts-list .account-forget-btn") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect($("#sources-list .account-forget-btn")).toBeTruthy());
+    ($("#sources-list .account-forget-btn") as HTMLButtonElement).click();
     await vi.waitFor(() =>
       expect(
         tauri.calls.find(
@@ -4166,22 +4169,32 @@ describe("accounts panel", () => {
       ).toBeTruthy(),
     );
     await vi.waitFor(() =>
-      expect($("#accounts-status").textContent).toContain("Forgot stored credentials"),
+      expect($("#sources-status").textContent).toContain("Forgot stored credentials"),
     );
   });
 
-  it("the Accounts navigation destination switches the workspace view", async () => {
+  it("the sources home lists accounts; no Accounts destination exists", async () => {
+    // The handler is installed before boot: the panel renders from the
+    // boot-time refresh (boot refresh unchanged this task).
+    tauri.handlers.set("accounts_list", () => [
+      {
+        source_id: "inst-mail",
+        kind: "imap",
+        label: "imap:imap.gmail.com:993:ana@gmail.com",
+        imap: {
+          host: "imap.gmail.com", port: 993, username: "ana@gmail.com",
+          folders: ["INBOX"], has_password: true, has_oauth: false,
+        },
+        message_count: 10, failed_items: 0, state: "connected", excluded: false,
+        last_attempt_at: null, last_success_at: "2026-01-02 10:00:00",
+        last_error: null, last_error_at: null,
+      },
+    ]);
     await boot();
-    const navBtn = $<HTMLButtonElement>('.nav-view-btn[data-view-target="accounts"]');
-    navBtn.click();
-    expect($("#app").dataset.view).toBe("accounts");
-    // The nav button marks the current page for screen readers.
-    expect(navBtn.getAttribute("aria-current")).toBe("page");
-    // Compact drawer: switching views closes it (the shell contract).
-    $<HTMLButtonElement>("#nav-toggle").click();
-    expect($("#app").dataset.nav).toBe("open");
-    navBtn.click();
-    expect($("#app").dataset.nav).toBe("closed");
+    ($('.nav-view-btn[data-view-target="sources"]') as HTMLElement).click();
+    await vi.waitFor(() => expect($("#sources-list .account-row").textContent).toContain("ana@gmail.com"));
+    expect(win.document.querySelector('.nav-view-btn[data-view-target="accounts"]')).toBe(null);
+    expect(win.document.querySelector("#view-accounts")).toBe(null);
   });
 
   it("Refresh re-lists the accounts", async () => {
@@ -4192,7 +4205,7 @@ describe("accounts panel", () => {
     });
     await boot();
     const before = listed;
-    ($("#accounts-refresh") as HTMLButtonElement).click();
+    ($("#sources-refresh") as HTMLButtonElement).click();
     await vi.waitFor(() => expect(listed).toBeGreaterThan(before));
   });
 });

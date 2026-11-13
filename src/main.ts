@@ -212,9 +212,9 @@ const watchAddButton = document.querySelector<HTMLButtonElement>("#watch-add-btn
 const watchStatus = document.querySelector<HTMLElement>("#watch-status")!;
 const watchFoldersList = document.querySelector<HTMLUListElement>("#watch-folders")!;
 const watchEventsList = document.querySelector<HTMLUListElement>("#watch-events")!;
-const accountsStatus = document.querySelector<HTMLElement>("#accounts-status")!;
-const accountsListEl = document.querySelector<HTMLUListElement>("#accounts-list")!;
-const accountsRefreshButton = document.querySelector<HTMLButtonElement>("#accounts-refresh")!;
+const sourcesStatus = document.querySelector<HTMLElement>("#sources-status")!;
+const sourcesListEl = document.querySelector<HTMLUListElement>("#sources-list")!;
+const sourcesRefreshButton = document.querySelector<HTMLButtonElement>("#sources-refresh")!;
 const jobsStatus = document.querySelector<HTMLElement>("#jobs-status")!;
 const jobsList = document.querySelector<HTMLUListElement>("#jobs-list")!;
 const dashboard = document.querySelector<HTMLElement>("#dashboard")!;
@@ -1794,7 +1794,7 @@ void ipc.onEvent<SyncScheduleView>("scheduler-status", (payload) => {
 });
 
 // ---------------------------------------------------------------------------
-// Accounts (multi-account overview: listing, sync now, pause, forget)
+// Accounts panel on the Sources home (listing, sync now, pause, forget)
 // ---------------------------------------------------------------------------
 
 /** The panel status line: a one-line summary of what is listed. */
@@ -1809,12 +1809,12 @@ function describeAccountsStatus(accounts: AccountView[]): string {
 }
 
 function renderAccountsPanel(accounts: AccountView[]): void {
-  renderAccounts(accountsListEl, accounts, {
+  renderAccounts(sourcesListEl, accounts, {
     onSyncNow: (account) => void syncAccountNow(account),
     onTogglePause: (account) => void toggleAccountPause(account),
     onForget: (account) => void forgetAccountCredentials(account),
   });
-  accountsStatus.textContent = describeAccountsStatus(accounts);
+  sourcesStatus.textContent = describeAccountsStatus(accounts);
 }
 
 async function refreshAccounts(): Promise<void> {
@@ -1825,8 +1825,8 @@ async function refreshAccounts(): Promise<void> {
     renderAccountsPanel(accounts);
   } catch (e) {
     if (accountsGuard.isCurrent(token)) {
-      accountsListEl.replaceChildren();
-      accountsStatus.textContent = `Accounts unavailable: ${e}`;
+      sourcesListEl.replaceChildren();
+      sourcesStatus.textContent = `Accounts unavailable: ${e}`;
     }
   }
 }
@@ -1846,24 +1846,24 @@ function accountSyncOutcomeLine(account: AccountView, outcome: ipc.ImapSyncOutco
 async function syncAccountNow(account: AccountView): Promise<void> {
   const request: SyncNowRequest | null = syncNowRequest(account);
   if (!request) {
-    accountsStatus.textContent = `${accountTitle(account)} is an import — nothing to sync.`;
+    sourcesStatus.textContent = `${accountTitle(account)} is an import — nothing to sync.`;
     return;
   }
-  accountsStatus.textContent = `Syncing ${accountTitle(account)}… (first sync of a large mailbox can take a while)`;
+  sourcesStatus.textContent = `Syncing ${accountTitle(account)}… (first sync of a large mailbox can take a while)`;
   try {
     const outcome = await ipc.syncImap(request);
     await refreshStats();
     void refreshEmbedStatus();
     void refreshDashboard();
     await refreshAccounts();
-    accountsStatus.textContent = accountSyncOutcomeLine(account, outcome);
+    sourcesStatus.textContent = accountSyncOutcomeLine(account, outcome);
   } catch (e) {
     // Classified, actionable text (never a raw errno); the account row
     // itself carries the persisted error state after this refresh. The
     // refresh runs first so re-rendering the panel cannot overwrite the
     // failure line the user must see.
     await refreshAccounts();
-    accountsStatus.textContent = `Sync failed for ${accountTitle(account)}: ${syncFailureText(e)}`;
+    sourcesStatus.textContent = `Sync failed for ${accountTitle(account)}: ${syncFailureText(e)}`;
   }
 }
 
@@ -1874,11 +1874,11 @@ async function toggleAccountPause(account: AccountView): Promise<void> {
   try {
     await ipc.sourceSetExcluded(account.source_id, !account.excluded);
     await refreshAccounts();
-    accountsStatus.textContent = account.excluded
+    sourcesStatus.textContent = account.excluded
       ? `${name} resumed — auto-sync rounds include it again.`
       : `${name} paused — auto-sync skips it; the archive and cursors are kept.`;
   } catch (e) {
-    accountsStatus.textContent = `Could not change ${name}: ${e}`;
+    sourcesStatus.textContent = `Could not change ${name}: ${e}`;
   }
 }
 
@@ -1889,11 +1889,11 @@ async function forgetAccountCredentials(account: AccountView): Promise<void> {
   try {
     const removed = await ipc.accountForgetCredentials(account.source_id);
     await refreshAccounts();
-    accountsStatus.textContent = removed
+    sourcesStatus.textContent = removed
       ? `Forgot stored credentials of ${name} — the archive stays; enter a password or sign in with Google to sync again.`
       : `${name} had no stored credentials.`;
   } catch (e) {
-    accountsStatus.textContent = `Could not forget credentials of ${name}: ${e}`;
+    sourcesStatus.textContent = `Could not forget credentials of ${name}: ${e}`;
   }
 }
 
@@ -2555,7 +2555,7 @@ imapSyncButton.addEventListener("click", () => void syncImap());
 autoSyncToggle.addEventListener("change", onAutoSyncToggle);
 autoSyncInterval.addEventListener("change", onAutoSyncIntervalChange);
 embedButton.addEventListener("click", () => void runEmbedJob());
-accountsRefreshButton.addEventListener("click", () => void refreshAccounts());
+sourcesRefreshButton.addEventListener("click", () => void refreshAccounts());
 sourcesAddButton.addEventListener("click", () => workspace.store.setSourcesSection("add"));
 addChoiceImportButton.addEventListener("click", () => {
   workspace.store.setSourcesSection("import");
