@@ -481,6 +481,19 @@ mod tests {
     }
 
     #[test]
+    fn renamed_eml_file_is_detected_by_content() {
+        let dir = tempdir();
+        let path = dir.path().join("mail.txt");
+        write(
+            &path,
+            "Subject: hello\nFrom: a@b.c\nMessage-ID: <s@x>\n\nSniffed body\n",
+        );
+        let preview = preview_import(&path).expect("sniffed eml preview");
+        assert_eq!(preview.kind, "eml");
+        assert_eq!(preview.messages_seen, 1);
+    }
+
+    #[test]
     fn previews_eml_directory() {
         let dir = tempdir();
         write(

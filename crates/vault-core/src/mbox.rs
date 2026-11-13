@@ -9,9 +9,10 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::bounded::{EntryOutcome, Flow, StreamItem, StreamSource};
+use crate::import_bounds::{expand_zip_bounded, ImportBounds};
 use crate::ingest::{Collected, Source};
 use crate::mail::parse_raw_mail;
 use crate::message::NewMessage;
@@ -186,6 +187,29 @@ impl StreamSource for EmlDirSource {
             return Err(e);
         }
         Ok(())
+    }
+}
+
+/// Resolve a mail-import pick to its streaming source: a directory is an
+/// `.eml` folder, a `.zip` expands through the shared import fence into a
+/// temp tree (the returned guard keeps it alive for the whole run) that
+/// imports as an `.eml` folder, anything else is a single mbox/.eml file.
+pub fn mail_source_for_pick(
+    path: &Path,
+) -> Result<(Box<dyn StreamSource + Send>, Option<tempfile::TempDir>)> {
+    if path.is_dir() {
+        return Ok((Box::new(EmlDirSource::new(path)), None));
+    }
+    if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+    {
+        let extracted = tempfile::tempdir().map_err(Error::from)?;
+        expand_zip_bounded(path, extracted.path(), &ImportBounds::default())?;
+        let root = extracted.path().to_path_buf();
+        Ok((Box::new(EmlDirSource::new(root)), Some(extracted)))
+    } else {
+        Ok((Box::new(MboxSource::new(path)), None))
     }
 }
 
@@ -468,5 +492,86 @@ mod tests {
     fn eml_dir_without_eml_files_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         assert!(EmlDirSource::new(dir.path()).collect().is_err());
+    }
+
+    /// Stream one source to completion, returning `(messages, failures)`.
+    fn count_streamed(source: &(dyn StreamSource + Send)) -> (u64, u64) {
+        let mut messages = 0;
+        let mut failures = 0;
+        source
+            .stream(0, &mut |item| {
+                match item {
+                    StreamItem::Message(_) => messages += 1,
+                    StreamItem::Failed { .. } => failures += 1,
+                }
+                Ok(Flow::Continue)
+            })
+            .unwrap();
+        (messages, failures)
+    }
+
+    #[test]
+    fn mail_source_for_pick_dir_streams_the_eml_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("1.eml"),
+            b"Subject: a\nMessage-ID: <1@x>\n\nA\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("2.eml"),
+            b"Subject: b\nMessage-ID: <2@x>\n\nB\n",
+        )
+        .unwrap();
+        let (source, guard) = mail_source_for_pick(dir.path()).unwrap();
+        assert!(guard.is_none(), "a directory pick needs no temp tree");
+        assert_eq!(count_streamed(source.as_ref()), (2, 0));
+    }
+
+    #[test]
+    fn mail_source_for_pick_zip_expands_and_streams_the_eml_files() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("emls.zip");
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        for (name, bytes) in [
+            (
+                "1.eml",
+                b"Subject: a\nMessage-ID: <1@x>\n\nA\n".as_slice().to_vec(),
+            ),
+            (
+                "2.eml",
+                b"Subject: b\nMessage-ID: <2@x>\n\nB\n".as_slice().to_vec(),
+            ),
+        ] {
+            zip.start_file(name, zip::write::FileOptions::<()>::default())
+                .unwrap();
+            zip.write_all(&bytes).unwrap();
+        }
+        zip.finish().unwrap();
+
+        let (source, guard) = mail_source_for_pick(&zip_path).unwrap();
+        let extracted = guard.expect("a .zip pick returns its temp-tree guard");
+        assert_eq!(count_streamed(source.as_ref()), (2, 0));
+        // The guard kept the extracted tree alive for the whole stream.
+        assert!(extracted.path().join("2.eml").is_file());
+    }
+
+    #[test]
+    fn mail_source_for_pick_mbox_file_streams_the_mbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive.mbox");
+        std::fs::write(
+            &path,
+            b"From a@example.com Sun Nov  1 10:00:00 2026\n\
+              From: A <a@example.com>\nSubject: one\nMessage-ID: <m1@x>\n\nBody one.\n\
+              From b@example.com Sun Nov  1 11:00:00 2026\n\
+              From: B <b@example.com>\nSubject: two\nMessage-ID: <m2@x>\n\nBody two.\n",
+        )
+        .unwrap();
+        let (source, guard) = mail_source_for_pick(&path).unwrap();
+        assert!(guard.is_none(), "a plain file pick needs no temp tree");
+        assert_eq!(count_streamed(source.as_ref()), (2, 0));
     }
 }
