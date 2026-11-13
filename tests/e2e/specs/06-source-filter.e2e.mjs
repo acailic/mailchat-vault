@@ -24,9 +24,17 @@ export async function run(ctx) {
     );
     const demoCount = Number(/demo: (\d+)\)$/.exec(statsText)[1]);
 
-    // Chips exist for both sources, none selected initially. Chips re-render
-    // on every toggle, so always re-query instead of holding references.
-    const chip = (source) => browser.$(`#source-chips button.chip[data-source="${source}"]`);
+    // Chips key on stable instance ids (`data-source` holds the id, the
+    // text still reads `label (count)`), so resolve each label to its id
+    // through the live `sources_list` instead of assuming label-keyed
+    // chips. Chips re-render on every toggle, so always re-query instead
+    // of holding references.
+    const instances = await ui.invokeCommand(browser, "sources_list");
+    const idByLabel = new Map(instances.map((s) => [s.label, s.id]));
+    assert.ok(idByLabel.get("mbox"), "mbox instance listed with a stable id");
+    assert.ok(idByLabel.get("demo"), "demo instance listed with a stable id");
+    const chip = (source) =>
+      browser.$(`#source-chips button.chip[data-source="${idByLabel.get(source)}"]`);
     assert.ok(await (await chip("mbox")).isExisting(), "mbox chip rendered");
     assert.ok(await (await chip("demo")).isExisting(), "demo chip rendered");
     assert.includes(await (await chip("mbox")).getText(), "mbox (8)", "chip shows source and count");

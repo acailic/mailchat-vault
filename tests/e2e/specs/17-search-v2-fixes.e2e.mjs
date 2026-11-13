@@ -5,11 +5,11 @@
 //      rows + the anchor; loading the 7-row second page must splice it
 //      at the front oldest -> newest (the pre-fix unshift loop rendered
 //      the page reversed at the top).
-//   2. Two source instances sharing one display label: the shared chip
-//      expands to one applied chip per matching instance id, and
-//      removing one applied chip clears every id the label expanded to
-//      (the pre-fix sibling removed a single id and the filter silently
-//      survived).
+//   2. Two source instances sharing one display label (TLS twins): each
+//      chip selects only its own stable instance id — exactly one applied
+//      chip, the browse scoped to that instance's messages alone (never
+//      the label's union) — and removing it returns to the unfiltered
+//      browse. There is no label→ids expansion anywhere.
 //   3. A selection built across result pages: the button counts checks
 //      from both pages, the backend writes every checked id, and
 //      reading + Back restores the same page, count, selection, and
@@ -196,8 +196,8 @@ export async function run(ctx) {
   });
 
   // ---------------------------------------------------------------------
-  // 2. Colliding display labels: union at filter time, clear-all at
-  //    removal time
+  // 2. Colliding display labels (TLS twins): per-id independence — a
+  //    chip selects only its own instance, removal unscopes
   // ---------------------------------------------------------------------
   await withSession({}, async (browser, { dataDir }) => {
     await ui.waitForApp(browser);
@@ -210,7 +210,10 @@ export async function run(ctx) {
     // same host:port:user reachable over two TLS modes - display_label()
     // omits the TLS mode, connector_key() carries it), each with its own
     // archived messages so the chips render and the counts prove which
-    // instances the filter matched.
+    // instance the filter matched. The twins' chip labels are
+    // disambiguated (`label · username · host` and `label · username ·
+    // host · imap 2`), so every assertion goes through the stable
+    // `data-source` ids and the counts — never the label text.
     const label = "imap:127.0.0.1:993:alice";
     const mkConfig = (tls) =>
       JSON.stringify({
@@ -246,47 +249,86 @@ export async function run(ctx) {
     await sqlite.query(db, seedMessage("inst-b", "conv-b", "b1", "beta msg", "02"));
     await sqlite.query(db, seedMessage("inst-b", "conv-b", "b1b", "beta msg", "03"));
 
+    // Resolve both twins' stable ids: sources_list carries the seeded
+    // config, whose tls_mode tells the instances apart (both share the
+    // label). Each twin holds exactly 2 messages; the label's union is 4.
+    const listed = await invoke(browser, "sources_list");
+    assert.ok(listed.ok, `sources_list succeeded: ${listed.error ?? ""}`);
+    const idByTls = new Map(
+      listed.value.map((s) => {
+        try {
+          return [JSON.parse(s.config_json).tls_mode, s.id];
+        } catch {
+          return [null, null];
+        }
+      }),
+    );
+    const idA = idByTls.get("implicit-tls");
+    const idB = idByTls.get("starttls");
+    assert.ok(idA && idB, "both twin instances listed with distinct stable ids");
+    assert.notEqual(idA, idB, "the twins resolve to distinct ids");
+
     // Boot the chips from the freshly seeded rows.
     await browser.execute(() => location.reload());
     await ui.waitForApp(browser);
 
-    // One sidebar chip per message-bearing instance; both share the label.
-    const sharedChips = await browser.$$(".chip[data-source='imap:127.0.0.1:993:alice']");
-    assert.equal(sharedChips.length, 2, "two sidebar chips render for the shared label");
+    const chip = (id) => browser.$(`#source-chips button.chip[data-source="${id}"]`);
+    const appliedCount = async () =>
+      (await browser.$$("#active-filter-chips .filter-chip")).length;
 
-    // Clicking the shared chip expands the label to BOTH instance ids:
-    // the filtered browse matches both instances' messages and one
-    // applied chip per id renders.
-    await sharedChips[0].click();
-    await browser.waitUntil(
-      async () => (await browser.$$("#active-filter-chips .filter-chip")).length === 2,
-      { timeoutMsg: "the shared label did not expand to two applied chips" },
-    );
-    const appliedChips = await browser.$$("#active-filter-chips .filter-chip");
-    for (const chip of appliedChips) {
-      assert.includes(await chip.getText(), label, "the applied chip carries the shared label");
-    }
-    const statusUnion = await settle(browser, ui);
+    // One sidebar chip per message-bearing instance, keyed by id.
+    assert.ok(await (await chip(idA)).isExisting(), "twin A's chip rendered");
+    assert.ok(await (await chip(idB)).isExisting(), "twin B's chip rendered");
+
+    // Clicking twin A's chip selects ONLY A's id: one applied chip, the
+    // browse scoped to A's own 2 messages — not the 4-message union the
+    // removed label-expansion produced.
+    await (await chip(idA)).click();
+    await browser.waitUntil(async () => (await appliedCount()) === 1, {
+      timeoutMsg: "selecting one twin must apply exactly one filter chip",
+    });
+    let status = await settle(browser, ui);
     await scrollAndShoot(browser, "17-colliding-label-chips.png");
     assert.equal(
-      ui.totalFromStatus(statusUnion, "filtered"),
-      4,
-      "the chip matches every instance carrying the label (4 messages across both)",
+      ui.totalFromStatus(status, "filtered"),
+      2,
+      "twin A's chip scopes the browse to its own instance (2 messages, not the label union of 4)",
+    );
+    assert.equal(
+      await (await chip(idA)).getAttribute("aria-pressed"),
+      "true",
+      "twin A's chip is pressed",
+    );
+    assert.equal(
+      await (await chip(idB)).getAttribute("aria-pressed"),
+      "false",
+      "twin B's chip stays unpressed (no label expansion)",
     );
 
-    // Removing one applied chip must clear every id the label expanded
-    // to - the pre-fix sibling removed a single id, writeFilters mapped
-    // the surviving id back to the same label, runSearch re-expanded it,
-    // and both chips silently re-rendered with the filter still applied.
-    await appliedChips[0].click();
-    await browser.waitUntil(
-      async () => (await browser.$$("#active-filter-chips .filter-chip")).length === 0,
-      { timeoutMsg: "removing the chip left applied filter chips behind" },
-    );
+    // Removing the single applied chip removes exactly that id: back to
+    // the unscoped browse over both instances' messages.
+    const applied = (await browser.$$("#active-filter-chips .filter-chip"))[0];
+    await applied.click();
+    await browser.waitUntil(async () => (await appliedCount()) === 0, {
+      timeoutMsg: "removing the chip left an applied filter behind",
+    });
     await ui.waitForText(browser, "#status", (text) => /^1–4 of 4$/.test(text), {
       timeoutMsg: "the filter did not reset to the unfiltered browse",
     });
-    log("    colliding-label chip: matched 4 messages across both ids, removal cleared both");
+
+    // Clicking twin B scopes to B alone — the two instances are fully
+    // independent selections.
+    await (await chip(idB)).click();
+    await browser.waitUntil(async () => (await appliedCount()) === 1, {
+      timeoutMsg: "selecting twin B must apply exactly one filter chip",
+    });
+    status = await settle(browser, ui);
+    assert.equal(
+      ui.totalFromStatus(status, "filtered"),
+      2,
+      "twin B's chip scopes the browse to B's instance alone",
+    );
+    log("    twin chips: each id scopes alone (2 of 4), removal unscoped — no label expansion");
   });
 
   // ---------------------------------------------------------------------

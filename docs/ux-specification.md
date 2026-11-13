@@ -29,8 +29,8 @@ From 800px to 1099px show navigation and results; opening a message replaces the
 
 ### Navigation rules
 
-- All messages browses newest first, including on first launch with an existing archive. An empty vault shows setup guidance instead.
-- Selecting a source scopes the current search and resets pagination. It does not erase typed search text. “All messages” clears source scope while retaining other filters.
+- Archive browses newest first, including on first launch with an existing archive. An empty vault shows setup guidance instead.
+- Selecting a source scopes the current search and resets pagination. It does not erase typed search text. Archive clears source scope while retaining other filters.
 - Source labels are user-facing names, not provider namespace strings. A status indicator has text such as “Syncing”, “Needs sign-in”, or “Last synced today at 09:20”. File imports show “Last imported”.
 - Add source opens a dedicated setup view with “Import files” and “Connect email”. Activity lists jobs; Settings contains General, AI assistance, and Storage & backup; source management lives in the Sources view.
 - Closing setup returns to the previous workspace. Once a job starts it continues when navigating away; its progress remains in Activity.
