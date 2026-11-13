@@ -22,6 +22,37 @@
  * This guard applies to every view's .row rules at once. */
 [hidden] { display: none !important; }
 
+/* --- Icon system: sprite symbols rendered via <use href="#i-…"> -------- */
+
+.icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  vertical-align: -2px; /* sits on the text baseline when inline */
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.icon-lg {
+  width: 20px;
+  height: 20px;
+}
+.icon-spin {
+  animation: icon-spin 0.9s linear infinite;
+}
+@keyframes icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .icon-spin {
+    animation: none;
+  }
+}
+
 html, body { height: 100%; }
 
 body {
