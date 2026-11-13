@@ -26,6 +26,7 @@ use crate::bounded::{Flow, StreamItem, StreamSource};
 use crate::chat_export::{self, ChatFormat};
 use crate::import_bounds::{expand_zip_bounded, walk_bounded, ImportBounds};
 use crate::mbox::{EmlDirSource, MboxSource, MBOX_SOURCE};
+use crate::messenger::messenger_export_root;
 use crate::{Error, Result};
 
 /// How many items (messages + parse failures) one preview scans before
@@ -57,7 +58,7 @@ pub struct ImportPreviewSample {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportPreview {
     /// Machine-readable format id: `mbox`, `eml`, `whatsapp`,
-    /// `telegram`, `signal`, or `discord`.
+    /// `telegram`, `signal`, `discord`, or `messenger`.
     pub kind: String,
     /// The dedup namespace the import will store under (`source.name()`).
     pub source: String,
@@ -77,8 +78,9 @@ pub struct ImportPreview {
     /// Scanned messages that reference at least one media file.
     pub media_referenced: u64,
     /// Referenced media files provably absent from the export (Telegram
-    /// references resolve exactly, so absence is certain; WhatsApp name
-    /// matching is fuzzier, so absence is not claimed there).
+    /// and Messenger tree references resolve exactly, so absence is
+    /// certain; WhatsApp name matching is fuzzier, so absence is not
+    /// claimed there).
     pub media_missing: u64,
     /// Human-readable caveats ("scan stopped at 500 items…").
     pub warnings: Vec<String>,
@@ -90,7 +92,9 @@ struct PreviewSource {
     source: String,
     /// The streaming source to scan.
     stream: Box<dyn StreamSource + Send>,
-    /// Root media references resolve against (None for mbox).
+    /// Root media references resolve against (None for mbox/eml, and for
+    /// a lone Messenger file, which says nothing about the tree around
+    /// it — the import extracts no media for that pick either).
     export_root: Option<PathBuf>,
     /// Whether the input is a whole tree (directory or expanded `.zip`)
     /// whose size is measured by a bounded walk instead of one file.
@@ -140,15 +144,23 @@ fn format_name(format: ChatFormat) -> &'static str {
 /// Resolve a chat-export source from a file path (bare pick).
 fn resolve_chat_file(file: &Path) -> Result<PreviewSource> {
     let (format, file, stream) = chat_export::resolve_stream_source(file)?;
-    let export_root = file
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
+    let export_root = if format == ChatFormat::Messenger {
+        // A lone Messenger file says nothing about the tree around it —
+        // the import runs no media pass for it either, so the preview
+        // counts references without ever claiming absence.
+        None
+    } else {
+        Some(
+            file.parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from(".")),
+        )
+    };
     Ok(PreviewSource {
         kind: format_name(format).into(),
         source: stream.name().to_string(),
         stream,
-        export_root: Some(export_root),
+        export_root,
         tree_input: false,
         size_root: file.to_path_buf(),
     })
@@ -161,15 +173,24 @@ fn resolve_chat_file(file: &Path) -> Result<PreviewSource> {
 fn resolve_dir_source(root: &Path, display: &Path) -> Result<PreviewSource> {
     match chat_export::resolve_stream_source(root) {
         Ok((format, file, stream)) => {
-            let export_root = file
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| root.to_path_buf());
+            let export_root = if format == ChatFormat::Messenger {
+                // DYI uris are `messages/…`-rooted: they resolve at the
+                // export root whatever tree level was picked, the same
+                // root the import's media pass resolves against
+                // ([`messenger_export_root`]).
+                Some(messenger_export_root(&file))
+            } else {
+                Some(
+                    file.parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| root.to_path_buf()),
+                )
+            };
             Ok(PreviewSource {
                 kind: format_name(format).into(),
                 source: stream.name().to_string(),
                 stream,
-                export_root: Some(export_root),
+                export_root,
                 tree_input: true,
                 size_root: root.to_path_buf(),
             })
@@ -299,25 +320,60 @@ fn telegram_ref_paths(obj: &Map<String, Value>) -> Vec<&str> {
     refs
 }
 
+/// The explicit media references of one Messenger (DYI) message object:
+/// the `uri` of each item in the five media arrays plus the single
+/// `sticker` object — the same fields [`crate::media::messenger_refs`]
+/// reads — every uri a path relative to the DYI export root.
+fn messenger_ref_paths(obj: &Map<String, Value>) -> Vec<&str> {
+    let mut refs = Vec::new();
+    for field in ["photos", "videos", "audio_files", "files", "gifs"] {
+        if let Some(Value::Array(items)) = obj.get(field) {
+            for item in items {
+                if let Some(uri) = item.get("uri").and_then(Value::as_str) {
+                    if !uri.is_empty() {
+                        refs.push(uri);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(uri) = obj
+        .get("sticker")
+        .and_then(Value::as_object)
+        .and_then(|s| s.get("uri"))
+        .and_then(Value::as_str)
+        .filter(|u| !u.is_empty())
+    {
+        refs.push(uri);
+    }
+    refs
+}
+
 /// Media presence of one scanned message: `(references the message
 /// carries, files provably absent from the export)`.
 ///
-/// Telegram references resolve exactly under the export root, so
-/// absence is provable; WhatsApp attachment names match fuzzily at
-/// import time (recursive walk), so a reference is reported but absence
-/// is never claimed.
-fn media_refs_of(raw_json: &str, export_root: Option<&Path>) -> (u64, u64) {
+/// Telegram and Messenger references resolve exactly under the export
+/// root, so absence is provable; WhatsApp attachment names match fuzzily
+/// at import time (recursive walk), so a reference is reported but
+/// absence is never claimed.
+fn media_refs_of(kind: &str, raw_json: &str, export_root: Option<&Path>) -> (u64, u64) {
     let Ok(value) = serde_json::from_str::<Value>(raw_json) else {
         return (0, 0);
     };
     let Some(obj) = value.as_object() else {
         return (0, 0);
     };
-    let telegram = telegram_ref_paths(obj);
-    if !telegram.is_empty() {
+    // The exact-resolution kinds, selected by the preview's format: each
+    // counts only its own reference shapes.
+    let exact: Vec<&str> = match kind {
+        "telegram" => telegram_ref_paths(obj),
+        "messenger" => messenger_ref_paths(obj),
+        _ => Vec::new(),
+    };
+    if !exact.is_empty() {
         let missing = export_root
             .map(|root| {
-                telegram
+                exact
                     .iter()
                     .filter(|rel| {
                         crate::import_bounds::safe_child(root, rel).map(|p| p.is_file())
@@ -328,11 +384,12 @@ fn media_refs_of(raw_json: &str, export_root: Option<&Path>) -> (u64, u64) {
             .unwrap_or(0);
         return (1, missing);
     }
-    let whatsapp = obj
-        .get("attachment")
-        .and_then(|a| a.get("name"))
-        .and_then(Value::as_str)
-        .is_some_and(|n| !n.is_empty());
+    let whatsapp = kind == "whatsapp"
+        && obj
+            .get("attachment")
+            .and_then(|a| a.get("name"))
+            .and_then(Value::as_str)
+            .is_some_and(|n| !n.is_empty());
     if whatsapp {
         return (1, 0);
     }
@@ -356,8 +413,11 @@ pub fn preview_import(picked: &Path) -> Result<ImportPreview> {
             match item {
                 StreamItem::Message(msg) => {
                     messages_seen += 1;
-                    let (refs, missing) =
-                        media_refs_of(&msg.raw_json, resolved.export_root.as_deref());
+                    let (refs, missing) = media_refs_of(
+                        &resolved.kind,
+                        &msg.raw_json,
+                        resolved.export_root.as_deref(),
+                    );
                     media_referenced += refs;
                     media_missing += missing;
                     if samples.len() < SAMPLE_CAP {
@@ -589,6 +649,70 @@ mod tests {
         let preview = preview_import(&messages).expect("discord dir preview");
         assert_eq!(preview.kind, "discord");
         assert_eq!(preview.messages_seen, 1);
+    }
+
+    #[test]
+    fn previews_messenger_tree() {
+        let dir = tempdir();
+        let thread = dir.path().join("messages/inbox/ana_1111");
+        std::fs::create_dir_all(&thread).unwrap();
+        std::fs::write(
+            thread.join("message_1.json"),
+            r#"{"participants": [{"name": "Ana"}], "title": "Ana", "thread_path": "inbox/ana_1111",
+                "messages": [{"sender_name": "Ana", "timestamp_ms": 1762981200000, "content": "zdravo"}]}"#,
+        )
+        .unwrap();
+        let preview = preview_import(dir.path()).expect("messenger preview");
+        assert_eq!(preview.kind, "messenger");
+        assert_eq!(preview.source, "messenger");
+        assert_eq!(preview.messages_seen, 1);
+    }
+
+    #[test]
+    fn previews_messenger_tree_media_refs() {
+        let dir = tempdir();
+        let thread = dir.path().join("messages/inbox/ana_1111");
+        std::fs::create_dir_all(thread.join("photos")).unwrap();
+        std::fs::write(thread.join("photos/there.jpg"), "jpegbytes").unwrap();
+        write(
+            &thread.join("message_1.json"),
+            r#"{"participants": [{"name": "Ana"}], "title": "Ana", "thread_path": "inbox/ana_1111",
+                "messages": [
+                    {"sender_name": "Ana", "timestamp_ms": 1762981200000, "content": "p",
+                     "photos": [{"uri": "messages/inbox/ana_1111/photos/there.jpg"}]},
+                    {"sender_name": "Ana", "timestamp_ms": 1762981260000, "content": "q",
+                     "sticker": {"uri": "messages/inbox/ana_1111/stickers/gone.webp"}}
+                ]}"#,
+        );
+        let preview = preview_import(dir.path()).expect("messenger media preview");
+        assert_eq!(preview.kind, "messenger");
+        assert_eq!(preview.messages_seen, 2);
+        assert_eq!(preview.media_referenced, 2);
+        assert_eq!(
+            preview.media_missing, 1,
+            "uris resolve at the DYI root: the sticker is absent, the photo is not"
+        );
+    }
+
+    #[test]
+    fn messenger_single_file_pick_claims_no_missing_media() {
+        let dir = tempdir();
+        let thread = dir.path().join("messages/inbox/ana_1111");
+        std::fs::create_dir_all(&thread).unwrap();
+        write(
+            &thread.join("message_1.json"),
+            r#"{"participants": [{"name": "Ana"}], "title": "Ana", "thread_path": "inbox/ana_1111",
+                "messages": [{"sender_name": "Ana", "timestamp_ms": 1762981200000, "content": "p",
+                    "photos": [{"uri": "messages/inbox/ana_1111/photos/absent.jpg"}]}]}"#,
+        );
+        let preview =
+            preview_import(&thread.join("message_1.json")).expect("messenger file preview");
+        assert_eq!(preview.kind, "messenger");
+        assert_eq!(preview.media_referenced, 1);
+        assert_eq!(
+            preview.media_missing, 0,
+            "a lone file says nothing about the tree around it — no absence claim"
+        );
     }
 
     #[test]

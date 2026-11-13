@@ -52,6 +52,8 @@ describe("formatLabel / formatHint", () => {
     expect(formatHint("eml")).toContain("Outlook");
     expect(formatLabel("whatsapp")).toBe("WhatsApp export");
     expect(formatHint("telegram")).toContain("Telegram Desktop");
+    expect(formatLabel("messenger")).toBe("Messenger (Facebook) export");
+    expect(formatHint("messenger")).toContain("Download profile information");
     expect(formatHint("nope")).toBeNull();
   });
 });

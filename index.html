@@ -246,14 +246,15 @@
               </div>
               <div class="row">
                 <button id="import-pick-btn" class="primary" type="button">Import file…</button>
-                <button id="import-folder-btn" type="button" title="Import a Telegram export folder, a Discord Data Package, or a folder holding one chat export">Import folder…</button>
+                <button id="import-folder-btn" type="button" title="Import a Telegram export folder, a Discord Data Package, a Messenger export, a folder of .eml files, or a folder holding one chat export">Import folder…</button>
                 <label class="meta" title="Copy media files from the export into the vault's media store (hash-named, deduplicated)">
                   <input id="chat-media" type="checkbox" checked /> extract media
                 </label>
               </div>
               <p class="meta" id="import-help" style="margin: 6px 0 0">
                 An .mbox email archive, a bare .eml (or a folder of them), a WhatsApp .txt,
-                a Telegram result.json, a Signal conversation .json, a Discord messages.json —
+                a Telegram result.json, a Signal conversation .json, a Discord messages.json,
+                a Facebook Messenger message_*.json (or its export folder) —
                 or a .zip of any of these. You will see a preview before anything is stored;
                 re-importing never duplicates.
               </p>

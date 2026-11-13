@@ -31,6 +31,8 @@ export function formatLabel(kind: string): string {
       return "Signal conversation export";
     case "discord":
       return "Discord Data Package";
+    case "messenger":
+      return "Messenger (Facebook) export";
     default:
       return kind;
   }
@@ -51,6 +53,8 @@ export function formatHint(kind: string): string | null {
       return "sigtop export-messages -f json (Signal Desktop keeps no built-in JSON export).";
     case "discord":
       return "Discord → Settings → Privacy → Request Data (the package arrives by email).";
+    case "messenger":
+      return "Facebook → Settings → Your Facebook information → Download profile information — set Format to JSON; import messages/ or the whole export.";
     default:
       return null;
   }
