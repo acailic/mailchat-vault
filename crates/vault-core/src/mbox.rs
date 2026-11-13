@@ -4,6 +4,8 @@
 //! Supports the common `mboxo`/`mboxrd` shape: messages separated by a line
 //! starting with `From ` (sender + date), with bodies escaping embedded
 //! `From ` lines as `>From ` (the escaped form does not split a message).
+//! A file that does not lead with `From ` is a bare RFC 5322 message
+//! (`.eml`): the whole file is one message.
 
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -90,11 +92,14 @@ pub fn parse_mbox(bytes: &[u8], chat_id: &str) -> Result<Collected> {
 }
 
 /// The shared streaming engine behind the whole-file parser and the
-/// streaming source: `From ` separator lines split the stream into
-/// messages (escaped `>From ` lines do not), one message buffered at a
-/// time. Parts before the first separator are dropped, and a separator
-/// line with no content is skipped silently — exactly the whole-file
-/// splitter's semantics, item for item.
+/// streaming source. A file leading with a `From ` separator line is
+/// mbox: separator lines split the stream into messages (escaped
+/// `>From ` lines do not), one message buffered at a time; parts
+/// before the first separator and separator lines with no content are
+/// skipped silently — exactly the whole-file splitter's semantics,
+/// item for item. Any other file is a bare RFC 5322 message (.eml):
+/// the whole file is one message, `From ` lines in its body included
+/// as body text, not separators.
 pub fn stream_mbox<R: BufRead>(
     reader: R,
     chat_id: &str,
@@ -108,15 +113,59 @@ pub fn stream_mbox<R: BufRead>(
     let mut failure: Option<crate::Error> = None;
     let mut stopped = false;
     let mut line = Vec::new();
+    // Pre-read the first line: a file that does not lead with a `From `
+    // separator line is a bare RFC 5322 message (.eml) — the whole file
+    // is one message, and `From ` lines inside its body are body text,
+    // not separators (legal unescaped in .eml; an .mbox always leads
+    // with `From `).
+    let mut first: Vec<u8> = Vec::new();
+    if reader.read_until(b'\n', &mut first)? == 0 {
+        return Ok(()); // empty file: nothing to import
+    }
+    if !first.starts_with(b"From ") {
+        let mut whole = first;
+        loop {
+            line.clear();
+            if reader.read_until(b'\n', &mut line)? == 0 {
+                break;
+            }
+            whole.extend_from_slice(&line);
+        }
+        offer_part(
+            &whole,
+            chat_id,
+            &mut skip,
+            emit,
+            &mut failure,
+            &mut stopped,
+            false,
+        );
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        return Ok(());
+    }
+    let mut pending = Some(first);
     loop {
         line.clear();
-        let read = reader.read_until(b'\n', &mut line)?;
-        if read == 0 {
+        if let Some(first) = pending.take() {
+            line = first;
+        } else if reader.read_until(b'\n', &mut line)? == 0 {
             break;
         }
         let at_line_start = part.is_empty() || *part.last().unwrap() == b'\n';
         if at_line_start && line.starts_with(b"From ") {
-            if started && !offer_part(&part, chat_id, &mut skip, emit, &mut failure, &mut stopped) {
+            if started
+                && !offer_part(
+                    &part,
+                    chat_id,
+                    &mut skip,
+                    emit,
+                    &mut failure,
+                    &mut stopped,
+                    true,
+                )
+            {
                 break;
             }
             started = true;
@@ -130,7 +179,15 @@ pub fn stream_mbox<R: BufRead>(
         // whole-file splitter never emitted them either).
     }
     if started && failure.is_none() && !stopped {
-        offer_part(&part, chat_id, &mut skip, emit, &mut failure, &mut stopped);
+        offer_part(
+            &part,
+            chat_id,
+            &mut skip,
+            emit,
+            &mut failure,
+            &mut stopped,
+            true,
+        );
     }
     if let Some(e) = failure {
         return Err(e);
@@ -147,11 +204,17 @@ fn offer_part(
     emit: &mut dyn FnMut(StreamItem) -> Result<Flow>,
     failure: &mut Option<crate::Error>,
     stopped: &mut bool,
+    separator: bool,
 ) -> bool {
-    // Drop the leading "From sender date" separator line before parsing.
-    let raw = match part.iter().position(|&b| b == b'\n') {
-        Some(nl) => &part[nl + 1..],
-        None => return true, // separator line with no content: skipped
+    // A `From sender date` separator line heads the part; drop it. A
+    // bare .eml part (no separator) parses whole.
+    let raw = if separator {
+        match part.iter().position(|&b| b == b'\n') {
+            Some(nl) => &part[nl + 1..],
+            None => return true, // separator line with no content: skipped
+        }
+    } else {
+        part
     };
     if raw.is_empty() {
         return true;
@@ -218,5 +281,28 @@ mod tests {
         assert_eq!(collected.failed, 0);
         assert_eq!(collected.messages.len(), 1);
         assert_eq!(collected.messages[0].body, "hi");
+    }
+
+    const EML: &[u8] = b"From: ana@example.com\nTo: bane@example.com\nSubject: Zdravo\nMessage-ID: <eml-1@example.com>\nDate: Fri, 13 Nov 2026 10:00:00 +0100\n\nPozdrav iz .eml datoteke.\n";
+
+    #[test]
+    fn bare_rfc822_message_parses_as_one_email() {
+        // No leading `From ` separator: the file is a single .eml.
+        let collected = parse_mbox(EML, "outlook").unwrap();
+        assert_eq!(collected.failed, 0);
+        assert_eq!(collected.messages.len(), 1);
+        assert!(collected.messages[0].body.contains("Pozdrav iz"));
+        assert!(collected.messages[0].author.contains("ana@example.com"));
+    }
+
+    #[test]
+    fn unescaped_from_line_in_bare_message_is_body_text() {
+        // In .eml a body line may start with `From ` — it must not split
+        // the message.
+        let mail = b"Subject: eml\nMessage-ID: <e2@example.com>\n\nline one\nFrom the desk of Ana\nline two\n";
+        let collected = parse_mbox(mail, "f").unwrap();
+        assert_eq!(collected.messages.len(), 1);
+        assert!(collected.messages[0].body.contains("From the desk of Ana"));
+        assert!(collected.messages[0].body.contains("line two"));
     }
 }
