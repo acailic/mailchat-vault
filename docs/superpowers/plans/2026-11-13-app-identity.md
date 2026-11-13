@@ -640,7 +640,7 @@ Run:
 convert src-tauri/icons/source.png -resize 3x3! -depth 8 txt: | head -15
 ```
 
-Read the output: the dominant dark color is the navy background (expected near `#1B2E4A`), the bright cyan/teal is the bubble (expected near `#3FB8AF`). Record both hex values; use them verbatim in Steps 2–3. If sampling is ambiguous, use `#1B2E4A` (navy) and `#3FB8AF` (teal) — they match the shipped art.
+Read the output: the dominant dark color is the navy background (expected near `#1B2E4A`), the bright cyan/teal is the bubble (expected near `#3FB8AF`). Record both hex values; use them verbatim in Steps 2–3. If sampling is ambiguous, use `#2A3876` (navy) and `#24C4AA` (teal) — they match the shipped art.
 
 - [ ] **Step 2: Create `public/favicon.svg`**
 
