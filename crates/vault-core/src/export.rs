@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::message::Message;
 use crate::query::SearchQuery;
+use crate::search2::SearchArchiveRequest;
 use crate::storage::Storage;
 use crate::Result;
 
@@ -93,6 +94,19 @@ pub fn export_search<W: Write>(
 ) -> Result<ExportSummary> {
     let mut writer = Writer::new(format, out)?;
     storage.search_export_stream(query, &mut |m| writer.write_message(m))?;
+    writer.finish()
+}
+
+/// Export all v2 search matches using their source-instance scope and
+/// complete filter/order contract. Pagination is intentionally ignored.
+pub fn export_search_v2<W: Write>(
+    storage: &Storage,
+    request: &SearchArchiveRequest,
+    format: ExportFormat,
+    out: W,
+) -> Result<ExportSummary> {
+    let mut writer = Writer::new(format, out)?;
+    storage.search_archive_export_stream(request, &mut |m| writer.write_message(m))?;
     writer.finish()
 }
 

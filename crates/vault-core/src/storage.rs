@@ -3204,7 +3204,7 @@ const TIME_CONFIDENCE: [&str; 5] = [
     "missing",
 ];
 
-fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
+pub(crate) fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
     Ok(Message {
         id: row.get(0)?,
         source: row.get(1)?,

@@ -18,6 +18,8 @@ import { iconEl, type IconName } from "./icons";
 export interface JobsTrackerState {
   /** Largest applied event seq (0 = nothing applied yet). */
   cursor: number;
+  /** Newest failure observed through either live events or recovery. */
+  latestFailureSeq: number;
   /** Records by id, insertion-ordered (newest submitted last). */
   records: Map<number, JobRecord>;
   /** True when an event revealed a gap the tracker cannot close alone —
@@ -26,7 +28,7 @@ export interface JobsTrackerState {
 }
 
 export function newJobsTracker(): JobsTrackerState {
-  return { cursor: 0, records: new Map(), needsPoll: true };
+  return { cursor: 0, latestFailureSeq: 0, records: new Map(), needsPoll: true };
 }
 
 /** Apply one live event (in arrival order). Sets `needsPoll` when the
@@ -41,6 +43,12 @@ export function applyJobEvent(tracker: JobsTrackerState, event: JobEvent): void 
 /** Apply a polling page. With `trimmed`, timeline reconstruction is
  * impossible — the snapshot replaces the record map wholesale. */
 export function applyJobsPage(tracker: JobsTrackerState, page: JobEventsPage): void {
+  // A gap can put the cursor beyond a missed failure; a trimmed ring can
+  // omit its event entirely. The snapshot still tells us it is newly failed.
+  const recoveredFailure = page.jobs.some(
+    (record) => record.state.state === "failed" &&
+      tracker.records.get(record.id)?.state.state !== "failed",
+  );
   if (page.trimmed) {
     tracker.records = new Map(page.jobs.map((r) => [r.id, r]));
   } else {
@@ -53,6 +61,9 @@ export function applyJobsPage(tracker: JobsTrackerState, page: JobEventsPage): v
     }
   }
   tracker.cursor = Math.max(tracker.cursor, page.latest_seq);
+  if (recoveredFailure) {
+    tracker.latestFailureSeq = Math.max(tracker.latestFailureSeq, page.latest_seq);
+  }
   tracker.needsPoll = false;
 }
 
@@ -90,6 +101,7 @@ function applyDetail(tracker: JobsTrackerState, event: JobEvent): void {
     case "failed":
       base.state = { state: "failed", error: event.error };
       base.finished_at = event.at;
+      tracker.latestFailureSeq = Math.max(tracker.latestFailureSeq, event.seq);
       break;
     case "cancelled":
       base.state = { state: "cancelled" };
