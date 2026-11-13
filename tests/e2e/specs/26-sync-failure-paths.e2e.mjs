@@ -1,7 +1,7 @@
 // Path: the first-sync failure loop at the live product surface (cold
 // review §2.2 / top-5 #5) — "najfragilniji trenutak prvog kontakta sa
-// live-mail putem". Every step drives the real app UI (form → Sync →
-// accounts panel → restart) and asserts the honest outcomes:
+// live-mail putem". Every step drives the real app UI (email form →
+// Sync → sources list → restart) and asserts the honest outcomes:
 //
 //   - REFUSED (dead local port): the failure line is the classified,
 //     actionable text — never a raw `Connection refused (os error 111)`;
@@ -85,7 +85,7 @@ export async function run(ctx) {
       firstDataDir = dataDir;
       const db = vaultDbPath(dataDir);
       await ui.waitForApp(browser);
-      await ui.openView(browser, "sources");
+      await ui.openSourcesSection(browser, "email");
 
       // -----------------------------------------------------------------
       // 0. The honest credential rule is stated up front, before any
@@ -131,30 +131,36 @@ export async function run(ctx) {
       );
       await saveScreenshot(browser, "26-refused-classified.png");
 
-      // The account row is there WITH the durable error state — the
-      // first-sync failure loop used to leave a stale "No accounts yet".
-      await ui.openView(browser, "accounts");
+      // The source row is there WITH the durable error state — the
+      // first-sync failure loop used to leave a stale empty list. Back
+      // returns from the email form to the sources home (the list).
+      await (await browser.$("#email-back-btn")).click();
+      await browser.waitUntil(
+        async () =>
+          (await browser.$("#app").getAttribute("data-sources-section")) === "home",
+        { timeoutMsg: "Back never returned to the sources home" },
+      );
       const refusedRow = await ui.waitForText(
         browser,
-        "#accounts-list",
+        "#sources-list",
         "sync failed at",
-        { timeout: 15_000, timeoutMsg: "the panel never showed the failed account's error state" },
+        { timeout: 15_000, timeoutMsg: "the list never showed the failed source's error state" },
       );
-      assert.includes(refusedRow, "imap:127.0.0.1:59993:first@h.invalid", "the account identity");
+      assert.includes(refusedRow, "first@h.invalid · 127.0.0.1", "the source identity (address · server)");
       assert.includes(refusedRow, "nothing answered", "the recorded why");
       assert.includes(refusedRow, "never synced", "nothing was synced");
       assert.includes(refusedRow, "credentials: password", "the session password counts as stored");
       await saveScreenshot(browser, "26-refused-panel-row.png");
 
       // -----------------------------------------------------------------
-      // 2. RETRY in the same session through the panel: "Sync now"
+      // 2. RETRY in the same session through the list: "Sync now"
       //    resolves the stored session password — the user retypes
-      //    nothing — and the retry keeps exactly one account row.
+      //    nothing — and the retry keeps exactly one source row.
       // -----------------------------------------------------------------
       await (await browser.$(".account-sync-btn")).click();
-      await ui.waitForText(browser, "#accounts-status", "Sync failed for imap:127.0.0.1:59993:first@h.invalid", {
+      await ui.waitForText(browser, "#sources-status", "Sync failed for first@h.invalid · 127.0.0.1", {
         timeout: 60_000,
-        timeoutMsg: "the panel retry never reported its failure",
+        timeoutMsg: "the list retry never reported its failure",
       });
       const afterRetry = await ctx.sqlite.query(
         db,
@@ -182,7 +188,7 @@ export async function run(ctx) {
       // -----------------------------------------------------------------
       // 3. DNS: an unresolvable host gets its own actionable message.
       // -----------------------------------------------------------------
-      await ui.openView(browser, "sources");
+      await ui.openSourcesSection(browser, "email");
       await setInput(browser, "#imap-host", "no-such-host.mailchat-e2e.invalid");
       await setInput(browser, "#imap-port", "993");
       await setInput(browser, "#imap-user", "dns@h.invalid");
@@ -239,13 +245,13 @@ export async function run(ctx) {
   await withSession({ dataDir: firstDataDir }, async (browser, { dataDir }) => {
     const db = vaultDbPath(dataDir);
     await ui.waitForApp(browser);
-    await ui.openView(browser, "accounts");
+    await ui.openView(browser, "sources");
 
     const survivedRow = await ui.waitForText(
       browser,
-      "#accounts-list",
-      "imap:127.0.0.1:59993:first@h.invalid",
-      { timeoutMsg: "the failed account did not survive the restart" },
+      "#sources-list",
+      "first@h.invalid · 127.0.0.1",
+      { timeoutMsg: "the failed source did not survive the restart" },
     );
     assert.includes(survivedRow, "sync failed at", "the error state survived the restart");
     assert.includes(survivedRow, "nothing answered", "the recorded why survived");

@@ -64,7 +64,7 @@ export async function run(ctx) {
     },
     async (browser) => {
       await ui.waitForApp(browser);
-      await ui.openView(browser, "sources");
+      await ui.openSourcesSection(browser, "email");
 
       // Leave a stale password in the password field while in password
       // mode — this value must never reach the backend in OAuth mode.

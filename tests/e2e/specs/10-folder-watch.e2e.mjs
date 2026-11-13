@@ -28,7 +28,7 @@ export async function run(ctx) {
 
   await withSession({}, async (browser, { dataDir }) => {
     await ui.waitForApp(browser);
-    await ui.openView(browser, "sources");
+    await ui.openSourcesSection(browser, "automatic");
 
     const watched = await mkdtemp(path.join(tmpdir(), "mailchat-watch-"));
     // Two files present before the folder is armed: the initial scan

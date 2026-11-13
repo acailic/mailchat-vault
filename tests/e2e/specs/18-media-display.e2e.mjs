@@ -480,7 +480,22 @@ export async function run(ctx) {
     assert.ok(!existsSync(path.join(dataDir, "escape.jpg")), "nothing written outside the store");
 
     // --- Settings: disk usage report + clean reconcile --------------------
+    // The media store lives on the Storage & backup settings page (the
+    // report loads when that page opens, not at startup) — same DOM-click
+    // rationale as openViewViaDom for the page nav.
     await openViewViaDom(browser, "settings");
+    await browser.execute(() =>
+      document
+        .querySelector('.settings-nav-btn[data-settings-target="storage"]')
+        ?.click(),
+    );
+    await browser.waitUntil(
+      () =>
+        browser
+          .execute(() => document.querySelector("#app")?.getAttribute("data-settings-section") ?? "")
+          .then((s) => s === "storage"),
+      { timeout: 5_000, timeoutMsg: "the Storage & backup settings page never opened" },
+    );
     await browser.waitUntil(
       () =>
         browser.execute(

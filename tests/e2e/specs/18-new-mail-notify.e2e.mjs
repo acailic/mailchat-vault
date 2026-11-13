@@ -164,7 +164,7 @@ export async function run(ctx) {
 
   await withSession({}, async (browser) => {
     await ui.waitForApp(browser);
-    await ui.openView(browser, "sources");
+    await ui.openSourcesSection(browser, "automatic");
 
     const watched = await mkdtemp(path.join(tmpdir(), "mailchat-watch-"));
     await writeFile(path.join(watched, "first.mbox"), mail(1, "One") + mail(2, "Two"));
@@ -222,14 +222,21 @@ export async function run(ctx) {
     // ==============================================================
     // 4. Settings off: even a cycle with new mail stays silent.
     // ==============================================================
-    await ui.openView(browser, "settings");
+    await ui.openSettingsSection(browser, "general");
     const toggle = await browser.$("#notify-toggle");
     assert.ok(await toggle.isSelected(), "Desktop notifications on by default");
     await toggle.click();
-    await (await browser.$("#settings-save-btn")).click();
-    await ui.waitForText(browser, "#settings-note", "Saved.", {
-      timeoutMsg: "settings save never confirmed",
-    });
+    await (await browser.$("#settings-save-general")).click();
+    // The save confirmation line lives on the AI assistance page, hidden
+    // while General is up (WebKit getText of a hidden element is ""), so
+    // the settle reads the app's own note through the DOM instead.
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(
+          () => document.querySelector("#settings-note")?.textContent ?? "",
+        )).startsWith("Saved."),
+      { timeoutMsg: "settings save never confirmed" },
+    );
 
     await setFocused(browser, false, "settings off");
     before = await notifyCount();
@@ -244,12 +251,16 @@ export async function run(ctx) {
     // 5. Settings back on (no restart): notifications return, one per
     //    cycle, still no duplicates from repeated watch snapshots.
     // ==============================================================
-    await ui.openView(browser, "settings");
+    await ui.openSettingsSection(browser, "general");
     await (await browser.$("#notify-toggle")).click();
-    await (await browser.$("#settings-save-btn")).click();
-    await ui.waitForText(browser, "#settings-note", "Saved.", {
-      timeoutMsg: "settings re-enable never confirmed",
-    });
+    await (await browser.$("#settings-save-general")).click();
+    await browser.waitUntil(
+      async () =>
+        (await browser.execute(
+          () => document.querySelector("#settings-note")?.textContent ?? "",
+        )).startsWith("Saved."),
+      { timeoutMsg: "settings re-enable never confirmed" },
+    );
 
     await setFocused(browser, false, "settings back on");
     before = await notifyCount();

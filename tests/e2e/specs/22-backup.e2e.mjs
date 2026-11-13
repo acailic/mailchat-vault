@@ -93,9 +93,10 @@ async function waitForJob(browser, id, { timeout = 90_000 } = {}) {
   throw new Error(`job ${id} never finished within ${timeout}ms`);
 }
 
-/** Open the Settings view and bring the Storage & backup panel on screen. */
+/** Open the Storage & backup settings page (backup + media store live
+ * behind the settings page nav, not on the Settings landing page). */
 async function openBackupPanel(browser, ui) {
-  await ui.openView(browser, "settings");
+  await ui.openSettingsSection(browser, "storage");
   await browser.execute(() =>
     document.querySelector("#backup")?.scrollIntoView({ block: "center" }),
   );

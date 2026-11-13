@@ -3713,6 +3713,24 @@ describe("workspace shell", () => {
     expect($("#topbar-title").textContent).toBe("Sources");
   });
 
+  it("leaving and returning to the workspace preserves the open reading pane", async () => {
+    await boot();
+    await openDetailViaResult();
+    expect($("#detail").classList.contains("open")).toBe(true);
+    expect($("#detail .detail-card")).toBeTruthy();
+    const settingsBtn = $(".nav-view-btn[data-view-target='settings']");
+    settingsBtn.click();
+    expect(app().dataset.view).toBe("settings");
+    expect(settingsBtn.getAttribute("aria-current")).toBe("page");
+    // Leaving and returning preserves the open reading pane and results.
+    $(".nav-view-btn[data-view-target='workspace']").click();
+    expect(app().dataset.view).toBe("workspace");
+    expect($("#detail").classList.contains("open")).toBe(true);
+    expect(app().dataset.reading).toBe("open");
+    // The pane still shows the opened message, not a blank slate.
+    expect($("#detail .detail-card")).toBeTruthy();
+  });
+
   it("selecting a source chip from another view returns to the workspace", async () => {
     await boot();
     $(".nav-view-btn[data-view-target='settings']").click();

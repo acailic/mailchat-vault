@@ -45,19 +45,69 @@ export async function waitForApp(browser, { timeout = 30_000 } = {}) {
 /**
  * Open a navigation destination (workspace | sources | activity |
  * settings) through the real nav buttons and wait for the view to mount.
- * Elements only exist visibly inside their view, so helpers/specs must
- * open the view before reading or clicking view-scoped controls.
+ * The button is matched anywhere in the nav (not only #nav-views): the
+ * three primary destinations live in #nav-views while Activity is the
+ * secondary link in #nav-secondary. Elements only exist visibly inside
+ * their view, so helpers/specs must open the view before reading or
+ * clicking view-scoped controls.
  */
 export async function openView(browser, view) {
   const app = await browser.$("#app");
   if ((await app.getAttribute("data-view")) === view) return;
-  const button = await browser.$(
-    `#nav-views .nav-view-btn[data-view-target="${view}"]`,
-  );
+  const button = await browser.$(`.nav-view-btn[data-view-target="${view}"]`);
   await button.click();
   await browser.waitUntil(
     async () => (await app.getAttribute("data-view")) === view,
     { timeout: 5_000, timeoutMsg: `view "${view}" never mounted` },
+  );
+}
+
+/**
+ * Open a Sources page (home | add | import | email | automatic) through
+ * the real buttons — the chooser round trip for add/import/email, the
+ * home link for automatic — and wait for data-sources-section to settle.
+ * "home" only settles when the home section is already current: a spec
+ * that deep-links elsewhere returns home through the section's own Back
+ * button (the user's path) before calling this.
+ */
+export async function openSourcesSection(browser, section) {
+  await openView(browser, "sources");
+  if (section === "home") {
+    await browser.waitUntil(
+      async () =>
+        (await browser.$("#app").getAttribute("data-sources-section")) === "home",
+    );
+    return;
+  }
+  if (section === "add") {
+    await browser.$("#sources-add-btn").click();
+  } else if (section === "import") {
+    await openSourcesSection(browser, "add");
+    await browser.$("#add-choice-import").click();
+  } else if (section === "email") {
+    await openSourcesSection(browser, "add");
+    await browser.$("#add-choice-email").click();
+  } else if (section === "automatic") {
+    await browser.$("#sources-automatic-btn").click();
+  }
+  await browser.waitUntil(
+    async () =>
+      (await browser.$("#app").getAttribute("data-sources-section")) === section,
+  );
+}
+
+/**
+ * Open a Settings page (general | storage | ai) through the real page
+ * nav and wait for data-settings-section to settle.
+ */
+export async function openSettingsSection(browser, section) {
+  await openView(browser, "settings");
+  if (section !== "general") {
+    await browser.$(`.settings-nav-btn[data-settings-target="${section}"]`).click();
+  }
+  await browser.waitUntil(
+    async () =>
+      (await browser.$("#app").getAttribute("data-settings-section")) === section,
   );
 }
 
