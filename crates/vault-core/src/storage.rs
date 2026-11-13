@@ -715,7 +715,8 @@ pub struct Storage {
 
 /// BM25F column weights every FTS ranking site orders by
 /// ([`Storage::search_filtered`], [`Storage::search_page`],
-/// [`Storage::search_export_stream`]).
+/// [`Storage::search_export_stream`], and the v2 relevance page
+/// [`Storage::search_archive`] in [`crate::search2`]).
 ///
 /// Term evidence is field-dependent: a term hitting the subject line says
 /// more about a message than the same term buried in a long body, and an
@@ -729,9 +730,12 @@ pub struct Storage {
 /// user input, and FTS5 auxiliary-function arguments cannot be bound
 /// parameters. Tuned against `tests/retrieval_eval.rs`; body stays the
 /// 1.0 anchor.
-const BM25_WEIGHT_BODY: f32 = 1.0;
-const BM25_WEIGHT_AUTHOR: f32 = 1.0;
-const BM25_WEIGHT_SUBJECT: f32 = 3.0;
+///
+/// `pub(crate)`: shared with the v2 query module ([`crate::search2`]),
+/// which ranks the IPC search path with the same weights.
+pub(crate) const BM25_WEIGHT_BODY: f32 = 1.0;
+pub(crate) const BM25_WEIGHT_AUTHOR: f32 = 1.0;
+pub(crate) const BM25_WEIGHT_SUBJECT: f32 = 3.0;
 
 impl Storage {
     /// Open (and migrate) a database file, creating it when missing.
