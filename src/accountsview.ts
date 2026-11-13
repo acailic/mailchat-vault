@@ -189,6 +189,7 @@ export function sourceChipRows(
     labelCounts.set(s.label, (labelCounts.get(s.label) ?? 0) + 1);
   }
   const importSeen = new Map<string, number>();
+  const imapSeen = new Map<string, number>();
   return present.map((s) => {
     const duplicated = (labelCounts.get(s.label) ?? 0) > 1;
     if (!duplicated) {
@@ -197,7 +198,14 @@ export function sourceChipRows(
     const account = accountById.get(s.id);
     let label: string;
     if (account && account.kind === "imap" && account.imap) {
-      label = `${s.label} · ${account.imap.username} · ${account.imap.host}`;
+      // The imap identity (username · host) disambiguates most duplicate
+      // labels, but TLS twins share it too (same server reachable over
+      // two modes): number within the identity, import-style, so every
+      // chip label stays distinct.
+      const identity = `${s.label} · ${account.imap.username} · ${account.imap.host}`;
+      const n = (imapSeen.get(identity) ?? 0) + 1;
+      imapSeen.set(identity, n);
+      label = n === 1 ? identity : `${identity} · imap ${n}`;
     } else {
       const n = (importSeen.get(s.label) ?? 0) + 1;
       importSeen.set(s.label, n);

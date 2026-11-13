@@ -1508,6 +1508,10 @@ async function refreshAfterVaultSwitch(): Promise<void> {
   state.selectedId = null;
   state.selection.clear();
   state.resultsSnapshot = null;
+  // A selected source id belongs to the vault it was picked in: the
+  // other vault's ids resolve to nothing and would render as a raw-uuid
+  // applied chip, so the scope resets with everything else.
+  state.sources = [];
   await refreshSources();
   await refreshImportScopes();
   await refreshStats();
@@ -1907,16 +1911,23 @@ async function forgetAccountCredentials(account: AccountView): Promise<void> {
 }
 
 /** Show one source's messages: scope the search to its stable id
- * (keeping the query text and other filters) and return to results. */
+ * (keeping the query text and other filters) and return to results.
+ * The search box takes focus — the user landed on a results view, and
+ * the next keystroke should type a query, not hit stale focus. */
 function viewSourceMessages(account: AccountView): void {
   state.sources = [account.source_id];
   renderSourceChipsNow();
   void runSearch(0);
   workspace.store.setView("workspace");
+  searchInput.focus();
 }
 
 /** Reconnection from the source details: open the Connect email form
- * prefilled with the account's identity (folders joined for the input). */
+ * prefilled with the account's identity (folders joined for the input)
+ * and armed in the auth mode its stored credentials allow — password
+ * first (the coordinator's precedence), Google sign-in when that is all
+ * the account has, password when nothing is stored (the backend's sync
+ * error then tells the user to enter one). */
 function updateAccountCredentials(account: AccountView): void {
   if (!account.imap) return;
   imapHostInput.value = account.imap.host;
@@ -1924,9 +1935,28 @@ function updateAccountCredentials(account: AccountView): void {
   imapUserInput.value = account.imap.username;
   imapFoldersInput.value = account.imap.folders.join(", ");
   imapPassInput.value = "";
-  imapStatus.textContent = `Re-enter the password for ${accountTitle(account)}, then Connect and sync.`;
+  const mode: ipc.ImapAuthMode = account.imap.has_password
+    ? "password"
+    : account.imap.has_oauth
+      ? "oauth"
+      : "password";
+  imapAuthSelect.value = mode;
+  applyImapAuthMode(); // shows only the inputs this mode needs
+  const name = accountTitle(account);
+  imapStatus.textContent =
+    mode === "oauth"
+      ? `Sign in with Google again for ${name}, then Connect and sync.`
+      : account.imap.has_password
+        ? `Re-enter the password for ${name}, then Connect and sync.`
+        : `Enter credentials for ${name}, then Connect and sync.`;
   workspace.store.setSourcesSection("email");
-  imapPassInput.focus();
+  // Focus last (after the section deep-link, consistent with the other
+  // section handlers): on the control this mode actually needs.
+  if (mode === "oauth") {
+    imapOauthButton.focus();
+  } else {
+    imapPassInput.focus();
+  }
 }
 
 /** Disconnect: stop future sync (per-source exclusion) and remove the

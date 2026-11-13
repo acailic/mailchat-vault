@@ -273,10 +273,13 @@ body {
   margin: 0 0 var(--sp-3);
 }
 
+/* Section headings — also covers every Settings page's h3 (General,
+   Storage & backup, AI assistance). */
 #view-sources h2:not(.view-heading),
 #view-sources h3,
 #view-activity h2:not(.view-heading),
-#view-settings h2:not(.view-heading) {
+#view-settings h2:not(.view-heading),
+#view-settings h3 {
   font-size: var(--text-section);
   margin: var(--sp-4) 0 var(--sp-2);
 }
