@@ -110,6 +110,13 @@ export function hasActiveJob(tracker: JobsTrackerState, kind: string): boolean {
   );
 }
 
+/** Number of queued/running jobs — the navigation Activity badge. */
+export function activeJobCount(tracker: JobsTrackerState): number {
+  return [...tracker.records.values()].filter(
+    (r) => r.state.state === "queued" || r.state.state === "running",
+  ).length;
+}
+
 /** One-line status over the tracker for the panel header. */
 export function jobsStatusText(tracker: JobsTrackerState): string {
   const records = orderedRecords(tracker);
