@@ -6,6 +6,18 @@ Status: **product specification with the M1 and M2 slices implemented, the M3.1/
 
 Mailchat Vault is a personal desktop archive for finding and understanding past email and chat messages. The next release prioritizes reliable retrieval, conversation context, available media preservation, and recovery across Linux, macOS, and Windows. AI is optional.
 
+## Guides
+
+Hands-on guides sit alongside the specification set:
+
+| Guide | Purpose |
+| --- | --- |
+| [Feature reference](features.md) | Detailed feature documentation: sources and import, workspace, folder watching, background jobs, export, media lifecycle, chat-format notes |
+| [AI-assisted search](ai-search.md) | LLM ask pipeline, AI consent, provider configuration, local embeddings and hybrid ranking |
+| [IMAP sync](imap-sync.md) | Gmail (Google sign-in / app password) and generic IMAP setup, credential storage |
+| [Testing](testing.md) | Test suites, performance budgets, fuzzing, CI, hermetic server setup |
+| [Release](release.md) | Installers, local builds, smoke tests, checksums, publishing |
+
 ## Reading order
 
 | Document | Purpose | Maintained by |
