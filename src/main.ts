@@ -176,6 +176,7 @@ const addBackButton = document.querySelector<HTMLButtonElement>("#add-back-btn")
 const importBackButton = document.querySelector<HTMLButtonElement>("#import-back-btn")!;
 const emailBackButton = document.querySelector<HTMLButtonElement>("#email-back-btn")!;
 const automaticBackButton = document.querySelector<HTMLButtonElement>("#automatic-back-btn")!;
+const sourcesAutomaticHeading = document.querySelector<HTMLElement>("#sources-automatic-heading")!;
 const imapPassLabel = document.querySelector<HTMLElement>("#imap-pass-label")!;
 const demoBanner = document.querySelector<HTMLElement>("#demo-banner")!;
 const demoLeaveButton = document.querySelector<HTMLButtonElement>("#demo-leave-btn")!;
@@ -2550,7 +2551,10 @@ autoSyncToggle.addEventListener("change", onAutoSyncToggle);
 autoSyncInterval.addEventListener("change", onAutoSyncIntervalChange);
 embedButton.addEventListener("click", () => void runEmbedJob());
 sourcesRefreshButton.addEventListener("click", () => void refreshAccounts());
-sourcesAddButton.addEventListener("click", () => workspace.store.setSourcesSection("add"));
+sourcesAddButton.addEventListener("click", () => {
+  workspace.store.setSourcesSection("add");
+  addChoiceImportButton.focus();
+});
 addChoiceImportButton.addEventListener("click", () => {
   workspace.store.setSourcesSection("import");
   importPickButton.focus();
@@ -2559,11 +2563,28 @@ addChoiceEmailButton.addEventListener("click", () => {
   workspace.store.setSourcesSection("email");
   imapUserInput.focus();
 });
-sourcesAutomaticButton.addEventListener("click", () => workspace.store.setSourcesSection("automatic"));
-addBackButton.addEventListener("click", () => workspace.store.setSourcesSection("home"));
-importBackButton.addEventListener("click", () => workspace.store.setSourcesSection("home"));
-emailBackButton.addEventListener("click", () => workspace.store.setSourcesSection("home"));
-automaticBackButton.addEventListener("click", () => workspace.store.setSourcesSection("home"));
+sourcesAutomaticButton.addEventListener("click", () => {
+  workspace.store.setSourcesSection("automatic");
+  sourcesAutomaticHeading.focus();
+});
+// Back returns to the home section; focus goes back to the trigger that
+// opened it, so keyboard users do not land on the (now hidden) Back button.
+addBackButton.addEventListener("click", () => {
+  workspace.store.setSourcesSection("home");
+  sourcesAddButton.focus();
+});
+importBackButton.addEventListener("click", () => {
+  workspace.store.setSourcesSection("home");
+  sourcesAddButton.focus();
+});
+emailBackButton.addEventListener("click", () => {
+  workspace.store.setSourcesSection("home");
+  sourcesAddButton.focus();
+});
+automaticBackButton.addEventListener("click", () => {
+  workspace.store.setSourcesSection("home");
+  sourcesAutomaticButton.focus();
+});
 watchButton.addEventListener("click", () => void watchTypedPath());
 watchPathInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") void watchTypedPath();

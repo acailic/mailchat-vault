@@ -3955,6 +3955,74 @@ describe("sources view sub-sections", () => {
     );
   });
 
+  it("Add source and Automatic imports move keyboard focus into the opened section", async () => {
+    await boot();
+    ($("#sources-add-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("add"),
+    );
+    // The section switch hides the trigger; focus must follow into the chooser.
+    expect(win.document.activeElement).toBe($("#add-choice-import"));
+    ($("#sources-automatic-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("automatic"),
+    );
+    // The heading carries tabindex="-1" (the reading-pane h2 pattern).
+    expect(win.document.activeElement).toBe($("#sources-automatic-heading"));
+  });
+
+  it("Back buttons restore focus to the trigger that opened the section", async () => {
+    await boot();
+    // From the chooser itself.
+    ($("#sources-add-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("add"),
+    );
+    ($("#add-back-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("home"),
+    );
+    expect(win.document.activeElement).toBe($("#sources-add-btn"));
+    // From the import flow.
+    ($("#sources-add-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("add"),
+    );
+    ($("#add-choice-import") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("import"),
+    );
+    ($("#import-back-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("home"),
+    );
+    expect(win.document.activeElement).toBe($("#sources-add-btn"));
+    // From the email flow.
+    ($("#sources-add-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("add"),
+    );
+    ($("#add-choice-email") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("email"),
+    );
+    ($("#email-back-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("home"),
+    );
+    expect(win.document.activeElement).toBe($("#sources-add-btn"));
+    // From the automatic-imports section back to its own link.
+    ($("#sources-automatic-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("automatic"),
+    );
+    ($("#automatic-back-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("home"),
+    );
+    expect(win.document.activeElement).toBe($("#sources-automatic-btn"));
+  });
+
   it("nav to sources resets to the home section from a deep section", async () => {
     await boot();
     ($("#sources-add-btn") as HTMLElement).click();
