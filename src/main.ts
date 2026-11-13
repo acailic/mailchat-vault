@@ -117,6 +117,7 @@ import type {
 } from "./types";
 import { moveIndex, pageModel, splitTerms } from "./viewmodel";
 import {
+  activeJobCount,
   applyJobEvent,
   applyJobsPage,
   hasActiveJob,
@@ -219,6 +220,11 @@ const sourcesListEl = document.querySelector<HTMLUListElement>("#sources-list")!
 const sourcesRefreshButton = document.querySelector<HTMLButtonElement>("#sources-refresh")!;
 const jobsStatus = document.querySelector<HTMLElement>("#jobs-status")!;
 const jobsList = document.querySelector<HTMLUListElement>("#jobs-list")!;
+const activityCountBadge = document.querySelector<HTMLElement>("#activity-count")!;
+const activityAttentionFlag = document.querySelector<HTMLElement>("#activity-attention")!;
+/** A job failed while Activity was not open — surface a textual flag on
+ * the nav link until the user opens Activity. */
+let activityAttention = false;
 const dashboard = document.querySelector<HTMLElement>("#dashboard")!;
 const dashboardStatus = document.querySelector<HTMLElement>("#dashboard-status")!;
 const dashboardRefreshButton = document.querySelector<HTMLButtonElement>("#stats-refresh")!;
@@ -2032,9 +2038,17 @@ void ipc.onEvent<WatchSnapshot>("watch-status", (payload) => {
 
 const jobs = newJobsTracker();
 
+function renderActivityBadge(): void {
+  const count = activeJobCount(jobs);
+  activityCountBadge.textContent = count > 0 ? String(count) : "";
+  activityCountBadge.hidden = count === 0;
+  activityAttentionFlag.hidden = !activityAttention;
+}
+
 function renderJobs(): void {
   jobsStatus.textContent = jobsStatusText(jobs);
   renderJobsList(jobsList, jobs);
+  renderActivityBadge();
   // The embedding button tracks its own job: disabled while queued or
   // running, re-enabled once no embedding job is active.
   embedButton.disabled = hasActiveJob(jobs, "embed_messages");
@@ -2081,6 +2095,9 @@ function refreshAfterJobEvent(event: JobEvent): void {
 
 void ipc.onEvent<JobEvent>("job-event", (payload) => {
   applyJobEvent(jobs, payload);
+  if (payload.type === "failed" && workspace.store.get().view !== "activity") {
+    activityAttention = true;
+  }
   // After applyJobEvent the tracker knows the kind even for a job whose
   // `submitted` event predates this listener (boot recovery).
   notifier.onJobEvent(payload, jobs.records.get(payload.job)?.kind);
@@ -2676,6 +2693,14 @@ workspace.store.subscribe((current) => {
     void refreshMediaUsage();
     void refreshRecovery();
     void refreshLastBackup();
+  }
+});
+// Opening Activity dismisses its attention flag (the failure list is now
+// in front of the user); re-render hides the nav flag immediately.
+workspace.store.subscribe(({ view }) => {
+  if (view === "activity" && activityAttention) {
+    activityAttention = false;
+    renderActivityBadge();
   }
 });
 themeSelect.addEventListener("change", () => applyTheme(themeSelect.value as SettingsView["theme"]));

@@ -2013,6 +2013,37 @@ describe("ask and local embeddings", () => {
   });
 });
 
+describe("activity badge", () => {
+  const emit = (payload: unknown) =>
+    tauriEvents.listeners.get("job-event")!({ payload });
+
+  it("shows the active-job count and clears it when jobs finish", async () => {
+    await boot();
+    emit({ seq: 1, at: "t", job: 7, type: "submitted", kind: "import_mbox" });
+    emit({ seq: 2, at: "t", job: 7, type: "started" });
+    await vi.waitFor(() => expect(($("#activity-count") as HTMLElement).hidden).toBe(false));
+    expect($("#activity-count").textContent).toBe("1");
+    emit({ seq: 3, at: "t", job: 7, type: "succeeded", result: null });
+    await vi.waitFor(() => expect(($("#activity-count") as HTMLElement).hidden).toBe(true));
+  });
+
+  it("a failed job raises the attention flag until Activity is opened", async () => {
+    await boot();
+    emit({ seq: 1, at: "t", job: 9, type: "submitted", kind: "imap_sync_all" });
+    emit({
+      seq: 2,
+      at: "t",
+      job: 9,
+      type: "failed",
+      error: { kind: "network", message: "down" },
+    });
+    await vi.waitFor(() => expect(($("#activity-attention") as HTMLElement).hidden).toBe(false));
+    expect($("#activity-attention").textContent).toContain("needs attention");
+    ($('.nav-view-btn[data-view-target="activity"]') as HTMLElement).click();
+    await vi.waitFor(() => expect(($("#activity-attention") as HTMLElement).hidden).toBe(true));
+  });
+});
+
 // Folder watching
 // ---------------------------------------------------------------------------
 

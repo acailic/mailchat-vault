@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 import type { JobEvent, JobEventsPage, JobRecord } from "./types";
 import {
+  activeJobCount,
   applyJobEvent,
   applyJobsPage,
   describeJobState,
@@ -208,6 +209,17 @@ describe("hasActiveJob", () => {
     );
     expect(hasActiveJob(tracker, "embed_messages")).toBe(true);
     expect(hasActiveJob(tracker, "imap_sync")).toBe(false);
+  });
+});
+
+describe("activeJobCount", () => {
+  it("activeJobCount counts queued and running jobs only", () => {
+    const tracker = newJobsTracker();
+    applyJobEvent(tracker, { seq: 1, type: "submitted", job: 1, kind: "import_mbox", at: "t" });
+    applyJobEvent(tracker, { seq: 2, type: "started", job: 1, at: "t" });
+    applyJobEvent(tracker, { seq: 3, type: "submitted", job: 2, kind: "imap_sync_all", at: "t" });
+    applyJobEvent(tracker, { seq: 4, type: "succeeded", job: 2, at: "t", result: null });
+    expect(activeJobCount(tracker)).toBe(1);
   });
 });
 
