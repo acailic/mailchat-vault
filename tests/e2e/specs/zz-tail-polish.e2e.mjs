@@ -213,7 +213,7 @@ export async function run(ctx) {
         "add",
       { timeoutMsg: "Add source never opened the chooser" },
     );
-    const choices = await browser.$$$("#sources-add .row button:not([id='add-back-btn'])");
+    const choices = await browser.$$("#sources-add .row button:not([id='add-back-btn'])");
     const choiceLabels = [];
     for (const choice of choices) choiceLabels.push(await choice.getText());
     assert.deepEqual(
