@@ -25,6 +25,8 @@ Hands-on guides sit alongside the specification set:
 | [Product review](product-review.md) | Strengths, observed UX defects, adoption risks, alternatives, and positioning hypotheses at the inspected 2026-11-06 baseline | Product owner |
 | [User success plan](user-success-plan.md) | Prioritized outcomes, work packages mapped to existing milestones, pilot metrics, and proceed/narrow/stop decisions | Product owner |
 | [User research playbook](user-research-playbook.md) | Recruitment criteria, interview and usability scripts, comparative retrieval study, and pilot readout templates | Product/research owner |
+| [Go-public plan](go-public-plan.md) | Reviewed launch plan: user-return priorities, candidate evidence, licensing/signing decisions, staged distribution, pilot gates and paid-support experiment; D13–D15 remain proposed | Product owner |
+| [Go-public review evidence](evidence/go-public-review-2026-11-13.md) | Repository findings and primary-source checks correcting licensing, signing, package-manager, Gmail and privacy assumptions | Maintainer / product owner |
 | [Project assessment](project-assessment.md) | Current implementation, evidence, limitations, and ranked gaps | Engineer changing the assessed subsystem |
 | [Product plan](product-plan.md) | Users, outcomes, release boundaries, and success criteria | Product owner |
 | [UX specification](ux-specification.md) | Workspace, journeys, visual direction, and interaction states | Designer and frontend implementer |
