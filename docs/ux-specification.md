@@ -10,14 +10,14 @@ The archive workspace has three areas: source navigation, results, and reading. 
 Desktop, width >= 1100px
 ┌──────────────────┬────────────────────────────┬─────────────────────────────┐
 │ Mailchat Vault   │ Search messages…      [Go] │ Ana · Delivery date         │
-│ All messages    │ [Person] [Dates] [Files]    │ Date · source · conversation │
-│ Sources         │ [Active filters] [Clear]   │ Original message            │
-│   Personal mail │ 1–50 of 1,234   Relevance  │                             │
-│   Family chats  │ Author / subject / date    │ [Available attachment]      │
-│                 │ Match snippet…             │ Conversation context        │
-│ [Add source]    │ Next result…               │ [Load earlier] [Load later] │
-│ Activity        │                            │ Provenance ▸                │
-│ Settings        │ [Previous]       [Next]    │                             │
+│ Archive          │ [Person] [Dates] [Files]    │ Date · source · conversation │
+│ Sources          │ [Active filters] [Clear]   │ Original message            │
+│ Settings         │ 1–50 of 1,234   Relevance  │                             │
+│ [source chips]   │ Author / subject / date    │ [Available attachment]      │
+│ Activity       2 │ Match snippet…             │ Conversation context        │
+│                  │ Next result…               │ [Load earlier] [Load later] │
+│                  │                            │ Provenance ▸                │
+│                  │ [Previous]       [Next]    │                             │
 └──────────────────┴────────────────────────────┴─────────────────────────────┘
 ```
 
@@ -25,14 +25,14 @@ At 1100px and above use a 208px navigation column, a results area of at least 32
 
 From 800px to 1099px show navigation and results; opening a message replaces the results area with a reading view and a visible “Back to results” action. Below 800px show one content area and a labeled navigation toggle. Preserve query, filters, page, selection, and scroll when returning. All controls remain reachable at 200% zoom; a viewport narrower than the nominal minimum uses the compact layout rather than horizontal clipping.
 
-**Current (M3.1).** The three-area shell, the 1100px/800px breakpoints with independent per-area scrolling, the 1280×800 default window with a 640×480 minimum, the medium-layout Back-to-results swap, and the compact drawer (labeled toggle, `aria-expanded`, Escape close, removed from the accessibility tree when closed) are implemented in [workspace.ts](../src/workspace.ts)/[state.ts](../src/state.ts), with semantic design tokens ([tokens.css](../src/styles/tokens.css); light/dark/System via the theme setting) and the bundled Source Sans 3 (SIL OFL 1.1 license committed at [src/assets/fonts](../src/assets/fonts)); 1280px at 200% zoom resolves to the compact layout with no horizontal clipping. Navigation destinations are All messages, Add source, Activity, and Settings, with per-source scope chips in the navigation column; imports and IMAP configuration live in the Add source view and job progress in Activity, and a started job keeps running when navigating away. Settings hosts the M4.4 Storage & backup group first (versioned backup creation, the staged validate-then-restore flow, and the previous-vault recovery list with return/forget, plus the U05 persisted last-verified-backup and restart-origin lines), followed by the provider controls and the Media store group. Not yet implemented: per-source status text ("Syncing"/"Needs sign-in"/"Last synced") on the chips (M3.4); the Add source view still hosts the interim import/sync controls rather than the dedicated setup views below (M3.3/M3.4).
+**Current (M3.1; updated for the Phase-1 navigation restructure).** The three-area shell, the 1100px/800px breakpoints with independent per-area scrolling, the 1280×800 default window with a 640×480 minimum, the medium-layout Back-to-results swap, and the compact drawer (labeled toggle, `aria-expanded`, Escape close, removed from the accessibility tree when closed) are implemented in [workspace.ts](../src/workspace.ts)/[state.ts](../src/state.ts), with semantic design tokens ([tokens.css](../src/styles/tokens.css); light/dark/System via the theme setting) and the bundled Source Sans 3 (SIL OFL 1.1 license committed at [src/assets/fonts](../src/assets/fonts)); 1280px at 200% zoom resolves to the compact layout with no horizontal clipping. Navigation destinations are **Archive**, **Sources**, and **Settings**, with **Activity** as a secondary link at the bottom of the navigation column — its badge counts active background jobs and a failure raises a textual "needs attention" flag until Activity is opened; there is no separate Accounts destination (the accounts overview merged into Sources). The Sources view is one screen with sub-sections: the **home list** shows every source (email and imports) with its name, kind, message count, last import/sync, and sync state, primary actions **View messages** (scopes the archive to the source's stable instance id, keeping the typed query) and **Sync now** (email), and a **Details** fold holding Pause/Resume, Update credentials…, Forget credentials, and the two-step Disconnect…; **Add source…** opens a chooser offering exactly Import files… and Connect email… (the email form has visible field labels with server/port/folders behind an Advanced fold); **Automatic imports…** holds the shared auto-sync toggle and folder watching. Sub-section transitions transfer keyboard focus to the incoming section's first control. Settings is split into **General**, **Storage & backup**, and **AI assistance** pages, each with its own Save that posts the full form; storage data (the M4.4 backup/restore/previous-vault group and the Media store report) loads only when the Storage & backup page opens. Source chips in the navigation column select by stable instance id: two sources sharing a display label stay independently selectable with disambiguated chip labels, and only labels present in the stats counts get a chip. Not yet implemented (unchanged by the restructure): per-source status text ("Syncing"/"Needs sign-in"/"Last synced") on the chips (M3.4); the running-import progress surface inside the import flow, and the date/timezone/DST confirmation choices (M3.3).
 
 ### Navigation rules
 
 - All messages browses newest first, including on first launch with an existing archive. An empty vault shows setup guidance instead.
 - Selecting a source scopes the current search and resets pagination. It does not erase typed search text. “All messages” clears source scope while retaining other filters.
 - Source labels are user-facing names, not provider namespace strings. A status indicator has text such as “Syncing”, “Needs sign-in”, or “Last synced today at 09:20”. File imports show “Last imported”.
-- Add source opens a dedicated setup view with “Import files” and “Connect email”. Activity lists jobs; Settings contains Appearance, AI, Storage & backup, and source management links.
+- Add source opens a dedicated setup view with “Import files” and “Connect email”. Activity lists jobs; Settings contains General, AI assistance, and Storage & backup; source management lives in the Sources view.
 - Closing setup returns to the previous workspace. Once a job starts it continues when navigating away; its progress remains in Activity.
 
 ### Search and selection
