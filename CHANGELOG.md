@@ -87,6 +87,27 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
   above. Empirical packaged-tray evidence is owned by the release
   validation route.
 
+### Added (retrieval quality — search and Ask)
+
+- **Subject matches rank higher** — full-text results now score matches
+  per field (BM25F-style weights: subject 3, body 1, author 1), so a
+  message whose *subject* carries your term outranks one that merely
+  mentions it in a long body. Applies everywhere FTS ranking is used:
+  plain search, exports, and the Ask pipeline.
+- **Ask can target subjects** — the AI translation step now knows about
+  the `subject:` column filter ("mail about the vault migration" plans
+  `subject: vault migration`), in addition to `body:` and `author:`.
+- **Smarter summary context order** — the rows sent to the AI for an
+  answer are arranged strongest-first *and* strongest-last instead of
+  strict rank order, following the "Lost in the Middle" finding that
+  models attend least to the middle of their context. Citations [1],
+  [2]… keep their rank-based numbering.
+- **A measured retrieval test suite** — a labeled fixture corpus with
+  recall@10/nDCG@10 gates over the FTS, vector, and fused ranking legs
+  now guards every ranking change (see
+  `docs/evidence/literature-review-2026-11-13.md` for the evidence
+  behind these changes).
+
 ### Added
 
 - **Email attachments** — synced mail now stores its MIME attachments
