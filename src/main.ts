@@ -96,14 +96,19 @@ import {
 } from "./notify";
 import {
   applyTheme,
+  envKeyPlaceholder,
+  envTestPayload,
   keyStoreNote,
   kindLabel,
   menuItemLabel,
   placeholderForKind,
   prefillForKind,
   uniqueProviderId,
+  ENV_ANTHROPIC_KEY_ID,
+  ENV_ZAI_KEY_ID,
   LOCAL_ID,
   ENV_ID,
+  type LlmTestPayload,
   type ProviderKind,
   type ProviderMenuItem,
   type SaveSettingsPayload,
@@ -277,6 +282,13 @@ const mediaStoreStatus = document.querySelector<HTMLElement>("#media-store-statu
 const mediaRefreshButton = document.querySelector<HTMLButtonElement>("#media-refresh-btn")!;
 const mediaReconcileButton = document.querySelector<HTMLButtonElement>("#media-reconcile-btn")!;
 const envInfo = document.querySelector<HTMLElement>("#env-info")!;
+const envZaiKey = document.querySelector<HTMLInputElement>("#env-zai-key")!;
+const envAnthropicKey = document.querySelector<HTMLInputElement>("#env-anthropic-key")!;
+const envBaseUrl = document.querySelector<HTMLInputElement>("#env-base-url")!;
+const envModel = document.querySelector<HTMLInputElement>("#env-model")!;
+const envTestButton = document.querySelector<HTMLButtonElement>("#env-test-btn")!;
+const envTestStatus = document.querySelector<HTMLElement>("#env-test-status")!;
+const envClearKeysButton = document.querySelector<HTMLButtonElement>("#env-clear-keys-btn")!;
 const providerRows = document.querySelector<HTMLElement>("#provider-rows")!;
 const addKind = document.querySelector<HTMLSelectElement>("#add-kind")!;
 const addProviderButton = document.querySelector<HTMLButtonElement>("#add-provider-btn")!;
@@ -831,8 +843,8 @@ function rowInputs(row: HTMLElement): Record<string, HTMLInputElement> {
 }
 
 /** One provider row: default radio, name/url/model inputs, write-only key
- * field, clear-key and remove buttons. `takenIds` feeds id generation for
- * newly added rows. */
+ * field, clear-key, remove, and Test buttons plus a per-row status line.
+ * `takenIds` feeds id generation for newly added rows. */
 function providerRow(
   profile: { id: string; name: string; kind: ProviderKind; base_url: string; model: string },
   hasKey: boolean,
@@ -890,7 +902,17 @@ function providerRow(
   remove.className = "small-btn remove-prov-btn";
   remove.textContent = "Remove";
 
-  row.append(radio, kind, name, url, model, key, clearKey, remove);
+  const test = document.createElement("button");
+  test.type = "button";
+  test.className = "small-btn test-btn";
+  test.textContent = "Test";
+  test.title = "Send one minimal request (max_tokens=1, no vault data) to check this provider";
+
+  const testStatus = document.createElement("span");
+  testStatus.className = "meta prov-test-status";
+  testStatus.setAttribute("role", "status");
+
+  row.append(radio, kind, name, url, model, key, clearKey, remove, test, testStatus);
   return row;
 }
 
@@ -916,10 +938,21 @@ function renderSettings(view: SettingsView): void {
   keepaliveToggle.checked = view.keep_running_in_background;
   autostartToggle.checked = view.start_at_login;
 
+  const env = view.env_overrides;
+  envBaseUrl.value = env.base_url;
+  envModel.value = env.model;
+  envZaiKey.value = "";
+  envZaiKey.placeholder = envKeyPlaceholder(env.zai_key);
+  envAnthropicKey.value = "";
+  envAnthropicKey.placeholder = envKeyPlaceholder(env.anthropic_key);
+  envClearKeysButton.hidden = !env.zai_key && !env.anthropic_key;
+  envTestStatus.textContent = "";
+  envTestStatus.classList.remove("error");
+
   const envLines: string[] = [];
   if (view.env) {
     envLines.push(
-      `Environment fallback: ${view.env.model} via ${view.env.host} (read-only — ZAI_API_KEY/GLM_API_KEY or ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL; used when no default provider is set).`,
+      `Environment fallback: ${view.env.model} via ${view.env.host} (ZAI_API_KEY/GLM_API_KEY or ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL; values set below override the process environment; used when no default provider is set).`,
     );
   }
   if (view.env_error) envLines.push(`Environment config ignored: ${view.env_error}`);
@@ -960,6 +993,12 @@ function collectSettings(): SaveSettingsPayload {
   const api_keys = rows
     .map((row) => ({ id: row.dataset.id!, key: rowInputs(row).key.value.trim() }))
     .filter((update) => update.key !== "");
+  const env_api_keys = (
+    [
+      { id: "ZAI_API_KEY" as const, key: envZaiKey.value.trim() },
+      { id: "ANTHROPIC_API_KEY" as const, key: envAnthropicKey.value.trim() },
+    ] as const
+  ).filter((u) => u.key !== "");
   return {
     providers,
     default_provider: checked && checked.value ? checked.value : null,
@@ -969,6 +1008,8 @@ function collectSettings(): SaveSettingsPayload {
     keep_running_in_background: keepaliveToggle.checked,
     start_at_login: autostartToggle.checked,
     api_keys,
+    env_overrides: { base_url: envBaseUrl.value.trim(), model: envModel.value.trim() },
+    env_api_keys: [...env_api_keys],
   };
 }
 
@@ -1025,6 +1066,41 @@ async function clearProviderKey(id: string): Promise<void> {
     settingsNote.classList.add("error");
     settingsNote.textContent = `Could not clear key: ${e}`;
   }
+}
+
+/** Run one Test-connection round trip and render the outcome. */
+async function runLlmTest(
+  payload: LlmTestPayload,
+  button: HTMLButtonElement,
+  status: HTMLElement,
+): Promise<void> {
+  button.disabled = true;
+  status.classList.remove("error");
+  status.textContent = "Testing…";
+  try {
+    const result = await ipc.llmTest(payload);
+    status.textContent = result.ok
+      ? `OK — ${result.latency_ms} ms · ${result.detail}`
+      : `Failed: ${result.detail}`;
+    status.classList.toggle("error", !result.ok);
+  } catch (e) {
+    status.textContent = `Failed: ${e}`;
+    status.classList.add("error");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function testPayloadForRow(row: HTMLElement): LlmTestPayload {
+  const inputs = rowInputs(row);
+  return {
+    provider: row.dataset.id!,
+    base_url: inputs.base_url.value.trim(),
+    model: inputs.model.value.trim(),
+    key: inputs.key.value.trim(),
+    zai_key: "",
+    anthropic_key: "",
+  };
 }
 
 function addProviderRow(): void {
@@ -3095,6 +3171,36 @@ providerRows.addEventListener("click", (event) => {
     void clearProviderKey(row.dataset.id);
   } else if (target.classList.contains("remove-prov-btn")) {
     row.remove();
+  } else if (target.classList.contains("test-btn")) {
+    const status = row.querySelector<HTMLElement>(".prov-test-status");
+    if (status) {
+      void runLlmTest(testPayloadForRow(row), target.closest<HTMLButtonElement>("button")!, status);
+    }
+  }
+});
+
+envTestButton.addEventListener("click", () => {
+  void runLlmTest(
+    envTestPayload({
+      base_url: envBaseUrl.value,
+      model: envModel.value,
+      zai_key: envZaiKey.value,
+      anthropic_key: envAnthropicKey.value,
+    }),
+    envTestButton,
+    envTestStatus,
+  );
+});
+
+envClearKeysButton.addEventListener("click", async () => {
+  try {
+    await ipc.llmKeyClear(ENV_ZAI_KEY_ID);
+    const view = await ipc.llmKeyClear(ENV_ANTHROPIC_KEY_ID);
+    renderSettings(view);
+    await refreshLlm();
+  } catch (e) {
+    settingsNote.classList.add("error");
+    settingsNote.textContent = `Could not clear keys: ${e}`;
   }
 });
 

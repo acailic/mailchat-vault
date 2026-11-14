@@ -30,6 +30,15 @@ export interface EnvProviderView {
   host: string;
 }
 
+/** Mirrors `src-tauri::registry::EnvOverridesView` — the Settings env
+ * section: non-secret values plus key-presence flags (never the keys). */
+export interface EnvOverridesView {
+  base_url: string;
+  model: string;
+  zai_key: boolean;
+  anthropic_key: boolean;
+}
+
 /** Mirrors `src-tauri::registry::SettingsView` — the `settings_get` /
  * `settings_save` / `llm_key_clear` response. */
 export interface SettingsView {
@@ -45,6 +54,7 @@ export interface SettingsView {
   /** Start the app automatically at login (M7; opt-in, default off). */
   start_at_login: boolean;
   env: EnvProviderView | null;
+  env_overrides: EnvOverridesView;
   env_error: string | null;
   settings_error: string | null;
   key_store: "os_keyring" | "memory" | null;
@@ -64,6 +74,33 @@ export interface SaveSettingsPayload {
   start_at_login: boolean;
   /** Non-empty key = store for that provider id; empty string = clear. */
   api_keys: Array<{ id: string; key: string }>;
+  env_overrides: EnvOverridesPayload;
+  /** Env key overrides: id is the variable name; non-empty = store, empty = clear. */
+  env_api_keys: Array<{ id: "ZAI_API_KEY" | "ANTHROPIC_API_KEY"; key: string }>;
+}
+
+/** Non-secret env overrides inside `settings_save`. */
+export interface EnvOverridesPayload {
+  base_url: string;
+  model: string;
+}
+
+/** One "Test connection" request (mirrors `LlmTestPayload`): form values
+ * as typed; empty fields fall back to stored/effective values. */
+export interface LlmTestPayload {
+  provider: string;
+  base_url: string;
+  model: string;
+  key: string;
+  zai_key: string;
+  anthropic_key: string;
+}
+
+/** Mirrors `LlmTestResult`. */
+export interface LlmTestResult {
+  ok: boolean;
+  latency_ms: number;
+  detail: string;
 }
 
 /** Mirrors `vault_core::settings::ProviderMenuItem` — one Ask-menu entry. */
@@ -79,6 +116,10 @@ export interface ProviderMenuItem {
 /** Pseudo-provider ids (reserved in the backend). */
 export const LOCAL_ID = "local";
 export const ENV_ID = "env";
+
+/** Keyring override ids (backend `registry::ENV_*_KEY_ID`). */
+export const ENV_ZAI_KEY_ID = "env:ZAI_API_KEY";
+export const ENV_ANTHROPIC_KEY_ID = "env:ANTHROPIC_API_KEY";
 
 /** Maximum results that may feed the RAG summary (backend contract). */
 export const MAX_SUMMARIZE_TOP = 50;
@@ -119,6 +160,28 @@ export function placeholderForKind(kind: ProviderKind, field: "base_url" | "mode
     return field === "base_url" ? "https://api.z.ai/api/anthropic (default)" : "glm-5 (default)";
   }
   return field === "base_url" ? "https://example.invalid/api" : "model name";
+}
+
+/** Placeholder for the write-only env key inputs. */
+export function envKeyPlaceholder(stored: boolean): string {
+  return stored ? "stored — type to replace" : "API key";
+}
+
+/** Payload for the env-fallback Test button (form values as typed). */
+export function envTestPayload(input: {
+  base_url: string;
+  model: string;
+  zai_key: string;
+  anthropic_key: string;
+}): LlmTestPayload {
+  return {
+    provider: ENV_ID,
+    base_url: input.base_url.trim(),
+    model: input.model.trim(),
+    key: "",
+    zai_key: input.zai_key.trim(),
+    anthropic_key: input.anthropic_key.trim(),
+  };
 }
 
 /** First free id with the given base (`base`, `base-2`, …) — mirrors
