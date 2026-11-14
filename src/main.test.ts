@@ -619,7 +619,7 @@ describe("filters", () => {
     // the unique label keeps its count.
     expect(chips.map((c) => c.textContent)).toEqual([
       "mbox · import",
-      "mbox · import 2",
+      "mbox",
       "demo (3)",
     ]);
     searchRespondsWith(() => pageOf(HITS.slice(0, 1), 6));
@@ -682,7 +682,7 @@ describe("filters", () => {
     // One applied filter chip per instance id, labeled distinctly.
     const chips = [...win.document.querySelectorAll("#active-filter-chips .filter-chip")];
     expect(chips.map((c) => c.textContent?.trim())).toEqual([
-      "mbox · import 2 ×",
+      "mbox ×",
       "mbox · import ×",
     ]);
     // Removing one leaves the other instance's filter in place.
@@ -1676,24 +1676,34 @@ describe("export", () => {
     await boot();
     searchRespondsWith(() => pageOf(HITS.slice(0, 2), 120));
     input("#author").value = "bruno";
-    pressKey(input("#author"), "Enter");
+    input("#from-date").value = "2026-01-01";
+    input("#to-date").value = "2026-12-31";
+    select("#has-attachment", "with");
+    select("#import-scope", "imp-1");
+    select("#sort-order", "newest");
+    $('#source-chips .chip[data-source="inst-mbox"]').click();
+    await runQuery("vault");
     await vi.waitFor(() => expect($("#status").textContent).toContain("1–50 of 120"));
 
     dialog.savedPath = "/tmp/out.csv";
-    tauri.handlers.set("export_search", () => ({ format: "csv", written: 120, skipped: 0 }));
+    tauri.handlers.set("export_search_v2", () => ({ format: "csv", written: 120, skipped: 0 }));
     $("#export-btn").click();
     await vi.waitFor(() =>
       expect($("#export-status").textContent).toBe("Exported 120 messages to /tmp/out.csv."),
     );
-    const exportCalls = tauri.calls.filter((c) => c.cmd === "export_search");
+    const exportCalls = tauri.calls.filter((c) => c.cmd === "export_search_v2");
     expect(exportCalls).toHaveLength(1);
     expect(exportCalls[0].args).toEqual({
-      query: {
-        text: "",
-        sources: [],
+      request: {
+        text: "vault",
+        source_ids: ["inst-mbox"],
         author: "bruno",
-        from_date: "",
-        to_date: "",
+        from_date: "2026-01-01",
+        to_date: "2026-12-31",
+        timezone: "",
+        has_attachment: true,
+        import_job_id: "imp-1",
+        sort: "newest",
         limit: 50,
         offset: 0,
       },
@@ -1705,7 +1715,7 @@ describe("export", () => {
   it("passes the chosen format and notes skipped non-email rows for mbox", async () => {
     await bootSearched();
     dialog.savedPath = "/tmp/archive.mbox";
-    tauri.handlers.set("export_search", () => ({
+    tauri.handlers.set("export_search_v2", () => ({
       format: "mbox",
       written: 40,
       skipped: 9,
@@ -1717,7 +1727,7 @@ describe("export", () => {
         "Exported 40 messages (9 non-email skipped — MBOX carries email rows) to /tmp/archive.mbox.",
       ),
     );
-    expect(tauri.calls.find((c) => c.cmd === "export_search")?.args).toMatchObject({
+    expect(tauri.calls.find((c) => c.cmd === "export_search_v2")?.args).toMatchObject({
       format: "mbox",
       path: "/tmp/archive.mbox",
     });
@@ -1728,7 +1738,7 @@ describe("export", () => {
     dialog.savedPath = null; // cancelled
     $("#export-btn").click();
     await flush();
-    expect(tauri.calls.filter((c) => c.cmd === "export_search")).toHaveLength(0);
+    expect(tauri.calls.filter((c) => c.cmd === "export_search_v2")).toHaveLength(0);
     expect($("#export-status").textContent).toBe("");
   });
 
@@ -1737,7 +1747,7 @@ describe("export", () => {
     dialog.savedPath = "/tmp/never.csv";
     $("#export-btn").click();
     await flush();
-    expect(tauri.calls.filter((c) => c.cmd === "export_search")).toHaveLength(0);
+    expect(tauri.calls.filter((c) => c.cmd === "export_search_v2")).toHaveLength(0);
     expect($("#export-status").textContent).toBe(
       "Nothing to export — run a search (or set filters) first.",
     );
@@ -1746,7 +1756,9 @@ describe("export", () => {
   it("a failing export surfaces the error", async () => {
     await bootSearched();
     dialog.savedPath = "/root/forbidden.csv";
-    tauri.handlers.set("export_search", () => Promise.reject("disk full"));
+    tauri.handlers.set("export_search_v2", () => Promise.reject({
+      code: "internal", message: "disk full", retryable: true,
+    }));
     $("#export-btn").click();
     await vi.waitFor(() =>
       expect($("#export-status").textContent).toBe("Export failed: disk full"),
@@ -2073,6 +2085,41 @@ describe("activity badge", () => {
     expect($("#activity-attention").textContent).toContain("needs attention");
     ($('.nav-view-btn[data-view-target="activity"]') as HTMLElement).click();
     await vi.waitFor(() => expect(($("#activity-attention") as HTMLElement).hidden).toBe(true));
+  });
+
+  it("does not reflag an acknowledged failure when its event is replayed", async () => {
+    await boot();
+    emit({ seq: 1, at: "t", job: 9, type: "submitted", kind: "imap_sync_all" });
+    const failure = {
+      seq: 2, at: "t", job: 9, type: "failed",
+      error: { kind: "network", message: "down" },
+    };
+    emit(failure);
+    expect($("#activity-attention").hidden).toBe(false);
+    $('.nav-view-btn[data-view-target="activity"]').click();
+    expect($("#activity-attention").hidden).toBe(true);
+    $('.nav-view-btn[data-view-target="workspace"]').click();
+    emit(failure);
+    expect($("#activity-attention").hidden).toBe(true);
+  });
+
+  it("flags failures recovered by polling and acknowledges them while Activity is open", async () => {
+    tauri.handlers.set("job_events_since", () => ({
+      events: [
+        { seq: 1, at: "t", job: 9, type: "submitted", kind: "imap_sync_all" },
+        { seq: 2, at: "t", job: 9, type: "failed", error: { kind: "network", message: "down" } },
+      ],
+      latest_seq: 2, oldest_kept: 1, trimmed: false, jobs: [],
+    }));
+    await boot();
+    await vi.waitFor(() => expect($("#jobs-list").textContent).toContain("failed"));
+    expect($("#activity-attention").hidden).toBe(false);
+    $('.nav-view-btn[data-view-target="activity"]').click();
+    expect($("#activity-attention").hidden).toBe(true);
+    emit({ seq: 3, at: "t", job: 10, type: "submitted", kind: "imap_sync_all" });
+    emit({ seq: 4, at: "t", job: 10, type: "failed", error: { kind: "network", message: "down again" } });
+    $('.nav-view-btn[data-view-target="workspace"]').click();
+    expect($("#activity-attention").hidden).toBe(true);
   });
 });
 

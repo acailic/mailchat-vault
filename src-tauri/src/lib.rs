@@ -86,7 +86,7 @@
 //!   switches through the recoverable journal — a restart is required
 //!   afterwards), and the previous-vault recovery surface. Startup
 //!   resolves an interrupted switch before anything opens the vault.
-//! - `export_search` — write the current search results (all pages, under
+//! - `export_search_v2` — write the current v2 search results (all pages, under
 //!   the active filters) to a user-chosen file as CSV, JSON Lines or MBOX.
 //! - `export_chat` — write the whole chat thread of one message to a
 //!   user-chosen file in the same formats.
@@ -2760,6 +2760,35 @@ async fn export_search(
     .map_err(|e| format!("export task failed: {e}"))?
 }
 
+/// Export all matches of the executed v2 search, retaining instance ids,
+/// attachment/import/conversation filters, timezone bounds, and ordering.
+/// The legacy `export_search` command remains available to older callers.
+#[tauri::command]
+async fn export_search_v2(
+    state: State<'_, AppState>,
+    request: SearchArchiveRequest,
+    format: String,
+    path: String,
+) -> Result<ExportSummary, AppError> {
+    let format = ExportFormat::parse(&format).map_err(AppError::from)?;
+    // Reject invalid queries before creating/truncating the destination.
+    request.normalize().map_err(AppError::from)?;
+    let vault = ActiveVault::from(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        vault
+            .with_read(|s| -> CoreResult<ExportSummary> {
+                let file = std::fs::File::create(&path).map_err(Error::from)?;
+                let mut out = BufWriter::new(file);
+                let summary = export::export_search_v2(s, &request, format, &mut out)?;
+                out.flush().map_err(Error::from)?;
+                Ok(summary)
+            })
+            .map_err(AppError::from)
+    })
+    .await
+    .map_err(|e| AppError::internal(format!("export task failed: {e}")))?
+}
+
 /// Export the whole chat thread containing message `id` (oldest → newest;
 /// a threadless message exports as one row) to `path`. `None` when no
 /// message has that id.
@@ -3247,6 +3276,7 @@ pub fn run() {
             stats,
             archive_stats,
             export_search,
+            export_search_v2,
             export_chat,
             search_archive_v2,
             message_detail_v2,

@@ -196,14 +196,17 @@ export function sourceChipRows(
     if (!duplicated) {
       return { id: s.id, label: s.label, count: countByLabel.get(s.label) ?? null };
     }
+    // Email vs import is the instance's own kind; the account row only
+    // supplies the imap identity (username · host) detail. The identity
+    // disambiguates most duplicate labels, but TLS twins share it too
+    // (same server reachable over two modes): number within the
+    // identity, import-style, so every chip label stays distinct.
     const account = accountById.get(s.id);
     let label: string;
-    if (account && account.kind === "imap" && account.imap) {
-      // The imap identity (username · host) disambiguates most duplicate
-      // labels, but TLS twins share it too (same server reachable over
-      // two modes): number within the identity, import-style, so every
-      // chip label stays distinct.
-      const identity = `${s.label} · ${account.imap.username} · ${account.imap.host}`;
+    if (s.kind === "imap") {
+      const identity = account && account.imap
+        ? `${s.label} · ${account.imap.username} · ${account.imap.host}`
+        : s.label;
       const n = (imapSeen.get(identity) ?? 0) + 1;
       imapSeen.set(identity, n);
       label = n === 1 ? identity : `${identity} · imap ${n}`;

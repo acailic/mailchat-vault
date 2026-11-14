@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Write;
 
+use crate::message::Message;
 use crate::query::{day_instant_utc, escape_like, parse_day};
 use crate::storage::{Storage, BM25_WEIGHT_AUTHOR, BM25_WEIGHT_BODY, BM25_WEIGHT_SUBJECT};
 use crate::{Error, Result};
@@ -711,7 +712,7 @@ fn browse_snippet(body: &str) -> String {
 
 /// `AND …` fragments over aliases `m` (archive_messages), `si`
 /// (source_instances), bound in order. Shared by the count and the page
-/// statements of one search.
+/// statements of one search and the all-results export.
 struct V2Filters {
     sql: String,
     values: Vec<SqlValue>,
@@ -812,6 +813,20 @@ fn summary_from_row(
     })
 }
 
+/// Shared deterministic order for paginated results and their export.
+/// Relevance keeps the bm25-weighted ranking (subject/body/author weights,
+/// retrieval slice 1); newest-first paths order by resolved instant then id.
+fn archive_order(req: &NormalizedSearch) -> String {
+    if req.text.is_empty() || req.sort == SearchSort::Newest {
+        "(m.sent_instant IS NULL) ASC, m.sent_instant DESC, m.id DESC".to_string()
+    } else {
+        format!(
+            "bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, \
+             {BM25_WEIGHT_SUBJECT}), m.id"
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Storage read paths
 // ---------------------------------------------------------------------------
@@ -825,6 +840,7 @@ impl Storage {
         let filters = V2Filters::build(&req)?;
         // Empty text browses newest regardless of the requested sort.
         let newest_order = req.text.is_empty() || req.sort == SearchSort::Newest;
+        let order = archive_order(&req);
 
         let tx = self.conn.unchecked_transaction()?;
 
@@ -864,7 +880,7 @@ impl Storage {
             let sql = format!(
                 "SELECT {SUMMARY_COLUMNS}, substr(m.body, 1, 600) {SUMMARY_JOINS} \
                  WHERE 1=1 {} \
-                 ORDER BY (m.sent_instant IS NULL) ASC, m.sent_instant DESC, m.id DESC \
+                 ORDER BY {order} \
                  LIMIT ? OFFSET ?",
                 filters.sql
             );
@@ -897,7 +913,7 @@ impl Storage {
                  JOIN source_instances AS si ON si.id = m.source_instance_id \
                  LEFT JOIN conversations AS c ON c.id = m.conversation_id \
                  WHERE archive_fts MATCH ?3 {} \
-                 ORDER BY (m.sent_instant IS NULL) ASC, m.sent_instant DESC, m.id DESC \
+                 ORDER BY {order} \
                  LIMIT ? OFFSET ?",
                 filters.sql
             );
@@ -931,8 +947,7 @@ impl Storage {
                  JOIN source_instances AS si ON si.id = m.source_instance_id \
                  LEFT JOIN conversations AS c ON c.id = m.conversation_id \
                  WHERE archive_fts MATCH ?3 {} \
-                 ORDER BY bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, \
-                               {BM25_WEIGHT_SUBJECT}), m.id LIMIT ? OFFSET ?",
+                 ORDER BY {order} LIMIT ? OFFSET ?",
                 filters.sql
             );
             let mut stmt = tx.prepare(&sql)?;
@@ -955,6 +970,48 @@ impl Storage {
             offset: req.offset,
             archive_revision,
         })
+    }
+
+    /// Stream every message matching the v2 search, without pagination.
+    /// The filters and ordering are shared with `search_archive`; a single
+    /// SQLite statement holds one read snapshot while each full message is
+    /// passed to the sink, so large exports do not collect rows in memory.
+    pub fn search_archive_export_stream(
+        &self,
+        request: &SearchArchiveRequest,
+        sink: &mut dyn FnMut(&Message) -> Result<()>,
+    ) -> Result<u64> {
+        let req = request.normalize()?;
+        let filters = V2Filters::build(&req)?;
+        let order = archive_order(&req);
+        let columns = "m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
+                       m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
+                       m.body, m.raw_json";
+        let (from, predicate, mut bind) = if req.text.is_empty() {
+            (SUMMARY_JOINS, "1=1", Vec::new())
+        } else {
+            (
+                "FROM archive_fts \
+                 JOIN archive_messages AS m ON m.id = archive_fts.rowid \
+                 JOIN source_instances AS si ON si.id = m.source_instance_id \
+                 LEFT JOIN conversations AS c ON c.id = m.conversation_id",
+                "archive_fts MATCH ?",
+                vec![SqlValue::from(crate::search::build_match_query(&req.text))],
+            )
+        };
+        bind.extend(filters.bind_values());
+        let sql = format!(
+            "SELECT {columns} {from} WHERE {predicate} {} ORDER BY {order}",
+            filters.sql
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(bind))?;
+        let mut count = 0;
+        while let Some(row) = rows.next()? {
+            sink(&crate::storage::message_from_row(row)?)?;
+            count += 1;
+        }
+        Ok(count)
     }
 
     /// The full v2 reading payload for one message. `Ok(None)` when no

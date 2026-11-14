@@ -378,8 +378,8 @@ describe("syncFailureText / passwordStoreNote (the honest failure surface)", () 
 });
 
 describe("sourceChipRows", () => {
-  const inst = (id: string, label: string): SourceInstance => ({
-    id, kind: "legacy", label, connector_key: "mbox", config_json: "{}",
+  const inst = (id: string, label: string, kind = "legacy"): SourceInstance => ({
+    id, kind, label, connector_key: "mbox", config_json: "{}",
     state: "connected", excluded: false,
     last_attempt_at: null, last_success_at: null, created_at: "2026-01-01 00:00:00",
   });
@@ -413,7 +413,7 @@ describe("sourceChipRows", () => {
 
   it("duplicate labels are disambiguated and lose the shared count", () => {
     const rows = sourceChipRows(
-      [inst("a", "chat"), inst("b", "chat"), inst("c", "chat")],
+      [inst("a", "chat"), inst("b", "chat", "imap"), inst("c", "chat")],
       [imp("a", "chat"), imap("b", "chat", "ana@gmail.com", "imap.gmail.com"), imp("c", "chat")],
       [{ source: "chat", count: 9 }],
     );
@@ -437,13 +437,30 @@ describe("sourceChipRows", () => {
     // host`) is identical, so the identity alone cannot disambiguate.
     const label = "imap:127.0.0.1:993:alice";
     const rows = sourceChipRows(
-      [inst("a", label), inst("b", label)],
+      [inst("a", label, "imap"), inst("b", label, "imap")],
       [imap("a", label, "alice", "127.0.0.1"), imap("b", label, "alice", "127.0.0.1")],
       [{ source: label, count: 4 }],
     );
     expect(rows.map((r) => r.label)).toEqual([
       "imap:127.0.0.1:993:alice · alice · 127.0.0.1",
       "imap:127.0.0.1:993:alice · alice · 127.0.0.1 · imap 2",
+    ]);
+    expect(rows.every((r) => r.count === null)).toBe(true);
+  });
+
+  it("classifies duplicate labels by the instance kind even when account rows are missing", () => {
+    // Regression: refreshAccounts() failing once leaves the account
+    // cache empty while instances and stats still load; an imap source
+    // must still get an imap-style chip label, not an import one.
+    const rows = sourceChipRows(
+      [inst("a", "chat", "imap"), inst("b", "chat", "imap"), inst("c", "chat")],
+      [],
+      [{ source: "chat", count: 9 }],
+    );
+    expect(rows.map((r) => r.label)).toEqual([
+      "chat",
+      "chat · imap 2",
+      "chat · import",
     ]);
     expect(rows.every((r) => r.count === null)).toBe(true);
   });

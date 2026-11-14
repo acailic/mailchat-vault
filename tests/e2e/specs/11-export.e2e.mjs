@@ -1,5 +1,6 @@
 // Export end-to-end: search-result and whole-chat exports to CSV, JSON
-// Lines and MBOX through the running app's export_search / export_chat
+// Lines and MBOX through the running app's export_search_v2 / export_chat
+// commands, with legacy export_search compatibility probes retained,
 // commands with the exact argument objects the UI button handlers build
 // (the native GTK save dialog cannot be automated over WebDriver — same
 // rationale as the media-extract and signal-import specs). Also drives
@@ -134,8 +135,13 @@ export async function run(ctx) {
       offset: 0,
     };
 
-    const csv = await invoke(browser, "export_search", {
-      query: uiQuery,
+    const uiRequest = {
+      text: "vault", source_ids: [], author: "", from_date: null,
+      to_date: null, timezone: "", has_attachment: null,
+      import_job_id: null, sort: "relevance", limit: 50, offset: 0,
+    };
+    const csv = await invoke(browser, "export_search_v2", {
+      request: uiRequest,
       format: "csv",
       path: out("vault.csv"),
     });
@@ -162,8 +168,8 @@ export async function run(ctx) {
 
     // Scenario: JSON Lines export of the same search is lossless — one
     // parseable Message per line, same rows in the same order as CSV.
-    const json = await invoke(browser, "export_search", {
-      query: uiQuery,
+    const json = await invoke(browser, "export_search_v2", {
+      request: uiRequest,
       format: "json",
       path: out("vault.jsonl"),
     });
@@ -186,6 +192,28 @@ export async function run(ctx) {
         assert.ok(key in m, `message has ${key}`);
       }
     }
+
+    // The UI scopes by canonical instance id. Export must use that same
+    // scope rather than comparing its id to a legacy source name.
+    const sources = await invoke(browser, "sources_list");
+    assert.ok(sources.ok, `sources_list succeeded: ${sources.error}`);
+    const mailSource = sources.value.find((source) => source.label === "mbox");
+    assert.ok(mailSource, "the imported email source exists");
+    const scopedRequest = { ...uiRequest, text: "", source_ids: [mailSource.id], sort: "newest" };
+    const scopedPage = await invoke(browser, "search_archive_v2", { request: scopedRequest });
+    assert.ok(scopedPage.ok, `source-scoped search succeeded: ${scopedPage.error}`);
+    const scopedExport = await invoke(browser, "export_search_v2", {
+      request: scopedRequest, format: "json", path: out("source.jsonl"),
+    });
+    assert.ok(scopedExport.ok, `source-scoped export succeeded: ${scopedExport.error}`);
+    assert.equal(scopedExport.value.written, scopedPage.value.total, "source export count matches search");
+    const scopedMessages = (await readFile(out("source.jsonl"), "utf8"))
+      .trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    assert.equal(
+      scopedMessages.map((m) => m.id).join(","),
+      scopedPage.value.hits.map((m) => m.id).join(","),
+      "the export contains the source's exact originals in search order",
+    );
 
     // Scenario: formula-injection probe — chat bodies beginning with =, +,
     // - or @ export to CSV with an apostrophe prefix so the cells open as

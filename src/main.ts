@@ -222,9 +222,8 @@ const jobsStatus = document.querySelector<HTMLElement>("#jobs-status")!;
 const jobsList = document.querySelector<HTMLUListElement>("#jobs-list")!;
 const activityCountBadge = document.querySelector<HTMLElement>("#activity-count")!;
 const activityAttentionFlag = document.querySelector<HTMLElement>("#activity-attention")!;
-/** A job failed while Activity was not open — surface a textual flag on
- * the nav link until the user opens Activity. */
-let activityAttention = false;
+/** Failures observed while Activity is open have already been shown. */
+let acknowledgedFailureSeq = 0;
 const dashboard = document.querySelector<HTMLElement>("#dashboard")!;
 const dashboardStatus = document.querySelector<HTMLElement>("#dashboard-status")!;
 const dashboardRefreshButton = document.querySelector<HTMLButtonElement>("#stats-refresh")!;
@@ -2076,10 +2075,13 @@ void ipc.onEvent<WatchSnapshot>("watch-status", (payload) => {
 const jobs = newJobsTracker();
 
 function renderActivityBadge(): void {
+  if (workspace.store.get().view === "activity") {
+    acknowledgedFailureSeq = jobs.latestFailureSeq;
+  }
   const count = activeJobCount(jobs);
   activityCountBadge.textContent = count > 0 ? String(count) : "";
   activityCountBadge.hidden = count === 0;
-  activityAttentionFlag.hidden = !activityAttention;
+  activityAttentionFlag.hidden = jobs.latestFailureSeq <= acknowledgedFailureSeq;
 }
 
 function renderJobs(): void {
@@ -2132,9 +2134,6 @@ function refreshAfterJobEvent(event: JobEvent): void {
 
 void ipc.onEvent<JobEvent>("job-event", (payload) => {
   applyJobEvent(jobs, payload);
-  if (payload.type === "failed" && workspace.store.get().view !== "activity") {
-    activityAttention = true;
-  }
   // After applyJobEvent the tracker knows the kind even for a job whose
   // `submitted` event predates this listener (boot recovery).
   notifier.onJobEvent(payload, jobs.records.get(payload.job)?.kind);
@@ -2187,27 +2186,20 @@ async function exportResults(): Promise<void> {
     return;
   }
   const format = exportFormatSelect.value;
+  const request = buildRequest(state.filters, PAGE_SIZE, 0);
   const path = await pickExportPath(format);
   if (path === null) return; // cancelled
   exportButton.disabled = true;
   exportStatus.textContent = "Exporting…";
   try {
-    const summary = await ipc.exportSearch({
-      query: {
-        text: state.filters.text,
-        sources: state.sources,
-        author: state.filters.author,
-        from_date: state.filters.fromDate,
-        to_date: state.filters.toDate,
-        limit: PAGE_SIZE,
-        offset: 0,
-      },
+    const summary = await ipc.exportSearchV2({
+      request,
       format,
       path,
     });
     exportStatus.textContent = exportStatusLine(summary, path);
   } catch (e) {
-    exportStatus.textContent = `Export failed: ${e}`;
+    exportStatus.textContent = `Export failed: ${describeError(e)}`;
   } finally {
     exportButton.disabled = false;
   }
@@ -2735,8 +2727,7 @@ workspace.store.subscribe((current) => {
 // Opening Activity dismisses its attention flag (the failure list is now
 // in front of the user); re-render hides the nav flag immediately.
 workspace.store.subscribe(({ view }) => {
-  if (view === "activity" && activityAttention) {
-    activityAttention = false;
+  if (view === "activity") {
     renderActivityBadge();
   }
 });
