@@ -288,9 +288,6 @@ impl LlmRegistry {
     /// values layered on top. Fails with a user-facing message when there is
     /// nothing to test or the configuration refuses itself (pairing,
     /// plaintext http).
-    // Not yet called outside tests; Task 4's `llm_test` command is the
-    // caller (drop this `allow` there).
-    #[allow(dead_code)]
     pub fn test_config(&self, payload: &LlmTestPayload) -> std::result::Result<LlmConfig, String> {
         let trim = |v: &str| v.trim().to_string();
         let config = if payload.provider == ENV_ID {
@@ -531,9 +528,6 @@ pub struct EnvOverridesPayload {
 /// target, then on to the process environment — the runtime layer
 /// order). Profile targets read `key`; the env target reads
 /// `zai_key`/`anthropic_key`; each target ignores the other's fields.
-// Not yet constructed outside tests; Task 4's `llm_test` command is the
-// caller (drop this `allow` there).
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 pub struct LlmTestPayload {
     pub provider: String,
