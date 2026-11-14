@@ -285,6 +285,83 @@ fn zai_host() -> String {
     endpoint_host(LlmConfig::DEFAULT_BASE_URL).expect("default base URL parses")
 }
 
+/// The per-kind pairing rules for one provider profile: a key is never
+/// sent to a provider it does not belong to — a z.ai key only to the
+/// z.ai host, an Anthropic key never there and only to an explicit
+/// endpoint, a custom endpoint fully explicit — plus URL shape and the
+/// plaintext-http refusal. This is exactly the `kind` match inside
+/// [`Settings::validate`], factored out so other call sites (e.g. the
+/// "Test connection" probe, which composes typed form values over the
+/// stored ones) enforce the same rules a save would enforce.
+pub fn check_profile_pairing(profile: &ProviderProfile) -> crate::Result<()> {
+    let name = profile.display_name();
+    match profile.kind {
+        ProviderKind::Zai => {
+            if !profile.base_url.is_empty() {
+                if !is_http_url(&profile.base_url) {
+                    return Err(settings_error(format!(
+                        "provider “{name}”: base URL must be an absolute http(s) URL"
+                    )));
+                }
+                if endpoint_host(&profile.base_url).as_deref() != Some(zai_host().as_str()) {
+                    return Err(settings_error(format!(
+                        "provider “{name}”: a z.ai key is only ever sent to the z.ai \
+                         endpoint, but the base URL points at {}. Remove the base URL to \
+                         use the default {}",
+                        profile.host(),
+                        LlmConfig::DEFAULT_BASE_URL
+                    )));
+                }
+                check_no_plaintext_http(&format!("provider “{name}”"), &profile.base_url)?;
+            }
+        }
+        ProviderKind::Anthropic => {
+            if profile.base_url.is_empty() {
+                return Err(settings_error(format!(
+                    "provider “{name}”: an Anthropic key is only sent to an explicitly \
+                     configured endpoint — set a base URL (e.g. https://api.anthropic.com)"
+                )));
+            }
+            if !is_http_url(&profile.base_url) {
+                return Err(settings_error(format!(
+                    "provider “{name}”: base URL must be an absolute http(s) URL"
+                )));
+            }
+            if endpoint_host(&profile.base_url) == Some(zai_host()) {
+                return Err(settings_error(format!(
+                    "provider “{name}”: refusing to send an Anthropic key to the z.ai \
+                     endpoint — point the base URL at the endpoint that accepts this key"
+                )));
+            }
+            check_no_plaintext_http(&format!("provider “{name}”"), &profile.base_url)?;
+            if profile.model.is_empty() {
+                return Err(settings_error(format!(
+                    "provider “{name}”: a model name is required for Anthropic providers"
+                )));
+            }
+        }
+        ProviderKind::Custom => {
+            if profile.base_url.is_empty() {
+                return Err(settings_error(format!(
+                    "provider “{name}”: a custom provider needs a base URL"
+                )));
+            }
+            if !is_http_url(&profile.base_url) {
+                return Err(settings_error(format!(
+                    "provider “{name}”: base URL must be an absolute http(s) URL"
+                )));
+            }
+            check_no_plaintext_http(&format!("provider “{name}”"), &profile.base_url)?;
+            if profile.model.is_empty() {
+                return Err(settings_error(format!(
+                    "provider “{name}”: a model name is required for custom providers"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Settings {
     /// Load from `path`. `Ok(None)` when the file does not exist (fresh
     /// install → defaults). `Err` for anything unreadable, corrupt, or a
@@ -373,70 +450,7 @@ impl Settings {
                 )));
             }
             known_ids.insert(p.id.clone());
-            match p.kind {
-                ProviderKind::Zai => {
-                    if !p.base_url.is_empty() {
-                        if !is_http_url(&p.base_url) {
-                            return Err(settings_error(format!(
-                                "provider “{name}”: base URL must be an absolute http(s) URL"
-                            )));
-                        }
-                        if endpoint_host(&p.base_url).as_deref() != Some(zai_host().as_str()) {
-                            return Err(settings_error(format!(
-                                "provider “{name}”: a z.ai key is only ever sent to the z.ai \
-                                 endpoint, but the base URL points at {}. Remove the base URL to \
-                                 use the default {}",
-                                p.host(),
-                                LlmConfig::DEFAULT_BASE_URL
-                            )));
-                        }
-                        check_no_plaintext_http(&format!("provider “{name}”"), &p.base_url)?;
-                    }
-                }
-                ProviderKind::Anthropic => {
-                    if p.base_url.is_empty() {
-                        return Err(settings_error(format!(
-                            "provider “{name}”: an Anthropic key is only sent to an explicitly \
-                             configured endpoint — set a base URL (e.g. https://api.anthropic.com)"
-                        )));
-                    }
-                    if !is_http_url(&p.base_url) {
-                        return Err(settings_error(format!(
-                            "provider “{name}”: base URL must be an absolute http(s) URL"
-                        )));
-                    }
-                    if endpoint_host(&p.base_url) == Some(zai_host()) {
-                        return Err(settings_error(format!(
-                            "provider “{name}”: refusing to send an Anthropic key to the z.ai \
-                             endpoint — point the base URL at the endpoint that accepts this key"
-                        )));
-                    }
-                    check_no_plaintext_http(&format!("provider “{name}”"), &p.base_url)?;
-                    if p.model.is_empty() {
-                        return Err(settings_error(format!(
-                            "provider “{name}”: a model name is required for Anthropic providers"
-                        )));
-                    }
-                }
-                ProviderKind::Custom => {
-                    if p.base_url.is_empty() {
-                        return Err(settings_error(format!(
-                            "provider “{name}”: a custom provider needs a base URL"
-                        )));
-                    }
-                    if !is_http_url(&p.base_url) {
-                        return Err(settings_error(format!(
-                            "provider “{name}”: base URL must be an absolute http(s) URL"
-                        )));
-                    }
-                    check_no_plaintext_http(&format!("provider “{name}”"), &p.base_url)?;
-                    if p.model.is_empty() {
-                        return Err(settings_error(format!(
-                            "provider “{name}”: a model name is required for custom providers"
-                        )));
-                    }
-                }
-            }
+            check_profile_pairing(p)?;
         }
         if !self.env_overrides.anthropic_base_url.is_empty() {
             if !is_http_url(&self.env_overrides.anthropic_base_url) {
