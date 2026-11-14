@@ -388,7 +388,7 @@ fn summary_prompt_carries_exactly_the_default_top_8() {
         .unwrap();
     assert_eq!(results.len(), 12);
 
-    let summarized = summarize_results(&llm, "vault?", &results, DEFAULT_SUMMARIZE_TOP);
+    let summarized = summarize_results(&llm, "vault?", &results, DEFAULT_SUMMARIZE_TOP, &[]);
     assert_eq!(summarized.answer.as_deref(), Some("summary"));
     let user = &llm.prompts()[0].1;
 
@@ -445,7 +445,7 @@ fn summary_prompt_truncates_long_bodies() {
     let results = s
         .search_filtered(&build_match_query("vault"), None, None, None, false, 50)
         .unwrap();
-    let summarized = summarize_results(&llm, "q", &results, DEFAULT_SUMMARIZE_TOP);
+    let summarized = summarize_results(&llm, "q", &results, DEFAULT_SUMMARIZE_TOP, &[]);
     assert_eq!(summarized.answer.as_deref(), Some("summary"));
     let user = &llm.prompts()[0].1;
     let prefix: String = long_body.chars().take(BODY_LIMIT).collect();

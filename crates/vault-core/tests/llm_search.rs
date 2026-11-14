@@ -175,7 +175,7 @@ fn summary_prompt_is_limited_to_top_n_results() {
         .search_filtered(&build_match_query("vault"), None, None, None, false, 50)
         .unwrap();
     assert_eq!(results.len(), 10);
-    let summarized = summarize_results(&llm, "vault?", &results, 3);
+    let summarized = summarize_results(&llm, "vault?", &results, 3, &[]);
     assert_eq!(summarized.answer.as_deref(), Some("summary"));
     let user = &llm.prompts()[0].1;
     // Which three are top-ranked is rank's business, but exactly three
