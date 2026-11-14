@@ -819,25 +819,52 @@ mark.hit {
 #view-activity section { margin-bottom: var(--sp-4); }
 
 /* Statistics dashboard: pure CSS bars + tables, no chart library. */
+.day-chart-block { margin: 10px 0 14px; }
 .day-chart {
   display: flex;
   align-items: flex-end;
   gap: 1px;
   height: 72px;
-  margin: 10px 0 14px;
+  margin: 0;
   border-bottom: 1px solid var(--border-strong);
 }
 .day-bar {
   flex: 1 1 0;
   min-width: 1px;
-  background: var(--accent);
+  background: var(--accent); /* fallback: engines without color-mix */
   border-radius: 1px 1px 0 0;
+}
+/* Heat ramp: quiet days blend toward the idle floor, the busiest day
+ * reaches the full accent, so density reads without hover tooltips. */
+@supports (background: color-mix(in oklab, red, blue)) {
+  .day-bar {
+    background: color-mix(
+      in oklab,
+      var(--accent) calc(35% + var(--bar-heat, 100) * 0.65%),
+      var(--chart-idle)
+    );
+  }
+}
+/* Time axis under the histogram: first, middle, and last bucket label. */
+.day-chart-axis {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-top: 2px;
+  font-size: var(--text-meta);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
   gap: 10px 24px;
 }
+/* One categorical color per card (accent → ochre → slate blue), echoed
+ * by the dot before each heading so the tables read at a glance. */
+.stat-table { --stat-fill: var(--accent); }
+.stat-grid .stat-table:nth-child(2) { --stat-fill: var(--chart-2); }
+.stat-grid .stat-table:nth-child(3) { --stat-fill: var(--chart-3); }
 .stat-table h3 {
   font-size: 12px;
   font-weight: 600;
@@ -845,6 +872,15 @@ mark.hit {
   letter-spacing: 0.04em;
   color: var(--muted);
   margin: 0 0 var(--sp-1);
+}
+.stat-table h3::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 2px;
+  background: var(--stat-fill);
 }
 .stat-table table { border-collapse: collapse; width: 100%; font-size: var(--text-meta); }
 .stat-table td {
@@ -864,7 +900,7 @@ mark.hit {
   height: 6px;
   border-radius: 3px;
   min-width: 1px;
-  background: var(--accent);
+  background: var(--stat-fill);
 }
 
 /* --- Settings view -------------------------------------------------------- */
