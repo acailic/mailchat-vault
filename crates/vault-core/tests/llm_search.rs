@@ -263,6 +263,9 @@ fn invalid_fts5_from_llm_falls_back_but_keeps_dates() {
         match_expr: "\"vault\" (".into(),
         date_from: Some("2026-10-01".into()),
         date_to: Some("2026-10-31".into()),
+        from: None,
+        has_link: None,
+        extract_links: false,
     };
     let planned = validate(&s, "vault october", Ok(candidate));
     assert_eq!(planned.source, PlanSource::LlmFallback);
@@ -332,6 +335,9 @@ fn ask_with_empty_plan_expression_returns_no_results() {
             match_expr: String::new(),
             date_from: None,
             date_to: None,
+            from: None,
+            has_link: None,
+            extract_links: false,
         },
         source: PlanSource::NoLlm,
         notes: Vec::new(),

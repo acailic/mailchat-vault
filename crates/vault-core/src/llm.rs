@@ -41,6 +41,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_TOKENS: u32 = 1024;
 /// Hard cap on the length of an LLM-produced MATCH expression.
 const MAX_MATCH_LEN: usize = 512;
+/// Hard cap on the length of an LLM-produced `from` filter.
+const MAX_FROM_LEN: usize = 128;
 /// Characters of each result body included in the summary prompt.
 const SUMMARY_BODY_LIMIT: usize = 500;
 
@@ -271,6 +273,13 @@ pub struct QueryPlan {
     pub date_from: Option<String>,
     /// Inclusive upper bound on `sent_at` (`YYYY-MM-DD`), if any.
     pub date_to: Option<String>,
+    /// Case-insensitive substring the sender (`author`) must contain.
+    pub from: Option<String>,
+    /// `Some(true)`: only messages whose body contains a URL. `Some(false)`
+    /// is ignored (treated as `None`).
+    pub has_link: Option<bool>,
+    /// Collect http(s) links from the results into `AskOutcome::collected`.
+    pub extract_links: bool,
 }
 
 impl QueryPlan {
@@ -281,6 +290,9 @@ impl QueryPlan {
             match_expr: build_match_query(question),
             date_from: None,
             date_to: None,
+            from: None,
+            has_link: None,
+            extract_links: false,
         }
     }
 
@@ -300,10 +312,14 @@ impl QueryPlan {
         if match_expr.len() > MAX_MATCH_LEN {
             return Err(Error::Llm("translation match too long".into()));
         }
+        let has_link = raw.has_link.filter(|&b| b); // only Some(true) is a filter
         Ok(Self {
             match_expr,
             date_from: canonical_date(&raw.date_from)?,
             date_to: canonical_date(&raw.date_to)?,
+            from: canonical_from(&raw.from)?,
+            has_link,
+            extract_links: raw.extract_links,
         })
     }
 }
@@ -325,6 +341,18 @@ fn canonical_date(value: &Option<String>) -> Result<Option<String>> {
         .transpose()
 }
 
+/// Parse an optional model-supplied sender filter: trimmed, empty → `None`,
+/// longer than [`MAX_FROM_LEN`] → plan rejected.
+fn canonical_from(value: &Option<String>) -> Result<Option<String>> {
+    match value.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(s) if s.chars().count() <= MAX_FROM_LEN => Ok(Some(s.to_string())),
+        Some(s) => Err(Error::Llm(format!(
+            "translation produced a too-long from filter: {s}"
+        ))),
+    }
+}
+
 /// Shape of the model's translation reply.
 #[derive(Deserialize)]
 struct RawPlan {
@@ -334,6 +362,12 @@ struct RawPlan {
     date_from: Option<String>,
     #[serde(default)]
     date_to: Option<String>,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    has_link: Option<bool>,
+    #[serde(default)]
+    extract_links: bool,
 }
 
 /// The JSON object inside a reply: the whole trimmed text when it starts with
@@ -360,8 +394,8 @@ fn translation_system_prompt(today: NaiveDate) -> String {
     prompt.push_str(
         ".\n\n\
          Reply with ONLY a JSON object — no markdown fence, no prose — exactly in this shape:\n\
-         {\"match\": \"<FTS5 MATCH expression>\", \"date_from\": \"<YYYY-MM-DD or null>\", \"date_to\": \"<YYYY-MM-DD or null>\"}\n\n\
-         Rules: the match expression must be non-empty, valid FTS5, and use only terms implied by the question; prefer a few precise quoted terms over long expressions.",
+         {\"match\": \"<FTS5 MATCH expression>\", \"date_from\": \"<YYYY-MM-DD or null>\", \"date_to\": \"<YYYY-MM-DD or null>\", \"from\": \"<substring of the sender's name or address, or null>\", \"has_link\": <true or null>, \"extract_links\": <true or false>}\n\n\
+         Rules: the match expression must be non-empty, valid FTS5, and use only terms implied by the question; prefer a few precise quoted terms over long expressions. Use \"from\" when the question names a sender; set \"has_link\": true when the question asks for messages containing links; set \"extract_links\": true only when the question explicitly asks to collect, list, or gather links — then also set \"has_link\": true.",
     );
     prompt
 }
@@ -418,10 +452,13 @@ pub fn validate(storage: &Storage, question: &str, candidate: Result<QueryPlan>)
                 match_expr: build_match_query(question),
                 date_from: plan.date_from,
                 date_to: plan.date_to,
+                from: plan.from,
+                has_link: plan.has_link,
+                extract_links: plan.extract_links,
             },
             source: PlanSource::LlmFallback,
             notes: vec![
-                "LLM match expression rejected as invalid FTS5; used a plain term search (date filters kept)"
+                "LLM match expression rejected as invalid FTS5; used a plain term search (date and sender filters kept)"
                     .into(),
             ],
         },
@@ -643,6 +680,9 @@ impl AskOutcome {
                 match_expr: String::new(),
                 date_from: None,
                 date_to: None,
+                from: None,
+                has_link: None,
+                extract_links: false,
             },
             plan_source: PlanSource::NoLlm,
             ranking: RankingMode::FtsOnly,
@@ -922,6 +962,61 @@ mod tests {
         assert_eq!(plan.match_expr, "\"vault\" OR \"archive\"");
         assert_eq!(plan.date_from.as_deref(), Some("2026-01-01"));
         assert_eq!(plan.date_to, None);
+    }
+
+    #[test]
+    fn translate_parses_new_filter_fields() {
+        let llm = MockLlm::with_replies([
+            "{\"match\": \"deploy\", \"from\": \"ana@\", \"has_link\": true, \"extract_links\": true}",
+        ]);
+        let plan = translate(&llm, "collect links ana sent", today()).unwrap();
+        assert_eq!(plan.from.as_deref(), Some("ana@"));
+        assert_eq!(plan.has_link, Some(true));
+        assert!(plan.extract_links);
+    }
+
+    #[test]
+    fn from_blank_becomes_none_and_false_has_link_becomes_none() {
+        let llm = MockLlm::with_replies([
+            "{\"match\": \"x\", \"from\": \"   \", \"has_link\": false, \"extract_links\": false}",
+        ]);
+        let plan = translate(&llm, "q", today()).unwrap();
+        assert_eq!(plan.from, None);
+        assert_eq!(plan.has_link, None);
+        assert!(!plan.extract_links);
+    }
+
+    #[test]
+    fn too_long_from_rejects_the_plan() {
+        let llm = MockLlm::with_replies([format!(
+            "{{\"match\": \"x\", \"from\": \"{}\"}}",
+            "a".repeat(129)
+        )]);
+        assert!(translate(&llm, "q", today()).is_err());
+    }
+
+    #[test]
+    fn plain_plan_has_no_filters() {
+        let plan = QueryPlan::plain("hello world");
+        assert_eq!(plan.from, None);
+        assert_eq!(plan.has_link, None);
+        assert!(!plan.extract_links);
+    }
+
+    #[test]
+    fn translation_prompt_documents_new_fields() {
+        let prompt = translation_system_prompt(today());
+        for needle in [
+            "\"from\"",
+            "\"has_link\"",
+            "\"extract_links\"",
+            "collect, list, or gather links",
+        ] {
+            assert!(
+                prompt.contains(needle),
+                "prompt must mention {needle}: {prompt}"
+            );
+        }
     }
 
     #[test]

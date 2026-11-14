@@ -187,6 +187,9 @@ fn subject_column_filter_flows_through_the_ask_plan() {
         match_expr: "subject: vault".into(),
         date_from: None,
         date_to: None,
+        from: None,
+        has_link: None,
+        extract_links: false,
     };
     let vetted = validate(&s, "vault migration plan", Ok(plan));
     assert_eq!(vetted.source, PlanSource::Llm);
