@@ -1,17 +1,19 @@
-// Unit tests for the v2 search state logic (M3.2): filter chips, request
-// building, stale-response tokens, selection/scroll restoration,
-// archive-revision refresh detection, deep links, copy text, and the
-// reading-pane context paging model.
+// Unit tests for the v2 search state logic (M3.2): filter chips, era
+// buckets, request building, stale-response tokens, selection/scroll
+// restoration, archive-revision refresh detection, deep links, copy text,
+// and the reading-pane context paging model.
 
 import { describe, expect, it } from "vitest";
 import type { MessageSummary } from "./v2types";
 import {
+  activeEraIndex,
   buildRequest,
   captureResults,
   contextCursors,
   contextEntries,
   dateBoundsValid,
   DEFAULT_FILTERS,
+  eraBuckets,
   filterChips,
   hasActiveFilters,
   mergeContextPages,
@@ -34,6 +36,9 @@ const labels = {
 function filters(over: Partial<SearchFilters>): SearchFilters {
   return { ...DEFAULT_FILTERS, ...over };
 }
+
+/** One `by_day` series entry (the era strip's input). */
+const day = (d: string, count = 1) => ({ day: d, count });
 
 describe("filter model", () => {
   it("empty filters are inactive; any filter activates browse", () => {
@@ -123,6 +128,83 @@ describe("filter model", () => {
     });
     // The user's sort choice survives for text searches.
     expect(buildRequest(filters({ text: "x", sort: "newest" }), 50, 0).sort).toBe("newest");
+  });
+});
+
+describe("era buckets", () => {
+  it("a multi-year archive becomes one year chip per year, ascending", () => {
+    const buckets = eraBuckets([
+      day("2021-03-04"),
+      day("2019-01-01", 5),
+      day("2020-12-31", 2),
+    ]);
+    expect(buckets).toEqual([
+      { label: "2019", from: "2019-01-01", to: "2019-12-31" },
+      { label: "2020", from: "2020-01-01", to: "2020-12-31" },
+      { label: "2021", from: "2021-01-01", to: "2021-12-31" },
+    ]);
+  });
+
+  it("an archive inside one year becomes month chips with true month ends", () => {
+    const buckets = eraBuckets([
+      day("2024-01-31"),
+      day("2024-02-29"), // leap February: the 29th, not the 28th
+      day("2024-03-01"),
+    ]);
+    expect(buckets).toEqual([
+      { label: "2024-01", from: "2024-01-01", to: "2024-01-31" },
+      { label: "2024-02", from: "2024-02-01", to: "2024-02-29" },
+      { label: "2024-03", from: "2024-03-01", to: "2024-03-31" },
+    ]);
+  });
+
+  it("months that straddle a year boundary still take year chips", () => {
+    expect(eraBuckets([day("2026-12-30"), day("2027-01-02")]).map((b) => b.label)).toEqual([
+      "2026",
+      "2027",
+    ]);
+  });
+
+  it("more than eight years keeps the most recent eight", () => {
+    const days = Array.from({ length: 12 }, (_, y) => day(`${2014 + y}-06-15`));
+    expect(eraBuckets(days).map((b) => b.label)).toEqual([
+      "2018",
+      "2019",
+      "2020",
+      "2021",
+      "2022",
+      "2023",
+      "2024",
+      "2025",
+    ]);
+  });
+
+  it("more than eight months in one year coarsen to that single year", () => {
+    const days = Array.from({ length: 10 }, (_, m) => day(`2026-${String(m + 1).padStart(2, "0")}-05`));
+    expect(eraBuckets(days)).toEqual([{ label: "2026", from: "2026-01-01", to: "2026-12-31" }]);
+  });
+
+  it("a tiny or undated archive renders nothing", () => {
+    expect(eraBuckets([])).toEqual([]); // undated (empty day series)
+    expect(eraBuckets([day("2026-01-10", 4)])).toEqual([]); // one month of history
+  });
+});
+
+describe("era chip highlight", () => {
+  const buckets = eraBuckets([day("2019-05-05"), day("2020-05-05")]);
+
+  it("lights the bucket whose exact bounds the filters hold", () => {
+    expect(activeEraIndex(buckets, filters({ fromDate: "2020-01-01", toDate: "2020-12-31" }))).toBe(1);
+  });
+
+  it("a hand-typed range inside a year is not that year's chip", () => {
+    expect(activeEraIndex(buckets, filters({ fromDate: "2020-03-01", toDate: "2020-12-31" }))).toBe(-1);
+  });
+
+  it("one-sided or empty bounds never match", () => {
+    expect(activeEraIndex(buckets, filters({ fromDate: "2020-01-01" }))).toBe(-1);
+    expect(activeEraIndex(buckets, filters({ toDate: "2020-12-31" }))).toBe(-1);
+    expect(activeEraIndex(buckets, DEFAULT_FILTERS)).toBe(-1);
   });
 });
 
