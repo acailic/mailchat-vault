@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  collectedCountLine,
   consentPromptText,
   consentStatusLine,
   describePlan,
+  linksToJson,
+  linksToText,
   privacyNote,
   privacyNoteFor,
   splitCitations,
@@ -59,7 +62,14 @@ const disabled: LlmStatus = {
 describe("describePlan", () => {
   it("shows the LLM plan with match expression, dates, and hybrid ranking", () => {
     const outcome: Pick<AskOutcome, "plan" | "plan_source" | "ranking"> = {
-      plan: { match_expr: '"vault" OR "archive"', date_from: "2026-10-01", date_to: "2026-10-31" },
+      plan: {
+        match_expr: '"vault" OR "archive"',
+        date_from: "2026-10-01",
+        date_to: "2026-10-31",
+        from: null,
+        has_link: null,
+        extract_links: false,
+      },
       plan_source: "llm",
       ranking: "hybrid_fts_vector",
     };
@@ -71,7 +81,7 @@ describe("describePlan", () => {
 
   it("marks the fallback, FTS-only ranking, and omits missing dates", () => {
     const outcome: Pick<AskOutcome, "plan" | "plan_source" | "ranking"> = {
-      plan: { match_expr: '"vault"', date_from: null, date_to: null },
+      plan: { match_expr: '"vault"', date_from: null, date_to: null, from: null, has_link: null, extract_links: false },
       plan_source: "llm_fallback",
       ranking: "fts_only",
     };
@@ -82,7 +92,7 @@ describe("describePlan", () => {
 
   it("marks the no-LLM mode and the vector-only ranking", () => {
     const noLlm: Pick<AskOutcome, "plan" | "plan_source" | "ranking"> = {
-      plan: { match_expr: "", date_from: null, date_to: null },
+      plan: { match_expr: "", date_from: null, date_to: null, from: null, has_link: null, extract_links: false },
       plan_source: "no_llm",
       ranking: "fts_only",
     };
@@ -90,7 +100,7 @@ describe("describePlan", () => {
       "FTS: (none) · ranked: FTS only (no LLM configured — plain term search)",
     );
     const vectorOnly: Pick<AskOutcome, "plan" | "plan_source" | "ranking"> = {
-      plan: { match_expr: '"deploying"', date_from: null, date_to: null },
+      plan: { match_expr: '"deploying"', date_from: null, date_to: null, from: null, has_link: null, extract_links: false },
       plan_source: "no_llm",
       ranking: "vector_only",
     };
@@ -101,7 +111,7 @@ describe("describePlan", () => {
 
   it("marks explicit local mode", () => {
     const outcome: Pick<AskOutcome, "plan" | "plan_source" | "ranking"> = {
-      plan: { match_expr: '"vault"', date_from: null, date_to: null },
+      plan: { match_expr: '"vault"', date_from: null, date_to: null, from: null, has_link: null, extract_links: false },
       plan_source: "local",
       ranking: "hybrid_fts_vector",
     };
@@ -214,5 +224,59 @@ describe("splitCitations", () => {
       { cite: 10 },
       " c",
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ask-collect-links: collected-link types, serializers, consent wording
+// ---------------------------------------------------------------------------
+
+const links = [
+  {
+    url: "https://example.com/a",
+    hits: [
+      { message_id: 1, author: "ana", sent_at: "2026-10-01T00:00:00Z", context: "see the link" },
+      { message_id: 2, author: "bo", sent_at: "2026-10-02T00:00:00Z", context: "again" },
+    ],
+  },
+];
+
+describe("collected links", () => {
+  it("counts links and citing messages", () => {
+    expect(collectedCountLine(links)).toBe("1 link from 2 messages");
+    expect(collectedCountLine([])).toBe("0 links from 0 messages");
+  });
+
+  it("serializes to text with one block per link", () => {
+    const text = linksToText(links);
+    expect(text).toContain("https://example.com/a (2 hits)");
+    expect(text).toContain("- ana · 2026-10-01T00:00:00Z · see the link");
+  });
+
+  it("serializes to pretty JSON", () => {
+    expect(JSON.parse(linksToJson(links))).toEqual(links);
+  });
+});
+
+describe("consent texts mention the link list", () => {
+  it("consent prompt states the links cap", () => {
+    expect(consentPromptText(zaiItem, 8)).toContain(
+      "collect links, the collected link list (URLs and senders, capped at 50)",
+    );
+  });
+  it("privacy note states the links cap", () => {
+    expect(privacyNoteFor(zaiItem, 8)).toContain("capped at 50");
+  });
+});
+
+describe("describePlan shows the new filters", () => {
+  it("renders from and links-only segments", () => {
+    const line = describePlan({
+      plan: { match_expr: "x", date_from: null, date_to: null, from: "ana@", has_link: true, extract_links: true },
+      plan_source: "llm",
+      ranking: "fts_only",
+    });
+    expect(line).toContain("from: ana@");
+    expect(line).toContain("links only");
   });
 });

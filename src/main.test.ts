@@ -1950,7 +1950,14 @@ const EMBED_STATUS: EmbeddingStatus = {
 };
 
 const ASK_OUTCOME: AskOutcome = {
-  plan: { match_expr: '"vault"', date_from: "2026-10-01", date_to: null },
+  plan: {
+    match_expr: '"vault"',
+    date_from: "2026-10-01",
+    date_to: null,
+    from: null,
+    has_link: null,
+    extract_links: false,
+  },
   plan_source: "llm",
   ranking: "hybrid_fts_vector",
   results: [
@@ -2755,7 +2762,7 @@ describe("ask provider menu", () => {
 /** What `llm_ask` returns for a consent-less network ask: fully local,
  * with the visible backend note (mirrors the backend's downgrade). */
 const LOCAL_ASK_OUTCOME: AskOutcome = {
-  plan: { match_expr: '"vault"', date_from: null, date_to: null },
+  plan: { match_expr: '"vault"', date_from: null, date_to: null, from: null, has_link: null, extract_links: false },
   plan_source: "local",
   ranking: "fts_only",
   results: [

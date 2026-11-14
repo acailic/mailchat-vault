@@ -7,6 +7,9 @@ export interface QueryPlan {
   match_expr: string;
   date_from: string | null;
   date_to: string | null;
+  from: string | null;
+  has_link: boolean | null;
+  extract_links: boolean;
 }
 
 /** Mirrors `vault_core::llm::PlanSource` (snake_case serde). */
@@ -26,6 +29,20 @@ export interface LlmStatus {
   default_provider: string | null;
 }
 
+/** Mirrors `vault_core::extract::LinkHit` (serde field names). */
+export interface LinkHit {
+  message_id: number;
+  author: string;
+  sent_at: string;
+  context: string;
+}
+
+/** Mirrors `vault_core::extract::CollectedLink` (serde field names). */
+export interface CollectedLink {
+  url: string;
+  hits: LinkHit[];
+}
+
 /** Mirrors `vault_core::llm::AskOutcome` (serde field names). */
 export interface AskOutcome {
   plan: QueryPlan;
@@ -34,6 +51,8 @@ export interface AskOutcome {
   results: unknown[];
   answer: string | null;
   notes: string[];
+  /** Present when the plan extracted links (older fixtures may omit it). */
+  collected?: CollectedLink[];
 }
 
 const PLAN_SOURCE_LABELS: Record<PlanSource, string> = {
@@ -56,6 +75,8 @@ export function describePlan(
   const parts = [`FTS: ${outcome.plan.match_expr || "(none)"}`];
   const dates = [outcome.plan.date_from, outcome.plan.date_to].filter(Boolean).join(" → ");
   if (dates) parts.push(`dates: ${dates}`);
+  if (outcome.plan.from) parts.push(`from: ${outcome.plan.from}`);
+  if (outcome.plan.has_link) parts.push("links only");
   parts.push(`ranked: ${RANKING_LABELS[outcome.ranking]}`);
   return `${parts.join(" · ")} (${PLAN_SOURCE_LABELS[outcome.plan_source]})`;
 }
@@ -82,7 +103,8 @@ export function privacyNoteFor(item: ProviderMenuItem, summarizeTop: number): st
     `LLM assist is on (${item.model} via ${item.host}): your question is sent ` +
     `to the provider to translate it into a search, and afterwards only the top ` +
     `${summarizeTop} result messages (bodies truncated to 500 chars) are sent ` +
-    `for the summary. Nothing else leaves this machine; embeddings for hybrid ` +
+    `for the summary, plus the collected link list (URLs and senders, capped at 50) ` +
+    `when your question asks to collect links. Nothing else leaves this machine; embeddings for hybrid ` +
     `ranking are computed locally and never sent; ${keySentence}.`
   );
 }
@@ -113,7 +135,9 @@ export function consentPromptText(item: ProviderMenuItem, summarizeTop: number):
   return (
     `Allow sending for this session? Your question, then the top ${summarizeTop} ` +
     `matching messages (bodies truncated to 500 chars), would be sent to ` +
-    `${item.model} via ${item.host} to translate and summarize the ask.`
+    `${item.model} via ${item.host} to translate and summarize the ask. ` +
+    `When your question asks to collect links, the collected link list ` +
+    `(URLs and senders, capped at 50) is sent too.`
   );
 }
 
@@ -142,4 +166,33 @@ export function splitCitations(answer: string): Array<string | CitationMarker> {
   }
   if (last < answer.length) parts.push(answer.slice(last));
   return parts;
+}
+
+// ---------------------------------------------------------------------------
+// Collected links (ask-collect-links)
+// ---------------------------------------------------------------------------
+
+/** Glanceable count line for the collected block. */
+export function collectedCountLine(links: CollectedLink[]): string {
+  const messages = new Set(links.flatMap((l) => l.hits.map((h) => h.message_id))).size;
+  const linkWord = links.length === 1 ? "link" : "links";
+  const msgWord = messages === 1 ? "message" : "messages";
+  return `${links.length} ${linkWord} from ${messages} ${msgWord}`;
+}
+
+/** Text export: one block per link, one line per citing hit. */
+export function linksToText(links: CollectedLink[]): string {
+  return links
+    .map((link) => {
+      const hits = link.hits
+        .map((h) => `- ${h.author || "unknown"} · ${h.sent_at || "date unknown"} · ${h.context}`)
+        .join("\n");
+      return `${link.url} (${link.hits.length} hit${link.hits.length === 1 ? "" : "s"})\n${hits}`;
+    })
+    .join("\n\n");
+}
+
+/** JSON export: the raw collected shape, pretty-printed. */
+export function linksToJson(links: CollectedLink[]): string {
+  return JSON.stringify(links, null, 2);
 }
