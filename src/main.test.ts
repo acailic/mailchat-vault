@@ -3577,6 +3577,7 @@ function viewWith(mutate: (v: Record<string, unknown>) => void = () => {}): Reco
     keep_running_in_background: false,
     start_at_login: false,
     env: null,
+    env_overrides: { base_url: "", model: "", zai_key: false, anthropic_key: false },
     env_error: null,
     settings_error: null,
     key_store: null,
@@ -3713,6 +3714,8 @@ describe("settings screen", () => {
         { id: "zai", key: "secret-1" }, // trimmed
         { id: "custom", key: "secret-2" },
       ],
+      env_overrides: { base_url: "", model: "" },
+      env_api_keys: [],
     });
     // The response re-renders: key inputs reset, theme applied, note names
     // the fallback store.

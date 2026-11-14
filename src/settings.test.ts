@@ -4,6 +4,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   applyTheme,
+  envKeyPlaceholder,
+  envTestPayload,
   keyStoreNote,
   kindLabel,
   menuItemLabel,
@@ -11,6 +13,8 @@ import {
   prefillForKind,
   providerName,
   uniqueProviderId,
+  ENV_ANTHROPIC_KEY_ID,
+  ENV_ZAI_KEY_ID,
   type ProviderMenuItem,
   type SettingsView,
 } from "./settings";
@@ -98,6 +102,36 @@ describe("keyStoreNote", () => {
     expect(keyStoreNote(null)).toBe("");
     const view = { key_store: "memory" } as SettingsView;
     expect(keyStoreNote(view.key_store)).toContain("restart");
+  });
+});
+
+describe("env overrides", () => {
+  it("key placeholders mark stored overrides", () => {
+    expect(envKeyPlaceholder(false)).toBe("API key");
+    expect(envKeyPlaceholder(true)).toBe("stored — type to replace");
+  });
+
+  it("envTestPayload targets env with trimmed form values", () => {
+    expect(
+      envTestPayload({
+        base_url: " https://api.anthropic.com ",
+        model: " claude-x ",
+        zai_key: " k-zai ",
+        anthropic_key: "",
+      }),
+    ).toEqual({
+      provider: "env",
+      base_url: "https://api.anthropic.com",
+      model: "claude-x",
+      key: "",
+      zai_key: "k-zai",
+      anthropic_key: "",
+    });
+  });
+
+  it("keyring override ids mirror the backend", () => {
+    expect(ENV_ZAI_KEY_ID).toBe("env:ZAI_API_KEY");
+    expect(ENV_ANTHROPIC_KEY_ID).toBe("env:ANTHROPIC_API_KEY");
   });
 });
 

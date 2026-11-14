@@ -36,7 +36,7 @@ consent prompt says exactly this before anything is sent.
 
 ## Configuration (Settings UI, or environment variables)
 
-Providers are configured on the **Settings screen**; the key is stored in the OS keyring when one is available (session memory otherwise) — never in the database or the repo, and never in the settings file. Environment variables keep working as a read-only fallback for headless use:
+Providers are configured on the **Settings screen**; the key is stored in the OS keyring when one is available (session memory otherwise) — never in the database or the repo, and never in the settings file. The environment variables below keep working as a fallback for headless use — and are themselves editable in Settings (see *Environment fallback overrides* below):
 
 | Variable | Meaning | Default |
 | --- | --- | --- |
@@ -46,6 +46,10 @@ Providers are configured on the **Settings screen**; the key is stored in the OS
 | `MAILCHAT_LLM_MODEL` | model name | `glm-5` |
 
 A mismatched key/endpoint pairing (for example `ANTHROPIC_API_KEY` without `ANTHROPIC_BASE_URL`) is refused with a clear error instead of sending the key anywhere — the same rules the Settings screen enforces per provider (see [Settings screen](#settings-screen) below).
+
+**Environment fallback overrides.** Settings → AI assistance has an *Environment variables* section that overrides this fallback: values entered there win over the process environment, layered **keyring override → settings override → process env**. The two API-key overrides are write-only fields stored in the OS keyring (entries `llm:env:ZAI_API_KEY` / `llm:env:ANTHROPIC_API_KEY`), never in the settings file; the `ANTHROPIC_BASE_URL` and `MAILCHAT_LLM_MODEL` overrides are non-secret and live in `settings.json` (`env_overrides`). The pairing rules above apply unchanged.
+
+**Test connection.** Every provider profile and the environment fallback has a **Test connection** button that sends exactly one minimal `/v1/messages` request — `max_tokens: 1`, a fixed "ping" message, nothing from the vault — using the values currently typed (falling back to stored ones), and reports the latency or a classified failure: invalid API key (HTTP 401/403), no endpoint at this base URL (404), the provider's error detail (for example an unknown model), or an unreachable host. Plaintext `http` to a non-loopback host is refused before any request is sent. The click itself is the consent for this single request — it is not part of the per-session Ask consent gate above.
 
 ## Privacy
 
@@ -103,10 +107,11 @@ The **Settings screen** is where LLM providers are configured — one place, no 
   - **Custom** — any Anthropic-compatible `/v1/messages` endpoint, base URL and model fully explicit.
   A profile that violates its pairing rule is **refused with a clear error before anything is saved** — the same policy the environment configuration enforces.
 - **Default provider**: which backend an Ask uses. None selected = automatic (the environment fallback when valid, else local-only mode).
+- **Environment fallback**: the *Environment variables* section (see [Configuration](#configuration-settings-ui-or-environment-variables)) sets or overrides the process-env fallback — API keys into the OS keyring, base URL and model into `settings.json` — and carries a **Test connection** button, as does every provider row.
 - **Options**: UI theme (system / light / dark), how many top results feed the RAG summary (1–50, default 8), the **Desktop notifications** toggle (on by default — see the [feature reference](features.md#what-the-app-does) for its contract), and the two **background keep-alive** toggles (both off by default): *keep running in the background* (close hides to the tray instead of exiting) and *start automatically at login* — see the M7 bullet in the [feature reference](features.md#what-the-app-does).
 
 ### Where values live
 
-- Non-secret settings — provider profiles (kind, base URL, model, name, id), the default provider, and options — live in `settings.json` in the app data dir (e.g. `~/.local/share/com.acailic.mailchatvault/settings.json` on Linux). The file is written atomically and versioned; nothing is ever stored in the vault database.
-- **API keys never touch the settings file**: they are stored in the OS keyring (service `mailchat-vault`, entry `llm:<provider-id>`; Secret Service/GNOME Keyring or KWallet on Linux, Keychain on macOS, Credential Manager on Windows). With no keyring reachable, a key is kept only in process memory for the current session and asked for again after a restart — the UI says so.
-- **Ask provider menu**: every ask picks its backend — a configured profile (shown with model and host, disabled until it has a key), the environment fallback (read-only, labeled *Environment variables*), or **local full-text**, which sends nothing anywhere. The privacy note under the question always describes exactly what the current selection sends.
+- Non-secret settings — provider profiles (kind, base URL, model, name, id), the default provider, the environment-fallback overrides (`env_overrides`: `ANTHROPIC_BASE_URL`, `MAILCHAT_LLM_MODEL`), and options — live in `settings.json` in the app data dir (e.g. `~/.local/share/com.acailic.mailchatvault/settings.json` on Linux). The file is written atomically and versioned; nothing is ever stored in the vault database.
+- **API keys never touch the settings file**: they are stored in the OS keyring (service `mailchat-vault`, entry `llm:<provider-id>`, and `llm:env:ZAI_API_KEY` / `llm:env:ANTHROPIC_API_KEY` for the environment-fallback overrides; Secret Service/GNOME Keyring or KWallet on Linux, Keychain on macOS, Credential Manager on Windows). With no keyring reachable, a key is kept only in process memory for the current session and asked for again after a restart — the UI says so.
+- **Ask provider menu**: every ask picks its backend — a configured profile (shown with model and host, disabled until it has a key), the environment fallback (labeled *Environment variables*, editable in Settings), or **local full-text**, which sends nothing anywhere. The privacy note under the question always describes exactly what the current selection sends.

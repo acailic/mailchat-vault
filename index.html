@@ -559,6 +559,41 @@
             <section id="settings-ai" class="settings-page" aria-label="AI assistance">
               <h3>AI assistance</h3>
               <div id="env-info" class="meta"></div>
+              <!-- Environment fallback overrides: the env vars the backend reads,
+                   editable here. Values set here override the process environment;
+                   API keys go to the OS keyring exactly like provider keys. -->
+              <div id="env-overrides">
+                <div class="row">
+                  <label class="meta" title="z.ai GLM API key; overrides ZAI_API_KEY/GLM_API_KEY from the environment">
+                    ZAI_API_KEY
+                    <input id="env-zai-key" type="password" autocomplete="off" placeholder="API key" />
+                  </label>
+                  <label class="meta" title="Anthropic API key; overrides ANTHROPIC_API_KEY. Only ever sent to the base URL below — never to z.ai">
+                    ANTHROPIC_API_KEY
+                    <input id="env-anthropic-key" type="password" autocomplete="off" placeholder="API key" />
+                  </label>
+                </div>
+                <div class="row">
+                  <label class="meta" title="Overrides ANTHROPIC_BASE_URL — the endpoint that accepts the Anthropic key (required with an Anthropic key)">
+                    ANTHROPIC_BASE_URL
+                    <input id="env-base-url" type="text" placeholder="https://api.anthropic.com" />
+                  </label>
+                  <label class="meta" title="Overrides MAILCHAT_LLM_MODEL — model for the environment fallback">
+                    MAILCHAT_LLM_MODEL
+                    <input id="env-model" type="text" placeholder="glm-5 (default)" />
+                  </label>
+                </div>
+                <div class="row">
+                  <button id="env-test-btn" type="button" title="Send one minimal request (max_tokens=1, no vault data) to check the key, endpoint, and model">Test connection</button>
+                  <span id="env-test-status" class="meta" style="flex: 1; min-height: 1em" role="status"></span>
+                  <button id="env-clear-keys-btn" type="button" class="small-btn" hidden>Clear keys</button>
+                </div>
+                <p class="meta" style="margin: 4px 0 0">
+                  Values set here override the process environment for the environment fallback
+                  (used when no default provider is set); keys are stored in the OS keyring, never
+                  in the settings file.
+                </p>
+              </div>
               <div id="provider-rows"></div>
               <div class="row">
                 <label class="meta">Add provider
