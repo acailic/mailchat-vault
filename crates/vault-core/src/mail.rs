@@ -22,6 +22,11 @@ use crate::util::{fnv1a, sha256_hex};
 /// count the message as failed.
 const MAX_MIME_DEPTH: usize = 64;
 
+/// Maximum decoded `text/html` size kept for the rendered preview
+/// (`raw_json.html`); larger bodies are dropped and the reading pane
+/// falls back to the raw text view.
+const MAX_HTML_BYTES: usize = 512 * 1024;
+
 /// Parse one raw RFC 5322 message into a [`NewMessage`].
 ///
 /// `external_id` is the `Message-ID` header (angle brackets trimmed),
@@ -179,6 +184,11 @@ pub(crate) fn parse_raw_mail_canonical(
         .or_else(|| decoded_body(&mail))
         .unwrap_or_default();
 
+    // Rendered-preview HTML: the decoded text/html part(s), kept only
+    // when non-empty and within the size bound. It never enters `body`
+    // (FTS stays plain text) or the revision hash (presentation only).
+    let html = extract_html(&mail).filter(|h| !h.trim().is_empty() && h.len() <= MAX_HTML_BYTES);
+
     let to = mail.headers.get_first_value("To").unwrap_or_default();
 
     // Semantic revision hash over decoded content and stable headers —
@@ -230,6 +240,9 @@ pub(crate) fn parse_raw_mail_canonical(
         }
         if let Some(refs) = mail.headers.get_first_value("References") {
             obj.insert("references".into(), json!(refs.trim()));
+        }
+        if let Some(html) = &html {
+            obj.insert("html".into(), json!(html));
         }
     }
 
@@ -486,6 +499,25 @@ fn extract_text(mail: &ParsedMail<'_>) -> Option<String> {
     }
 }
 
+/// Extract every `text/html` leaf body, joined — the rendered-preview
+/// counterpart of [`extract_text`]. `None` when the mail carries no
+/// HTML part at all.
+fn extract_html(mail: &ParsedMail<'_>) -> Option<String> {
+    if mail.subparts.is_empty() {
+        return if mail.ctype.mimetype == "text/html" {
+            Some(decoded_body(mail).unwrap_or_default())
+        } else {
+            None
+        };
+    }
+    let leaves: Vec<String> = mail.subparts.iter().filter_map(extract_html).collect();
+    if leaves.is_empty() {
+        None
+    } else {
+        Some(leaves.join("\n\n"))
+    }
+}
+
 /// Decode a part's body to a String: `get_body_raw` handles the transfer
 /// encoding; for bodies with no declared charset (or us-ascii) the bytes are
 /// read as UTF-8 with a Latin-1 fallback for legacy 8-bit mail (mailparse's
@@ -688,6 +720,76 @@ mod tests {
     fn moderate_nesting_still_parses() {
         let msg = parse_raw_mail(&nested_multipart(8), "mbox", "f").unwrap();
         assert_eq!(msg.body, "hi");
+    }
+
+    /// A multipart/alternative mail with a plain and a quoted-printable
+    /// HTML part — the shape the rendered preview is built for.
+    fn alternative_mail() -> Vec<u8> {
+        "\
+From: a@b.c\nSubject: alt\nDate: Mon, 2 Nov 2026 10:00:00 +0100\n\
+MIME-Version: 1.0\nContent-Type: multipart/alternative; boundary=\"bb\"\n\n\
+--bb\nContent-Type: text/plain; charset=utf-8\n\nplain telo\n\
+--bb\nContent-Type: text/html; charset=utf-8\n\
+Content-Transfer-Encoding: quoted-printable\n\n<p>telo</p>\n\
+--bb--\n"
+            .as_bytes()
+            .to_vec()
+    }
+
+    #[test]
+    fn html_part_is_kept_in_raw_json_for_the_rendered_preview() {
+        let parsed = parse_raw_mail_canonical(&alternative_mail(), "mbox", "f").unwrap();
+        // FTS body stays plain text — HTML never leaks into it.
+        assert_eq!(parsed.message.body, "alt\n\nplain telo");
+        let raw: serde_json::Value = serde_json::from_str(&parsed.message.raw_json).unwrap();
+        assert_eq!(raw["html"], "<p>telo</p>");
+    }
+
+    #[test]
+    fn plain_only_mail_has_no_html_key() {
+        let mail = b"From: a@b.c\nSubject: s\n\nsamo tekst\n";
+        let parsed = parse_raw_mail_canonical(mail, "mbox", "f").unwrap();
+        let raw: serde_json::Value = serde_json::from_str(&parsed.message.raw_json).unwrap();
+        assert!(raw.get("html").is_none());
+    }
+
+    #[test]
+    fn html_only_mail_keeps_body_fallback_and_html_key() {
+        let mail =
+            b"From: a@b.c\nSubject: s\nMIME-Version: 1.0\nContent-Type: text/html\n\n<p>samo html</p>\n";
+        let parsed = parse_raw_mail_canonical(mail, "mbox", "f").unwrap();
+        // No text/plain leaf: today's fallback decodes the top-level
+        // body (the html itself), subject-prefixed for FTS.
+        assert_eq!(parsed.message.body, "s\n\n<p>samo html</p>");
+        let raw: serde_json::Value = serde_json::from_str(&parsed.message.raw_json).unwrap();
+        assert_eq!(raw["html"], "<p>samo html</p>");
+    }
+
+    #[test]
+    fn empty_html_part_is_not_stored() {
+        // A text/html leaf that decodes to nothing must not produce an
+        // empty `html` key — the spec omits the key entirely.
+        let mail = b"From: a@b.c\nSubject: s\nMIME-Version: 1.0\n\
+Content-Type: multipart/alternative; boundary=\"bb\"\n\n\
+--bb\nContent-Type: text/plain\n\nkratko\n\
+--bb\nContent-Type: text/html\n\n\n--bb--\n";
+        let parsed = parse_raw_mail_canonical(mail, "mbox", "f").unwrap();
+        let raw: serde_json::Value = serde_json::from_str(&parsed.message.raw_json).unwrap();
+        assert!(raw.get("html").is_none());
+    }
+
+    #[test]
+    fn oversized_html_is_dropped() {
+        let big = "<p>".to_string() + &"x".repeat(MAX_HTML_BYTES) + "</p>";
+        let mail = format!(
+            "From: a@b.c\nSubject: s\nDate: Mon, 2 Nov 2026 10:00:00 +0100\n\
+MIME-Version: 1.0\nContent-Type: multipart/alternative; boundary=\"bb\"\n\n\
+--bb\nContent-Type: text/plain\n\nkratko\n\
+--bb\nContent-Type: text/html\n\n{big}\n--bb--\n"
+        );
+        let parsed = parse_raw_mail_canonical(mail.as_bytes(), "mbox", "f").unwrap();
+        let raw: serde_json::Value = serde_json::from_str(&parsed.message.raw_json).unwrap();
+        assert!(raw.get("html").is_none());
     }
 
     /// A multipart/mixed mail with a base64 attachment, an inline image
