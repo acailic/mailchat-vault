@@ -568,6 +568,71 @@ button.link-btn:hover:not(:disabled) { background: none; color: var(--accent-hov
   margin-top: 2px;
 }
 
+/* Inline import progress (wave 3): the preview card's sibling, built
+ * from the same parts — border, panel surface, one quiet bar. */
+.import-progress-card {
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  background: var(--panel);
+}
+.import-progress-card .preview-title {
+  /* Room for the state glyph beside the label. */
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.import-progress-card.failed .preview-title .icon {
+  color: var(--danger);
+}
+.import-progress-line { margin: var(--sp-2) 0 0; }
+
+/* Determinate: accent fill on a bordered track (the chart-bar pair). */
+.progress-track {
+  position: relative;
+  margin-top: var(--sp-2);
+  height: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  background: var(--panel-2);
+}
+.progress-fill {
+  height: 100%;
+  min-width: 2px;
+  background: var(--accent);
+  border-radius: var(--radius-pill);
+  transition: width var(--motion-slow) ease-out;
+}
+
+/* Indeterminate (total not yet known): one accent segment traverses the
+ * track. Under reduced motion it rests as a static partial fill — the
+ * state stays legible without the movement. */
+.progress-track.indeterminate::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 30%;
+  background: var(--accent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .progress-track.indeterminate::after {
+    animation: progress-traverse 1.4s ease-in-out infinite;
+  }
+}
+@keyframes progress-traverse {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(calc(100% / 0.3)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress-track.indeterminate::after {
+    left: 35%;
+  }
+}
+
 /* Results list */
 #results { list-style: none; margin: 0; padding: 0; }
 .group { margin-bottom: 10px; }
