@@ -140,7 +140,7 @@ fn vector_layer_within_budget_over_100k_messages() {
     let query = e.embed("quarterly vault report review");
     let scan_ms = best_of("vector scan top-50", || {
         let hits = s
-            .vector_scan(e.id(), e.dim(), &query, None, None, 50)
+            .vector_scan(e.id(), e.dim(), &query, None, None, None, false, 50)
             .expect("scan");
         assert_eq!(hits.len(), 50, "the fixture is dense enough to fill a page");
     });

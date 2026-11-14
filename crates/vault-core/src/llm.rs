@@ -27,6 +27,7 @@ use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::extract::CollectedLink;
 use crate::message::Message;
 use crate::search::build_match_query;
 use crate::storage::Storage;
@@ -41,8 +42,12 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_TOKENS: u32 = 1024;
 /// Hard cap on the length of an LLM-produced MATCH expression.
 const MAX_MATCH_LEN: usize = 512;
+/// Hard cap on the length of an LLM-produced `from` filter.
+const MAX_FROM_LEN: usize = 128;
 /// Characters of each result body included in the summary prompt.
 const SUMMARY_BODY_LIMIT: usize = 500;
+/// Lines of collected links appended to the summary prompt (privacy cap).
+pub const SUMMARY_LINK_LIMIT: usize = 50;
 
 // ---------------------------------------------------------------------------
 // Configuration and provider
@@ -271,6 +276,13 @@ pub struct QueryPlan {
     pub date_from: Option<String>,
     /// Inclusive upper bound on `sent_at` (`YYYY-MM-DD`), if any.
     pub date_to: Option<String>,
+    /// Case-insensitive substring the sender (`author`) must contain.
+    pub from: Option<String>,
+    /// `Some(true)`: only messages whose body contains a URL. `Some(false)`
+    /// is ignored (treated as `None`).
+    pub has_link: Option<bool>,
+    /// Collect http(s) links from the results into `AskOutcome::collected`.
+    pub extract_links: bool,
 }
 
 impl QueryPlan {
@@ -281,6 +293,9 @@ impl QueryPlan {
             match_expr: build_match_query(question),
             date_from: None,
             date_to: None,
+            from: None,
+            has_link: None,
+            extract_links: false,
         }
     }
 
@@ -300,10 +315,14 @@ impl QueryPlan {
         if match_expr.len() > MAX_MATCH_LEN {
             return Err(Error::Llm("translation match too long".into()));
         }
+        let has_link = raw.has_link.filter(|&b| b); // only Some(true) is a filter
         Ok(Self {
             match_expr,
             date_from: canonical_date(&raw.date_from)?,
             date_to: canonical_date(&raw.date_to)?,
+            from: canonical_from(&raw.from)?,
+            has_link,
+            extract_links: raw.extract_links,
         })
     }
 }
@@ -325,6 +344,18 @@ fn canonical_date(value: &Option<String>) -> Result<Option<String>> {
         .transpose()
 }
 
+/// Parse an optional model-supplied sender filter: trimmed, empty → `None`,
+/// longer than [`MAX_FROM_LEN`] → plan rejected.
+fn canonical_from(value: &Option<String>) -> Result<Option<String>> {
+    match value.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(s) if s.chars().count() <= MAX_FROM_LEN => Ok(Some(s.to_string())),
+        Some(s) => Err(Error::Llm(format!(
+            "translation produced a too-long from filter: {s}"
+        ))),
+    }
+}
+
 /// Shape of the model's translation reply.
 #[derive(Deserialize)]
 struct RawPlan {
@@ -334,6 +365,12 @@ struct RawPlan {
     date_from: Option<String>,
     #[serde(default)]
     date_to: Option<String>,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    has_link: Option<bool>,
+    #[serde(default)]
+    extract_links: bool,
 }
 
 /// The JSON object inside a reply: the whole trimmed text when it starts with
@@ -360,8 +397,8 @@ fn translation_system_prompt(today: NaiveDate) -> String {
     prompt.push_str(
         ".\n\n\
          Reply with ONLY a JSON object — no markdown fence, no prose — exactly in this shape:\n\
-         {\"match\": \"<FTS5 MATCH expression>\", \"date_from\": \"<YYYY-MM-DD or null>\", \"date_to\": \"<YYYY-MM-DD or null>\"}\n\n\
-         Rules: the match expression must be non-empty, valid FTS5, and use only terms implied by the question; prefer a few precise quoted terms over long expressions.",
+         {\"match\": \"<FTS5 MATCH expression>\", \"date_from\": \"<YYYY-MM-DD or null>\", \"date_to\": \"<YYYY-MM-DD or null>\", \"from\": \"<substring of the sender's name or address, or null>\", \"has_link\": <true or null>, \"extract_links\": <true or false>}\n\n\
+         Rules: the match expression must be non-empty, valid FTS5, and use only terms implied by the question; prefer a few precise quoted terms over long expressions. Use \"from\" when the question names a sender; set \"has_link\": true when the question asks for messages containing links; set \"extract_links\": true only when the question explicitly asks to collect, list, or gather links — then also set \"has_link\": true.",
     );
     prompt
 }
@@ -418,10 +455,13 @@ pub fn validate(storage: &Storage, question: &str, candidate: Result<QueryPlan>)
                 match_expr: build_match_query(question),
                 date_from: plan.date_from,
                 date_to: plan.date_to,
+                from: plan.from,
+                has_link: plan.has_link,
+                extract_links: plan.extract_links,
             },
             source: PlanSource::LlmFallback,
             notes: vec![
-                "LLM match expression rejected as invalid FTS5; used a plain term search (date filters kept)"
+                "LLM match expression rejected as invalid FTS5; used a plain term search (date and sender filters kept)"
                     .into(),
             ],
         },
@@ -442,6 +482,8 @@ pub fn run_plan(storage: &Storage, planned: &PlannedQuery, limit: u32) -> Result
         &planned.plan.match_expr,
         planned.plan.date_from.as_deref(),
         planned.plan.date_to.as_deref(),
+        planned.plan.from.as_deref(),
+        planned.plan.has_link.unwrap_or(false),
         limit,
     )
 }
@@ -502,6 +544,8 @@ pub fn rank_hybrid(
                 &embedder.embed(question),
                 planned.plan.date_from.as_deref(),
                 planned.plan.date_to.as_deref(),
+                planned.plan.from.as_deref(),
+                planned.plan.has_link.unwrap_or(false),
                 VECTOR_CANDIDATES.max(limit),
             )?
             .into_iter()
@@ -584,12 +628,16 @@ pub struct Summarized {
 /// results. Only those rows (truncated) are sent — the privacy guarantee.
 /// Skipped entirely when there are no results. Blocks are placed in
 /// [`lim_order`] (strongest evidence at the prompt's edges) while their
-/// `[k]` numbers stay by rank.
+/// `[k]` numbers stay by rank. When `collected` is non-empty, up to
+/// [`SUMMARY_LINK_LIMIT`] `url · author · date` lines are appended and the
+/// system prompt gains a rule for describing the links; with no collected
+/// links both prompts are built exactly as before.
 pub fn summarize_results(
     llm: &dyn Llm,
     question: &str,
     results: &[Message],
     top: usize,
+    collected: &[CollectedLink],
 ) -> Summarized {
     if results.is_empty() {
         return Summarized {
@@ -603,8 +651,36 @@ pub fn summarize_results(
         .map(|i| context_block(top_messages[i], i + 1))
         .collect::<Vec<_>>()
         .join("\n\n");
-    let user = format!("Question: {question}\n\nMessages (numbered by relevance):\n\n{contexts}");
-    match llm.complete(SUMMARY_SYSTEM_PROMPT, &user) {
+    let mut user =
+        format!("Question: {question}\n\nMessages (numbered by relevance):\n\n{contexts}");
+    let mut system = SUMMARY_SYSTEM_PROMPT.to_string();
+    if !collected.is_empty() {
+        let mut lines: Vec<String> = Vec::new();
+        'links: for link in collected {
+            for hit in &link.hits {
+                if lines.len() >= SUMMARY_LINK_LIMIT {
+                    break 'links;
+                }
+                let author = if hit.author.is_empty() {
+                    "unknown"
+                } else {
+                    &hit.author
+                };
+                let date = if hit.sent_at.is_empty() {
+                    "date unknown"
+                } else {
+                    &hit.sent_at
+                };
+                lines.push(format!("{} · {} · {}", link.url, author, date));
+            }
+        }
+        user.push_str("\n\nCollected links (from the messages above):\n");
+        user.push_str(&lines.join("\n"));
+        system.push_str(
+            "\n- When a collected-links list is present, describe what the links are and who sent them; cite the numbered messages.",
+        );
+    }
+    match llm.complete(&system, &user) {
         Ok(answer) => Summarized {
             answer: Some(answer),
             notes: Vec::new(),
@@ -623,8 +699,8 @@ pub fn summarize_results(
 // ---------------------------------------------------------------------------
 
 /// Everything one "ask" returns: the plan used, how the results were
-/// ranked, the results, the RAG answer, and human-readable degradation
-/// notes for the UI.
+/// ranked, the results, the RAG answer, any collected links, and
+/// human-readable degradation notes for the UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AskOutcome {
     pub plan: QueryPlan,
@@ -632,6 +708,8 @@ pub struct AskOutcome {
     pub ranking: RankingMode,
     pub results: Vec<Message>,
     pub answer: Option<String>,
+    /// Collected links when the plan extracted them; empty otherwise.
+    pub collected: Vec<CollectedLink>,
     pub notes: Vec<String>,
 }
 
@@ -643,11 +721,15 @@ impl AskOutcome {
                 match_expr: String::new(),
                 date_from: None,
                 date_to: None,
+                from: None,
+                has_link: None,
+                extract_links: false,
             },
             plan_source: PlanSource::NoLlm,
             ranking: RankingMode::FtsOnly,
             results: Vec::new(),
             answer: None,
+            collected: Vec::new(),
             notes: Vec::new(),
         }
     }
@@ -680,9 +762,14 @@ pub fn ask(
     let fts_results = run_plan(storage, &planned, limit)?;
     let hybrid = rank_hybrid(storage, embedder, question, &planned, &fts_results, limit)?;
     let results = hybrid.results;
+    let collected = if planned.plan.extract_links {
+        crate::extract::extract_links(&results)
+    } else {
+        Vec::new()
+    };
     let (answer, summary_notes) = match llm {
         Some(llm) => {
-            let s = summarize_results(llm, question, &results, summarize_top);
+            let s = summarize_results(llm, question, &results, summarize_top, &collected);
             (s.answer, s.notes)
         }
         None => (None, Vec::new()),
@@ -695,6 +782,7 @@ pub fn ask(
         ranking: hybrid.ranking,
         results,
         answer,
+        collected,
         notes,
     })
 }
@@ -744,6 +832,7 @@ impl LlmStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extract::extract_links;
 
     fn today() -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 11, 1).unwrap()
@@ -925,6 +1014,61 @@ mod tests {
     }
 
     #[test]
+    fn translate_parses_new_filter_fields() {
+        let llm = MockLlm::with_replies([
+            "{\"match\": \"deploy\", \"from\": \"ana@\", \"has_link\": true, \"extract_links\": true}",
+        ]);
+        let plan = translate(&llm, "collect links ana sent", today()).unwrap();
+        assert_eq!(plan.from.as_deref(), Some("ana@"));
+        assert_eq!(plan.has_link, Some(true));
+        assert!(plan.extract_links);
+    }
+
+    #[test]
+    fn from_blank_becomes_none_and_false_has_link_becomes_none() {
+        let llm = MockLlm::with_replies([
+            "{\"match\": \"x\", \"from\": \"   \", \"has_link\": false, \"extract_links\": false}",
+        ]);
+        let plan = translate(&llm, "q", today()).unwrap();
+        assert_eq!(plan.from, None);
+        assert_eq!(plan.has_link, None);
+        assert!(!plan.extract_links);
+    }
+
+    #[test]
+    fn too_long_from_rejects_the_plan() {
+        let llm = MockLlm::with_replies([format!(
+            "{{\"match\": \"x\", \"from\": \"{}\"}}",
+            "a".repeat(129)
+        )]);
+        assert!(translate(&llm, "q", today()).is_err());
+    }
+
+    #[test]
+    fn plain_plan_has_no_filters() {
+        let plan = QueryPlan::plain("hello world");
+        assert_eq!(plan.from, None);
+        assert_eq!(plan.has_link, None);
+        assert!(!plan.extract_links);
+    }
+
+    #[test]
+    fn translation_prompt_documents_new_fields() {
+        let prompt = translation_system_prompt(today());
+        for needle in [
+            "\"from\"",
+            "\"has_link\"",
+            "\"extract_links\"",
+            "collect, list, or gather links",
+        ] {
+            assert!(
+                prompt.contains(needle),
+                "prompt must mention {needle}: {prompt}"
+            );
+        }
+    }
+
+    #[test]
     fn translate_parses_fenced_json_with_prose() {
         let llm = MockLlm::with_replies([
             "Sure!\n```json\n{\"match\": \"pricing\", \"date_from\": null, \"date_to\": \"2026-03-31\"}\n```\nDone.",
@@ -1005,7 +1149,7 @@ mod tests {
     #[test]
     fn summarize_skips_when_no_results() {
         let llm = MockLlm::with_replies(Vec::<String>::new());
-        let s = summarize_results(&llm, "q", &[], DEFAULT_SUMMARIZE_TOP);
+        let s = summarize_results(&llm, "q", &[], DEFAULT_SUMMARIZE_TOP, &[]);
         assert_eq!(s.answer, None);
         assert!(llm.prompts().is_empty(), "no LLM call without results");
     }
@@ -1029,6 +1173,21 @@ mod tests {
             if n > 0 {
                 assert_eq!(order.first(), Some(&0), "n={n}");
             }
+        }
+    }
+
+    /// Fixture: message with a body that may contain links.
+    fn link_msg(id: i64, author: &str, body: &str) -> Message {
+        Message {
+            id,
+            source: "test".into(),
+            external_id: format!("l{id}"),
+            channel: "email".into(),
+            chat_id: String::new(),
+            author: author.into(),
+            sent_at: "2026-10-01T00:00:00Z".into(),
+            body: body.into(),
+            raw_json: "{}".into(),
         }
     }
 
@@ -1065,7 +1224,7 @@ mod tests {
     fn summary_prompt_orders_blocks_lost_in_the_middle() {
         let msgs: Vec<Message> = (0..8).map(lim_msg).collect();
         let llm = MockLlm::with_replies(["summary"]);
-        let s = summarize_results(&llm, "vault?", &msgs, DEFAULT_SUMMARIZE_TOP);
+        let s = summarize_results(&llm, "vault?", &msgs, DEFAULT_SUMMARIZE_TOP, &[]);
         assert_eq!(s.answer.as_deref(), Some("summary"));
         let user = &llm.prompts()[0].1;
 
@@ -1090,7 +1249,7 @@ mod tests {
         for (n, expected) in [(1usize, vec![1usize]), (2, vec![1, 2]), (3, vec![1, 3, 2])] {
             let msgs: Vec<Message> = (0..n).map(lim_msg).collect();
             let llm = MockLlm::with_replies(["summary"]);
-            summarize_results(&llm, "vault?", &msgs, n);
+            summarize_results(&llm, "vault?", &msgs, n, &[]);
             let user = &llm.prompts()[0].1;
             assert_eq!(marker_order(user, n), expected, "n={n}");
         }
@@ -1100,7 +1259,7 @@ mod tests {
     fn summary_prompt_truncates_top_rows_before_permuting() {
         let msgs: Vec<Message> = (0..5).map(lim_msg).collect();
         let llm = MockLlm::with_replies(["summary"]);
-        summarize_results(&llm, "vault?", &msgs, 3);
+        summarize_results(&llm, "vault?", &msgs, 3, &[]);
         let user = &llm.prompts()[0].1;
 
         // Exactly the top-3 ranked rows are sent, then permuted (1,3,2).
@@ -1123,7 +1282,7 @@ mod tests {
     fn summary_prompt_header_says_numbered_by_relevance() {
         let msgs: Vec<Message> = (0..2).map(lim_msg).collect();
         let llm = MockLlm::with_replies(["summary"]);
-        summarize_results(&llm, "vault?", &msgs, DEFAULT_SUMMARIZE_TOP);
+        summarize_results(&llm, "vault?", &msgs, DEFAULT_SUMMARIZE_TOP, &[]);
         let user = &llm.prompts()[0].1;
         assert!(
             user.contains("Messages (numbered by relevance):"),
@@ -1132,6 +1291,102 @@ mod tests {
         assert!(
             !user.contains("most relevant first"),
             "the old header is false once block order differs from numbering: {user}"
+        );
+    }
+
+    #[test]
+    fn summary_prompt_includes_the_collected_links_section() {
+        let msgs = vec![link_msg(1, "ana", "see https://example.com/a")];
+        let collected = extract_links(&msgs);
+        let llm = MockLlm::with_replies(["summary"]);
+        let s = summarize_results(&llm, "collect links", &msgs, 8, &collected);
+        assert_eq!(s.answer.as_deref(), Some("summary"));
+        let user = &llm.prompts()[0].1;
+        assert!(
+            user.contains("Collected links (from the messages above):"),
+            "{user}"
+        );
+        assert!(
+            user.contains("https://example.com/a · ana · 2026-10-01T00:00:00Z"),
+            "{user}"
+        );
+        // The system prompt gains the links rule only when links exist.
+        assert!(llm.prompts()[0].0.contains("describe what the links are"));
+    }
+
+    #[test]
+    fn summary_link_lines_are_capped() {
+        let body = (0..60)
+            .map(|i| format!("https://example.com/{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let msgs = vec![link_msg(1, "ana", &body)];
+        let collected = extract_links(&msgs);
+        let llm = MockLlm::with_replies(["summary"]);
+        summarize_results(&llm, "q", &msgs, 8, &collected);
+        let user = &llm.prompts()[0].1;
+        assert!(user.contains("https://example.com/49"), "{user}");
+        assert!(!user.contains("https://example.com/50"), "{user}");
+    }
+
+    #[test]
+    fn summary_without_links_is_unchanged() {
+        let msgs = vec![lim_msg(0)];
+        let llm = MockLlm::with_replies(["summary"]);
+        summarize_results(&llm, "vault?", &msgs, 8, &[]);
+        assert!(!llm.prompts()[0].0.contains("describe what the links are"));
+        assert!(!llm.prompts()[0].1.contains("Collected links"));
+    }
+
+    #[test]
+    fn ask_collects_links_only_when_the_plan_extracts() {
+        use crate::storage::Storage;
+        use crate::vector::HashEmbedder;
+        let storage = Storage::open_in_memory().unwrap();
+        storage
+            .insert_message(&crate::message::NewMessage::new(
+                "test",
+                "l1",
+                "ana",
+                "2026-10-01T00:00:00Z",
+                "see https://example.com/a about deploys",
+            ))
+            .unwrap();
+        let embedder = HashEmbedder;
+        // Local mode (no LLM): the plain plan never extracts.
+        let local = ask(
+            &storage,
+            None,
+            &embedder,
+            "collect links about deploys",
+            50,
+            8,
+            today(),
+        )
+        .unwrap();
+        assert!(local.collected.is_empty());
+        // An LLM that plans extraction: the link is collected and the
+        // summary prompt carries the collected-links section.
+        let llm = MockLlm::with_replies([
+            "{\"match\": \"deploys\", \"has_link\": true, \"extract_links\": true}".to_string(),
+            "one link collected [1].".to_string(),
+        ]);
+        let out = ask(
+            &storage,
+            Some(&llm),
+            &embedder,
+            "collect links about deploys",
+            50,
+            8,
+            today(),
+        )
+        .unwrap();
+        assert_eq!(out.collected.len(), 1);
+        assert_eq!(out.collected[0].url, "https://example.com/a");
+        assert!(
+            llm.prompts()[1].1.contains("Collected links"),
+            "{}",
+            llm.prompts()[1].1
         );
     }
 }

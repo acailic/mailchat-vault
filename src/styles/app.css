@@ -8,6 +8,8 @@
  *   data-layout  wide (>=1100px) | medium (800–1099px) | compact (<800px)
  *   data-reading open | closed   (a message is open in the reading pane)
  *   data-nav     open | closed   (compact navigation drawer)
+ *   data-nav-collapsed true | false  (desktop: the nav column is removed)
+ *   data-workspace-section search | ask  (the tab inside the Archive view)
  * The CSS media queries mirror the JS breakpoints exactly.
  * ------------------------------------------------------------------------- */
 
@@ -65,7 +67,16 @@
   margin: 0;
 }
 
-html, body { height: 100%; }
+html, body {
+  height: 100%;
+  /* The document never scrolls — every pane scrolls on its own. This
+   * hard-guards the WebKitGTK viewport/100vh glitch class (stale layout
+   * viewport after a resize or monitor change), where the page briefly
+   * becomes taller than the window and wheel chaining scrolls the whole
+   * app into empty canvas. On the root element, not just body: body's
+   * overflow alone does not always propagate to the viewport. */
+  overflow: hidden;
+}
 
 body {
   margin: 0;
@@ -116,7 +127,11 @@ body {
 #app {
   display: grid;
   grid-template-columns: var(--nav-width) 1fr;
-  height: 100vh;
+  /* 100%, not 100vh: a percentage resolves against body's height, which
+   * tracks the real viewport in every engine — 100vh can go stale in
+   * WebKitGTK after a window resize or monitor change and leave the page
+   * taller than the window. */
+  height: 100%;
   overflow: hidden; /* each area scrolls on its own */
 }
 
@@ -239,7 +254,16 @@ body {
   font-size: 12px;
 }
 
-/* --- Content column: topbar (compact) + views --------------------------- */
+/* Desktop sidebar hiding (wide/medium): the nav column leaves the grid
+ * entirely and the content takes the full width — no scrim, no overlay
+ * (that is the compact drawer below). */
+@media (min-width: 800px) {
+  #app[data-nav-collapsed="true"] { grid-template-columns: 1fr; }
+  #app[data-nav-collapsed="true"] #nav { display: none; }
+  #app[data-nav-collapsed="true"] #content { grid-column: 1; }
+}
+
+/* --- Content column: topbar (nav toggle + view title) + views ------------ */
 
 #content {
   grid-column: 2;
@@ -249,8 +273,10 @@ body {
   min-height: 0;
 }
 
+/* The topbar is visible at every width: its hamburger hides the nav column
+ * on desktop and works the drawer on compact. */
 #topbar {
-  display: none; /* compact only */
+  display: flex;
   align-items: center;
   gap: var(--sp-2);
   padding: var(--sp-1) var(--sp-2);
@@ -325,6 +351,34 @@ body {
   background: var(--selection);
   border-color: var(--border-strong);
   font-weight: 600;
+}
+
+/* --- Workspace view: Search / Ask tabs (one panel at a time) ------------- */
+
+/* Same segmented-control language as the settings pages; aria-selected is
+ * the state (role=tab, not aria-current). */
+.workspace-tabs { gap: var(--sp-1); margin-bottom: var(--sp-3); }
+.workspace-tab-btn {
+  padding: var(--sp-1) var(--sp-2);
+  font: inherit;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+.workspace-tab-btn:hover { background: var(--panel-2); }
+.workspace-tab-btn[aria-selected="true"] {
+  background: var(--selection);
+  border-color: var(--border-strong);
+  font-weight: 600;
+}
+
+/* Panels stay mounted; only visibility is switched (results, scroll, and
+ * the last answer survive tab switches). */
+#app[data-view="workspace"][data-workspace-section="search"] #ask-section,
+#app[data-view="workspace"][data-workspace-section="ask"] #search-section {
+  display: none;
 }
 
 #view-sources,
@@ -755,6 +809,26 @@ mark.hit {
 #ask-notes { margin-top: var(--sp-1); font-size: var(--text-meta); color: var(--warning); }
 #ask-results, .watch-list, .jobs-list { list-style: none; margin: var(--sp-1) 0 0; padding: 0; font-size: var(--text-meta); }
 #ask-results li, .watch-list li, .jobs-list li { padding: 3px 0; }
+/* ask-collect-links: one details/summary per URL, one .ask-source row per hit. */
+#ask-collected-list { list-style: none; margin: var(--sp-1) 0 0; padding: 0; font-size: var(--text-meta); }
+#ask-collected-list li { padding: 3px 0; }
+#ask-collected-list summary { cursor: pointer; color: var(--accent); }
+#ask-collected-list .ask-source {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  border-radius: var(--radius-m);
+  padding: 3px 4px;
+  cursor: pointer;
+}
+#ask-collected-list .ask-source:hover, #ask-collected-list .ask-source:focus-visible {
+  background: var(--selection);
+}
+#ask-collected-list .ask-source .meta { color: var(--accent); }
 
 /* --- Reading pane -------------------------------------------------------- */
 
@@ -995,6 +1069,7 @@ summary.icon-btn::-webkit-details-marker { display: none; }
 #view-activity section { margin-bottom: var(--sp-4); }
 
 /* Statistics dashboard: pure CSS bars + tables, no chart library. */
+.day-chart-block { margin: 10px 0 14px; }
 .day-chart {
   display: flex;
   align-items: flex-end;
@@ -1002,14 +1077,14 @@ summary.icon-btn::-webkit-details-marker { display: none; }
   height: 72px;
   /* Room above the axis for the per-bar count labels. */
   padding-top: var(--sp-4);
-  margin: 10px 0 14px;
+  margin: 0;
   border-bottom: 1px solid var(--border-strong);
 }
 .day-bar {
   position: relative;
   flex: 1 1 0;
   min-width: 1px;
-  background: var(--accent);
+  background: var(--accent); /* fallback: engines without color-mix */
   border-radius: 1px 1px 0 0;
 }
 .day-bar-count {
@@ -1034,11 +1109,37 @@ summary.icon-btn::-webkit-details-marker { display: none; }
   font-size: var(--text-meta);
   color: var(--muted);
 }
+/* Heat ramp: quiet days blend toward the idle floor, the busiest day
+ * reaches the full accent, so density reads without hover tooltips. */
+@supports (background: color-mix(in oklab, red, blue)) {
+  .day-bar {
+    background: color-mix(
+      in oklab,
+      var(--accent) calc(35% + var(--bar-heat, 100) * 0.65%),
+      var(--chart-idle)
+    );
+  }
+}
+/* Time axis under the histogram: first, middle, and last bucket label. */
+.day-chart-axis {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-top: 2px;
+  font-size: var(--text-meta);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
   gap: 10px 24px;
 }
+/* One categorical color per card (accent → ochre → slate blue), echoed
+ * by the dot before each heading so the tables read at a glance. */
+.stat-table { --stat-fill: var(--accent); }
+.stat-grid .stat-table:nth-child(2) { --stat-fill: var(--chart-2); }
+.stat-grid .stat-table:nth-child(3) { --stat-fill: var(--chart-3); }
 .stat-table h3 {
   font-size: 12px;
   font-weight: 600;
@@ -1046,6 +1147,15 @@ summary.icon-btn::-webkit-details-marker { display: none; }
   letter-spacing: 0.04em;
   color: var(--muted);
   margin: 0 0 var(--sp-1);
+}
+.stat-table h3::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 2px;
+  background: var(--stat-fill);
 }
 .stat-table table { border-collapse: collapse; width: 100%; font-size: var(--text-meta); }
 .stat-table td {
@@ -1065,7 +1175,7 @@ summary.icon-btn::-webkit-details-marker { display: none; }
   height: 6px;
   border-radius: 3px;
   min-width: 1px;
-  background: var(--accent);
+  background: var(--stat-fill);
 }
 
 /* --- Settings view -------------------------------------------------------- */
@@ -1105,8 +1215,6 @@ summary.icon-btn::-webkit-details-marker { display: none; }
 
 @media (max-width: 799.98px) {
   #app { grid-template-columns: 1fr; }
-
-  #topbar { display: flex; }
 
   #nav {
     position: fixed;

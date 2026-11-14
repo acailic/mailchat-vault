@@ -398,6 +398,11 @@ export function exportChat(args: {
   return invoke<ExportSummary | null>("export_chat", args);
 }
 
+/** Write a UTF-8 text file to a path picked with the save dialog. */
+export function saveText(args: { path: string; contents: string }): Promise<null> {
+  return invoke<null>("save_text", args);
+}
+
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------

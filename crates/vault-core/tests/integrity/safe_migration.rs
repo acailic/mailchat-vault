@@ -107,7 +107,9 @@ fn assert_reopen_completes_migration(db: &Path) {
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
     assert_eq!(s.stats().unwrap().total, ROWS as u64);
     assert_eq!(
-        s.search_filtered("vintage", None, None, 100).unwrap().len(),
+        s.search_filtered("vintage", None, None, None, false, 100)
+            .unwrap()
+            .len(),
         ROWS
     );
     // The IMAP cursor carried over from the legacy table, not lost.
@@ -376,7 +378,9 @@ fn successful_conversion_validates_and_removes_the_snapshot() {
     // right after open (every migrated row is searchable).
     assert_eq!(s.stats().unwrap().total, ROWS as u64);
     assert_eq!(
-        s.search_filtered("vintage", None, None, 100).unwrap().len(),
+        s.search_filtered("vintage", None, None, None, false, 100)
+            .unwrap()
+            .len(),
         ROWS
     );
     // Row ids survived the canonical copy.
@@ -450,7 +454,9 @@ fn wal_only_legacy_rows_survive_the_snapshot_path() {
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
     assert_eq!(s.stats().unwrap().total, (ROWS + 1) as u64);
     assert_eq!(
-        s.search_filtered("vintage", None, None, 100).unwrap().len(),
+        s.search_filtered("vintage", None, None, None, false, 100)
+            .unwrap()
+            .len(),
         ROWS + 1,
         "the WAL-only row must be archived too"
     );

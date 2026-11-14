@@ -38,12 +38,16 @@ import {
   type RestorePreviewView,
 } from "./backupview";
 import {
+  collectedCountLine,
   consentPromptText,
   consentStatusLine,
   describePlan,
+  linksToJson,
+  linksToText,
   privacyNoteFor,
   splitCitations,
   type AskOutcome,
+  type CollectedLink,
   type LlmStatus,
 } from "./llmview";
 import {
@@ -207,6 +211,12 @@ const llmNote = document.querySelector<HTMLElement>("#llm-note")!;
 const answerBox = document.querySelector<HTMLElement>("#answer")!;
 const askNotes = document.querySelector<HTMLElement>("#ask-notes")!;
 const askResults = document.querySelector<HTMLUListElement>("#ask-results")!;
+const askCollected = document.querySelector<HTMLElement>("#ask-collected")!;
+const askCollectedCount = document.querySelector<HTMLElement>("#ask-collected-count")!;
+const askCollectedFormat = document.querySelector<HTMLSelectElement>("#ask-collected-format")!;
+const askCollectedExport = document.querySelector<HTMLButtonElement>("#ask-collected-export")!;
+const askCollectedStatus = document.querySelector<HTMLElement>("#ask-collected-status")!;
+const askCollectedList = document.querySelector<HTMLUListElement>("#ask-collected-list")!;
 const embedButton = document.querySelector<HTMLButtonElement>("#embed-btn")!;
 const embedStatus = document.querySelector<HTMLElement>("#embed-status")!;
 const imapHostInput = document.querySelector<HTMLInputElement>("#imap-host")!;
@@ -435,7 +445,80 @@ function renderAsk(outcome: AskOutcome): void {
   askNotes.textContent = outcome.notes.join(" · ");
   askNotes.hidden = outcome.notes.length === 0;
   renderAskResults(askResults, sources);
+  const collected = outcome.collected ?? [];
+  lastCollected = collected.length > 0 ? collected : null;
+  // A new outcome invalidates the previous ask's export status ("Exported N
+  // links."), which would otherwise survive next to the new link list.
+  askCollectedStatus.textContent = "";
+  if (collected.length > 0) {
+    askCollectedCount.textContent = collectedCountLine(collected);
+    renderCollected(collected);
+    askCollected.hidden = false;
+  } else {
+    askCollected.hidden = true;
+  }
 }
+
+/** The links the last ask collected — what Export saves (always what is
+ * on screen). */
+let lastCollected: CollectedLink[] | null = null;
+
+/** One <li> per link: a details/summary holding one clickable hit row per
+ * citing message (same open-in-thread-context behavior as citations). */
+function renderCollected(links: CollectedLink[]): void {
+  askCollectedList.replaceChildren();
+  for (const link of links) {
+    const li = document.createElement("li");
+    const details = document.createElement("details");
+    details.open = links.length === 1 && link.hits.length === 1;
+    const summary = document.createElement("summary");
+    summary.textContent =
+      link.hits.length === 1 ? link.url : `${link.url} (${link.hits.length} hits)`;
+    details.append(summary);
+    for (const hit of link.hits) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "ask-source";
+      const meta = document.createElement("span");
+      meta.className = "meta";
+      meta.textContent = `${hit.author || "unknown"} · ${hit.sent_at || "date unknown"}`;
+      const ctx = document.createElement("span");
+      ctx.textContent = hit.context;
+      row.append(meta, document.createElement("br"), ctx);
+      row.addEventListener("click", () => void openDetail(hit.message_id));
+      details.append(row);
+    }
+    li.append(details);
+    askCollectedList.append(li);
+  }
+}
+
+/** Save the collected links through the OS save dialog (text or JSON). */
+async function exportCollected(links: CollectedLink[]): Promise<void> {
+  const format = askCollectedFormat.value === "json" ? "json" : "text";
+  const ext = format === "json" ? "json" : "txt";
+  const path = await save({
+    title: "Export collected links",
+    defaultPath: `mailchat-links.${ext}`,
+    filters: [
+      format === "json"
+        ? { name: "JSON file", extensions: ["json"] }
+        : { name: "Text file", extensions: ["txt"] },
+    ],
+  });
+  if (typeof path !== "string") return;
+  try {
+    await ipc.saveText({ path, contents: format === "json" ? linksToJson(links) : linksToText(links) });
+    askCollectedStatus.textContent = `Exported ${links.length} link${links.length === 1 ? "" : "s"}.`;
+  } catch (e) {
+    askCollectedStatus.textContent = describeError(e);
+  }
+}
+
+askCollectedExport.addEventListener("click", () => {
+  const collected = lastCollected;
+  if (collected) void exportCollected(collected);
+});
 
 /** The menu entry an ask with the current selection would use, when it
  * is an *available network* provider (the only case needing consent). */
@@ -606,7 +689,7 @@ function renderSourceChipsNow(): void {
         ? state.sources.filter((s) => s !== id)
         : [...state.sources, id];
       // Source scoping is a search action: show the results it produced.
-      workspace.store.setView("workspace");
+      workspace.store.setWorkspaceSection("search");
       renderSourceChipsNow();
       void runSearch(0);
     },
@@ -1732,7 +1815,7 @@ function showImportFollowup(importId: string | undefined, inserted: number): voi
       importScopeSelect.append(option);
     }
     importScopeSelect.value = importId;
-    workspace.store.setView("workspace");
+    workspace.store.setWorkspaceSection("search");
     void runSearch(0);
   });
   importFollowup.append(view);
@@ -1793,7 +1876,7 @@ async function enterDemo(): Promise<void> {
   try {
     await ipc.demoEnter();
     demoActive = true;
-    workspace.store.setView("workspace");
+    workspace.store.setWorkspaceSection("search");
     await refreshAfterVaultSwitch();
   } catch (e) {
     setStatus(`Could not open the sample archive: ${e}`, true);
@@ -2173,7 +2256,7 @@ function viewSourceMessages(account: AccountView): void {
   state.sources = [account.source_id];
   renderSourceChipsNow();
   void runSearch(0);
-  workspace.store.setView("workspace");
+  workspace.store.setWorkspaceSection("search");
   searchInput.focus();
 }
 

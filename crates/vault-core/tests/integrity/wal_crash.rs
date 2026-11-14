@@ -37,7 +37,9 @@ fn committed_transactions_survive_crash_before_checkpoint() {
     assert_eq!(s.stats().unwrap().total, 3);
     for id in ["a", "b", "c"] {
         assert_eq!(
-            s.search_filtered(id, None, None, 10).unwrap().len(),
+            s.search_filtered(id, None, None, None, false, 10)
+                .unwrap()
+                .len(),
             1,
             "row {id} searchable"
         );
@@ -87,12 +89,14 @@ fn torn_wal_tail_discards_only_the_incomplete_transaction() {
         stats.total, 2,
         "only the two fully committed transactions survive"
     );
-    let hits = s.search_filtered("committed", None, None, 10).unwrap();
+    let hits = s
+        .search_filtered("committed", None, None, None, false, 10)
+        .unwrap();
     let mut ids: Vec<&str> = hits.iter().map(|m| m.external_id.as_str()).collect();
     ids.sort_unstable();
     assert_eq!(ids, ["small-1", "small-2"]);
     assert!(
-        s.search_filtered("xxxxx", None, None, 10)
+        s.search_filtered("xxxxx", None, None, None, false, 10)
             .unwrap()
             .is_empty(),
         "the torn transaction must leave no searchable residue"
@@ -134,7 +138,12 @@ fn losing_the_wal_file_loses_recency_but_never_corrupts() {
         .insert_message(&msg("integrity", "fresh", "written after the loss"))
         .unwrap();
     assert!(matches!(out, InsertOutcome::Inserted(_)));
-    assert_eq!(s.search_filtered("after", None, None, 10).unwrap().len(), 1);
+    assert_eq!(
+        s.search_filtered("after", None, None, None, false, 10)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]

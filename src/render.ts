@@ -359,6 +359,8 @@ function dayBarLabel(bar: DayBar): string {
 const DAY_BAR_LABEL_MAX = 12;
 
 function dayChart(days: ArchiveStats["by_day"]): HTMLElement {
+  const block = document.createElement("div");
+  block.className = "day-chart-block";
   const chart = document.createElement("div");
   chart.className = "day-chart";
   chart.setAttribute("role", "group");
@@ -382,6 +384,9 @@ function dayChart(days: ArchiveStats["by_day"]): HTMLElement {
     const col = document.createElement("div");
     col.className = "day-bar";
     col.style.height = `${barHeightPct(bar.count, max)}%`;
+    // Heat share of the tallest day (0..100) drives the color ramp;
+    // engines without color-mix keep the solid accent fallback.
+    col.style.setProperty("--bar-heat", String(barHeightPct(bar.count, max)));
     const text = dayBarLabel(bar);
     col.title = text;
     col.setAttribute("role", "img");
@@ -394,7 +399,29 @@ function dayChart(days: ArchiveStats["by_day"]): HTMLElement {
     }
     chart.append(col);
   }
-  return chart;
+  block.append(chart);
+  if (bars.length > 0) block.append(dayChartAxis(bars));
+  return block;
+}
+
+/** Time axis under the histogram: the first, middle, and last bucket
+ * labels (a day, month, or year, per the bucketing in dayBars). */
+function dayChartAxis(bars: DayBar[]): HTMLElement {
+  const axis = document.createElement("div");
+  axis.className = "day-chart-axis";
+  const ticks = [
+    bars[0].label,
+    bars[Math.floor((bars.length - 1) / 2)].label,
+    bars[bars.length - 1].label,
+  ];
+  axis.append(
+    ...[...new Set(ticks)].map((label) => {
+      const tick = document.createElement("span");
+      tick.textContent = label;
+      return tick;
+    }),
+  );
+  return axis;
 }
 
 function countTable(caption: string, rows: CountRow[]): HTMLElement {

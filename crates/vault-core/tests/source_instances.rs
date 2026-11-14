@@ -72,7 +72,7 @@ fn sync_round(
 
 fn find_one(storage: &Storage, phrase: &str) -> vault_core::message::Message {
     let hits = storage
-        .search_filtered(&build_match_query(phrase), None, None, 10)
+        .search_filtered(&build_match_query(phrase), None, None, None, false, 10)
         .unwrap();
     assert_eq!(hits.len(), 1, "expected exactly one hit for {phrase:?}");
     hits.into_iter().next().unwrap()
@@ -189,7 +189,14 @@ fn same_username_on_different_hosts_stays_two_instances() {
     // Two rows, one per instance — each correctly attributed under its
     // human-readable connector label, never the raw instance id.
     let hits = storage
-        .search_filtered(&build_match_query("sharedlist"), None, None, 10)
+        .search_filtered(
+            &build_match_query("sharedlist"),
+            None,
+            None,
+            None,
+            false,
+            10,
+        )
         .unwrap();
     assert_eq!(hits.len(), 2);
     let mut sources: Vec<String> = hits.iter().map(|m| m.source.clone()).collect();
@@ -365,14 +372,28 @@ fn conflicting_message_id_payloads_survive_as_revisions() {
     // Both revisions are searchable, each with its own body.
     assert_eq!(
         storage
-            .search_filtered(&build_match_query("original draft"), None, None, 10)
+            .search_filtered(
+                &build_match_query("original draft"),
+                None,
+                None,
+                None,
+                false,
+                10
+            )
             .unwrap()
             .len(),
         1
     );
     assert_eq!(
         storage
-            .search_filtered(&build_match_query("tampered alternate"), None, None, 10)
+            .search_filtered(
+                &build_match_query("tampered alternate"),
+                None,
+                None,
+                None,
+                false,
+                10
+            )
             .unwrap()
             .len(),
         1

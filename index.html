@@ -71,12 +71,19 @@
           <!-- Workspace: results area + reading pane. -->
           <section id="view-workspace" class="view" aria-label="Search and results">
             <div id="results-col">
+              <!-- Search / Ask: two modes over the same archive, one column.
+                   Panels stay mounted; data-workspace-section picks the
+                   visible one (CSS), so results and answers survive switches. -->
+              <div id="workspace-tabs" class="row" role="tablist" aria-label="Workspace sections">
+                <button type="button" id="tab-search" class="workspace-tab-btn" data-workspace-tab="search" role="tab" aria-selected="true" aria-controls="search-section">Search</button>
+                <button type="button" id="tab-ask" class="workspace-tab-btn" data-workspace-tab="ask" role="tab" aria-selected="false" aria-controls="ask-section">Ask</button>
+              </div>
               <!-- U02: shown while the isolated sample archive is open. -->
               <div id="demo-banner" class="row banner" hidden>
                 <span class="meta grow">Sample archive: an isolated demo. Nothing you see here is saved to your vault.</span>
                 <button id="demo-leave-btn" type="button">Leave sample</button>
               </div>
-              <section>
+              <section id="search-section" role="tabpanel" aria-labelledby="tab-search">
                 <h2 class="visually-hidden">Search</h2>
                 <!-- One quiet toolbar row: search + Filters fold + sort + Clear.
                      The advanced filters (author, dates, files, import scope)
@@ -196,7 +203,7 @@
               <!-- Ask is a secondary mode: collapsed behind a quiet toggle
                    (native details/summary, like Filters) so the reading
                    surface stays about retrieval until it is wanted. -->
-              <section id="ask-section" aria-label="Ask the archive">
+              <section id="ask-section" role="tabpanel" aria-labelledby="tab-ask" aria-label="Ask the archive">
                 <details id="ask-fold">
                   <summary id="ask-summary" title="Ask a question in plain language; the answer cites the matching messages">Ask the archive</summary>
                   <div class="ask-fields">
@@ -225,6 +232,21 @@
                     </div>
                     <div id="ask-status" class="meta" style="margin-top: 6px; min-height: 1em" role="status"></div>
                     <div id="answer" hidden></div>
+                    <!-- ask-collect-links: the locally extracted, deduplicated
+                         link list with the messages that cite each link. -->
+                    <div id="ask-collected" hidden>
+                      <div class="row" style="margin-top: 6px">
+                        <span id="ask-collected-count" class="meta" role="status"></span>
+                        <label class="visually-hidden" for="ask-collected-format">Export format for collected links</label>
+                        <select id="ask-collected-format" title="File format for the collected links">
+                          <option value="text" selected>Text</option>
+                          <option value="json">JSON</option>
+                        </select>
+                        <button id="ask-collected-export" type="button" title="Save the collected links to a file">Export links…</button>
+                        <span id="ask-collected-status" class="meta" role="status"></span>
+                      </div>
+                      <ul id="ask-collected-list" aria-label="Collected links (each hit opens in thread context)"></ul>
+                    </div>
                     <div id="ask-notes" hidden></div>
                     <ul id="ask-results" aria-label="Answer sources (each opens in thread context)"></ul>
                   </div>

@@ -141,7 +141,14 @@ fn golden_seed_first_write_wins() {
     assert_eq!(storage.stats().unwrap().total, model.len() as u64);
     assert!(
         storage
-            .search_filtered(&fixtures::quoted_term("mutated-variant"), None, None, 1000)
+            .search_filtered(
+                &fixtures::quoted_term("mutated-variant"),
+                None,
+                None,
+                None,
+                false,
+                1000
+            )
             .unwrap()
             .is_empty(),
         "mutated content must never be searchable"

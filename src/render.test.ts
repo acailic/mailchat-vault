@@ -453,10 +453,21 @@ describe("dashboard", () => {
       "1,234 messages · 2 sources · 2026-01-01 → 2026-03-31",
     );
     expect(el.querySelectorAll(".day-bar").length).toBe(3);
-    // Bar heights scale against the tallest day (20).
+    // Bar heights scale against the tallest day (20)…
     expect((el.querySelectorAll(".day-bar")[0] as HTMLElement).style.height).toBe("50%");
     expect((el.querySelectorAll(".day-bar")[1] as HTMLElement).style.height).toBe("100%");
     expect((el.querySelectorAll(".day-bar")[2] as HTMLElement).style.height).toBe("25%");
+    // …and the same share feeds the color ramp via --bar-heat.
+    expect(
+      (el.querySelectorAll(".day-bar")[0] as HTMLElement).style.getPropertyValue("--bar-heat"),
+    ).toBe("50");
+    expect(
+      (el.querySelectorAll(".day-bar")[1] as HTMLElement).style.getPropertyValue("--bar-heat"),
+    ).toBe("100");
+    // Time axis under the histogram: first, middle, and last bucket.
+    expect(
+      [...el.querySelectorAll(".day-chart-axis span")].map((s) => s.textContent),
+    ).toEqual(["2026-01-01", "2026-02-01", "2026-03-31"]);
     expect(el.querySelectorAll(".stat-table").length).toBe(3);
     expect(el.querySelectorAll(".stat-table tbody tr").length).toBe(6);
     // The author shows its display name; the full address stays in the
@@ -548,6 +559,10 @@ describe("dashboard", () => {
     const el = document.createElement("div");
     renderDashboard(el, { stats: archiveStats({ by_day }) });
     expect(el.querySelectorAll(".day-bar").length).toBe(12); // month buckets
+    // The axis follows the bucketing: month labels, no duplicates.
+    expect(
+      [...el.querySelectorAll(".day-chart-axis span")].map((s) => s.textContent),
+    ).toEqual(["2026-01", "2026-06", "2026-12"]);
   });
 
   it("dense charts keep every bar machine-readable but drop the visible counts", () => {

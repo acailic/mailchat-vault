@@ -78,6 +78,7 @@ pub mod chat_export;
 pub mod demo;
 pub mod discord;
 pub mod export;
+pub mod extract;
 pub mod imap;
 pub mod imap_coordinator;
 pub mod import_bounds;

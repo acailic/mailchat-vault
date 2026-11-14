@@ -417,7 +417,9 @@ fn mbox_reimports_into_a_working_archive() {
     for m in &collected.messages {
         fresh.insert_message(m).unwrap();
     }
-    let hits = fresh.search_filtered("unicode", None, None, 10).unwrap();
+    let hits = fresh
+        .search_filtered("unicode", None, None, None, false, 10)
+        .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].body, "Subject here\n\nbody text with unicode 👋");
 }
