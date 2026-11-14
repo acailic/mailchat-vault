@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ArchiveStats, ChatContext, Message, SearchHit } from "./types";
 import {
+  HIGHLIGHT_MAX_MARKS,
   attachmentOf,
   barHeightPct,
   dashboardSummary,
@@ -111,6 +112,37 @@ describe("highlightSegments", () => {
       { text: "krv", hit: true },
       { text: " i krvarenje", hit: false },
     ]);
+  });
+
+  it("caps marks at maxMarks; later matches render as one plain tail", () => {
+    expect(highlightSegments("vault vault vault", ["vault"], 2)).toEqual([
+      { text: "vault", hit: true },
+      { text: " ", hit: false },
+      { text: "vault", hit: true },
+      { text: " vault", hit: false },
+    ]);
+  });
+
+  it("a maxMarks of 0 marks nothing", () => {
+    expect(highlightSegments("vault vault", ["vault"], 0)).toEqual([
+      { text: "vault vault", hit: false },
+    ]);
+  });
+
+  it("the cap never changes the combined text content", () => {
+    const text = Array.from({ length: 60 }, (_, i) => `v${i} vault`).join(" ");
+    for (const maxMarks of [0, 1, 10, 50, 100]) {
+      const segments = highlightSegments(text, ["vault"], maxMarks);
+      expect(segments.map((s) => s.text).join("")).toBe(text);
+      expect(segments.filter((s) => s.hit).length).toBe(Math.min(maxMarks, 60));
+    }
+  });
+
+  it("marks at most HIGHLIGHT_MAX_MARKS runs by default", () => {
+    const text = `${"see vault ".repeat(HIGHLIGHT_MAX_MARKS + 5)}end`;
+    const segments = highlightSegments(text, ["vault"]);
+    expect(segments.filter((s) => s.hit).length).toBe(HIGHLIGHT_MAX_MARKS);
+    expect(segments.map((s) => s.text).join("")).toBe(text);
   });
 });
 
