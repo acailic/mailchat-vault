@@ -276,17 +276,18 @@
             <h2 class="view-heading">Sources</h2>
 
             <!-- Home: the source list (the accounts overview, Task 3)
-                 plus the two ways forward. -->
+                 plus the two ways forward. The header row carries every
+                 control (add, automatic imports, refresh); the status
+                 line below reports what the last refresh saw. -->
             <section id="sources-home" class="sources-section" aria-label="Your sources">
               <div class="row">
                 <button id="sources-add-btn" class="primary" type="button">Add source…</button>
-                <div class="spacer"></div>
                 <button id="sources-automatic-btn" class="link-btn" type="button" title="Auto-sync and watched folders — imports that happen without a click">Automatic imports…</button>
+                <div class="spacer"></div>
+                <button id="sources-refresh" type="button" title="Re-read the accounts and their states">Refresh</button>
               </div>
               <div class="row" style="margin-top: 6px">
                 <span id="sources-status" class="meta" style="flex: 1" role="status">…</span>
-                <div class="spacer"></div>
-                <button id="sources-refresh" type="button">Refresh</button>
               </div>
               <ul id="sources-list" class="accounts-list" tabindex="-1" aria-label="Sources"></ul>
             </section>
@@ -461,28 +462,55 @@
                  pages (inside any one page it is hidden with its page). -->
             <div id="settings-note" class="meta" role="status"></div>
 
+            <!-- General: no "General" heading — the tab above already
+                 says it. Each control is one labelled field with its
+                 helper text; Save sits in the end-of-form action zone,
+                 and the shared #settings-note above the pages flashes
+                 the saved state. -->
             <section id="settings-general" class="settings-page" aria-label="General">
-              <h3>General</h3>
-              <div class="row">
-                <label class="meta">Theme
+              <div class="settings-form">
+                <div class="form-field">
+                  <label for="theme">Theme</label>
                   <select id="theme">
                     <option value="system">System</option>
                     <option value="light">Light</option>
                     <option value="dark">Dark</option>
                   </select>
-                </label>
-                <label class="meta" title="Native desktop notification when a sync or folder-watch cycle brings new mail; silent while the app window is focused">Desktop notifications
-                  <input id="notify-toggle" type="checkbox" checked />
-                </label>
+                  <p class="field-hint">Light, dark, or follow the system.</p>
+                </div>
+                <div class="form-field">
+                  <label class="field-check" for="notify-toggle">
+                    <input id="notify-toggle" type="checkbox" checked />
+                    Desktop notifications
+                  </label>
+                  <p class="field-hint">
+                    A native desktop notification when a sync or folder-watch cycle brings new
+                    mail; silent while the app window is focused.
+                  </p>
+                </div>
+                <div class="form-field">
+                  <label class="field-check" for="keepalive-toggle">
+                    <input id="keepalive-toggle" type="checkbox" />
+                    Keep running in background
+                  </label>
+                  <p class="field-hint">
+                    Closing the window hides the app to the tray instead of exiting, so
+                    auto-sync, folder watching, and notifications keep working between opens
+                    (the tray menu shows, syncs, and quits).
+                  </p>
+                </div>
+                <div class="form-field">
+                  <label class="field-check" for="autostart-toggle">
+                    <input id="autostart-toggle" type="checkbox" />
+                    Start at login
+                  </label>
+                  <p class="field-hint">
+                    Launch the app automatically when you log in (OS login-item registration;
+                    applied when you save).
+                  </p>
+                </div>
               </div>
-              <div class="row" style="margin-top: 6px">
-                <label class="meta" title="Off by default: closing the window hides the app to the tray instead of exiting, so auto-sync, folder watching, and notifications keep working between opens (the tray menu shows, syncs, and quits)">Keep running in background
-                  <input id="keepalive-toggle" type="checkbox" />
-                </label>
-                <label class="meta" title="Off by default: launch the app automatically when you log in (OS login-item registration; applied when you save)">Start at login
-                  <input id="autostart-toggle" type="checkbox" />
-                </label>
-                <div class="spacer"></div>
+              <div class="form-actions">
                 <button id="settings-save-general" type="button">Save</button>
               </div>
             </section>

@@ -387,6 +387,14 @@ body {
   flex: 1;
   overflow-y: auto;
   padding: var(--sp-4);
+  /* Sub-views are pages, not spreadsheets: the scroll region is one
+   * measure-bounded column, centered on the canvas, so controls and
+   * lists sit at a reading width instead of clinging to the top-left of
+   * a full-bleed viewport. The workspace view keeps the full width —
+   * its results list and reading pane are the wide surfaces. */
+  width: 100%;
+  max-width: 720px;
+  margin-inline: auto;
 }
 
 .view-heading {
@@ -1163,7 +1171,10 @@ summary.icon-btn::-webkit-details-marker { display: none; }
 }
 .stat-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  /* Two tables side by side fill the Activity column (the third sits
+   * below, half-width); narrower than two 240px tracks it collapses to
+   * one without a new breakpoint. */
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 10px 24px;
 }
 /* One categorical color per card (accent → ochre → slate blue), echoed
@@ -1212,6 +1223,26 @@ summary.icon-btn::-webkit-details-marker { display: none; }
 /* --- Settings view -------------------------------------------------------- */
 
 #view-settings .row { display: flex; gap: var(--sp-2); flex-wrap: wrap; align-items: center; margin-top: var(--sp-2); }
+
+/* Settings forms (General): one labelled field per group with its helper
+ * text under the control, and one end-of-form action zone — Save belongs
+ * to the whole form, not to the last row of controls. The shared
+ * #settings-note above the pages flashes the saved state. */
+.settings-form { display: grid; gap: var(--sp-3); }
+.form-field { display: grid; gap: 2px; justify-items: start; }
+.form-field > label { font-weight: 600; }
+label.field-check { display: flex; align-items: center; gap: var(--sp-2); font-weight: 600; }
+label.field-check input { margin: 0; }
+.field-hint { margin: 0; font-size: var(--text-meta); color: var(--muted); }
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+}
 .provider-row {
   display: grid;
   grid-template-columns: auto auto 1.1fr 1.4fr 1fr 1fr auto;
