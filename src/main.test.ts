@@ -3889,7 +3889,9 @@ describe("workspace shell", () => {
     input("#search").value = "vault";
     pressKey(input("#search"), "Enter");
     await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
-    const row = $("#results .hit-item") as HTMLElement;
+    // The row's button (role=button .hit-main) is the focus target; the
+    // li itself is a plain list item.
+    const row = $("#results .hit-item .hit-main") as HTMLElement;
     row.focus();
     row.click();
     await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
@@ -3900,19 +3902,23 @@ describe("workspace shell", () => {
     expect(app().dataset.reading).toBe("closed");
     // The initiating result row receives focus again.
     const active = win.document.activeElement as unknown as HTMLElement | null;
-    expect(active?.classList.contains("hit-item")).toBe(true);
-    expect(active?.getAttribute("aria-current")).toBe("true");
+    expect(active?.classList.contains("hit-main")).toBe(true);
+    expect(active?.closest(".hit-item")?.getAttribute("aria-current")).toBe("true");
   });
 
   it("Enter on a focused result row opens that row's message", async () => {
     await bootSearched();
-    const rows = win.document.querySelectorAll("#results .hit-item") as unknown as HTMLElement[];
+    const rows = win.document.querySelectorAll(
+      "#results .hit-item .hit-main",
+    ) as unknown as HTMLElement[];
     const row = rows[2];
     expect(row.getAttribute("role")).toBe("button");
     row.focus();
     pressKey(row, "Enter");
     await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
-    expect(ctxCalls().at(-1)?.args).toMatchObject({ id: Number(row.dataset.id) });
+    expect(ctxCalls().at(-1)?.args).toMatchObject({
+      id: Number((row.closest(".hit-item") as HTMLElement)?.dataset.id),
+    });
   });
 
   it("opening a message in wide layout keeps focus on the current thread row", async () => {
@@ -3923,7 +3929,7 @@ describe("workspace shell", () => {
     input("#search").value = "vault";
     pressKey(input("#search"), "Enter");
     await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
-    const row = $("#results .hit-item") as HTMLElement;
+    const row = $("#results .hit-item .hit-main") as HTMLElement;
     row.focus();
     row.click();
     await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
@@ -3977,12 +3983,12 @@ describe("workspace shell", () => {
 
   it("ArrowDown from a focused row keeps focus on the new active row", async () => {
     await bootSearched();
-    const row = $("#results .hit-item") as HTMLElement;
+    const row = $("#results .hit-item .hit-main") as HTMLElement;
     row.focus();
     pressKey(win.document, "ArrowDown");
     const active = win.document.activeElement as unknown as HTMLElement | null;
-    expect(active?.classList.contains("hit-item")).toBe(true);
-    expect(active?.getAttribute("aria-current")).toBe("true");
+    expect(active?.classList.contains("hit-main")).toBe(true);
+    expect(active?.closest(".hit-item")?.getAttribute("aria-current")).toBe("true");
     const activeRow = $<HTMLElement>("#results .hit-item.active");
     expect(activeRow.dataset.index).toBe("0");
   });
@@ -4020,7 +4026,7 @@ describe("workspace shell", () => {
     input("#search").value = "vault";
     pressKey(input("#search"), "Enter");
     await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
-    const row = $("#results .hit-item") as HTMLElement;
+    const row = $("#results .hit-item .hit-main") as HTMLElement;
     row.focus();
     row.click();
     await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
@@ -4029,8 +4035,8 @@ describe("workspace shell", () => {
     closeBtn.click();
     expect($("#detail").classList.contains("open")).toBe(false);
     const active = win.document.activeElement as unknown as HTMLElement | null;
-    expect(active?.classList.contains("hit-item")).toBe(true);
-    expect(active?.getAttribute("aria-current")).toBe("true");
+    expect(active?.classList.contains("hit-main")).toBe(true);
+    expect(active?.closest(".hit-item")?.getAttribute("aria-current")).toBe("true");
   });
 
   it("Ctrl/Cmd+K focuses the search box from anywhere", async () => {

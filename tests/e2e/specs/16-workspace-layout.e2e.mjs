@@ -269,16 +269,21 @@ export async function run(ctx) {
     await ui.importMbox(browser, ui.archiveMbox);
     await ui.search(browser, "vault");
 
-    // Result rows announce as activatable buttons for screen readers.
-    const rowRole = await browser.execute(
-      () => document.querySelector("#results .hit-item")?.getAttribute("role"),
-    );
-    assert.equal(rowRole, "button", "result rows announce as buttons");
+    // Result rows announce as activatable buttons for screen readers:
+    // the row's main area carries role=button, and the list item itself
+    // does not (the selection checkbox is a sibling interactive control,
+    // never a control nested inside a button).
+    const rowRole = await browser.execute(() => ({
+      li: document.querySelector("#results li.hit-item")?.getAttribute("role"),
+      main: document.querySelector("#results li.hit-item .hit-main")?.getAttribute("role"),
+    }));
+    assert.equal(rowRole.main, "button", "the row's main area announces as a button");
+    assert.equal(rowRole.li, null, "the list item itself is not a button");
 
     // Enter on a focused row opens THAT row's message, not whatever the
     // global selection points at (the row-level handler wins).
     await browser.execute(() => {
-      const rows = document.querySelectorAll("#results .hit-item");
+      const rows = document.querySelectorAll("#results .hit-item .hit-main");
       rows[2].focus();
     });
     await browser.keys("Enter");
@@ -302,7 +307,7 @@ export async function run(ctx) {
 
     // Space activates a focused row the same way (button semantics).
     await browser.execute(() => {
-      document.querySelectorAll("#results .hit-item")[1].focus();
+      document.querySelectorAll("#results .hit-item .hit-main")[1].focus();
     });
     await browser.keys(" ");
     await browser.waitUntil(
@@ -335,12 +340,12 @@ export async function run(ctx) {
       ),
     );
     await browser.execute(() => {
-      document.querySelector("#results .hit-item").focus();
+      document.querySelector("#results .hit-item .hit-main").focus();
     });
     await browser.keys("ArrowDown");
     const arrowFocus = await browser.execute(() => ({
       activeFocused:
-        document.activeElement === document.querySelector("#results .hit-item.active"),
+        document.activeElement === document.querySelector("#results .hit-item.active .hit-main"),
       currentIndex: [...document.querySelectorAll("#results .hit-item")].indexOf(
         document.querySelector('.hit-item[aria-current="true"]'),
       ),
@@ -451,12 +456,35 @@ export async function run(ctx) {
     await ui.setViewport(browser, 1280, 800);
     await ui.openView(browser, "activity");
     const chart = await browser.$("#dashboard .day-chart");
-    assert.ok(await chart.isExisting(), "day histogram rendered for demo data");
-    assert.equal(await chart.getAttribute("role"), "img", "histogram is role=img");
-    assert.ok(
-      (await chart.getAttribute("aria-label"))?.includes("histogram"),
-      "histogram carries a label for screen readers",
+    assert.ok(await chart.isExisting(), "day chart rendered for demo data");
+    assert.equal(await chart.getAttribute("role"), "group", "chart container is role=group");
+    assert.matches(
+      await chart.getAttribute("aria-label"),
+      /^Messages per day/,
+      "chart carries a screen-reader label",
     );
+    // By now the archive spans the demo seed, the mbox import, and the
+    // signal conversation — several day buckets, so the multi-bar branch
+    // applies: every .day-bar is itself a labelled image ("2026-11-01:
+    // 6 messages"; month buckets "2026-11" once the series outgrows the
+    // bar budget; the count is singular for a lone message). The
+    // single-bucket plain-text branch (.day-single) is pinned by the
+    // stats-dashboard spec.
+    const bars = await browser.execute(() =>
+      Array.from(document.querySelectorAll("#dashboard .day-chart .day-bar"), (bar) => ({
+        role: bar.getAttribute("role"),
+        label: bar.getAttribute("aria-label"),
+      })),
+    );
+    assert.ok(bars.length >= 2, `multi-day archive draws per-day bars (got ${bars.length})`);
+    bars.forEach((bar, i) => {
+      assert.equal(bar.role, "img", `day bar ${i} is role=img`);
+      assert.matches(
+        bar.label,
+        /^\d{4}-\d{2}(-\d{2})?: [\d,]+ messages?$/,
+        `day bar ${i} carries a dated count label`,
+      );
+    });
 
     // Deferred from the medium Back step: the captured focus state must
     // show the initiating result row focused, not <body>.

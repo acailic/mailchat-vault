@@ -1321,7 +1321,9 @@ document.addEventListener("keydown", (event) => {
     renderAll();
     const activeRow = resultsList.querySelector<HTMLElement>(".hit-item.active");
     activeRow?.scrollIntoView({ block: "nearest" });
-    if (rowFocused) activeRow?.focus();
+    // The row's button (role=button .hit-main) is the focus target; the
+    // li itself is a plain list item.
+    if (rowFocused) activeRow?.querySelector<HTMLElement>(".hit-main")?.focus();
     event.preventDefault();
   } else if (event.key === "Enter") {
     if (state.activeIndex >= 0 && state.hits[state.activeIndex]) {

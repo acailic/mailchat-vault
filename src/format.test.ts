@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  authorDisplayName,
   conversationConfidenceLabel,
   folderSummaryLine,
   formatDayLabel,
@@ -12,6 +13,29 @@ import {
   timeConfidenceLabel,
 } from "./format";
 import type { FolderSyncSummary } from "./types";
+
+describe("authorDisplayName (the display part of an author string)", () => {
+  it("returns the name before the address", () => {
+    expect(authorDisplayName("Ana Sender <ana@example.com>")).toBe("Ana Sender");
+    expect(authorDisplayName("Mailchat Vault <demo@mailchat-vault.local>")).toBe(
+      "Mailchat Vault",
+    );
+  });
+
+  it("keeps bare handles and addresses whole", () => {
+    expect(authorDisplayName("marko")).toBe("marko");
+    expect(authorDisplayName("ana@example.com")).toBe("ana@example.com");
+    expect(authorDisplayName("<noreply@example.com>")).toBe("<noreply@example.com>");
+  });
+
+  it("never returns an empty display string", () => {
+    expect(authorDisplayName("")).toBe("");
+    expect(authorDisplayName(null)).toBe("");
+    expect(authorDisplayName(undefined)).toBe("");
+    // A name of only whitespace falls back to the whole string.
+    expect(authorDisplayName("   <ana@example.com>")).toBe("<ana@example.com>");
+  });
+});
 
 describe("confidence labels (F08: tokens never reach the user)", () => {
   it("maps every canonical time-confidence token to a user word", () => {

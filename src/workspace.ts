@@ -187,8 +187,10 @@ export function initWorkspace(): WorkspaceController {
       const inReading =
         active instanceof Element && active.closest("#reading") !== null;
       if (!active || active === document.body || inReading) {
+        // The row's button (role=button .hit-main) is the focus target;
+        // the li is a plain list item and not focusable.
         const activeRow = document.querySelector<HTMLElement>(
-          '#results .hit-item[aria-current="true"]',
+          '#results .hit-item[aria-current="true"] .hit-main',
         );
         const restore =
           readingTrigger && readingTrigger.isConnected

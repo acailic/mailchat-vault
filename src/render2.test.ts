@@ -65,6 +65,39 @@ describe("flat results", () => {
     expect(el.querySelector(".group")).toBeNull();
   });
 
+  it("the row's button is the main area, never the list item around the checkbox", () => {
+    const el = document.createElement("div");
+    renderFlatResults(el, {
+      hits: [hit({ author: "Mailchat Vault <demo@mailchat-vault.local>" })],
+      activeIndex: -1,
+      selectedId: null,
+      selection: new Set(),
+      terms: [],
+      onOpen: () => {},
+      onToggleSelect: () => {},
+    });
+    // The list item is a plain list item: the checkbox inside it is a
+    // sibling interactive control, not a control nested in a button
+    // (no double announcement, no Space-key ambiguity).
+    const li = el.querySelector("li.hit-item") as HTMLElement;
+    expect(li.getAttribute("role")).toBeNull();
+    expect(li.getAttribute("tabindex")).toBeNull();
+    const main = li.querySelector(".hit-main") as HTMLElement;
+    expect(main.getAttribute("role")).toBe("button");
+    expect(main.getAttribute("tabindex")).toBe("0");
+    expect(main.getAttribute("title")).toBe("Open this message");
+    const check = li.querySelector("input.row-select") as HTMLInputElement;
+    expect(check.getAttribute("aria-label")).toBe("Select message 1 for export");
+    // The meta line shows the display name; the full address stays in
+    // the title attribute.
+    const meta = main.querySelector(".meta") as HTMLElement;
+    expect(meta.textContent).toContain("Mailchat Vault · ");
+    expect(meta.textContent).not.toContain("demo@mailchat-vault.local");
+    expect(meta.getAttribute("title")).toBe(
+      "Mailchat Vault <demo@mailchat-vault.local>",
+    );
+  });
+
   it("marks the hit markers as <mark> runs", () => {
     const el = document.createElement("div");
     renderFlatResults(el, {
@@ -141,6 +174,31 @@ describe("flat results", () => {
     });
     (el.querySelector("li.hit-item") as HTMLElement).click();
     expect(opened).toEqual([9]);
+  });
+
+  it("Enter and Space activate the row's button; the checkbox stays its own control", () => {
+    const el = document.createElement("div");
+    const opened: number[] = [];
+    renderFlatResults(el, {
+      hits: [hit({ id: 9 })],
+      activeIndex: -1,
+      selectedId: null,
+      selection: new Set(),
+      terms: [],
+      onOpen: (id) => opened.push(id),
+      onToggleSelect: () => {},
+    });
+    const main = el.querySelector(".hit-main") as HTMLElement;
+    main.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+    );
+    main.dispatchEvent(
+      new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }),
+    );
+    expect(opened).toEqual([9, 9]);
+    // The checkbox is a sibling control: its clicks never open the row.
+    (el.querySelector("input.row-select") as HTMLElement).click();
+    expect(opened).toEqual([9, 9]);
   });
 });
 
