@@ -148,24 +148,33 @@
                 </section>
                 <div id="results" tabindex="-1"></div>
                 <div id="pagination" aria-label="Result pages"></div>
+                <!-- One Export… action: the format + what-to-export choices
+                     (current results / checked rows) fold behind a native
+                     disclosure, like Filters. The outcome line stays
+                     visible below it after the picker closes. This-chat
+                     export lives in the reading header's own picker. -->
                 <div id="export-controls">
-                  <span class="meta">export:</span>
-                  <label class="visually-hidden" for="export-format">Export format</label>
-                  <select id="export-format" title="File format for exports">
-                    <option value="csv" selected>CSV</option>
-                    <option value="json">JSON Lines</option>
-                    <option value="mbox">MBOX (email rows)</option>
-                  </select>
-                  <button id="export-btn" type="button" title="Export every row of the current search results (all pages), not just this page">
-                    Export results…
-                  </button>
-                  <label class="meta" title="Export only the rows you check in the results list, with provenance">selection:
-                    <select id="selection-format" title="File format for the checked rows" style="max-width: 7em">
-                      <option value="text" selected>Text</option>
-                      <option value="json">JSON</option>
-                    </select>
-                  </label>
-                  <button id="export-selection-btn" type="button" disabled title="Export the rows checked in the results list">Export selected…</button>
+                  <details id="export-menu">
+                    <summary id="export-summary" title="Export the current results or the rows you checked">Export…</summary>
+                    <div class="export-fields">
+                      <label class="visually-hidden" for="export-format">Export format</label>
+                      <select id="export-format" title="File format for exports">
+                        <option value="csv" selected>CSV</option>
+                        <option value="json">JSON Lines</option>
+                        <option value="mbox">MBOX (email rows)</option>
+                      </select>
+                      <button id="export-btn" type="button" title="Export every row of the current search results (all pages), not just this page">
+                        Export results…
+                      </button>
+                      <label class="meta" title="Export only the rows you check in the results list, with provenance">selection:
+                        <select id="selection-format" title="File format for the checked rows" style="max-width: 7em">
+                          <option value="text" selected>Text</option>
+                          <option value="json">JSON</option>
+                        </select>
+                      </label>
+                      <button id="export-selection-btn" type="button" disabled title="Export the rows checked in the results list">Export selected…</button>
+                    </div>
+                  </details>
                   <span id="export-status" class="meta" role="status"></span>
                   <span id="selection-status" class="meta" role="status"></span>
                 </div>
@@ -175,41 +184,42 @@
                 </p>
               </section>
 
+              <!-- Ask is a secondary mode: collapsed behind a quiet toggle
+                   (native details/summary, like Filters) so the reading
+                   surface stays about retrieval until it is wanted. -->
               <section id="ask-section" aria-label="Ask the archive">
-                <h2>Ask the archive (natural language)</h2>
-                <div class="row">
-                  <label class="visually-hidden" for="ask-provider">LLM provider for this ask</label>
-                  <select id="ask-provider" title="LLM provider for this ask (configured in Settings)">
-                    <option value="local">Local full-text (no LLM)</option>
-                  </select>
-                  <label class="visually-hidden" for="ask">Question</label>
-                  <input id="ask" type="text" placeholder='e.g. “what did Ana say about the vault in October?”' />
-                  <button id="ask-btn" type="button">Ask</button>
-                </div>
-                <div class="row" style="margin-top: 6px">
-                  <button id="embed-btn" type="button" title="Embed messages that don't have a local embedding yet (incremental, offline)">
-                    Update local embeddings
-                  </button>
-                  <span id="embed-status" class="meta" style="min-height: 1em" role="status"></span>
-                </div>
-                <div id="llm-note" class="meta" role="status"></div>
-                <!-- M5: explicit, session-scoped AI consent. The status line
-                     always shows the current state; the prompt (with what
-                     exactly would leave the machine) appears when an ask
-                     wants the network without consent yet granted. -->
-                <div id="consent-row" class="row" style="margin-top: 6px">
-                  <span id="consent-status" class="meta" role="status"></span>
-                  <button id="consent-revoke-btn" type="button" hidden title="Revoke this session's AI consent; asks run fully locally again">Revoke</button>
-                </div>
-                <div id="consent-prompt" class="row" style="margin-top: 6px" hidden>
-                  <span id="consent-text" class="meta"></span>
-                  <button id="consent-allow-btn" type="button" title="Allow sending your question and the top results to the selected provider for this session only">Send &amp; ask for this session</button>
-                  <button id="consent-local-btn" type="button" title="Keep asking fully locally; nothing leaves this machine">Keep asking locally</button>
-                </div>
-                <div id="ask-status" class="meta" style="margin-top: 6px; min-height: 1em" role="status"></div>
-                <div id="answer" hidden></div>
-                <div id="ask-notes" hidden></div>
-                <ul id="ask-results" aria-label="Answer sources (each opens in thread context)"></ul>
+                <details id="ask-fold">
+                  <summary id="ask-summary" title="Ask a question in plain language; the answer cites the matching messages">Ask the archive</summary>
+                  <div class="ask-fields">
+                    <div class="row">
+                      <label class="visually-hidden" for="ask-provider">LLM provider for this ask</label>
+                      <select id="ask-provider" title="LLM provider for this ask (configured in Settings)">
+                        <option value="local">Local full-text (no LLM)</option>
+                      </select>
+                      <label class="visually-hidden" for="ask">Question</label>
+                      <input id="ask" type="text" placeholder='e.g. “what did Ana say about the vault in October?”' />
+                      <button id="ask-btn" type="button">Ask</button>
+                    </div>
+                    <div id="llm-note" class="meta" role="status"></div>
+                    <!-- M5: explicit, session-scoped AI consent. The status line
+                         always shows the current state; the prompt (with what
+                         exactly would leave the machine) appears when an ask
+                         wants the network without consent yet granted. -->
+                    <div id="consent-row" class="row" style="margin-top: 6px">
+                      <span id="consent-status" class="meta" role="status"></span>
+                      <button id="consent-revoke-btn" type="button" hidden title="Revoke this session's AI consent; asks run fully locally again">Revoke</button>
+                    </div>
+                    <div id="consent-prompt" class="row" style="margin-top: 6px" hidden>
+                      <span id="consent-text" class="meta"></span>
+                      <button id="consent-allow-btn" type="button" title="Allow sending your question and the top results to the selected provider for this session only">Send &amp; ask for this session</button>
+                      <button id="consent-local-btn" type="button" title="Keep asking fully locally; nothing leaves this machine">Keep asking locally</button>
+                    </div>
+                    <div id="ask-status" class="meta" style="margin-top: 6px; min-height: 1em" role="status"></div>
+                    <div id="answer" hidden></div>
+                    <div id="ask-notes" hidden></div>
+                    <ul id="ask-results" aria-label="Answer sources (each opens in thread context)"></ul>
+                  </div>
+                </details>
               </section>
             </div>
 
@@ -511,6 +521,19 @@
                 <div class="spacer"></div>
                 <button id="settings-save-ai" type="button">Save</button>
               </div>
+              <!-- Local embeddings: the offline half of Ask. Maintenance of
+                   the local index lives here with the rest of the AI
+                   configuration, not under every result set. -->
+              <div class="row">
+                <button id="embed-btn" type="button" title="Embed messages that don't have a local embedding yet (incremental, offline)">
+                  Update local embeddings
+                </button>
+                <span id="embed-status" class="meta" style="flex: 1; min-height: 1em" role="status"></span>
+              </div>
+              <p class="meta" style="margin-top: 4px">
+                Local embeddings run entirely on this device and feed Ask's offline
+                matching; updating is incremental, so only new messages are embedded.
+              </p>
               <p class="meta" style="font-size: 12px; margin-top: 8px">
                 Providers live in settings.json in the app data dir; API keys are stored in the OS keyring
                 (session memory when none is available) — never in the settings file or the database.

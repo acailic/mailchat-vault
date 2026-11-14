@@ -56,6 +56,7 @@ export async function run(ctx) {
 
       // --- fresh install: local-only menu, off note -------------------------
       await ui.openView(browser, "workspace");
+      await ui.openAsk(browser); // the provider menu lives behind the Ask fold
       const askProvider = await browser.$("#ask-provider");
       let options = await askProvider.$$("option");
       assert.equal(options.length, 1, "fresh install lists only local mode");

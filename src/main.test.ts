@@ -1954,6 +1954,37 @@ describe("first-run state and the isolated sample archive (U02)", () => {
 // ---------------------------------------------------------------------------
 
 describe("export", () => {
+  it("one Export… picker holds the format and both what-to-export choices, folded by default", async () => {
+    await bootSearched();
+    const menu = $("#export-menu") as HTMLDetailsElement;
+    expect(menu.open).toBe(false);
+    expect($("#export-summary").textContent).toBe("Export…");
+    // Everything the old always-visible strip offered now lives inside
+    // the one disclosure — nothing export-related sits beside it.
+    for (const id of ["export-format", "export-btn", "selection-format", "export-selection-btn"]) {
+      expect($(`#${id}`)!.closest("#export-menu")).toBe(menu);
+    }
+    // The outcome lines stay outside the fold so a finished export is
+    // still reported after the picker closes.
+    expect($("#export-status")!.closest("#export-menu")).toBeNull();
+    expect($("#selection-status")!.closest("#export-menu")).toBeNull();
+    // The disabled-until-selection rule survives the move.
+    expect($<HTMLButtonElement>("#export-selection-btn").disabled).toBe(true);
+    ($(".hit-item[data-id=\"1\"] .row-select") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect($<HTMLButtonElement>("#export-selection-btn").disabled).toBe(false),
+    );
+  });
+
+  it("the picker hides with the first-run card: no export offered on an empty archive", async () => {
+    tauri.handlers.set("stats", () => ({ total: 0, by_source: [] }));
+    await boot();
+    await vi.waitFor(() => expect($("#first-run").getAttribute("hidden")).toBeNull());
+    // The summary, the picker, and its status lines disappear together.
+    expect($("#export-controls").getAttribute("hidden")).not.toBeNull();
+    expect($("#export-menu")!.closest("#export-controls")).toBeTruthy();
+  });
+
   it("exports the executed search with all its filters, not just the page", async () => {
     await boot();
     searchRespondsWith(() => pageOf(HITS.slice(0, 2), 120));
@@ -2251,6 +2282,21 @@ describe("ask and local embeddings", () => {
     await vi.waitFor(() => expect($("#embed-status").textContent).toContain("3/4"));
     expect($("#embed-status").textContent).toContain("1 pending");
     expect($("#embed-status").textContent).toContain("hash-ngram-v1");
+  });
+
+  it("Ask stays collapsed behind its toggle; embeddings live on the AI settings page", async () => {
+    tauri.handlers.set("embed_status", () => EMBED_STATUS);
+    await boot();
+    // Progressive disclosure: nothing retrieval-irrelevant is spread under
+    // the results until the user folds it open.
+    expect(($("#ask-fold") as HTMLDetailsElement).open).toBe(false);
+    expect($("#ask-summary").textContent).toBe("Ask the archive");
+    // The local-embeddings controls moved out of the workspace into
+    // Settings → AI assistance, next to the rest of the AI configuration.
+    expect($("#embed-btn")!.closest("#settings-ai")).toBeTruthy();
+    expect($("#embed-status")!.closest("#settings-ai")).toBeTruthy();
+    expect($("#embed-btn")!.closest("#ask-section")).toBeNull();
+    expect($("#embed-btn")!.closest("#results-col")).toBeNull();
   });
 
   it("an embed_status failure leaves the line empty, not broken", async () => {
@@ -3212,15 +3258,22 @@ describe("ask AI consent + evidence navigation", () => {
 
   it("Revoke resets a granted consent mid-session", async () => {
     await bootConsentable();
+    expect($("#ask-summary").textContent).toBe("Ask the archive");
     await askFromInput("vault?");
     $("#consent-allow-btn").click();
     await vi.waitFor(() =>
       expect($("#consent-status").textContent).toContain("granted for this session"),
     );
+    // A live grant stays visible on the fold's summary even when Ask is
+    // collapsed again (the Filters convention for applied state).
+    expect($("#ask-summary").textContent).toBe("Ask the archive · AI consent on");
+    expect($("#ask-summary").classList.contains("on")).toBe(true);
     $("#consent-revoke-btn").click();
     await vi.waitFor(() =>
       expect($("#consent-status").textContent).toContain("not granted"),
     );
+    expect($("#ask-summary").textContent).toBe("Ask the archive");
+    expect($("#ask-summary").classList.contains("on")).toBe(false);
     expect($<HTMLButtonElement>("#consent-revoke-btn").hidden).toBe(true);
     await askFromInput("after revoke?");
     expect(askCalls().at(-1)!.args).toMatchObject({ consent: false });

@@ -355,7 +355,10 @@ export async function run(ctx) {
 
     // Keydown guard: with focus on a select, ArrowDown must change the
     // select natively and NOT move the result selection; Enter must run the
-    // focused control's action, not open the selected message.
+    // focused control's action, not open the selected message. (The format
+    // select lives inside the Export… picker, so the picker is opened
+    // first — a closed fold's controls cannot take focus.)
+    await ui.openExportMenu(browser);
     const guardBefore = await browser.execute(() => ({
       selected: document.querySelector("#export-format").value,
       currentRow: document.querySelector('.hit-item[aria-current="true"]')?.textContent ?? "",

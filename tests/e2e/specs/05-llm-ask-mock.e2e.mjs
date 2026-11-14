@@ -61,6 +61,7 @@ export async function run(ctx) {
       if (!(await browser.$("#ask").isExisting())) {
         ctx.skip("Ask UI not present in this build");
       }
+      await ui.openAsk(browser); // Ask lives behind its fold
 
       // The privacy note announces LLM mode with the configured model/host,
       // and the M5 consent state line starts a session ungranted.
@@ -231,6 +232,7 @@ export async function run(ctx) {
         // env provider (model-alpha via the recorder).
         await ui.importMbox(browser, ui.archiveMbox);
         await ui.openView(browser, "workspace");
+        await ui.openAsk(browser); // Ask lives behind its fold
         const askInput = await browser.$("#ask");
         await askInput.click();
         await askInput.setValue("what happened with the vault around midnight?");

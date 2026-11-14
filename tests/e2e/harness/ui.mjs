@@ -84,6 +84,52 @@ export async function openFilters(browser) {
 }
 
 /**
+ * Open the Ask fold in the workspace (the user's path: a click on the
+ * summary). Ask is a progressive-disclosure section — its input,
+ * provider menu, and consent UI live inside a closed <details> disclosure,
+ * and WebKit cannot interact with (or read the text of) controls a
+ * closed fold hides, so every spec that drives Ask opens the fold first.
+ * Idempotent, like openFilters.
+ */
+export async function openAsk(browser) {
+  await openView(browser, "workspace"); // the Ask section is view-scoped
+  const isOpen = async () =>
+    (await browser.execute(() => document.querySelector("#ask-fold")?.open ?? false));
+  if (!(await isOpen())) {
+    const summary = await browser.$("#ask-summary");
+    await summary.waitForDisplayed({ timeout: 5_000 });
+    await summary.click();
+    await browser.waitUntil(isOpen, {
+      timeout: 5_000,
+      timeoutMsg: "the Ask fold never opened",
+    });
+  }
+}
+
+/**
+ * Open the Export… picker under the results (the user's path: a click on
+ * the summary). The format select and the what-to-export buttons live
+ * inside the closed disclosure; specs that click them or read their
+ * labels open the picker first. Idempotent, like openFilters.
+ */
+export async function openExportMenu(browser) {
+  await openView(browser, "workspace"); // the picker is view-scoped
+  const isOpen = async () =>
+    (await browser.execute(() => document.querySelector("#export-menu")?.open ?? false));
+  if (!(await isOpen())) {
+    const summary = await browser.$("#export-summary");
+    // The controls hide with the first-run card; wait for the vault to
+    // have content before clicking (the caller imports first).
+    await summary.waitForDisplayed({ timeout: 10_000 });
+    await summary.click();
+    await browser.waitUntil(isOpen, {
+      timeout: 5_000,
+      timeoutMsg: "the Export… picker never opened",
+    });
+  }
+}
+
+/**
  * Open a Sources page (home | add | import | email | automatic) through
  * the real buttons — the chooser round trip for add/import/email, the
  * home link for automatic — and wait for data-sources-section to settle.

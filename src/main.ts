@@ -197,6 +197,7 @@ const exportControls = document.querySelector<HTMLElement>("#export-controls")!;
 const askInput = document.querySelector<HTMLInputElement>("#ask")!;
 const askButton = document.querySelector<HTMLButtonElement>("#ask-btn")!;
 const askStatus = document.querySelector<HTMLElement>("#ask-status")!;
+const askSummary = document.querySelector<HTMLElement>("#ask-summary")!;
 const llmNote = document.querySelector<HTMLElement>("#llm-note")!;
 const answerBox = document.querySelector<HTMLElement>("#answer")!;
 const askNotes = document.querySelector<HTMLElement>("#ask-notes")!;
@@ -438,6 +439,10 @@ function selectedNetworkProvider(): ProviderMenuItem | null {
 function updateConsentUi(): void {
   consentStatus.textContent = consentStatusLine(aiConsentGranted);
   consentRevokeButton.hidden = !aiConsentGranted;
+  // The fold's summary is the glanceable state while Ask is collapsed
+  // (the Filters convention): a live session grant must never hide.
+  askSummary.textContent = aiConsentGranted ? "Ask the archive · AI consent on" : "Ask the archive";
+  askSummary.classList.toggle("on", aiConsentGranted);
   const network = selectedNetworkProvider();
   if (!network) hideConsentPrompt();
   else if (!consentPrompt.hidden) showConsentPrompt(network);
