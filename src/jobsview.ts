@@ -171,7 +171,7 @@ export function jobKindLabel(kind: string): string {
     case "import_chat_export":
       return "chat import";
     case "embed_messages":
-      return "local embeddings";
+      return "local search index";
     case "imap_sync":
       return "IMAP sync";
     case "imap_sync_all":
@@ -182,12 +182,17 @@ export function jobKindLabel(kind: string): string {
 }
 
 /** The `done/total (pct%) · hint` line for a running job, shared by the
- * Activity row and the import flow's inline card. Null when the total is
- * unknown — the caller falls back to its own indeterminate wording. */
+ *  Activity row and the import flow's inline card. Null when the total is
+ *  unknown — the caller falls back to its own indeterminate wording.
+ *  Progress hints arrive from the backend as stable worker tokens; the
+ *  one plain-language rewrite ("embedding" → "indexing") keeps the
+ *  Activity row in user terms without touching the wire. */
 export function jobProgressText(progress: JobProgress): string | null {
   if (progress.total <= 0) return null;
   const pct = jobProgressPercent(progress)!;
-  const hint = progress.message ? ` · ${progress.message}` : "";
+  const hint = progress.message
+    ? ` · ${progress.message === "embedding" ? "indexing" : progress.message}`
+    : "";
   return `${progress.done}/${progress.total} (${pct}%)${hint}`;
 }
 
@@ -233,7 +238,7 @@ function describeResult(result: unknown): string {
     if (typeof counts.skipped === "number" && counts.skipped > 0)
       bits.push(`${counts.skipped} present`);
   }
-  if (typeof r.embedded === "number" && r.embedded > 0) bits.push(`${r.embedded} embedded`);
+  if (typeof r.embedded === "number" && r.embedded > 0) bits.push(`${r.embedded} indexed`);
   return bits.length > 0 ? ` (${bits.join(", ")})` : "";
 }
 

@@ -175,9 +175,12 @@ export async function run(ctx) {
     //    title/body, rendered by the desktop notification daemon.
     // ==============================================================
     await setFocused(browser, false, "before first import");
+    // The typed path sits behind the "Type a path instead" fold (the
+    // folder picker is the primary control) — open it first.
+    await (await browser.$("#watch-typed-fold summary")).click();
     await (await browser.$("#watch-path")).setValue(watched);
     await (await browser.$("#watch-btn")).click();
-    await ui.waitForText(browser, "#stats", "2 messages (mbox: 2)", {
+    await ui.waitForText(browser, "#stats", "2 messages (Mail import: 2)", {
       timeout: 30_000,
       timeoutMsg: "initial scan never imported the mbox",
     });
@@ -199,7 +202,7 @@ export async function run(ctx) {
     await setFocused(browser, true, "focus gate");
     before = await notifyCount();
     await writeFile(path.join(watched, "second.mbox"), mail(3, "Three"));
-    await ui.waitForText(browser, "#stats", "3 messages (mbox: 3)", {
+    await ui.waitForText(browser, "#stats", "3 messages (Mail import: 3)", {
       timeout: 30_000,
       timeoutMsg: "focused-window import never stored the message",
     });
@@ -214,7 +217,7 @@ export async function run(ctx) {
     await sleep(4000);
     assert.equal(
       await (await browser.$("#stats")).getText(),
-      "3 messages (mbox: 3)",
+      "3 messages (Mail import: 3)",
       "re-settled file stayed deduped",
     );
     await expectNotifications(before, 0, "re-settled file with nothing new");
@@ -237,7 +240,7 @@ export async function run(ctx) {
     await setFocused(browser, false, "settings off");
     before = await notifyCount();
     await writeFile(path.join(watched, "second.mbox"), mail(3, "Three") + mail(4, "Four"));
-    await ui.waitForText(browser, "#stats", "4 messages (mbox: 4)", {
+    await ui.waitForText(browser, "#stats", "4 messages (Mail import: 4)", {
       timeout: 30_000,
       timeoutMsg: "opted-out cycle never stored the message",
     });
@@ -260,7 +263,7 @@ export async function run(ctx) {
     await setFocused(browser, false, "settings back on");
     before = await notifyCount();
     await writeFile(path.join(watched, "second.mbox"), mail(3, "Three") + mail(4, "Four") + mail(5, "Five"));
-    await ui.waitForText(browser, "#stats", "5 messages (mbox: 5)", {
+    await ui.waitForText(browser, "#stats", "5 messages (Mail import: 5)", {
       timeout: 30_000,
       timeoutMsg: "re-enabled cycle never stored the message",
     });

@@ -11,7 +11,7 @@ export function watchStatusText(s: WatchSnapshot): string {
   }
   const n = s.folders.length;
   if (n === 0) {
-    return "No folders watched yet — add one to import exports automatically.";
+    return "No folders watched yet — pick one to import exports automatically.";
   }
   const parts = [`Watching ${n} folder${n === 1 ? "" : "s"}`];
   if (s.pending > 0) parts.push(`${s.pending} file${s.pending === 1 ? "" : "s"} settling`);

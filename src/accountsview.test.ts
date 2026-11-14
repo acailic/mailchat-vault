@@ -141,6 +141,11 @@ describe("labels and status lines", () => {
 
   it("titles rows with the account label", () => {
     expect(accountTitle(importAccount())).toBe("mbox:archive.mbox");
+    // The raw legacy mail-import namespace reads as plain words; the
+    // stored label stays available via accountTitleDetail.
+    expect(accountTitle(importAccount({ label: "mbox" }))).toBe("Mail import");
+    expect(accountTitleDetail(importAccount({ label: "mbox" }))).toBe("Stored source: mbox");
+    expect(accountTitleDetail(importAccount())).toBe("");
   });
 
   it("titles an IMAP account by its address and server, never the raw connector label", () => {
@@ -444,8 +449,10 @@ describe("sourceChipRows", () => {
       [imp("a", "mbox"), imp("b", "demo")],
       counts,
     );
+    // The raw `mbox` namespace reads as "Mail import" on the chip (the
+    // stored label stays the identity — friendlySourceLabel).
     expect(rows).toEqual([
-      { id: "a", label: "mbox", count: 3, icon: "file" },
+      { id: "a", label: "Mail import", count: 3, icon: "file" },
       { id: "b", label: "demo", count: 5, icon: "file" },
     ]);
   });

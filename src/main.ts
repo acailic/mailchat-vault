@@ -12,6 +12,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   folderSummaryLine,
   formatSentAt,
+  friendlySourceLabel,
   humanSize,
   importScopeLabel,
   snippet,
@@ -788,16 +789,18 @@ async function refreshLlm(): Promise<void> {
   }
 }
 
-// Local embedding coverage label for the Ask section (incremental job).
+// Local search-index coverage label for the Ask section (incremental
+// job). The index is the embedding store, but the user-facing words say
+// what it does: how much of the archive is indexed for local search.
 function describeEmbedStatus(status: EmbeddingStatus): string {
   if (status.messages === 0) {
-    return "no messages to embed yet";
+    return "no messages to index yet";
   }
   const model = `${status.model}, ${status.dim}d`;
   if (status.pending === 0) {
-    return `local embeddings: all ${status.embedded} embedded (${model})`;
+    return `local search index: all ${status.embedded} messages indexed (${model})`;
   }
-  return `local embeddings: ${status.embedded}/${status.messages} · ${status.pending} pending (${model})`;
+  return `local search index: ${status.embedded} of ${status.messages} messages indexed · ${status.pending} pending (${model})`;
 }
 
 async function refreshEmbedStatus(): Promise<void> {
@@ -817,12 +820,12 @@ async function refreshEmbedStatus(): Promise<void> {
  * queued or running. */
 async function runEmbedJob(): Promise<void> {
   embedButton.disabled = true;
-  embedStatus.textContent = "Embedding… (local, offline, background job)";
+  embedStatus.textContent = "Building the local search index… (local, offline, background job)";
   try {
     await ipc.jobSubmit("embed_messages", {});
     // The panel takes it from here (started/progress/succeeded events).
   } catch (e) {
-    embedStatus.textContent = `Embedding job failed to start: ${e}`;
+    embedStatus.textContent = `Could not start building the local search index: ${e}`;
     embedButton.disabled = false;
   }
 }
@@ -1125,7 +1128,9 @@ async function refreshStats(): Promise<void> {
     if (!statsGuard.isCurrent(token)) return; // a newer refresh superseded this response
     lastStats = stats;
     archiveTotal = demoActive ? archiveTotal : stats.total;
-    const parts = stats.by_source.map((s) => `${s.source}: ${s.count}`).join(", ");
+    const parts = stats.by_source
+      .map((s) => `${friendlySourceLabel(s.source)}: ${s.count}`)
+      .join(", ");
     statsLabel.textContent =
       stats.total === 0 ? "empty archive" : `${stats.total} messages (${parts})`;
     renderSourceChipsNow();
@@ -2491,7 +2496,7 @@ async function addWatchFolder(path: string): Promise<boolean> {
 async function watchTypedPath(): Promise<void> {
   const path = watchPathInput.value.trim();
   if (!path) {
-    watchStatus.textContent = "Type a folder path first, or use Pick folder…";
+    watchStatus.textContent = "Pick a folder above, or type a folder path here.";
     return;
   }
   watchButton.disabled = true;

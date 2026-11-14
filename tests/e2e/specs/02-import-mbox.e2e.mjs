@@ -20,7 +20,7 @@ export async function run(ctx) {
     );
     assert.equal(
       await (await browser.$("#stats")).getText(),
-      "8 messages (mbox: 8)",
+      "8 messages (Mail import: 8)",
       "stats label after import",
     );
 
@@ -76,7 +76,7 @@ export async function run(ctx) {
     );
     assert.equal(
       await (await browser.$("#stats")).getText(),
-      "8 messages (mbox: 8)",
+      "8 messages (Mail import: 8)",
       "stats unchanged after re-import",
     );
     if (ctx.sqlite) {
@@ -93,7 +93,7 @@ export async function run(ctx) {
     assert.ok(demoCount >= 4, `expected at least the classic 4 demo messages, got ${demoCount}`);
     assert.equal(
       await (await browser.$("#stats")).getText(),
-      `${8 + demoCount} messages (mbox: 8, demo: ${demoCount})`,
+      `${8 + demoCount} messages (Mail import: 8, demo: ${demoCount})`,
       "stats label counts both sources",
     );
 
@@ -116,7 +116,7 @@ export async function run(ctx) {
     );
     assert.equal(
       await (await browser.$("#stats")).getText(),
-      `${9 + demoCount} messages (mbox: 9, demo: ${demoCount})`,
+      `${9 + demoCount} messages (Mail import: 9, demo: ${demoCount})`,
       "stats label counts the .eml mail under mbox",
     );
 

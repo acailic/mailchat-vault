@@ -136,7 +136,7 @@ describe("privacyNoteFor", () => {
     const note = privacyNote(disabled);
     expect(note).toContain("LLM assist is off");
     expect(note).toContain("fully locally");
-    expect(note).toContain("hybrid vector ranking");
+    expect(note).toContain("local search index");
     expect(note).toContain("nothing leaves this machine");
     expect(note).toContain("ANTHROPIC_API_KEY");
   });
