@@ -16,4 +16,4 @@ In scope: the desktop application, its release pipeline and packaging scripts. O
 
 ## Response
 
-Best-effort; a two-business-day initial triage target is being matched to actual capacity before publication ([go-public plan §8](docs/go-public-plan.md)). Reports of data loss, corruption or unintended content transmission pause all expansion work immediately.
+Best-effort; a two-business-day initial triage target is being matched to actual capacity before publication. Reports of data loss, corruption or unintended content transmission pause all expansion work immediately.

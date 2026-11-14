@@ -12,7 +12,7 @@ Documentation, logos, icons and screenshots may carry licensing of their own; ch
 
 ## Scope
 
-Mailchat Vault is a personal, local email and chat archive ([D01](docs/decisions.md)); unified-inbox, collaboration and hosted-service features are deliberate non-goals. Read the [product plan](docs/product-plan.md) before proposing features, and open an issue first for anything beyond a small fix so the approach can be agreed. Work lands in small, reviewable slices: one user problem, existing-milestone dependency, acceptance behavior and evidence path ([go-public plan §8](docs/go-public-plan.md)).
+Mailchat Vault is a personal, local email and chat archive ([D01](docs/decisions.md)); unified-inbox, collaboration and hosted-service features are deliberate non-goals. Read the [product plan](docs/product-plan.md) before proposing features, and open an issue first for anything beyond a small fix so the approach can be agreed. Work lands in small, reviewable slices: one user problem, existing-milestone dependency, acceptance behavior and evidence path (see the [documentation index](docs/README.md) for the working conventions).
 
 ## Development
 
