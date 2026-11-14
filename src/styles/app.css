@@ -548,6 +548,12 @@ kbd {
   background: var(--selection);
   border-color: var(--accent);
 }
+/* The era strip's quiet visible label; the row's aria-label carries the
+ * longer "Filter by time period" form for assistive tech. */
+.era-chip-label {
+  font-size: var(--text-meta);
+  color: var(--muted);
+}
 /* Nav source chips carry the source's taxonomy icon (mail/chat/file) at
  * chip scale — decorative (aria-hidden, currentColor like every icon),
  * inline-flex so icon and label sit on one line and the pill still

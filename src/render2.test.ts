@@ -296,6 +296,12 @@ describe("era chips", () => {
     { label: "2020", from: "2020-01-01", to: "2020-12-31" },
   ];
 
+  /** eraBuckets caps at 8 — the longest strip the app derives. */
+  const eightBuckets = Array.from({ length: 8 }, (_, i) => {
+    const year = 2019 + i;
+    return { label: String(year), from: `${year}-01-01`, to: `${year}-12-31` };
+  });
+
   it("renders one pressed toggle per bucket; clicks report the index", () => {
     const el = document.createElement("div");
     const toggled: number[] = [];
@@ -310,6 +316,68 @@ describe("era chips", () => {
     chips[0].click();
     chips[0].click();
     expect(toggled).toEqual([0, 0]);
+  });
+
+  it("carries the quiet visible 'Time' label", () => {
+    const el = document.createElement("div");
+    renderEraChips(el, { buckets, activeIndex: -1, onToggle: () => {} });
+    const label = el.querySelector(".era-chip-label") as HTMLElement;
+    expect(label.textContent).toBe("Time");
+    // A label, not a control.
+    expect(el.querySelectorAll("button").length).toBe(2);
+  });
+
+  it("caps the strip at the 5 most recent eras; Older… reveals the rest", () => {
+    const el = document.createElement("div");
+    const toggled: number[] = [];
+    renderEraChips(el, { buckets: eightBuckets, activeIndex: -1, onToggle: (i) => toggled.push(i) });
+    const chips = () => [...el.querySelectorAll("button.era-chip")] as HTMLElement[];
+    // Collapsed: the five most recent years, oldest of them first.
+    expect(chips().map((c) => c.textContent)).toEqual(["2022", "2023", "2024", "2025", "2026"]);
+    const older = el.querySelector("button.era-more") as HTMLElement;
+    expect(older.textContent).toBe("Older…");
+    expect(older.getAttribute("aria-expanded")).toBe("false");
+    expect(older.title).toContain("3 older time periods");
+
+    // Clicking a visible chip reports its FULL bucket index (2022 is
+    // bucket 3 of 8), never its position among the visible ones.
+    chips()[0].click();
+    expect(toggled).toEqual([3]);
+
+    // Older… expands; Fewer collapses; the state rides the strip element.
+    older.click();
+    expect(chips().map((c) => c.textContent)).toEqual(
+      eightBuckets.map((b) => b.label),
+    );
+    const fewer = el.querySelector("button.era-more") as HTMLElement;
+    expect(fewer.textContent).toBe("Fewer");
+    expect(fewer.getAttribute("aria-expanded")).toBe("true");
+    fewer.click();
+    expect(chips()).toHaveLength(5);
+    expect((el.querySelector("button.era-more") as HTMLElement).textContent).toBe("Older…");
+
+    // A re-render (searches re-render constantly) keeps the collapsed
+    // state — and by default it is collapsed until asked.
+    renderEraChips(el, { buckets: eightBuckets, activeIndex: -1, onToggle: () => {} });
+    expect(chips()).toHaveLength(5);
+  });
+
+  it("never hides the active era behind the cap", () => {
+    const el = document.createElement("div");
+    // 2019 (index 0) is applied but older than the cap: it stays visible,
+    // ahead of the five most recent.
+    renderEraChips(el, { buckets: eightBuckets, activeIndex: 0, onToggle: () => {} });
+    const chips = [...el.querySelectorAll("button.era-chip")] as HTMLElement[];
+    expect(chips.map((c) => c.textContent)).toEqual([
+      "2019",
+      "2022",
+      "2023",
+      "2024",
+      "2025",
+      "2026",
+    ]);
+    expect(chips[0].classList.contains("on")).toBe(true);
+    expect(chips[0].getAttribute("aria-pressed")).toBe("true");
   });
 
   it("fewer than two buckets render nothing (no dead chrome)", () => {
