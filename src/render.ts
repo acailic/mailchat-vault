@@ -3,7 +3,7 @@
 /// inject markup. The functions are pure builders — tested via happy-dom
 /// snapshots in render.test.ts.
 
-import { formatSentAt, humanSize, snippet as truncateBody } from "./format";
+import { authorDisplayName, formatSentAt, humanSize, snippet as truncateBody } from "./format";
 import { icon } from "./icons";
 import type { SourceChipRow } from "./accountsview";
 import type {
@@ -13,6 +13,7 @@ import type {
   SearchHit,
 } from "./types";
 import {
+  type DayBar,
   type HitGroup,
   type MessageMedia,
   type PageModel,
@@ -337,21 +338,56 @@ export function renderDetail(el: HTMLElement, opts: DetailOptions): void {
 /** One row of a count table: a label, its count, and an inline bar. */
 interface CountRow {
   label: string;
+  /** The untruncated value when `label` is a shortened form (full author
+   *  strings); the tooltip defaults to the label. */
+  title?: string;
   count: number;
 }
+
+/** One bar's label, for the tooltip, the screen reader, and the single
+ * bucket's plain-text line alike: "2026-11-01: 6 messages". */
+function dayBarLabel(bar: DayBar): string {
+  return `${bar.label}: ${formatCount(bar.count)} ${bar.count === 1 ? "message" : "messages"}`;
+}
+
+/** Bars wide enough to carry a visible count label; beyond this the
+ * labels would collide, and each bar keeps its title/aria-label. */
+const DAY_BAR_LABEL_MAX = 12;
 
 function dayChart(days: ArchiveStats["by_day"]): HTMLElement {
   const chart = document.createElement("div");
   chart.className = "day-chart";
-  chart.setAttribute("role", "img");
-  chart.setAttribute("aria-label", "Messages per day histogram");
+  chart.setAttribute("role", "group");
   const bars = dayBars(days, 180);
+  if (bars.length === 1) {
+    // A single bucket has no distribution to show — one full-width bar
+    // would just dress the total up as a chart. Say the count plainly.
+    chart.classList.add("single");
+    const text = dayBarLabel(bars[0]);
+    chart.setAttribute("aria-label", `Messages per day — ${text}`);
+    const note = document.createElement("span");
+    note.className = "day-single";
+    note.textContent = text;
+    chart.append(note);
+    return chart;
+  }
+  chart.setAttribute("aria-label", "Messages per day");
   const max = Math.max(0, ...bars.map((b) => b.count));
+  const withCounts = bars.length <= DAY_BAR_LABEL_MAX;
   for (const bar of bars) {
     const col = document.createElement("div");
     col.className = "day-bar";
     col.style.height = `${barHeightPct(bar.count, max)}%`;
-    col.title = `${bar.label}: ${formatCount(bar.count)}`;
+    const text = dayBarLabel(bar);
+    col.title = text;
+    col.setAttribute("role", "img");
+    col.setAttribute("aria-label", text);
+    if (withCounts) {
+      const count = document.createElement("span");
+      count.className = "day-bar-count";
+      count.textContent = formatCount(bar.count);
+      col.append(count);
+    }
     chart.append(col);
   }
   return chart;
@@ -370,7 +406,7 @@ function countTable(caption: string, rows: CountRow[]): HTMLElement {
     const label = document.createElement("td");
     label.className = "label";
     label.textContent = row.label;
-    label.title = row.label;
+    label.title = row.title ?? row.label;
     const num = document.createElement("td");
     num.className = "num";
     num.textContent = formatCount(row.count);
@@ -422,7 +458,10 @@ export function renderDashboard(el: HTMLElement, opts: DashboardOptions): void {
     countTable(
       "Top authors",
       stats.top_authors.map((a) => ({
-        label: a.author || "(unknown)",
+        // The display name reads; the full "Name <address>" identity
+        // stays one hover away (title).
+        label: authorDisplayName(a.author) || "(unknown)",
+        title: a.author || "(unknown)",
         count: a.count,
       })),
     ),

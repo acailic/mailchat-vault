@@ -4,6 +4,7 @@
 /// textContent, tested via happy-dom in render2.test.ts.
 
 import {
+  authorDisplayName,
   conversationConfidenceLabel,
   formatSentAt,
   importScopeLabel,
@@ -73,7 +74,9 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
   li.dataset.index = String(at);
   if (at === opts.activeIndex) li.setAttribute("aria-current", "true");
 
-  // Selection checkbox for the explicit selection export.
+  // Selection checkbox for the explicit selection export — a sibling of
+  // the row's button, never a control nested inside one (no double
+  // announcement, no Space-key ambiguity).
   const check = document.createElement("input");
   check.type = "checkbox";
   check.className = "row-select";
@@ -82,17 +85,26 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
   check.addEventListener("click", (event) => event.stopPropagation());
   check.addEventListener("change", () => opts.onToggleSelect(hit.id));
 
+  // The row's activatable area: role=button + tabindex live here, on an
+  // element that contains only text. The li stays a plain list item
+  // (class/data/aria-current remain on it for styling and keyboard nav).
   const main = document.createElement("div");
   main.className = "hit-main";
+  main.setAttribute("role", "button");
+  main.setAttribute("tabindex", "0");
+  main.title = "Open this message";
   const meta = document.createElement("div");
   meta.className = "meta";
+  const displayAuthor = authorDisplayName(hit.author) || "unknown";
   const parts = [
-    hit.author || "unknown",
+    displayAuthor,
     timeLabel(hit),
     hit.source_label,
   ];
   if (hit.conversation_label) parts.push(hit.conversation_label);
   meta.textContent = parts.join(" · ");
+  // The full "Name <address>" form stays one hover away.
+  if (displayAuthor !== (hit.author || "unknown")) meta.title = hit.author;
   if (hit.attachment_count > 0) {
     const files = document.createElement("span");
     files.className = "badge attachments";
@@ -133,12 +145,13 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
 
   main.append(meta, body);
   li.append(check, main);
-  li.setAttribute("role", "button");
-  li.setAttribute("tabindex", "0");
-  li.title = "Open this message";
   const open = () => opts.onOpen(hit.id);
+  // Clicks anywhere in the row except the checkbox open the message:
+  // the li listener is plain delegation (the li carries no button
+  // semantics), and the checkbox stops its own clicks from bubbling.
   li.addEventListener("click", open);
-  li.addEventListener("keydown", (event) => {
+  // Keyboard activation belongs to the button element alone.
+  main.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       event.stopPropagation();

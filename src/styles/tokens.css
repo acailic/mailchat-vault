@@ -121,7 +121,9 @@
   --accent-hover: #9ccdb2;
   --accent-fg: #10241a;
   --selection: #33473c;
-  --match: #8a6d1d;
+  /* Amber search-match pair, measured: #ffe9a8 ink on #7a5f18 bar =
+   * 5.02:1 (WCAG AA; the previous #8a6d1d bar measured 4.08:1). */
+  --match: #7a5f18;
   --match-ink: #ffe9a8;
   --success: #7fc492;
   --warning: #d9a84e;
@@ -146,7 +148,8 @@
     --accent-hover: #9ccdb2;
     --accent-fg: #10241a;
     --selection: #33473c;
-    --match: #8a6d1d;
+    /* Same measured pair as the explicit dark block: 5.02:1 (WCAG AA). */
+    --match: #7a5f18;
     --match-ink: #ffe9a8;
     --success: #7fc492;
     --warning: #d9a84e;

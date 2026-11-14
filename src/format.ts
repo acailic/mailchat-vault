@@ -42,6 +42,19 @@ export function importScopeLabel(scope: {
   return day ? `Imported ${day} — ${count}` : count;
 }
 
+/** The display part of an author string: "Ana Sender <ana@example.com>"
+ *  renders as "Ana Sender", a bare address or handle stays whole. The
+ *  full string stays the identity of record — callers keep it in the
+ *  title attribute, because the address is often the only stable handle
+ *  of a correspondent. */
+export function authorDisplayName(author: string | null | undefined): string {
+  const raw = (author ?? "").trim();
+  if (!raw) return "";
+  const at = raw.indexOf(" <");
+  if (at <= 0) return raw;
+  return raw.slice(0, at).trim() || raw;
+}
+
 /** The user-facing label of one time-confidence token: a short word
  *  (or two) that says how much to trust the shown time — the token
  *  itself never reaches the reading pane, the copy text, or exports

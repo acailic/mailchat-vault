@@ -431,12 +431,50 @@ describe("dashboard", () => {
     expect((el.querySelectorAll(".day-bar")[2] as HTMLElement).style.height).toBe("25%");
     expect(el.querySelectorAll(".stat-table").length).toBe(3);
     expect(el.querySelectorAll(".stat-table tbody tr").length).toBe(6);
-    // The unknown author gets a readable label.
+    // The author shows its display name; the full address stays in the
+    // tooltip; the unknown author gets a readable label.
     const authorRows = [...el.querySelectorAll(".stat-table")[2].querySelectorAll("td.label")];
     expect(authorRows.map((td) => td.textContent)).toEqual([
-      "Ana <ana@example.com>",
+      "Ana",
       "(unknown)",
     ]);
+    expect(authorRows[0].getAttribute("title")).toBe("Ana <ana@example.com>");
+  });
+
+  it("labels every day bar with its count for eyes and machines", () => {
+    const el = document.createElement("div");
+    renderDashboard(el, { stats: archiveStats() });
+    const bars = [...el.querySelectorAll(".day-bar")];
+    // Machine-readable label (aria-label) and tooltip per bar.
+    expect(bars.map((b) => b.getAttribute("aria-label"))).toEqual([
+      "2026-01-01: 10 messages",
+      "2026-02-01: 20 messages",
+      "2026-03-31: 5 messages",
+    ]);
+    expect(bars[0].getAttribute("title")).toBe("2026-01-01: 10 messages");
+    // Few enough bars: the count is visible text too.
+    expect(bars.map((b) => b.querySelector(".day-bar-count")?.textContent)).toEqual([
+      "10",
+      "20",
+      "5",
+    ]);
+  });
+
+  it("a single day renders its count as plain text, not one full-width bar", () => {
+    const el = document.createElement("div");
+    renderDashboard(el, {
+      stats: archiveStats({
+        by_day: [{ day: "2026-11-01", count: 6 }],
+      }),
+    });
+    expect(el.querySelectorAll(".day-bar").length).toBe(0);
+    const chart = el.querySelector(".day-chart") as HTMLElement;
+    expect(chart.classList.contains("single")).toBe(true);
+    const note = chart.querySelector(".day-single");
+    expect(note?.textContent).toBe("2026-11-01: 6 messages");
+    expect(chart.getAttribute("aria-label")).toBe(
+      "Messages per day — 2026-11-01: 6 messages",
+    );
   });
 
   it("an empty archive renders the summary only", () => {
@@ -482,5 +520,25 @@ describe("dashboard", () => {
     const el = document.createElement("div");
     renderDashboard(el, { stats: archiveStats({ by_day }) });
     expect(el.querySelectorAll(".day-bar").length).toBe(12); // month buckets
+  });
+
+  it("dense charts keep every bar machine-readable but drop the visible counts", () => {
+    // Days spanning two years: 24 month buckets, too many for readable
+    // visible labels (every count is 6 to keep the check uniform).
+    const by_day = Array.from({ length: 700 }, (_, i) => ({
+      day: `${i % 24 < 12 ? 2025 : 2026}-${String((i % 12) + 1).padStart(2, "0")}-15`,
+      count: 6,
+    }));
+    const el = document.createElement("div");
+    renderDashboard(el, { stats: archiveStats({ by_day }) });
+    const bars = [...el.querySelectorAll(".day-bar")];
+    expect(bars.length).toBe(24);
+    expect(el.querySelectorAll(".day-bar-count").length).toBe(0);
+    // Every bar still names its bucket and its summed count for machines
+    // and tooltips ("2026-04: 30 messages").
+    expect(
+      bars.every((b) => /^\d{4}-\d{2}: [\d,]+ messages$/.test(b.getAttribute("aria-label") ?? "")),
+    ).toBe(true);
+    expect(bars.every((b) => b.getAttribute("title"))).toBe(true);
   });
 });

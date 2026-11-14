@@ -853,14 +853,39 @@ mark.hit {
   align-items: flex-end;
   gap: 1px;
   height: 72px;
+  /* Room above the axis for the per-bar count labels. */
+  padding-top: var(--sp-4);
   margin: 10px 0 14px;
   border-bottom: 1px solid var(--border-strong);
 }
 .day-bar {
+  position: relative;
   flex: 1 1 0;
   min-width: 1px;
   background: var(--accent);
   border-radius: 1px 1px 0 0;
+}
+.day-bar-count {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: var(--text-meta);
+  line-height: 1.2;
+  color: var(--muted);
+  white-space: nowrap;
+}
+/* One bucket is not a distribution: the count renders as plain text,
+ * never one misleading full-width bar. */
+.day-chart.single {
+  height: auto;
+  align-items: center;
+  padding-top: 0;
+  border-bottom: none;
+}
+.day-single {
+  font-size: var(--text-meta);
+  color: var(--muted);
 }
 .stat-grid {
   display: grid;
