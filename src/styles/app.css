@@ -1212,6 +1212,8 @@ summary.icon-btn::-webkit-details-marker { display: none; }
 .provider-row input[type="text"] { min-width: 6em; }
 .provider-row input[type="password"] { min-width: 8em; }
 .provider-row .small-btn, .row .small-btn { padding: 4px 8px; font-size: 12px; }
+/* Per-row Test-connection outcome: a full-width line below the inputs. */
+.prov-test-status { grid-column: 1 / -1; min-height: 1em; }
 
 /* --- Medium layout (800–1099px): nav + one content column ---------------- */
 

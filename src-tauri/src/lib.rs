@@ -130,7 +130,7 @@ use vault_core::jobs::{
     DbPool, JobContext, JobError, JobEventsPage, JobId, JobRecord, PoolConfig, PoolSink, PoolSync,
 };
 use vault_core::llm::{
-    self, AnthropicLlm, AskOutcome, LlmConfig, LlmStatus, PlanSource, PlannedQuery, QueryPlan,
+    self, AnthropicLlm, AskOutcome, LlmStatus, PlanSource, PlannedQuery, QueryPlan,
 };
 use vault_core::oauth::{self, OAuthConfig};
 use vault_core::object_store::{MediaUsage, ObjectStore, ReconcileReport};
@@ -154,7 +154,7 @@ mod registry;
 mod secrets;
 mod tray;
 
-use registry::{LlmRegistry, SaveSettingsPayload, Selection, SettingsView};
+use registry::{LlmRegistry, LlmTestPayload, SaveSettingsPayload, Selection, SettingsView};
 
 /// Batch size of the v2 embedding job (mirrors `vector`'s internal batch;
 /// progress is reported once per batch).
@@ -1153,6 +1153,45 @@ fn llm_status(state: State<AppState>) -> Result<LlmStatus, String> {
     Ok(registry.status())
 }
 
+/// `LlmTestResult` — the outcome of one "Test connection" click.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LlmTestResult {
+    pub ok: bool,
+    pub latency_ms: u64,
+    /// What happened: "{host} replied on model {model}" or the
+    /// classified failure message.
+    pub detail: String,
+}
+
+/// One "Test connection" round trip against a provider profile or the
+/// environment fallback (`env`). The explicit button click is the
+/// consent: the request is a fixed "ping" with `max_tokens: 1` and sends
+/// nothing from the vault, so it stands outside the Ask consent gate.
+#[tauri::command]
+fn llm_test(state: State<AppState>, payload: LlmTestPayload) -> Result<LlmTestResult, String> {
+    // Resolve the config without holding the registry lock across the
+    // network round trip (same pattern as llm_ask).
+    let config = {
+        let registry = state
+            .registry
+            .lock()
+            .map_err(|e| format!("registry lock poisoned: {e}"))?;
+        registry.test_config(&payload)?
+    };
+    let start = std::time::Instant::now();
+    let outcome = config.test_connection();
+    let latency_ms = start.elapsed().as_millis() as u64;
+    let detail = match &outcome {
+        Ok(()) => format!("{} replied on model {}", config.host(), config.model),
+        Err(e) => e.to_string(),
+    };
+    Ok(LlmTestResult {
+        ok: outcome.is_ok(),
+        latency_ms,
+        detail,
+    })
+}
+
 /// Everything the Settings UI shows: provider profiles (with a `has_key`
 /// flag — never the keys), the default selection, options, and the
 /// environment-fallback diagnostics.
@@ -1192,6 +1231,10 @@ fn settings_save(
             keep_running_in_background: payload.keep_running_in_background,
             start_at_login: payload.start_at_login,
         },
+        env_overrides: vault_core::settings::EnvOverrides {
+            anthropic_base_url: payload.env_overrides.base_url.clone(),
+            llm_model: payload.env_overrides.model.clone(),
+        },
     };
     settings.normalize();
     settings.validate().map_err(|e| e.to_string())?;
@@ -1203,6 +1246,16 @@ fn settings_save(
         let id = update.id.trim();
         if !ids.contains(id) {
             return Err(format!("API key update for unknown provider “{id}”"));
+        }
+    }
+
+    // Env API-key updates name variables, not provider ids — refuse
+    // anything outside the two the environment fallback reads.
+    const ENV_KEY_VARS: [&str; 2] = ["ZAI_API_KEY", "ANTHROPIC_API_KEY"];
+    for update in &payload.env_api_keys {
+        let var = update.id.trim();
+        if !ENV_KEY_VARS.contains(&var) {
+            return Err(format!("env API key update for unknown variable “{var}”"));
         }
     }
 
@@ -1219,6 +1272,16 @@ fn settings_save(
             secrets.clear_llm_key(id);
         } else {
             key_store = Some(secrets.save_llm_key(id, key));
+        }
+    }
+    // Env keys ride the same rule under keyring ids `env:<VAR>`.
+    for update in &payload.env_api_keys {
+        let id = format!("env:{}", update.id.trim());
+        let key = update.key.trim();
+        if key.is_empty() {
+            secrets.clear_llm_key(&id);
+        } else {
+            key_store = Some(secrets.save_llm_key(&id, key));
         }
     }
     // Forget the keys of providers that no longer exist (keyring hygiene).
@@ -3216,11 +3279,10 @@ pub fn run() {
             if let Err(e) = &settings {
                 eprintln!("Settings ignored: {e}");
             }
-            let env = LlmConfig::from_env();
-            if let Err(e) = &env {
-                eprintln!("LLM env config ignored: {e}");
-            }
-            let registry = LlmRegistry::load(settings, env, |id| secrets.load_llm_key(id));
+            let registry =
+                LlmRegistry::load(settings, Box::new(|name| std::env::var(name).ok()), |id| {
+                    secrets.load_llm_key(id)
+                });
             // Folder watcher: imports new/modified export files from the
             // user's chosen folders through the pool's write queue and
             // pushes every status change to the UI as a `watch-status`
@@ -3329,6 +3391,7 @@ pub fn run() {
             settings_get,
             settings_save,
             llm_key_clear,
+            llm_test,
             import_mbox,
             import_chat_export,
             sync_imap,
@@ -3730,6 +3793,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn llm_test_result_serializes_flat() {
+        let result = LlmTestResult {
+            ok: false,
+            latency_ms: 12,
+            detail: "invalid API key (HTTP 401)".into(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains(r#""ok":false"#));
+        assert!(json.contains(r#""latency_ms":12"#));
+        assert!(json.contains("invalid API key"));
+    }
+
     // -----------------------------------------------------------------------
     // M5: AI consent gate (evidence: a local TCP recorder plays the
     // provider endpoint — "mock network" — so the tests can prove which
@@ -3741,6 +3817,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     use vault_core::jobs::PoolConfig;
+    use vault_core::llm::LlmConfig;
     use vault_core::vector::HashEmbedder;
 
     /// Read one HTTP/1.1 request (headers + Content-Length body) and return

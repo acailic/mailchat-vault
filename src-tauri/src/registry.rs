@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use vault_core::llm::{LlmConfig, LlmStatus};
+use vault_core::llm::{plaintext_http_off_loopback, LlmConfig, LlmStatus};
 use vault_core::settings::{
     build_menu, ProviderMenuItem, ProviderProfile, Settings, Theme, ENV_ID, LOCAL_ID,
 };
@@ -22,6 +22,17 @@ use crate::secrets::SecretStore;
 
 /// The pseudo-provider name shown for the environment fallback.
 const ENV_NAME: &str = "Environment variables";
+
+/// Keyring ids for the environment-variable key overrides (stored with
+/// `Secrets::save_llm_key`, so the entries are `llm:env:ZAI_API_KEY` and
+/// `llm:env:ANTHROPIC_API_KEY`). Shared with the Settings UI (clear-key).
+pub const ENV_ZAI_KEY_ID: &str = "env:ZAI_API_KEY";
+pub const ENV_ANTHROPIC_KEY_ID: &str = "env:ANTHROPIC_API_KEY";
+
+/// The two keyring override ids, for reload loops.
+fn env_key_ids() -> [&'static str; 2] {
+    [ENV_ZAI_KEY_ID, ENV_ANTHROPIC_KEY_ID]
+}
 
 /// Which LLM backend one ask resolved to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,9 +63,15 @@ pub struct LlmRegistry {
     settings: Settings,
     /// Profile id → API key (from the keyring / session memory).
     keys: HashMap<String, String>,
-    /// Valid env-var configuration, if any (never contains a profile key).
+    /// Keyring override values for the environment fallback
+    /// (`env:ZAI_API_KEY` / `env:ANTHROPIC_API_KEY`).
+    env_keys: HashMap<String, String>,
+    /// Process-environment lookup (injected so tests stay deterministic).
+    #[allow(clippy::type_complexity)] // the injected lookup, kept inline to mirror `load`
+    process_env: Box<dyn Fn(&str) -> Option<String> + Send + Sync>,
+    /// The layered environment fallback, if validly configured.
     env: Option<LlmConfig>,
-    /// Why the env configuration was refused (pairing policy), if it was.
+    /// Why the environment configuration was refused, if it was.
     env_error: Option<String>,
     /// Why the settings file could not be loaded, if it could not.
     settings_error: Option<String>,
@@ -64,15 +81,17 @@ pub struct LlmRegistry {
 
 impl LlmRegistry {
     /// Build from the load-time pieces: settings file contents (or the
-    /// error that prevented loading), the env-var configuration (or its
-    /// error), and a loader for stored profile keys. A parseable but
-    /// invalid settings file is treated like a corrupt one — defaults
+    /// error that prevented loading), the process-environment lookup (the
+    /// bottom layer of the environment fallback, under the keyring and
+    /// settings-file overrides), and a loader for stored keys. A parseable
+    /// but invalid settings file is treated like a corrupt one — defaults
     /// apply and the validation error is surfaced — so the pairing policy
     /// enforced at save time holds from boot on, for externally edited
     /// files too.
+    #[allow(clippy::type_complexity)] // the injected lookup, same type as the field
     pub fn load(
         settings: vault_core::Result<Option<Settings>>,
-        env: vault_core::Result<Option<LlmConfig>>,
+        process_env: Box<dyn Fn(&str) -> Option<String> + Send + Sync>,
         load_key: impl Fn(&str) -> Option<String>,
     ) -> Self {
         let (settings, settings_error) = match settings {
@@ -86,23 +105,55 @@ impl LlmRegistry {
             }
             Err(e) => (Settings::default(), Some(e.to_string())),
         };
-        let (env, env_error) = match env {
-            Ok(env) => (env, None),
-            Err(e) => (None, Some(e.to_string())),
-        };
         let mut registry = Self {
             settings,
             keys: HashMap::new(),
-            env,
-            env_error,
+            env_keys: HashMap::new(),
+            process_env,
+            env: None,
+            env_error: None,
             settings_error,
             key_store: None,
         };
+        // `reload_keys` is the single funnel that derives the env fallback.
         registry.reload_keys(load_key);
         registry
     }
 
-    /// Re-read the stored key of every configured profile.
+    /// The layered environment lookup: keyring override → settings-file
+    /// override → process environment. UI-entered values win.
+    fn env_lookup(&self, name: &str) -> Option<String> {
+        let overridden = match name {
+            "ZAI_API_KEY" => self.env_keys.get(ENV_ZAI_KEY_ID).cloned(),
+            "ANTHROPIC_API_KEY" => self.env_keys.get(ENV_ANTHROPIC_KEY_ID).cloned(),
+            "ANTHROPIC_BASE_URL" => {
+                let url = self.settings.env_overrides.anthropic_base_url.trim();
+                (!url.is_empty()).then(|| url.to_string())
+            }
+            "MAILCHAT_LLM_MODEL" => {
+                let model = self.settings.env_overrides.llm_model.trim();
+                (!model.is_empty()).then(|| model.to_string())
+            }
+            _ => None,
+        };
+        overridden.or_else(|| (self.process_env)(name))
+    }
+
+    /// Recompute the environment fallback through the unchanged pairing
+    /// policy (`LlmConfig::from_lookup`).
+    fn recompute_env(&mut self) {
+        let layered = LlmConfig::from_lookup(|name| self.env_lookup(name));
+        let (env, env_error) = match layered {
+            Ok(env) => (env, None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+        self.env = env;
+        self.env_error = env_error;
+    }
+
+    /// Re-read the stored key of every configured profile, plus the two
+    /// environment-fallback key overrides, then recompute the environment
+    /// fallback so the derived state never lags the reloaded keys.
     pub fn reload_keys(&mut self, load_key: impl Fn(&str) -> Option<String>) {
         self.keys = self
             .settings
@@ -110,6 +161,11 @@ impl LlmRegistry {
             .iter()
             .filter_map(|p| load_key(&p.id).map(|k| (p.id.clone(), k)))
             .collect();
+        self.env_keys = env_key_ids()
+            .into_iter()
+            .filter_map(|id| load_key(id).map(|k| (id.to_string(), k)))
+            .collect();
+        self.recompute_env();
     }
 
     /// The settings currently in effect.
@@ -117,7 +173,8 @@ impl LlmRegistry {
         &self.settings
     }
 
-    /// Replace the settings (after a successful save) and re-read keys.
+    /// Replace the settings (after a successful save) and re-read keys
+    /// (which also recomputes the environment fallback).
     pub fn update(
         &mut self,
         settings: Settings,
@@ -130,9 +187,13 @@ impl LlmRegistry {
         self.reload_keys(load_key);
     }
 
-    /// Forget a single profile's key at runtime (after a keyring clear).
+    /// Forget a single key at runtime (after a keyring clear): a profile's
+    /// key by profile id, or an environment-fallback key override by its
+    /// `env:` id ([`ENV_ZAI_KEY_ID`] / [`ENV_ANTHROPIC_KEY_ID`]).
     pub fn drop_key(&mut self, provider_id: &str) {
         self.keys.remove(provider_id);
+        self.env_keys.remove(provider_id);
+        self.recompute_env();
     }
 
     /// Build a resolved [`LlmConfig`] for one profile (no key lookup).
@@ -222,6 +283,82 @@ impl LlmRegistry {
         }
     }
 
+    /// Build the exact [`LlmConfig`] a "Test connection" click should probe:
+    /// the target's stored/effective values with the currently-typed form
+    /// values layered on top. Fails with a user-facing message when there is
+    /// nothing to test or the configuration refuses itself (pairing,
+    /// plaintext http).
+    pub fn test_config(&self, payload: &LlmTestPayload) -> std::result::Result<LlmConfig, String> {
+        let trim = |v: &str| v.trim().to_string();
+        let config = if payload.provider == ENV_ID {
+            let zai = trim(&payload.zai_key);
+            let anthropic = trim(&payload.anthropic_key);
+            let base_url = trim(&payload.base_url);
+            let model = trim(&payload.model);
+            let lookup = |name: &str| -> Option<String> {
+                match name {
+                    "ZAI_API_KEY" => (!zai.is_empty())
+                        .then(|| zai.clone())
+                        .or_else(|| self.env_keys.get(ENV_ZAI_KEY_ID).cloned())
+                        .or_else(|| self.env_lookup(name)),
+                    "ANTHROPIC_API_KEY" => (!anthropic.is_empty())
+                        .then(|| anthropic.clone())
+                        .or_else(|| self.env_keys.get(ENV_ANTHROPIC_KEY_ID).cloned())
+                        .or_else(|| self.env_lookup(name)),
+                    "ANTHROPIC_BASE_URL" => (!base_url.is_empty())
+                        .then(|| base_url.clone())
+                        .or_else(|| self.env_lookup(name)),
+                    "MAILCHAT_LLM_MODEL" => (!model.is_empty())
+                        .then(|| model.clone())
+                        .or_else(|| self.env_lookup(name)),
+                    _ => self.env_lookup(name),
+                }
+            };
+            match LlmConfig::from_lookup(lookup) {
+                Ok(Some(config)) => config,
+                Ok(None) => {
+                    return Err(
+                        "no API key set for the environment fallback — type one to test".into(),
+                    )
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        } else {
+            let profile = self
+                .settings
+                .providers
+                .iter()
+                .find(|p| p.id == payload.provider)
+                .ok_or_else(|| format!("unknown provider “{}”", payload.provider))?;
+            let mut config = Self::config_for(profile);
+            if !trim(&payload.base_url).is_empty() {
+                config.base_url = trim(&payload.base_url);
+            }
+            if !trim(&payload.model).is_empty() {
+                config.model = trim(&payload.model);
+            }
+            config.api_key = {
+                let typed = trim(&payload.key);
+                if typed.is_empty() {
+                    self.keys
+                        .get(&profile.id)
+                        .cloned()
+                        .ok_or("no API key stored — type one to test")?
+                } else {
+                    typed
+                }
+            };
+            config
+        };
+        if plaintext_http_off_loopback(&config.base_url) {
+            return Err(format!(
+                "refusing to send the API key over plaintext http — use https for {} (or a localhost endpoint for testing)",
+                config.base_url
+            ));
+        }
+        Ok(config)
+    }
+
     /// Id of the default provider for the menu preselection: the settings
     /// default (only while it references a configured profile — a dangling
     /// id from an externally edited file falls through exactly like
@@ -266,7 +403,7 @@ impl LlmRegistry {
 }
 
 // ---------------------------------------------------------------------------
-// IPC payloads (settings_get / settings_save / llm_key_clear)
+// IPC payloads (settings_get / settings_save / llm_key_clear / llm_test)
 // ---------------------------------------------------------------------------
 
 /// One provider profile as the Settings UI sees it: the file data plus
@@ -287,6 +424,20 @@ pub struct EnvProviderView {
     pub host: String,
 }
 
+/// The environment-variable overrides as the Settings UI sees them:
+/// non-secret values plus key-presence flags (never the keys).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub struct EnvOverridesView {
+    /// ANTHROPIC_BASE_URL override value ("" = not overridden).
+    pub base_url: String,
+    /// MAILCHAT_LLM_MODEL override value ("" = not overridden).
+    pub model: String,
+    /// Whether a ZAI_API_KEY override is stored.
+    pub zai_key: bool,
+    /// Whether an ANTHROPIC_API_KEY override is stored.
+    pub anthropic_key: bool,
+}
+
 /// Response of `settings_get` (and of a successful `settings_save`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SettingsView {
@@ -303,6 +454,9 @@ pub struct SettingsView {
     pub start_at_login: bool,
     /// The environment-fallback provider, when validly configured.
     pub env: Option<EnvProviderView>,
+    /// The environment-variable overrides entered in Settings (non-secret
+    /// values + key-presence flags).
+    pub env_overrides: EnvOverridesView,
     /// Why the environment configuration was refused, if it was.
     pub env_error: Option<String>,
     /// Why the settings file could not be loaded, if it could not.
@@ -334,6 +488,14 @@ pub struct SaveSettingsPayload {
     #[serde(default)]
     pub start_at_login: bool,
     pub api_keys: Vec<ApiKeyUpdate>,
+    /// Environment-variable overrides (ANTHROPIC_BASE_URL / MAILCHAT_LLM_MODEL).
+    #[serde(default)]
+    pub env_overrides: EnvOverridesPayload,
+    /// API-key overrides for the environment fallback. `id` is the
+    /// variable name (`ZAI_API_KEY` / `ANTHROPIC_API_KEY`); non-empty key
+    /// stores, empty clears. Ids not mentioned keep their stored key.
+    #[serde(default)]
+    pub env_api_keys: Vec<ApiKeyUpdate>,
 }
 
 /// `SaveSettingsPayload::notifications` serde default.
@@ -347,6 +509,49 @@ pub struct ApiKeyUpdate {
     pub id: String,
     /// Non-empty = store; empty = clear.
     pub key: String,
+}
+
+/// Non-secret env overrides inside [`SaveSettingsPayload`]. Empty values
+/// mean "no override".
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+pub struct EnvOverridesPayload {
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub model: String,
+}
+
+/// One "Test connection" request: the target (`env` or a profile id)
+/// plus the form values as currently typed, so an unsaved edit can be
+/// tested as typed. Empty fields fall back to the stored/effective
+/// values; empty key fields fall back to the stored key (for the env
+/// target, then on to the process environment — the runtime layer
+/// order). Profile targets read `key`; the env target reads
+/// `zai_key`/`anthropic_key`; each target ignores the other's fields.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+pub struct LlmTestPayload {
+    pub provider: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub zai_key: String,
+    #[serde(default)]
+    pub anthropic_key: String,
+}
+
+#[cfg(test)]
+impl LlmTestPayload {
+    /// Payload targeting `provider` with every form field empty.
+    pub fn defaulting(provider: &str) -> Self {
+        Self {
+            provider: provider.into(),
+            ..Self::default()
+        }
+    }
 }
 
 impl From<&LlmRegistry> for SettingsView {
@@ -371,6 +576,12 @@ impl From<&LlmRegistry> for SettingsView {
                 model: e.model.clone(),
                 host: e.host(),
             }),
+            env_overrides: EnvOverridesView {
+                base_url: settings.env_overrides.anthropic_base_url.clone(),
+                model: settings.env_overrides.llm_model.clone(),
+                zai_key: registry.env_keys.contains_key(ENV_ZAI_KEY_ID),
+                anthropic_key: registry.env_keys.contains_key(ENV_ANTHROPIC_KEY_ID),
+            },
             env_error: registry.env_error.clone(),
             settings_error: registry.settings_error.clone(),
             key_store: registry.key_store,
@@ -413,25 +624,50 @@ mod tests {
         }
     }
 
-    fn env_config() -> LlmConfig {
-        LlmConfig {
-            base_url: "http://127.0.0.1:1/api".into(),
-            api_key: "env-key".into(),
-            model: "env-model".into(),
-        }
+    /// The env-var shape the old precomputed `env_config()` helper stood
+    /// for: an Anthropic key explicitly paired with a loopback base URL,
+    /// plus a model override — now fed through the injected process env.
+    fn env_vars() -> &'static [(&'static str, &'static str)] {
+        &[
+            ("ANTHROPIC_API_KEY", "env-key"),
+            ("ANTHROPIC_BASE_URL", "http://127.0.0.1:1/api"),
+            ("MAILCHAT_LLM_MODEL", "env-model"),
+        ]
     }
 
-    fn registry(settings: Settings, keys: &[(&str, &str)], env: Option<LlmConfig>) -> LlmRegistry {
+    fn registry(
+        settings: Settings,
+        keys: &[(&str, &str)],
+        env_vars: &[(&str, &str)],
+    ) -> LlmRegistry {
         let key_map: HashMap<String, String> = keys
             .iter()
             .map(|(id, k)| (id.to_string(), k.to_string()))
             .collect();
-        LlmRegistry::load(Ok(Some(settings)), Ok(env), |id| key_map.get(id).cloned())
+        let env_map: HashMap<String, String> = env_vars
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect();
+        LlmRegistry::load(
+            Ok(Some(settings)),
+            Box::new(move |n| env_map.get(n).cloned()),
+            |id| key_map.get(id).cloned(),
+        )
+    }
+
+    trait SelectionExt {
+        fn matches_local_with_reason(&self) -> bool;
+    }
+
+    impl SelectionExt for Selection {
+        fn matches_local_with_reason(&self) -> bool {
+            matches!(self, Selection::Local { .. })
+        }
     }
 
     #[test]
     fn nothing_configured_degrades_to_local() {
-        let r = registry(Settings::default(), &[], None);
+        let r = registry(Settings::default(), &[], &[]);
         assert_eq!(
             r.select(None),
             Selection::Local {
@@ -447,7 +683,7 @@ mod tests {
 
     #[test]
     fn env_fallback_is_the_default_when_no_file_default() {
-        let r = registry(Settings::default(), &[], Some(env_config()));
+        let r = registry(Settings::default(), &[], env_vars());
         match r.select(None) {
             Selection::Provider { id, config, .. } => {
                 assert_eq!(id, ENV_ID);
@@ -464,7 +700,7 @@ mod tests {
     #[test]
     fn file_default_wins_over_env_and_carries_the_key() {
         let settings = settings_with(vec![profile("glm", ProviderKind::Zai)], Some("glm"));
-        let r = registry(settings, &[("glm", "k")], Some(env_config()));
+        let r = registry(settings, &[("glm", "k")], env_vars());
         match r.select(None) {
             Selection::Provider { id, name, config } => {
                 assert_eq!((id.as_str(), name.as_str()), ("glm", "z.ai GLM"));
@@ -480,7 +716,7 @@ mod tests {
     #[test]
     fn default_without_key_degrades_with_a_note() {
         let settings = settings_with(vec![profile("glm", ProviderKind::Zai)], Some("glm"));
-        let r = registry(settings, &[], None);
+        let r = registry(settings, &[], &[]);
         match r.select(None) {
             Selection::Local { reason } => {
                 assert!(reason.contains("no API key"), "got: {reason}");
@@ -504,12 +740,7 @@ mod tests {
     fn invalid_settings_are_ignored_at_load_with_the_error_surfaced() {
         let mut settings = settings_with(vec![profile("glm", ProviderKind::Zai)], Some("glm"));
         settings.providers[0].base_url = "http://attacker.example/api".into();
-        let key_map: HashMap<String, String> = [("glm".to_string(), "stored-zai-key".to_string())]
-            .into_iter()
-            .collect();
-        let r = LlmRegistry::load(Ok(Some(settings)), Ok(Some(env_config())), |id| {
-            key_map.get(id).cloned()
-        });
+        let r = registry(settings, &[("glm", "stored-zai-key")], env_vars());
         // The whole file is refused: defaults apply, the validation error is
         // surfaced, and the stored key is unreachable — nothing selects glm.
         let view = SettingsView::from(&r);
@@ -552,7 +783,7 @@ mod tests {
             ],
             None,
         );
-        let r = registry(settings, &[("glm", "k")], None);
+        let r = registry(settings, &[("glm", "k")], &[]);
         match r.select(Some("mine")) {
             Selection::Local { reason } => assert!(reason.contains("no API key")),
             other => panic!("mine has no key: {other:?}"),
@@ -577,7 +808,7 @@ mod tests {
 
     #[test]
     fn select_env_uses_the_env_config() {
-        let r = registry(Settings::default(), &[], Some(env_config()));
+        let r = registry(Settings::default(), &[], env_vars());
         match r.select(Some(ENV_ID)) {
             Selection::Provider { id, config, .. } => {
                 assert_eq!(id, ENV_ID);
@@ -589,11 +820,15 @@ mod tests {
 
     #[test]
     fn load_reports_env_and_settings_errors() {
+        // The settings error comes in as before; the env error now arises
+        // from the (injected) process env itself — a key without the base
+        // URL it must be paired with violates the unchanged pairing policy.
+        let env_map: HashMap<String, String> = [("ANTHROPIC_API_KEY".to_string(), "k".to_string())]
+            .into_iter()
+            .collect();
         let r = LlmRegistry::load(
             Err(vault_core::Error::Settings("bad file".into())),
-            Err(vault_core::Error::Llm(
-                "ANTHROPIC_API_KEY is set but ANTHROPIC_BASE_URL is not".into(),
-            )),
+            Box::new(move |n| env_map.get(n).cloned()),
             |_| None,
         );
         let view = SettingsView::from(&r);
@@ -615,7 +850,7 @@ mod tests {
     fn view_carries_notifications_and_old_payloads_default_enabled() {
         let mut settings = Settings::default();
         settings.options.notifications = false;
-        let r = registry(settings, &[], None);
+        let r = registry(settings, &[], &[]);
         assert!(!SettingsView::from(&r).notifications);
         // A payload from a frontend older than the option (field absent)
         // parses as the enabled default, never a silent opt-out.
@@ -640,7 +875,7 @@ mod tests {
         let mut settings = Settings::default();
         settings.options.keep_running_in_background = true;
         settings.options.start_at_login = true;
-        let r = registry(settings, &[], None);
+        let r = registry(settings, &[], &[]);
         let view = SettingsView::from(&r);
         assert!(view.keep_running_in_background);
         assert!(view.start_at_login);
@@ -663,7 +898,7 @@ mod tests {
 
     #[test]
     fn update_swaps_settings_and_keys() {
-        let mut r = registry(Settings::default(), &[], None);
+        let mut r = registry(Settings::default(), &[], &[]);
         let settings = settings_with(vec![profile("glm", ProviderKind::Zai)], Some("glm"));
         r.update(settings, Some(SecretStore::Memory), |id| {
             (id == "glm").then(|| "fresh".to_string())
@@ -678,7 +913,7 @@ mod tests {
     #[test]
     fn drop_key_makes_provider_unavailable() {
         let settings = settings_with(vec![profile("glm", ProviderKind::Zai)], None);
-        let mut r = registry(settings, &[("glm", "k")], None);
+        let mut r = registry(settings, &[("glm", "k")], &[]);
         assert!(
             r.status()
                 .providers
@@ -701,10 +936,258 @@ mod tests {
     #[test]
     fn view_never_contains_key_material() {
         let settings = settings_with(vec![profile("glm", ProviderKind::Zai)], None);
-        let r = registry(settings, &[("glm", "super-secret-key")], Some(env_config()));
+        let r = registry(settings, &[("glm", "super-secret-key")], env_vars());
         let json = serde_json::to_string(&SettingsView::from(&r)).unwrap();
         assert!(!json.contains("super-secret-key"));
         assert!(!json.contains("env-key"));
         assert!(json.contains("\"has_key\":true"));
+    }
+
+    #[test]
+    fn env_overrides_layer_over_the_process_environment() {
+        let mut settings = Settings::default();
+        settings.env_overrides = vault_core::settings::EnvOverrides {
+            anthropic_base_url: "http://127.0.0.1:2/api".into(),
+            llm_model: "override-model".into(),
+        };
+        // Keyring override beats the process env; process env fills the
+        // rest. (The key must be the Anthropic one: the unchanged pairing
+        // policy refuses a ZAI key paired with an explicit non-z.ai URL.)
+        let r = registry(
+            settings,
+            &[("env:ANTHROPIC_API_KEY", "stored-anthropic")],
+            &[
+                ("ANTHROPIC_API_KEY", "process-anthropic"),
+                ("MAILCHAT_LLM_MODEL", "process-model"),
+            ],
+        );
+        match r.select(Some(ENV_ID)) {
+            Selection::Provider { config, .. } => {
+                assert_eq!(config.api_key, "stored-anthropic");
+                assert_eq!(config.base_url, "http://127.0.0.1:2/api");
+                assert_eq!(config.model, "override-model");
+            }
+            other => panic!("env should resolve: {other:?}"),
+        }
+        // Without the keyring key the process env is used verbatim.
+        let mut settings = Settings::default();
+        settings.env_overrides.llm_model = "override-model".into();
+        let r = registry(settings, &[], &[("ZAI_API_KEY", "process-zai")]);
+        match r.select(Some(ENV_ID)) {
+            Selection::Provider { config, .. } => {
+                assert_eq!(config.api_key, "process-zai");
+                assert_eq!(config.base_url, LlmConfig::DEFAULT_BASE_URL);
+                assert_eq!(config.model, "override-model");
+            }
+            other => panic!("env should resolve: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn env_pairing_error_surfaces_in_view() {
+        let mut settings = Settings::default();
+        settings.env_overrides.anthropic_base_url = "https://api.z.ai/api/anthropic".into(); // z.ai host + Anthropic key
+        let r = registry(settings, &[("env:ANTHROPIC_API_KEY", "k")], &[]);
+        let view = SettingsView::from(&r);
+        assert!(view.env.is_none());
+        assert!(
+            view.env_error
+                .as_deref()
+                .unwrap()
+                .contains("ANTHROPIC_API_KEY"),
+            "got: {:?}",
+            view.env_error
+        );
+        match r.select(Some(ENV_ID)) {
+            Selection::Local { reason } => assert!(reason.contains("not configured")),
+            other => panic!("env must degrade: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn view_carries_env_overrides_and_flags_but_no_keys() {
+        let mut settings = Settings::default();
+        settings.env_overrides = vault_core::settings::EnvOverrides {
+            anthropic_base_url: "https://api.anthropic.com".into(),
+            llm_model: "m".into(),
+        };
+        let r = registry(
+            settings,
+            &[
+                ("env:ZAI_API_KEY", "secret-zai"),
+                ("env:ANTHROPIC_API_KEY", "secret-anthropic"),
+            ],
+            &[],
+        );
+        let view = SettingsView::from(&r);
+        assert_eq!(view.env_overrides.base_url, "https://api.anthropic.com");
+        assert_eq!(view.env_overrides.model, "m");
+        assert!(view.env_overrides.zai_key);
+        assert!(view.env_overrides.anthropic_key);
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(!json.contains("secret-zai"));
+        assert!(!json.contains("secret-anthropic"));
+    }
+
+    #[test]
+    fn old_payloads_without_env_fields_parse() {
+        let payload: SaveSettingsPayload = serde_json::from_str(
+            r#"{"providers":[],"default_provider":null,"theme":"system","summarize_top":8,"api_keys":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(payload.env_overrides, EnvOverridesPayload::default());
+        assert!(payload.env_api_keys.is_empty());
+    }
+
+    #[test]
+    fn test_config_env_target_layers_form_values_over_stored() {
+        let mut settings = Settings::default();
+        settings.env_overrides.llm_model = "stored-model".into();
+        let r = registry(settings, &[("env:ZAI_API_KEY", "stored-zai")], &[]);
+        // Typed form key + model win; URL falls back to the default.
+        let payload = LlmTestPayload {
+            provider: ENV_ID.into(),
+            base_url: String::new(),
+            model: "typed-model".into(),
+            key: String::new(),
+            zai_key: "typed-zai".into(),
+            anthropic_key: String::new(),
+        };
+        let config = r.test_config(&payload).unwrap();
+        assert_eq!(
+            (
+                config.api_key.as_str(),
+                config.model.as_str(),
+                config.base_url.as_str()
+            ),
+            ("typed-zai", "typed-model", LlmConfig::DEFAULT_BASE_URL)
+        );
+        // Empty form fields fall back to stored override + keyring.
+        let payload = LlmTestPayload::defaulting(ENV_ID);
+        let config = r.test_config(&payload).unwrap();
+        assert_eq!(
+            (config.api_key.as_str(), config.model.as_str()),
+            ("stored-zai", "stored-model")
+        );
+    }
+
+    #[test]
+    fn test_config_env_keys_fall_back_to_the_process_environment() {
+        // No stored override: the process-env key is what a Test click
+        // probes, mirroring runtime resolution (keyring override →
+        // settings-file override → process environment).
+        let r = registry(Settings::default(), &[], &[("ZAI_API_KEY", "process-zai")]);
+        let config = r.test_config(&LlmTestPayload::defaulting(ENV_ID)).unwrap();
+        assert_eq!(config.api_key, "process-zai");
+    }
+
+    #[test]
+    fn test_config_env_target_errors_are_actionable() {
+        // Nothing configured at all.
+        let r = registry(Settings::default(), &[], &[]);
+        let err = r
+            .test_config(&LlmTestPayload::defaulting(ENV_ID))
+            .unwrap_err();
+        assert!(err.contains("no API key"), "got: {err}");
+        // Pairing violation: typed Anthropic key + z.ai base URL.
+        let payload = LlmTestPayload {
+            provider: ENV_ID.into(),
+            base_url: "https://api.z.ai/api/anthropic".into(),
+            model: String::new(),
+            key: String::new(),
+            zai_key: String::new(),
+            anthropic_key: "k".into(),
+        };
+        let err = r.test_config(&payload).unwrap_err();
+        assert!(
+            err.contains("refusing to send an Anthropic key"),
+            "got: {err}"
+        );
+        // Plaintext http off loopback: refused before any network. (The
+        // Anthropic key pairs legally with this non-z.ai URL, so the
+        // refusal can only come from the plaintext-http guard.)
+        let payload = LlmTestPayload {
+            provider: ENV_ID.into(),
+            base_url: "http://api.example.com".into(),
+            model: String::new(),
+            key: String::new(),
+            zai_key: String::new(),
+            anthropic_key: "k".into(),
+        };
+        let err = r.test_config(&payload).unwrap_err();
+        assert!(err.contains("plaintext http"), "got: {err}");
+    }
+
+    #[test]
+    fn test_config_profile_target_uses_form_or_stored_key() {
+        let settings = settings_with(vec![profile("glm", ProviderKind::Zai)], None);
+        let r = registry(settings.clone(), &[("glm", "stored")], &[]);
+        let payload = LlmTestPayload {
+            provider: "glm".into(),
+            base_url: String::new(),
+            model: "typed-model".into(),
+            key: String::new(),
+            zai_key: String::new(),
+            anthropic_key: String::new(),
+        };
+        let config = r.test_config(&payload).unwrap();
+        assert_eq!(
+            (config.api_key.as_str(), config.model.as_str()),
+            ("stored", "typed-model")
+        );
+        // Typed key works without a stored one (unsaved row).
+        let r = registry(settings, &[], &[]);
+        let payload = LlmTestPayload {
+            key: "typed".into(),
+            ..LlmTestPayload::defaulting("glm")
+        };
+        assert_eq!(r.test_config(&payload).unwrap().api_key, "typed");
+        // No key anywhere: actionable error.
+        let err = r
+            .test_config(&LlmTestPayload::defaulting("glm"))
+            .unwrap_err();
+        assert!(err.contains("no API key"), "got: {err}");
+        // Unknown provider.
+        let err = r
+            .test_config(&LlmTestPayload::defaulting("nope"))
+            .unwrap_err();
+        assert!(err.contains("unknown provider"), "got: {err}");
+        // Plaintext http guard applies to profiles too.
+        let payload = LlmTestPayload {
+            provider: "glm".into(),
+            base_url: "http://api.example.com".into(),
+            key: "k".into(),
+            ..LlmTestPayload::defaulting("glm")
+        };
+        assert!(r
+            .test_config(&payload)
+            .unwrap_err()
+            .contains("plaintext http"));
+    }
+
+    #[test]
+    fn drop_key_handles_env_key_ids() {
+        let r = registry(Settings::default(), &[("env:ZAI_API_KEY", "k")], &[]);
+        assert!(SettingsView::from(&r).env_overrides.zai_key);
+        let mut r = r;
+        r.drop_key(ENV_ZAI_KEY_ID);
+        assert!(!SettingsView::from(&r).env_overrides.zai_key);
+        assert!(r.select(Some(ENV_ID)).matches_local_with_reason());
+    }
+
+    #[test]
+    fn reload_keys_recomputes_the_env_fallback() {
+        // A key reload alone must leave the derived env state consistent:
+        // a freshly stored override becomes selectable, a removed one
+        // stops being so.
+        let mut r = registry(Settings::default(), &[], &[]);
+        assert!(r.select(Some(ENV_ID)).matches_local_with_reason());
+        r.reload_keys(|id| (id == ENV_ZAI_KEY_ID).then(|| "fresh".to_string()));
+        match r.select(Some(ENV_ID)) {
+            Selection::Provider { config, .. } => assert_eq!(config.api_key, "fresh"),
+            other => panic!("env should resolve after reload: {other:?}"),
+        }
+        r.reload_keys(|_| None);
+        assert!(r.select(Some(ENV_ID)).matches_local_with_reason());
     }
 }
