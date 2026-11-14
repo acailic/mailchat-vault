@@ -125,6 +125,21 @@ impl Default for Options {
     }
 }
 
+/// Non-secret environment-variable overrides — the Settings "Environment
+/// variables" section. Values entered there win over the process
+/// environment for the environment fallback; the two API-key overrides
+/// live in the OS keyring (`env:ZAI_API_KEY` / `env:ANTHROPIC_API_KEY`),
+/// never in this file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct EnvOverrides {
+    /// `ANTHROPIC_BASE_URL` override; empty = not overridden.
+    #[serde(default)]
+    pub anthropic_base_url: String,
+    /// `MAILCHAT_LLM_MODEL` override; empty = not overridden.
+    #[serde(default)]
+    pub llm_model: String,
+}
+
 /// One configured LLM provider profile. Carries no key material: the API
 /// key lives in the OS keyring under the profile `id`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,6 +214,9 @@ pub struct Settings {
     pub default_provider: Option<String>,
     /// Misc options.
     pub options: Options,
+    /// Environment-variable overrides (non-secret; see [`EnvOverrides`]).
+    #[serde(default)]
+    pub env_overrides: EnvOverrides,
 }
 
 impl Default for Settings {
@@ -208,6 +226,7 @@ impl Default for Settings {
             providers: Vec::new(),
             default_provider: None,
             options: Options::default(),
+            env_overrides: EnvOverrides::default(),
         }
     }
 }
@@ -234,7 +253,7 @@ fn is_http_url(url: &str) -> bool {
 
 /// Whether `url` parses and points at a loopback host (`localhost`,
 /// `127.0.0.0/8`, `::1`) — the one place plaintext http stays allowed.
-fn is_loopback_url(url: &str) -> bool {
+pub(crate) fn is_loopback_url(url: &str) -> bool {
     Url::parse(url)
         .map(|u| match u.host() {
             Some(url::Host::Domain(d)) => d == "localhost" || d.ends_with(".localhost"),
@@ -246,15 +265,16 @@ fn is_loopback_url(url: &str) -> bool {
 }
 
 /// Refuse a base URL whose scheme is plaintext `http` on a non-loopback
-/// host: a stored API key must never travel unencrypted.
-fn check_no_plaintext_http(name: &str, base_url: &str) -> crate::Result<()> {
+/// host: a stored API key must never travel unencrypted. `label` names the
+/// offender in the message (e.g. `provider “Work GLM”`).
+fn check_no_plaintext_http(label: &str, base_url: &str) -> crate::Result<()> {
     let plaintext = Url::parse(base_url)
         .map(|u| u.scheme() == "http")
         .unwrap_or(false);
     if plaintext && !is_loopback_url(base_url) {
         return Err(settings_error(format!(
-            "provider “{name}”: the API key must not travel over plaintext http — use https \
-             for {base_url} (or a localhost/127.0.0.1 endpoint for testing)"
+            "{label}: the API key must not travel over plaintext http — use https for \
+             {base_url} (or a localhost/127.0.0.1 endpoint for testing)"
         )));
     }
     Ok(())
@@ -317,6 +337,13 @@ impl Settings {
                 *default = d;
             }
         }
+        self.env_overrides.anthropic_base_url = self
+            .env_overrides
+            .anthropic_base_url
+            .trim()
+            .trim_end_matches('/')
+            .to_string();
+        self.env_overrides.llm_model = self.env_overrides.llm_model.trim().to_string();
     }
 
     /// Validate the pairing rules and cross-references. Returns the first
@@ -363,7 +390,7 @@ impl Settings {
                                 LlmConfig::DEFAULT_BASE_URL
                             )));
                         }
-                        check_no_plaintext_http(name, &p.base_url)?;
+                        check_no_plaintext_http(&format!("provider “{name}”"), &p.base_url)?;
                     }
                 }
                 ProviderKind::Anthropic => {
@@ -384,7 +411,7 @@ impl Settings {
                              endpoint — point the base URL at the endpoint that accepts this key"
                         )));
                     }
-                    check_no_plaintext_http(name, &p.base_url)?;
+                    check_no_plaintext_http(&format!("provider “{name}”"), &p.base_url)?;
                     if p.model.is_empty() {
                         return Err(settings_error(format!(
                             "provider “{name}”: a model name is required for Anthropic providers"
@@ -402,7 +429,7 @@ impl Settings {
                             "provider “{name}”: base URL must be an absolute http(s) URL"
                         )));
                     }
-                    check_no_plaintext_http(name, &p.base_url)?;
+                    check_no_plaintext_http(&format!("provider “{name}”"), &p.base_url)?;
                     if p.model.is_empty() {
                         return Err(settings_error(format!(
                             "provider “{name}”: a model name is required for custom providers"
@@ -410,6 +437,17 @@ impl Settings {
                     }
                 }
             }
+        }
+        if !self.env_overrides.anthropic_base_url.is_empty() {
+            if !is_http_url(&self.env_overrides.anthropic_base_url) {
+                return Err(settings_error(
+                    "ANTHROPIC_BASE_URL override must be an absolute http(s) URL".into(),
+                ));
+            }
+            check_no_plaintext_http(
+                "ANTHROPIC_BASE_URL override",
+                &self.env_overrides.anthropic_base_url,
+            )?;
         }
         if let Some(default) = &self.default_provider {
             if !known_ids.contains(default) {
@@ -892,6 +930,7 @@ mod tests {
             }],
             default_provider: Some(" ".into()),
             options: Options::default(),
+            env_overrides: EnvOverrides::default(),
             version: SETTINGS_VERSION,
         };
         s.normalize();
@@ -937,5 +976,66 @@ mod tests {
         // Without env config the menu ends at the profiles.
         let menu = build_menu(&s, |_| false, None);
         assert_eq!(menu.last().unwrap().id, "mine");
+    }
+
+    #[test]
+    fn env_overrides_backfill_when_absent_and_round_trip() {
+        let dir = std::env::temp_dir().join(format!("mcv-settings-env-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        // A file written before the field existed loads with empty overrides.
+        let older = serde_json::json!({
+            "version": SETTINGS_VERSION,
+            "providers": [],
+            "default_provider": null,
+            "options": {"theme": "system", "summarize_top": 8}
+        });
+        fs::write(&path, serde_json::to_vec(&older).unwrap()).unwrap();
+        let loaded = Settings::load(&path).unwrap().unwrap();
+        assert_eq!(loaded.env_overrides, EnvOverrides::default());
+        // Values round-trip through save/load.
+        let mut s = loaded;
+        s.env_overrides = EnvOverrides {
+            anthropic_base_url: "https://api.anthropic.com".into(),
+            llm_model: "claude-sonnet-4-5".into(),
+        };
+        s.save(&path).unwrap();
+        assert_eq!(
+            Settings::load(&path).unwrap().unwrap().env_overrides,
+            s.env_overrides
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn env_overrides_normalize_trims() {
+        let mut s = Settings::default();
+        s.env_overrides.anthropic_base_url = " https://api.anthropic.com/ ".into();
+        s.env_overrides.llm_model = " glm-5 ".into();
+        s.normalize();
+        assert_eq!(
+            s.env_overrides.anthropic_base_url,
+            "https://api.anthropic.com"
+        );
+        assert_eq!(s.env_overrides.llm_model, "glm-5");
+    }
+
+    #[test]
+    fn env_overrides_validate_url_shape_and_transport() {
+        // Not a URL: refused.
+        let mut s = Settings::default();
+        s.env_overrides.anthropic_base_url = "not a url".into();
+        let err = s.validate().unwrap_err().to_string();
+        assert!(err.contains("absolute http(s) URL"), "got: {err}");
+        // Plaintext http off loopback: refused (the key must stay encrypted).
+        s.env_overrides.anthropic_base_url = "http://api.anthropic.com".into();
+        let err = s.validate().unwrap_err().to_string();
+        assert!(err.contains("plaintext http"), "got: {err}");
+        // Loopback http stays allowed (local mock endpoints).
+        s.env_overrides.anthropic_base_url = "http://127.0.0.1:8080".into();
+        s.validate().unwrap();
+        // Empty override: nothing to check.
+        s.env_overrides.anthropic_base_url = String::new();
+        s.validate().unwrap();
     }
 }

@@ -27,7 +27,12 @@ import type {
   WatchSnapshot,
 } from "./types";
 import type { AskOutcome, LlmStatus } from "./llmview";
-import type { SaveSettingsPayload, SettingsView } from "./settings";
+import type {
+  LlmTestPayload,
+  LlmTestResult,
+  SaveSettingsPayload,
+  SettingsView,
+} from "./settings";
 import type {
   ConversationContext,
   ImportScope,
@@ -417,6 +422,10 @@ export function settingsSave(payload: SaveSettingsPayload): Promise<SettingsView
 
 export function llmKeyClear(id: string): Promise<SettingsView> {
   return invoke<SettingsView>("llm_key_clear", { id });
+}
+
+export function llmTest(payload: LlmTestPayload): Promise<LlmTestResult> {
+  return invoke<LlmTestResult>("llm_test", { payload });
 }
 
 // ---------------------------------------------------------------------------
