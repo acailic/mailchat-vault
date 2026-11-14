@@ -1528,11 +1528,19 @@ impl Storage {
     /// unknown (NULL) instant are excluded while a bound is active — they
     /// cannot be placed in time. The MATCH expression is a bound parameter
     /// throughout, so it can never spill into SQL text.
+    ///
+    /// `from_filter` keeps only messages whose author contains the value
+    /// (case-insensitive for ASCII, as SQLite `LIKE` is); `require_link`
+    /// keeps only bodies containing an `http…://` URL. Both are bound
+    /// parameters applied before `LIMIT`. `%`/`_` inside `from_filter` pass
+    /// through as LIKE wildcards.
     pub fn search_filtered(
         &self,
         match_query: &str,
         date_from: Option<&str>,
         date_to: Option<&str>,
+        from_filter: Option<&str>,
+        require_link: bool,
         limit: u32,
     ) -> Result<Vec<Message>> {
         let from = match parse_date_bound(date_from, "date_from")? {
@@ -1564,13 +1572,22 @@ impl Storage {
               AND (?2 IS NULL OR m.sent_instant >= ?2)
               AND (?3 IS NULL OR m.sent_instant < ?3)
               AND ((?2 IS NULL AND ?3 IS NULL) OR m.sent_instant IS NOT NULL)
+              AND (?4 IS NULL OR m.author LIKE '%' || ?4 || '%')
+              AND (?5 = 0 OR m.body LIKE '%http%://%')
             ORDER BY bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, {BM25_WEIGHT_SUBJECT}), m.id
-            LIMIT ?4
+            LIMIT ?6
             "#,
         ))?;
         let rows = stmt
             .query_map(
-                params![match_query, from, to_exclusive, limit],
+                params![
+                    match_query,
+                    from,
+                    to_exclusive,
+                    from_filter,
+                    require_link,
+                    limit
+                ],
                 message_from_row,
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -2339,11 +2356,14 @@ impl Storage {
 
     /// Vector search: cosine of `query` against every `model` embedding,
     /// under the same LOCAL-day date bounds as [`Storage::search_filtered`]
-    /// (`None` = unbounded). Returns the best `limit` hits, score-descending
+    /// (`None` = unbounded) and the same `from_filter` / `require_link`
+    /// filters, applied in SQL before the scan is ranked and truncated.
+    /// Returns the best `limit` hits, score-descending
     /// (ties by ascending id). Stored vectors are normalized at write time,
     /// so cosine is a plain dot product. Rows whose blob length disagrees
     /// with `dim` (a foreign model's leftovers) are skipped, not fatal.
     /// This is the manual-cosine index described in [`crate::vector`].
+    #[allow(clippy::too_many_arguments)]
     pub fn vector_scan(
         &self,
         model: &str,
@@ -2351,6 +2371,8 @@ impl Storage {
         query: &[f32],
         date_from: Option<&str>,
         date_to: Option<&str>,
+        from_filter: Option<&str>,
+        require_link: bool,
         limit: u32,
     ) -> Result<Vec<VectorHit>> {
         if query.len() != dim as usize {
@@ -2377,30 +2399,39 @@ impl Storage {
         };
 
         // Same bound-parameter shape as search_filtered: the date bounds
-        // are values, never spliced into the SQL text. Without bounds the
-        // scan skips the messages join entirely (the embedding table alone
-        // answers it); with bounds the join applies the same local-day
-        // sent_at filter as the FTS leg.
-        let (sql, has_bounds) = if from.is_some() || to_exclusive.is_some() {
-            (
-                "SELECT e.message_id, e.embedding
+        // and sender/link filters are values, never spliced into the SQL
+        // text. Without any filter the scan skips the messages join
+        // entirely (the embedding table alone answers it); with one the
+        // join applies the same filters as the FTS leg.
+        let (sql, has_filters) =
+            if from.is_some() || to_exclusive.is_some() || from_filter.is_some() || require_link {
+                (
+                    "SELECT e.message_id, e.embedding
                  FROM message_embeddings AS e
                  JOIN archive_messages AS m ON m.id = e.message_id
                  WHERE e.model = ?1
                    AND (?2 IS NULL OR m.sent_instant >= ?2)
                    AND (?3 IS NULL OR m.sent_instant < ?3)
-                   AND ((?2 IS NULL AND ?3 IS NULL) OR m.sent_instant IS NOT NULL)",
-                true,
-            )
-        } else {
-            (
-                "SELECT message_id, embedding FROM message_embeddings WHERE model = ?1",
-                false,
-            )
-        };
+                   AND ((?2 IS NULL AND ?3 IS NULL) OR m.sent_instant IS NOT NULL)
+                   AND (?4 IS NULL OR m.author LIKE '%' || ?4 || '%')
+                   AND (?5 = 0 OR m.body LIKE '%http%://%')",
+                    true,
+                )
+            } else {
+                (
+                    "SELECT message_id, embedding FROM message_embeddings WHERE model = ?1",
+                    false,
+                )
+            };
         let mut stmt = self.conn.prepare(sql)?;
-        let mut rows = if has_bounds {
-            stmt.query(params![model, from, to_exclusive])?
+        let mut rows = if has_filters {
+            stmt.query(params![
+                model,
+                from,
+                to_exclusive,
+                from_filter,
+                require_link
+            ])?
         } else {
             stmt.query(params![model])?
         };
@@ -4195,6 +4226,87 @@ mod tests {
             err.to_string().contains("archive_fts"),
             "error must name the corrupt index: {err}"
         );
+    }
+
+    fn seeded_links() -> Storage {
+        let s = Storage::open_in_memory().unwrap();
+        let rows = [
+            ("ana@example.com", "see https://example.com/a now"),
+            ("Ana Example <ana@example.com>", "no links here, just words"),
+            (
+                "bo@example.com",
+                "docs at https://example.com/b and HTTP://example.com/c",
+            ),
+            ("carol@example.com", "nothing to see"),
+        ];
+        for (i, (author, body)) in rows.iter().enumerate() {
+            s.insert_message(&crate::message::NewMessage::new(
+                "test",
+                format!("m{i}"),
+                *author,
+                "2026-01-01T00:00:00Z",
+                *body,
+            ))
+            .unwrap();
+        }
+        s
+    }
+
+    #[test]
+    fn search_filtered_from_is_case_insensitive_substring() {
+        let s = seeded_links();
+        let out = s
+            .search_filtered("example", None, None, Some("ANA@"), false, 50)
+            .unwrap();
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert!(out.iter().all(|m| m.author.to_lowercase().contains("ana@")));
+    }
+
+    #[test]
+    fn search_filtered_require_link_keeps_only_url_bodies() {
+        let s = seeded_links();
+        let out = s
+            .search_filtered("example", None, None, None, true, 50)
+            .unwrap();
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|m| m.body.contains("://")));
+    }
+
+    #[test]
+    fn search_filtered_combines_from_and_require_link() {
+        let s = seeded_links();
+        let out = s
+            .search_filtered("example", None, None, Some("bo@"), true, 50)
+            .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].author, "bo@example.com");
+    }
+
+    #[test]
+    fn vector_scan_applies_the_same_filters() {
+        let s = seeded_links();
+        // Embed two messages (ids 1 and 4) with identical normalized vectors:
+        // id 1 is ana's (has a URL), id 4 is carol's (no URL, not ana).
+        let model = "test-embed";
+        s.embed_messages_batch(model, 2, &[(1, vec![1.0, 0.0]), (4, vec![1.0, 0.0])])
+            .unwrap();
+        // Unfiltered: both ids are candidates.
+        let all = s
+            .vector_scan(model, 2, &[1.0, 0.0], None, None, None, false, 10)
+            .unwrap();
+        assert_eq!(all.len(), 2, "{all:?}");
+        // Sender filter: only message 1 (ana) survives.
+        let filtered = s
+            .vector_scan(model, 2, &[1.0, 0.0], None, None, Some("ana"), false, 10)
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].message_id, 1);
+        // Link filter: only message 1 (has a URL) survives.
+        let linked = s
+            .vector_scan(model, 2, &[1.0, 0.0], None, None, None, true, 10)
+            .unwrap();
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].message_id, 1);
     }
 }
 

@@ -502,18 +502,20 @@ fn old_schema_fixture_migrates_without_loss() {
     // Baseline search works over the canonical index: bodies and authors
     // are findable, unknown-time rows are excluded by date bounds.
     assert_eq!(
-        s.search_filtered("zephyr", None, None, 10).unwrap().len(),
+        s.search_filtered("zephyr", None, None, None, false, 10)
+            .unwrap()
+            .len(),
         2
     );
     // to_date bound keeps the June 30 row and drops the undated one.
     assert_eq!(
-        s.search_filtered("zephyr", None, Some("2025-12-31"), 10)
+        s.search_filtered("zephyr", None, Some("2025-12-31"), None, false, 10)
             .unwrap()
             .len(),
         1
     );
     assert_eq!(
-        s.search_filtered("zephyr", Some("2025-07-01"), None, 10)
+        s.search_filtered("zephyr", Some("2025-07-01"), None, None, false, 10)
             .unwrap()
             .len(),
         0,
@@ -647,7 +649,12 @@ fn current_writes_reach_canonical_tables_only() {
 
     // FTS stays in sync with the canonical table alone: the fresh rows are
     // searchable, and the untouched legacy index holds none of them.
-    assert_eq!(s.search_filtered("fresh", None, None, 10).unwrap().len(), 1);
+    assert_eq!(
+        s.search_filtered("fresh", None, None, None, false, 10)
+            .unwrap()
+            .len(),
+        1
+    );
     assert_eq!(
         count(
             &db,
@@ -840,7 +847,16 @@ fn v3_database_upgrades_and_carries_embeddings_to_canonical() {
     assert_eq!(counts.embedded, 1, "the v3 vector survives the migration");
     assert_eq!(counts.messages, 1, "the legacy row migrated");
     let hits = s
-        .vector_scan("test-model", 4, &[1.0, 0.0, 0.0, 0.0], None, None, 10)
+        .vector_scan(
+            "test-model",
+            4,
+            &[1.0, 0.0, 0.0, 0.0],
+            None,
+            None,
+            None,
+            false,
+            10,
+        )
         .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].message_id, 1, "row id preserved");

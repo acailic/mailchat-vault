@@ -230,7 +230,7 @@ mod tests {
             assert_eq!(storage.stats().unwrap().total, expected, "seed {seed}");
             assert!(
                 !storage
-                    .search_filtered(&build_match_query("zdravo"), None, None, 10)
+                    .search_filtered(&build_match_query("zdravo"), None, None, None, false, 10)
                     .unwrap()
                     .is_empty(),
                 "seed {seed}: known body string not searchable"

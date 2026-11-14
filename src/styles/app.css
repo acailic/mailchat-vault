@@ -685,6 +685,26 @@ mark.hit {
 #ask-notes { margin-top: var(--sp-1); font-size: var(--text-meta); color: var(--warning); }
 #ask-results, .watch-list, .jobs-list { list-style: none; margin: var(--sp-1) 0 0; padding: 0; font-size: var(--text-meta); }
 #ask-results li, .watch-list li, .jobs-list li { padding: 3px 0; }
+/* ask-collect-links: one details/summary per URL, one .ask-source row per hit. */
+#ask-collected-list { list-style: none; margin: var(--sp-1) 0 0; padding: 0; font-size: var(--text-meta); }
+#ask-collected-list li { padding: 3px 0; }
+#ask-collected-list summary { cursor: pointer; color: var(--accent); }
+#ask-collected-list .ask-source {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  border-radius: var(--radius-m);
+  padding: 3px 4px;
+  cursor: pointer;
+}
+#ask-collected-list .ask-source:hover, #ask-collected-list .ask-source:focus-visible {
+  background: var(--selection);
+}
+#ask-collected-list .ask-source .meta { color: var(--accent); }
 
 /* --- Reading pane -------------------------------------------------------- */
 

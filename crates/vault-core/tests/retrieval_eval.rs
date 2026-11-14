@@ -781,6 +781,9 @@ fn evaluate() -> Evaluation {
                 match_expr: q.match_expr.to_string(),
                 date_from: q.date_from.map(str::to_string),
                 date_to: q.date_to.map(str::to_string),
+                from: None,
+                has_link: None,
+                extract_links: false,
             },
             source: PlanSource::NoLlm,
             notes: Vec::new(),
@@ -799,6 +802,8 @@ fn evaluate() -> Evaluation {
                 &embedder.embed(q.text),
                 q.date_from,
                 q.date_to,
+                None,
+                false,
                 CANDIDATES,
             )
             .unwrap()

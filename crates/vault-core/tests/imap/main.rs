@@ -195,7 +195,7 @@ pub(crate) fn cursor(storage: &Storage, user: &str, folder: &str) -> Option<(u32
 /// [`mails`] make each mail individually addressable.
 pub(crate) fn find(storage: &Storage, phrase: &str) -> Vec<Message> {
     storage
-        .search_filtered(&build_match_query(phrase), None, None, 100)
+        .search_filtered(&build_match_query(phrase), None, None, None, false, 100)
         .unwrap()
 }
 
