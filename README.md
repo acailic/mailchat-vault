@@ -67,3 +67,7 @@ Annotated layout: [feature reference](docs/features.md#annotated-repository-layo
 ## Releases
 
 Tagged versions (`v*`) build Linux, macOS, and Windows installers as draft GitHub Releases with `SHA256SUMS` checksums; artifacts are unsigned and smoke-tested before publishing. Build and publish procedure: [docs/release.md](docs/release.md).
+
+## License
+
+GPL-3.0-only — see [LICENSE](LICENSE) and [decision D13](docs/decisions.md). Contributions use the DCO ([CONTRIBUTING](CONTRIBUTING.md)); security reports go through [SECURITY.md](SECURITY.md), not public issues.
