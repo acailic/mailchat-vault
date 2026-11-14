@@ -394,6 +394,9 @@ describe("reading pane", () => {
     expect(frame).not.toBeNull();
     expect(frame.getAttribute("sandbox")).toBe("");
     expect(frame.getAttribute("srcdoc")).toContain("default-src 'none'");
+    // Links are retargeted to new windows the sandbox never opens, so
+    // clicks cannot navigate the frame itself.
+    expect(frame.getAttribute("srcdoc")).toContain('<base target="_blank">');
     expect(frame.getAttribute("srcdoc")).toContain("<p>telo pisma</p>");
     expect(el.querySelector(".detail-card .body")?.innerHTML).not.toContain(
       "<p>telo pisma</p>",

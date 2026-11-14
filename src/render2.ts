@@ -417,7 +417,10 @@ export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
     // untrusted sender: it is only ever placed into a sandboxed
     // iframe's srcdoc (no scripts, unique origin, no navigation, and
     // a CSP that blocks every remote subresource — tracking pixels
-    // included). Raw is today's highlighted plain text.
+    // included). A sandboxed frame can still navigate itself, so the
+    // srcdoc also carries <base target="_blank">: every link targets
+    // a new window, which the popup-less sandbox then refuses to open
+    // — link clicks stay inert. Raw is today's highlighted plain text.
     const toggle = document.createElement("div");
     toggle.className = "mode-toggle";
     toggle.setAttribute("role", "group");
@@ -442,7 +445,7 @@ export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
           "srcdoc",
           '<!doctype html><meta http-equiv="Content-Security-Policy" ' +
             'content="default-src \'none\'; style-src \'unsafe-inline\'; ' +
-            'img-src data:">' +
+            'img-src data:"><base target="_blank">' +
             html,
         );
         // Sibling of .body, never inside it: the serialized markup of
