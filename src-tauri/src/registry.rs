@@ -115,8 +115,8 @@ impl LlmRegistry {
             settings_error,
             key_store: None,
         };
+        // `reload_keys` is the single funnel that derives the env fallback.
         registry.reload_keys(load_key);
-        registry.recompute_env();
         registry
     }
 
@@ -152,7 +152,8 @@ impl LlmRegistry {
     }
 
     /// Re-read the stored key of every configured profile, plus the two
-    /// environment-fallback key overrides.
+    /// environment-fallback key overrides, then recompute the environment
+    /// fallback so the derived state never lags the reloaded keys.
     pub fn reload_keys(&mut self, load_key: impl Fn(&str) -> Option<String>) {
         self.keys = self
             .settings
@@ -164,6 +165,7 @@ impl LlmRegistry {
             .into_iter()
             .filter_map(|id| load_key(id).map(|k| (id.to_string(), k)))
             .collect();
+        self.recompute_env();
     }
 
     /// The settings currently in effect.
@@ -171,8 +173,8 @@ impl LlmRegistry {
         &self.settings
     }
 
-    /// Replace the settings (after a successful save), re-read keys, and
-    /// recompute the environment fallback.
+    /// Replace the settings (after a successful save) and re-read keys
+    /// (which also recomputes the environment fallback).
     pub fn update(
         &mut self,
         settings: Settings,
@@ -183,7 +185,6 @@ impl LlmRegistry {
         self.settings_error = None;
         self.key_store = key_store;
         self.reload_keys(load_key);
-        self.recompute_env();
     }
 
     /// Forget a single key at runtime (after a keyring clear): a profile's
@@ -301,10 +302,12 @@ impl LlmRegistry {
                 match name {
                     "ZAI_API_KEY" => (!zai.is_empty())
                         .then(|| zai.clone())
-                        .or_else(|| self.env_keys.get(ENV_ZAI_KEY_ID).cloned()),
+                        .or_else(|| self.env_keys.get(ENV_ZAI_KEY_ID).cloned())
+                        .or_else(|| self.env_lookup(name)),
                     "ANTHROPIC_API_KEY" => (!anthropic.is_empty())
                         .then(|| anthropic.clone())
-                        .or_else(|| self.env_keys.get(ENV_ANTHROPIC_KEY_ID).cloned()),
+                        .or_else(|| self.env_keys.get(ENV_ANTHROPIC_KEY_ID).cloned())
+                        .or_else(|| self.env_lookup(name)),
                     "ANTHROPIC_BASE_URL" => (!base_url.is_empty())
                         .then(|| base_url.clone())
                         .or_else(|| self.env_lookup(name)),
@@ -524,7 +527,10 @@ pub struct EnvOverridesPayload {
 /// One "Test connection" request: the target (`env` or a profile id)
 /// plus the form values as currently typed, so an unsaved edit can be
 /// tested as typed. Empty fields fall back to the stored/effective
-/// values; empty key fields fall back to the stored key.
+/// values; empty key fields fall back to the stored key (for the env
+/// target, then on to the process environment — the runtime layer
+/// order). Profile targets read `key`; the env target reads
+/// `zai_key`/`anthropic_key`; each target ignores the other's fields.
 // Not yet constructed outside tests; Task 4's `llm_test` command is the
 // caller (drop this `allow` there).
 #[allow(dead_code)]
@@ -1072,6 +1078,16 @@ mod tests {
     }
 
     #[test]
+    fn test_config_env_keys_fall_back_to_the_process_environment() {
+        // No stored override: the process-env key is what a Test click
+        // probes, mirroring runtime resolution (keyring override →
+        // settings-file override → process environment).
+        let r = registry(Settings::default(), &[], &[("ZAI_API_KEY", "process-zai")]);
+        let config = r.test_config(&LlmTestPayload::defaulting(ENV_ID)).unwrap();
+        assert_eq!(config.api_key, "process-zai");
+    }
+
+    #[test]
     fn test_config_env_target_errors_are_actionable() {
         // Nothing configured at all.
         let r = registry(Settings::default(), &[], &[]);
@@ -1162,6 +1178,22 @@ mod tests {
         let mut r = r;
         r.drop_key(ENV_ZAI_KEY_ID);
         assert!(!SettingsView::from(&r).env_overrides.zai_key);
+        assert!(r.select(Some(ENV_ID)).matches_local_with_reason());
+    }
+
+    #[test]
+    fn reload_keys_recomputes_the_env_fallback() {
+        // A key reload alone must leave the derived env state consistent:
+        // a freshly stored override becomes selectable, a removed one
+        // stops being so.
+        let mut r = registry(Settings::default(), &[], &[]);
+        assert!(r.select(Some(ENV_ID)).matches_local_with_reason());
+        r.reload_keys(|id| (id == ENV_ZAI_KEY_ID).then(|| "fresh".to_string()));
+        match r.select(Some(ENV_ID)) {
+            Selection::Provider { config, .. } => assert_eq!(config.api_key, "fresh"),
+            other => panic!("env should resolve after reload: {other:?}"),
+        }
+        r.reload_keys(|_| None);
         assert!(r.select(Some(ENV_ID)).matches_local_with_reason());
     }
 }
