@@ -1672,8 +1672,19 @@ function feedImportJobEvent(event: JobEvent): void {
     if (outcome) {
       importStatus.textContent = importSummaryLine(outcome);
       showImportFollowup(outcome.import_id, outcome.summary.inserted);
-      initialBrowseDone = true; // the archive view is live from here on
-      void runSearch(0); // newest-first browse, ready when the user returns
+      // The archive view is live from here on — but the counts must
+      // land first: runSearch reads archiveTotal, which refreshStats
+      // owns. Browsing before that refresh resolves reads a stale
+      // total (an import into an empty archive still reads as empty),
+      // takes the first-run empty branch, and the initialBrowseDone
+      // flag set along the way then blocks the stats-driven browse
+      // (maybeInitialBrowse) that would surface the import a moment
+      // later — the workspace would stay on "Your archive is empty"
+      // until the next manual search.
+      void refreshStats().then(() => {
+        initialBrowseDone = true; // the archive view is live from here on
+        void runSearch(0); // newest-first browse, ready when the user returns
+      });
       if (outcome.media) void refreshMediaUsage(); // media landed in the store
     } else {
       // Unexpected result shape (no invented numbers, no follow-up to

@@ -516,7 +516,12 @@ export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
 
   const header = document.createElement("header");
   const title = document.createElement("h2");
-  title.textContent = detail.author || "unknown";
+  // The headline follows the rows' discipline: the display name, with
+  // the full "Name <address>" form one hover away. The exact address
+  // stays in the meta table below either way.
+  const displayAuthor = authorDisplayName(detail.author) || "unknown";
+  title.textContent = displayAuthor;
+  if (displayAuthor !== (detail.author || "unknown")) title.title = detail.author;
   const actions = document.createElement("div");
   actions.className = "header-actions";
   // Utility actions are icon-only and equal in weight; Export… opens the

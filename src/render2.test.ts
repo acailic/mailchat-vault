@@ -451,6 +451,25 @@ describe("reading pane", () => {
     expect(card.querySelectorAll("li.thread-row.current").length).toBe(1);
   });
 
+  it("an addressed author headlines as the display name, full form one hover away", () => {
+    // The rows show the display name (wave-1 discipline); the pane's
+    // headline follows it instead of the raw "Name <address>" form.
+    const raw = ctx.anchor.author;
+    ctx.anchor.author = "Ana Sender <ana@example.com>";
+    try {
+      const el = render();
+      const h2 = el.querySelector(".detail-card h2") as HTMLElement;
+      expect(h2.textContent).toBe("Ana Sender");
+      expect(h2.title).toBe("Ana Sender <ana@example.com>");
+      // The exact address stays in the meta table.
+      expect(el.querySelector(".detail-card .meta-table")?.textContent).toContain(
+        "ana@example.com",
+      );
+    } finally {
+      ctx.anchor.author = raw;
+    }
+  });
+
   it("attachments list separates preserved from not preserved", () => {
     const el = render();
     const items = [...el.querySelectorAll("li.media-item")];
