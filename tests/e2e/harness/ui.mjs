@@ -291,13 +291,17 @@ async function statsLabelText(browser) {
 
 /** Wait until the #stats label matches a fresh `stats` round trip — the
  * deterministic settle for "the UI noticed the archive changed" (the
- * terminal job event refreshes every vault-reading panel). */
+ * terminal job event refreshes every vault-reading panel). The expected
+ * line applies the UI's plain-word source mapping ("mbox" reads as
+ * "Mail import"; format.ts friendlySourceLabel). */
 export async function waitForStatsSync(browser, { timeout = 30_000 } = {}) {
   await browser.waitUntil(
     async () => {
       const stats = await invokeCommand(browser, "stats", {});
       const label = await statsLabelText(browser);
-      const parts = stats.by_source.map((s) => `${s.source}: ${s.count}`).join(", ");
+      const parts = stats.by_source
+        .map((s) => `${s.source === "mbox" ? "Mail import" : s.source}: ${s.count}`)
+        .join(", ");
       const expected =
         stats.total === 0 ? "empty archive" : `${stats.total} messages (${parts})`;
       return label === expected;

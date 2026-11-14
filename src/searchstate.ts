@@ -19,6 +19,7 @@ import type {
 } from "./v2types";
 import {
   conversationConfidenceLabel,
+  friendlySourceLabel,
   timeConfidenceLabel,
 } from "./format";
 
@@ -365,14 +366,20 @@ export function selectionIds(hits: MessageSummary[], selected: Set<number>): num
 }
 
 // ---------------------------------------------------------------------------
-// Copy text (format-compatible with Rust `detail_as_text`)
+// Copy text (format-compatible with Rust `detail_as_text`, except the
+// source line reads the plain-word label with the stored one in parens)
 // ---------------------------------------------------------------------------
 
 /** Readable text + provenance for one message (Copy message / exports). */
 export function messageToText(detail: MessageDetail): string {
   const lines: string[] = [];
   lines.push(`=== Message ${detail.id} ===`);
-  lines.push(`Source: ${detail.source_label} (${detail.source_id})`);
+  // The plain-word label leads; the stored label rides along in the
+  // parens only when the two differ (provenance, e.g. mbox → Mail import).
+  const sourceName = friendlySourceLabel(detail.source_label);
+  const stored =
+    sourceName === detail.source_label ? "" : ` (${detail.source_label})`;
+  lines.push(`Source: ${sourceName}${stored} (${detail.source_id})`);
   if (detail.conversation_label) {
     const qualifier = conversationConfidenceLabel(detail.conversation_confidence);
     lines.push(

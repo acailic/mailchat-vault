@@ -15,7 +15,7 @@ pub fn messages() -> Vec<NewMessage> {
             "Mailchat Vault <demo@mailchat-vault.local>",
             "2026-11-01T09:00:00Z",
             "Welcome to your local mail and chat archive. Everything you import is stored \
-             in SQLite and searched with FTS5, entirely on this machine.",
+             and searched entirely on this computer — try searching for jelena or vault.",
         ),
         NewMessage::new(
             DEMO_SOURCE,

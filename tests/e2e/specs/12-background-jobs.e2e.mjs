@@ -60,7 +60,7 @@ export async function run(ctx) {
     const lines = await jobLines(browser);
     assert.equal(lines.length, 2, "two finished job entries in the jobs panel");
     assert.ok(
-      lines.some((line) => /^local embeddings — done \(8 embedded\)$/.test(line)),
+      lines.some((line) => /^local search index — done \(8 indexed\)$/.test(line)),
       "embed job entry shows the result summary",
     );
     assert.ok(
@@ -106,7 +106,7 @@ export async function run(ctx) {
     await ui.waitForText(browser, "#jobs-status", "No active jobs (2 finished).");
     const reloaded = await jobLines(browser);
     assert.ok(
-      reloaded.some((line) => /^local embeddings — done \(8 embedded\)$/.test(line)),
+      reloaded.some((line) => /^local search index — done \(8 indexed\)$/.test(line)),
       "jobs panel restored from job_events_since(0) after reload",
     );
     await saveScreenshot(browser, "12-jobs-panel-after-reload.png");
