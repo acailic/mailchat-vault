@@ -253,7 +253,7 @@ fn is_http_url(url: &str) -> bool {
 
 /// Whether `url` parses and points at a loopback host (`localhost`,
 /// `127.0.0.0/8`, `::1`) — the one place plaintext http stays allowed.
-fn is_loopback_url(url: &str) -> bool {
+pub(crate) fn is_loopback_url(url: &str) -> bool {
     Url::parse(url)
         .map(|u| match u.host() {
             Some(url::Host::Domain(d)) => d == "localhost" || d.ends_with(".localhost"),

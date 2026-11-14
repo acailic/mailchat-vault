@@ -74,6 +74,15 @@ pub(crate) fn endpoint_host(url: &str) -> Option<String> {
     Some(host.strip_suffix('.').unwrap_or(host).to_string())
 }
 
+/// Whether `url` is plaintext `http` pointed at a non-loopback host —
+/// the one shape refused before any key is sent (mirrors the
+/// settings-file policy for provider profiles).
+pub fn plaintext_http_off_loopback(url: &str) -> bool {
+    Url::parse(url)
+        .map(|u| u.scheme() == "http" && !crate::settings::is_loopback_url(url))
+        .unwrap_or(false)
+}
+
 impl LlmConfig {
     pub const DEFAULT_BASE_URL: &'static str = "https://api.z.ai/api/anthropic";
     pub const DEFAULT_MODEL: &'static str = "glm-5";
@@ -148,6 +157,60 @@ impl LlmConfig {
     /// base URL itself when it does not parse as an absolute URL.
     pub fn host(&self) -> String {
         endpoint_host(&self.base_url).unwrap_or_else(|| self.base_url.clone())
+    }
+
+    /// One minimal `/v1/messages` round trip (`max_tokens: 1`) that verifies
+    /// base URL, API key, and model together — the Settings "Test
+    /// connection" button. Nothing from the vault is sent (a fixed "ping"
+    /// message) and the reply text is ignored: a 2xx with a readable body is
+    /// success. Errors are classified and user-facing.
+    pub fn test_connection(&self) -> Result<()> {
+        let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "model": self.model,
+            "max_tokens": 1,
+            "messages": [{ "role": "user", "content": "ping" }],
+        });
+        let response = ureq::post(&url)
+            .set("x-api-key", &self.api_key)
+            .set("anthropic-version", "2023-06-01")
+            .timeout(REQUEST_TIMEOUT)
+            .send_json(body);
+        match response {
+            Ok(response) => response
+                .into_json::<serde_json::Value>()
+                .map(|_| ())
+                .map_err(|e| Error::Llm(format!("unreadable response body: {e}"))),
+            Err(ureq::Error::Status(code, response)) => {
+                let body = response.into_string().unwrap_or_default();
+                Err(Error::Llm(classify_status(code, &body, &self.host())))
+            }
+            Err(e) => Err(Error::Llm(format!("could not reach {}: {e}", self.host()))),
+        }
+    }
+}
+
+/// Turn a non-2xx test response into a short, actionable message.
+fn classify_status(code: u16, body: &str, host: &str) -> String {
+    match code {
+        401 | 403 => format!("invalid API key (HTTP {code})"),
+        404 => format!("no endpoint at this base URL (HTTP 404) — check the base URL ({host})"),
+        _ => {
+            let detail = serde_json::from_str::<serde_json::Value>(body)
+                .ok()
+                .and_then(|v| {
+                    v["error"]["message"]
+                        .as_str()
+                        .or_else(|| v["message"].as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| body.chars().take(200).collect());
+            if detail.is_empty() {
+                format!("HTTP {code}")
+            } else {
+                format!("HTTP {code}: {detail}")
+            }
+        }
     }
 }
 
@@ -1388,5 +1451,37 @@ mod tests {
             "{}",
             llm.prompts()[1].1
         );
+    }
+
+    #[test]
+    fn classify_status_maps_common_failures() {
+        // Invalid key.
+        assert!(classify_status(401, "", "api.z.ai").contains("invalid API key (HTTP 401)"));
+        assert!(classify_status(403, "{}", "h").contains("invalid API key (HTTP 403)"));
+        // Wrong base URL.
+        assert!(classify_status(404, "", "api.example").contains("no endpoint at this base URL"));
+        // Provider error body (Anthropic-style nested message) is surfaced.
+        let body =
+            r#"{"error":{"type":"invalid_request_error","message":"model: nope not found"}}"#;
+        assert!(classify_status(400, body, "h").contains("model: nope not found"));
+        // Flat message field also honored.
+        assert!(
+            classify_status(400, r#"{"message":"bad request detail"}"#, "h")
+                .contains("bad request detail")
+        );
+        // Non-JSON body: raw excerpt.
+        assert!(classify_status(500, "boom", "h").contains("HTTP 500: boom"));
+        // Empty body: code only.
+        assert_eq!(classify_status(502, "", "h"), "HTTP 502");
+    }
+
+    #[test]
+    fn plaintext_http_guard_matches_settings_policy() {
+        assert!(plaintext_http_off_loopback("http://api.example.com"));
+        assert!(!plaintext_http_off_loopback("https://api.example.com"));
+        assert!(!plaintext_http_off_loopback("http://127.0.0.1:8080"));
+        assert!(!plaintext_http_off_loopback("http://localhost:9"));
+        assert!(!plaintext_http_off_loopback("http://[::1]:9"));
+        assert!(!plaintext_http_off_loopback("not a url"));
     }
 }
