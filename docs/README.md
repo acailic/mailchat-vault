@@ -17,6 +17,7 @@ Hands-on guides sit alongside the specification set:
 | [IMAP sync](imap-sync.md) | Gmail (Google sign-in / app password) and generic IMAP setup, credential storage |
 | [Testing](testing.md) | Test suites, performance budgets, fuzzing, CI, hermetic server setup |
 | [Release](release.md) | Installers, local builds, smoke tests, checksums, publishing |
+| [Support matrix](support-matrix.md) | Current capability and claim status with evidence links, plus open go-public blockers |
 
 ## Reading order
 

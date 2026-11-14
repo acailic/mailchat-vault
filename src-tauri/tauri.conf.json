@@ -30,7 +30,7 @@
     "targets": ["appimage", "deb"],
     "category": "Utility",
     "shortDescription": "Local email & chat archive",
-    "longDescription": "Mailchat Vault — private local archive and full-text search over your own email and chat history. Imports mbox, WhatsApp, Telegram, Signal and Discord exports; nothing leaves the machine.",
+    "longDescription": "Mailchat Vault — local archive and full-text search over your own email and chat history. Imports mbox, WhatsApp, Telegram, Signal and Discord exports; syncs mail read-only over IMAP. Search runs locally; optional AI-assisted search sends the query and matching rows to your chosen provider after explicit consent. The app does not encrypt the archive or backups.",
     "fileAssociations": [
       {
         "ext": ["mbox"],
