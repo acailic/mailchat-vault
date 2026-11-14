@@ -15,7 +15,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use vault_core::llm::{plaintext_http_off_loopback, LlmConfig, LlmStatus};
 use vault_core::settings::{
-    build_menu, ProviderMenuItem, ProviderProfile, Settings, Theme, ENV_ID, LOCAL_ID,
+    build_menu, check_profile_pairing, ProviderMenuItem, ProviderProfile, Settings, Theme, ENV_ID,
+    LOCAL_ID,
 };
 
 use crate::secrets::SecretStore;
@@ -287,10 +288,13 @@ impl LlmRegistry {
     /// the target's stored/effective values with the currently-typed form
     /// values layered on top. Fails with a user-facing message when there is
     /// nothing to test or the configuration refuses itself (pairing,
-    /// plaintext http).
+    /// plaintext http). Profile targets re-run the save-time pairing rules
+    /// ([`check_profile_pairing`]) on the composed values — typed form
+    /// fields replace the stored, validated ones, so a Test click must not
+    /// send a key to a provider it does not belong to either.
     pub fn test_config(&self, payload: &LlmTestPayload) -> std::result::Result<LlmConfig, String> {
         let trim = |v: &str| v.trim().to_string();
-        let config = if payload.provider == ENV_ID {
+        let (config, pairing) = if payload.provider == ENV_ID {
             let zai = trim(&payload.zai_key);
             let anthropic = trim(&payload.anthropic_key);
             let base_url = trim(&payload.base_url);
@@ -314,7 +318,9 @@ impl LlmRegistry {
                     _ => self.env_lookup(name),
                 }
             };
-            match LlmConfig::from_lookup(lookup) {
+            // The env target's typed values flow through `from_lookup`,
+            // which already enforces the env pairing rules.
+            let config = match LlmConfig::from_lookup(lookup) {
                 Ok(Some(config)) => config,
                 Ok(None) => {
                     return Err(
@@ -322,7 +328,8 @@ impl LlmRegistry {
                     )
                 }
                 Err(e) => return Err(e.to_string()),
-            }
+            };
+            (config, None)
         } else {
             let profile = self
                 .settings
@@ -348,13 +355,25 @@ impl LlmRegistry {
                     typed
                 }
             };
-            config
+            // Re-validate the pairing on what will actually be probed:
+            // typed-or-effective base URL and model under the profile kind.
+            let composed = ProviderProfile {
+                id: profile.id.clone(),
+                name: profile.name.clone(),
+                kind: profile.kind,
+                base_url: config.base_url.clone(),
+                model: config.model.clone(),
+            };
+            (config, Some(composed))
         };
         if plaintext_http_off_loopback(&config.base_url) {
             return Err(format!(
                 "refusing to send the API key over plaintext http — use https for {} (or a localhost endpoint for testing)",
                 config.base_url
             ));
+        }
+        if let Some(profile) = pairing {
+            check_profile_pairing(&profile).map_err(|e| e.to_string())?;
         }
         Ok(config)
     }
@@ -1163,6 +1182,60 @@ mod tests {
             .test_config(&payload)
             .unwrap_err()
             .contains("plaintext http"));
+    }
+
+    #[test]
+    fn test_config_profile_target_never_sends_a_zai_key_off_zai() {
+        // A typed base URL replaces the stored (validated) one, so the
+        // save-time pairing rule is re-run on the composed profile: the
+        // stored z.ai key must not ride a typed foreign endpoint.
+        let settings = settings_with(vec![profile("glm", ProviderKind::Zai)], None);
+        let r = registry(settings, &[("glm", "stored")], &[]);
+        let payload = LlmTestPayload {
+            base_url: "https://api.anthropic.com".into(),
+            ..LlmTestPayload::defaulting("glm")
+        };
+        let err = r.test_config(&payload).unwrap_err();
+        assert!(
+            err.contains("only ever sent to the z.ai endpoint"),
+            "got: {err}"
+        );
+        assert!(err.contains("api.anthropic.com"), "got: {err}");
+        // An explicit z.ai spelling still passes — the rule refuses the
+        // pairing, not typed URLs as such.
+        let payload = LlmTestPayload {
+            base_url: "https://api.z.ai/api/anthropic".into(),
+            ..LlmTestPayload::defaulting("glm")
+        };
+        assert_eq!(r.test_config(&payload).unwrap().api_key, "stored");
+    }
+
+    #[test]
+    fn test_config_profile_target_never_sends_an_anthropic_key_to_zai() {
+        // The mirror case: a typed Anthropic key must not be probed
+        // against the z.ai host, exactly as a save would refuse.
+        let settings = settings_with(vec![profile("claude", ProviderKind::Anthropic)], None);
+        let r = registry(settings, &[], &[]);
+        let payload = LlmTestPayload {
+            base_url: "https://api.z.ai/api/anthropic".into(),
+            key: "typed".into(),
+            ..LlmTestPayload::defaulting("claude")
+        };
+        let err = r.test_config(&payload).unwrap_err();
+        assert!(
+            err.contains("refusing to send an Anthropic key"),
+            "got: {err}"
+        );
+        // Its own (stored) endpoint with the typed key still resolves.
+        let payload = LlmTestPayload {
+            key: "typed".into(),
+            ..LlmTestPayload::defaulting("claude")
+        };
+        let config = r.test_config(&payload).unwrap();
+        assert_eq!(
+            (config.api_key.as_str(), config.base_url.as_str()),
+            ("typed", "https://api.anthropic.com")
+        );
     }
 
     #[test]

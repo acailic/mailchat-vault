@@ -1167,10 +1167,18 @@ pub struct LlmTestResult {
 /// environment fallback (`env`). The explicit button click is the
 /// consent: the request is a fixed "ping" with `max_tokens: 1` and sends
 /// nothing from the vault, so it stands outside the Ask consent gate.
+///
+/// The probe is blocking I/O bounded only by the request timeout (30s),
+/// so it runs on the blocking pool: a slow or unreachable endpoint never
+/// freezes the UI or stalls other commands.
 #[tauri::command]
-fn llm_test(state: State<AppState>, payload: LlmTestPayload) -> Result<LlmTestResult, String> {
-    // Resolve the config without holding the registry lock across the
-    // network round trip (same pattern as llm_ask).
+async fn llm_test(
+    state: State<'_, AppState>,
+    payload: LlmTestPayload,
+) -> Result<LlmTestResult, String> {
+    // Resolve the config under the registry lock, and release it before
+    // the network round trip (same pattern as llm_ask): the config is
+    // cloned out, so the probe below owns everything it needs.
     let config = {
         let registry = state
             .registry
@@ -1178,18 +1186,22 @@ fn llm_test(state: State<AppState>, payload: LlmTestPayload) -> Result<LlmTestRe
             .map_err(|e| format!("registry lock poisoned: {e}"))?;
         registry.test_config(&payload)?
     };
-    let start = std::time::Instant::now();
-    let outcome = config.test_connection();
-    let latency_ms = start.elapsed().as_millis() as u64;
-    let detail = match &outcome {
-        Ok(()) => format!("{} replied on model {}", config.host(), config.model),
-        Err(e) => e.to_string(),
-    };
-    Ok(LlmTestResult {
-        ok: outcome.is_ok(),
-        latency_ms,
-        detail,
+    tauri::async_runtime::spawn_blocking(move || {
+        let start = std::time::Instant::now();
+        let outcome = config.test_connection();
+        let latency_ms = start.elapsed().as_millis() as u64;
+        let detail = match &outcome {
+            Ok(()) => format!("{} replied on model {}", config.host(), config.model),
+            Err(e) => e.to_string(),
+        };
+        LlmTestResult {
+            ok: outcome.is_ok(),
+            latency_ms,
+            detail,
+        }
     })
+    .await
+    .map_err(|e| format!("connection test task failed: {e}"))
 }
 
 /// Everything the Settings UI shows: provider profiles (with a `has_key`
