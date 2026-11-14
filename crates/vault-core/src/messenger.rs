@@ -430,7 +430,10 @@ struct MessengerHeader {
     // The field exists to make serde enforce array-ness (the same trick
     // as `TelegramHeader`); IgnoredAny elements are zero-sized, so a
     // huge messages array costs no memory proportional to its size.
-    // Never read — pass 2 walks the messages streamed.
+    // Never read — pass 2 walks the messages streamed. Defaulted: a
+    // part file without the member parses (empty), the same tolerance
+    // the whole-file parser's defaulted `MessengerExport.messages` has.
+    #[serde(default)]
     #[allow(dead_code)]
     messages: Vec<serde::de::IgnoredAny>,
 }
@@ -612,8 +615,16 @@ impl<'de, 'a, 'c> serde::de::Visitor<'de> for MessagesVisitor<'a, 'c> {
         self,
         mut map: A,
     ) -> std::result::Result<(), A::Error> {
+        // A duplicate top-level `messages` key streams only the first
+        // array; later occurrences are drained through the ignore arm
+        // (serde_json requires the value consumed before the map can
+        // end). The whole-file parser keeps its own standard serde
+        // duplicate-key handling — the paths intentionally diverge on
+        // that pathological shape.
+        let mut messages_seen = false;
         while let Some(key) = map.next_key::<String>()? {
-            if key == "messages" {
+            if key == "messages" && !messages_seen {
+                messages_seen = true;
                 map.next_value_seed(MessagesSeed {
                     ctx: self.ctx,
                     occ: self.occ,
@@ -792,6 +803,72 @@ mod tests {
         for (item, msg) in streamed.iter().zip(&collected.messages) {
             assert_eq!(item, &StreamItem::Message(msg.clone()));
         }
+    }
+
+    #[test]
+    fn missing_messages_member_is_tolerated_on_both_paths() {
+        // A part file without a `messages` member must not fail the
+        // whole streaming pick: the header defaults it to empty, so
+        // `collect` succeeds with zero messages and `stream` yields
+        // nothing without error — the paths agree.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("message_1.json");
+        std::fs::write(
+            &path,
+            br#"{"participants": [{"name": "Ana"}], "title": "Ana", "thread_path": "inbox/ana_1111"}"#,
+        )
+        .unwrap();
+        let collected = MessengerSource::new(&path).collect().unwrap();
+        assert_eq!(collected.messages.len(), 0);
+        assert_eq!(collected.failed, 0);
+        let mut streamed = Vec::new();
+        MessengerSource::new(&path)
+            .stream(0, &mut |item| {
+                streamed.push(item);
+                Ok(Flow::Continue)
+            })
+            .unwrap();
+        assert_eq!(streamed.len(), 0);
+    }
+
+    #[test]
+    fn duplicate_messages_key_streams_only_the_first_array() {
+        // A duplicated top-level `messages` key in a later part file:
+        // pass 1 reads only the numerically first part, so nothing
+        // fails the pick, and the guard makes pass 2 stream just the
+        // first array — before the guard, both arrays streamed. The
+        // whole-file parser keeps standard serde duplicate-key
+        // handling, so the paths intentionally diverge on this
+        // pathological shape; no parity assertion.
+        let dir = tempfile::tempdir().unwrap();
+        let thread = dir.path().join("ana_1111");
+        std::fs::create_dir_all(&thread).unwrap();
+        std::fs::write(
+            thread.join("message_1.json"),
+            br#"{"participants": [{"name": "Ana"}], "title": "Ana", "thread_path": "inbox/ana_1111", "messages": [{"sender_name": "Ana", "timestamp_ms": 1762981140000, "content": "nula"}]}"#,
+        )
+        .unwrap();
+        // This part holds two distinct `messages` arrays.
+        std::fs::write(
+            thread.join("message_2.json"),
+            br#"{"participants": [{"name": "Ana"}], "messages": [{"sender_name": "Ana", "timestamp_ms": 1762981200000, "content": "prva"}, {"sender_name": "Ana", "timestamp_ms": 1762981260000, "content": "druga"}], "title": "Ana", "messages": [{"sender_name": "Ana", "timestamp_ms": 1762981320000, "content": "treca"}]}"#,
+        )
+        .unwrap();
+        let mut streamed = Vec::new();
+        MessengerSource::new(&thread)
+            .stream(0, &mut |item| {
+                streamed.push(item);
+                Ok(Flow::Continue)
+            })
+            .unwrap();
+        let bodies: Vec<&str> = streamed
+            .iter()
+            .map(|item| match item {
+                StreamItem::Message(m) => m.body.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert_eq!(bodies, ["nula", "prva", "druga"]);
     }
 
     #[test]
