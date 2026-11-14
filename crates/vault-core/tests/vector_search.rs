@@ -152,6 +152,8 @@ fn vector_scan_orders_by_cosine_and_respects_dates() {
             &e.embed("vault sync problems"),
             None,
             None,
+            None,
+            false,
             10,
         )
         .unwrap();
@@ -180,6 +182,8 @@ fn vector_scan_orders_by_cosine_and_respects_dates() {
             &e.embed("vault sync planning"),
             Some("2026-10-01"),
             Some("2026-10-31"),
+            None,
+            false,
             10,
         )
         .unwrap();
@@ -194,6 +198,8 @@ fn vector_scan_orders_by_cosine_and_respects_dates() {
             &e.embed("vault"),
             Some("2020-01-01"),
             Some("2020-12-31"),
+            None,
+            false,
             10,
         )
         .unwrap();
@@ -207,6 +213,8 @@ fn vector_scan_orders_by_cosine_and_respects_dates() {
             &e.embed("vault"),
             Some("October"),
             None,
+            None,
+            false,
             10
         )
         .is_err());
@@ -227,7 +235,16 @@ fn vector_scan_truncates_and_orders_deterministically() {
     let e = HashEmbedder::new();
     run_embedding_job(&s, &e, None).unwrap();
     let hits = s
-        .vector_scan(e.id(), e.dim(), &e.embed("shared topic"), None, None, 3)
+        .vector_scan(
+            e.id(),
+            e.dim(),
+            &e.embed("shared topic"),
+            None,
+            None,
+            None,
+            false,
+            3,
+        )
         .unwrap();
     assert_eq!(hits.len(), 3, "limit respected");
     let mut sorted = hits.clone();
@@ -251,7 +268,16 @@ fn vector_scan_skips_foreign_dimension_rows() {
     let foreign = vec![0.5, -0.5, 0.5, -0.5];
     s.embed_messages_batch(e.id(), 4, &[(1, foreign)]).unwrap();
     let hits = s
-        .vector_scan(e.id(), e.dim(), &e.embed("vault sync"), None, None, 10)
+        .vector_scan(
+            e.id(),
+            e.dim(),
+            &e.embed("vault sync"),
+            None,
+            None,
+            None,
+            false,
+            10,
+        )
         .unwrap();
     assert!(
         hits.iter().all(|h| h.message_id != 1),
@@ -264,7 +290,16 @@ fn vector_scan_skips_foreign_dimension_rows() {
 fn vector_scan_rejects_mismatched_query_length() {
     let s = seeded();
     let e = HashEmbedder::new();
-    let err = s.vector_scan(e.id(), e.dim(), &[1.0, 2.0, 3.0], None, None, 5);
+    let err = s.vector_scan(
+        e.id(),
+        e.dim(),
+        &[1.0, 2.0, 3.0],
+        None,
+        None,
+        None,
+        false,
+        5,
+    );
     assert!(matches!(err, Err(vault_core::Error::Embedding(_))));
 }
 
@@ -330,7 +365,9 @@ fn embedding_vectors_roundtrip_through_the_blob_format() {
     let e = HashEmbedder::new();
     run_embedding_job(&s, &e, None).unwrap();
     let q = e.embed("vault sync encountered problems at midnight");
-    let hits = s.vector_scan(e.id(), e.dim(), &q, None, None, 1).unwrap();
+    let hits = s
+        .vector_scan(e.id(), e.dim(), &q, None, None, None, false, 1)
+        .unwrap();
     assert_eq!(hits[0].message_id, 2);
     // ~1 up to the (small) i8 quantization error.
     assert!(

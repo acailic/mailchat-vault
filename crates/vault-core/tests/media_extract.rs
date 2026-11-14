@@ -504,7 +504,7 @@ fn whatsapp_attachments_are_matched_by_name() {
         ("plan.pdf", "document", "plan.pdf"),
     ] {
         let hits = storage
-            .search_filtered(&build_match_query(needle), None, None, 10)
+            .search_filtered(&build_match_query(needle), None, None, None, false, 10)
             .unwrap();
         let raw: serde_json::Value = serde_json::from_str(&hits[0].raw_json).unwrap();
         assert_eq!(raw["media"][0]["kind"], kind, "{needle}");
@@ -548,7 +548,7 @@ fn whatsapp_stem_match_never_shadowed_by_foreign_extension() {
     assert_eq!(media.stored, 1, "IMG-1.jpg matches IMG-1.jpeg by stem");
     assert_eq!(fs::read_dir(sb.store_dir()).unwrap().count(), 1);
     let hits = storage
-        .search_filtered(&build_match_query("plan.pdf"), None, None, 10)
+        .search_filtered(&build_match_query("plan.pdf"), None, None, None, false, 10)
         .unwrap();
     let raw: serde_json::Value = serde_json::from_str(&hits[0].raw_json).unwrap();
     // The absent plan.pdf is a missing entry — never linked to the
@@ -580,7 +580,7 @@ fn whatsapp_export_without_files_reports_missing_named_attachments() {
     // no digest) — visible, honestly absent, re-import-stable.
     assert_eq!(media.linked, 1);
     let hits = storage
-        .search_filtered(&build_match_query("vidimo se"), None, None, 10)
+        .search_filtered(&build_match_query("vidimo se"), None, None, None, false, 10)
         .unwrap();
     assert!(!hits.is_empty());
     assert!(!sb.store_dir().exists());

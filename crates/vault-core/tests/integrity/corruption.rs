@@ -177,7 +177,7 @@ fn fts_index_corruption_is_detected_and_rebuildable() {
     assert_eq!(s.stats().unwrap().total, n);
     for i in 0..n {
         assert!(
-            s.search_filtered(&format!("tok{i}"), None, None, 1)
+            s.search_filtered(&format!("tok{i}"), None, None, None, false, 1)
                 .unwrap()
                 .is_empty(),
             "wiped index must not return hits"
@@ -186,10 +186,15 @@ fn fts_index_corruption_is_detected_and_rebuildable() {
 
     // Recovery path: rebuild restores the index exactly.
     s.rebuild_fts().unwrap();
-    assert_eq!(s.search_filtered("tok17", None, None, 10).unwrap().len(), 1);
+    assert_eq!(
+        s.search_filtered("tok17", None, None, None, false, 10)
+            .unwrap()
+            .len(),
+        1
+    );
     for i in 0..n {
         assert_eq!(
-            s.search_filtered(&format!("tok{i}"), None, None, 1)
+            s.search_filtered(&format!("tok{i}"), None, None, None, false, 1)
                 .unwrap()
                 .len(),
             1,

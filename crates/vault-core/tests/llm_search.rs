@@ -172,7 +172,7 @@ fn summary_prompt_is_limited_to_top_n_results() {
     }
     let llm = MockLlm::with_replies(["summary"]);
     let results = s
-        .search_filtered(&build_match_query("vault"), None, None, 50)
+        .search_filtered(&build_match_query("vault"), None, None, None, false, 50)
         .unwrap();
     assert_eq!(results.len(), 10);
     let summarized = summarize_results(&llm, "vault?", &results, 3);
@@ -293,25 +293,34 @@ fn unparseable_llm_json_falls_back_to_plain_plan() {
 fn storage_date_filters_are_inclusive_and_validated() {
     let s = seeded();
 
-    let all = s.search_filtered("\"vault\"", None, None, 50).unwrap();
+    let all = s
+        .search_filtered("\"vault\"", None, None, None, false, 50)
+        .unwrap();
     assert_eq!(all.len(), 5, "no bounds: every vault row, incl. date-less");
 
     let october = s
-        .search_filtered("\"vault\"", Some("2026-10-01"), Some("2026-10-31"), 50)
+        .search_filtered(
+            "\"vault\"",
+            Some("2026-10-01"),
+            Some("2026-10-31"),
+            None,
+            false,
+            50,
+        )
         .unwrap();
     assert_eq!(october.len(), 3, "inclusive both ends; date-less excluded");
 
     let from_only = s
-        .search_filtered("\"vault\"", Some("2026-10-13"), None, 50)
+        .search_filtered("\"vault\"", Some("2026-10-13"), None, None, false, 50)
         .unwrap();
     assert_eq!(from_only.len(), 2, "m3 and m4 (m2 is on the 12th)");
 
     assert!(matches!(
-        s.search_filtered("\"vault\"", Some("October"), None, 50),
+        s.search_filtered("\"vault\"", Some("October"), None, None, false, 50),
         Err(Error::InvalidDate(_))
     ));
     assert!(matches!(
-        s.search_filtered("\"vault\"", None, Some("2026-13-01"), 50),
+        s.search_filtered("\"vault\"", None, Some("2026-13-01"), None, false, 50),
         Err(Error::InvalidDate(_))
     ));
 }

@@ -802,6 +802,8 @@ fn evaluate() -> Evaluation {
                 &embedder.embed(q.text),
                 q.date_from,
                 q.date_to,
+                None,
+                false,
                 CANDIDATES,
             )
             .unwrap()

@@ -479,6 +479,8 @@ pub fn run_plan(storage: &Storage, planned: &PlannedQuery, limit: u32) -> Result
         &planned.plan.match_expr,
         planned.plan.date_from.as_deref(),
         planned.plan.date_to.as_deref(),
+        planned.plan.from.as_deref(),
+        planned.plan.has_link.unwrap_or(false),
         limit,
     )
 }
@@ -539,6 +541,8 @@ pub fn rank_hybrid(
                 &embedder.embed(question),
                 planned.plan.date_from.as_deref(),
                 planned.plan.date_to.as_deref(),
+                planned.plan.from.as_deref(),
+                planned.plan.has_link.unwrap_or(false),
                 VECTOR_CANDIDATES.max(limit),
             )?
             .into_iter()
