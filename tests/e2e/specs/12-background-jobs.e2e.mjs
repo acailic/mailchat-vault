@@ -43,7 +43,8 @@ export async function run(ctx) {
 
     // --- 2. import a mbox, then run the embed job through the v2 panel ---
     await ui.importMbox(browser, ui.archiveMbox);
-    await ui.openView(browser, "workspace");
+    // The embeddings control lives on Settings → AI assistance.
+    await ui.openSettingsSection(browser, "ai");
     const embedButton = await browser.$("#embed-btn");
     await embedButton.scrollIntoView({ block: "center" });
     await embedButton.click();

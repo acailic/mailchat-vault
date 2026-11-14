@@ -368,7 +368,9 @@ export async function run(ctx) {
     const secondPageId = await rows2[0].getAttribute("data-id");
     await (await rows2[0].$(".row-select")).click();
 
-    // The announced set spans both pages...
+    // The announced set spans both pages... (the button lives inside the
+    // Export… picker, so the picker is opened to read its label)
+    await ui.openExportMenu(browser);
     const exportBtn = await browser.$("#export-selection-btn");
     assert.includes(
       await exportBtn.getText(),

@@ -436,7 +436,9 @@ kbd {
  * more quiet control in the row (the .chip recipe, kept separate so
  * ".chip" stays the removable-chip contract) and carries the
  * active-filter count. */
-#filters > summary {
+#filters > summary,
+#export-menu > summary,
+#ask-fold > summary {
   /* Default list-item display keeps the native disclosure marker — the
    * same affordance as the IMAP form's Advanced fold. */
   cursor: pointer;
@@ -448,8 +450,11 @@ kbd {
   color: inherit;
   width: fit-content;
 }
-#filters > summary:hover { background: var(--panel-2); }
-#filters > summary.on {
+#filters > summary:hover,
+#export-menu > summary:hover,
+#ask-fold > summary:hover { background: var(--panel-2); }
+#filters > summary.on,
+#ask-fold > summary.on {
   background: var(--selection);
   border-color: var(--accent);
 }
@@ -669,13 +674,24 @@ mark.hit {
 /* Pagination + export */
 #pagination { display: flex; gap: 10px; align-items: center; margin-top: var(--sp-3); }
 .page-info { font-size: var(--text-meta); color: var(--muted); }
-#export-controls { display: flex; gap: var(--sp-2); align-items: center; margin-top: var(--sp-2); flex-wrap: wrap; }
-#export-status { font-size: var(--text-meta); color: var(--muted); }
+/* One Export… action: the picker folds behind the summary; the outcome
+ * line stays readable below it once the picker is closed again. */
+#export-controls { margin-top: var(--sp-2); }
+#export-controls .export-fields {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  align-items: center;
+  padding-top: var(--sp-2);
+}
+#export-status, #selection-status { font-size: var(--text-meta); color: var(--muted); }
 
 #keyboard-hint { margin-top: var(--sp-2); font-size: 12px; color: var(--muted); }
 
-/* Ask section (secondary mode beside Search in the results area) */
-#ask-section h2 { font-size: var(--text-section); margin: var(--sp-4) 0 var(--sp-2); }
+/* Ask section (secondary mode beside Search in the results area): a
+ * quiet fold like Filters; the heading weight moves to the summary. */
+#ask-fold { margin-top: var(--sp-4); }
+#ask-section .ask-fields { padding-top: var(--sp-2); }
 #ask { flex: 1; min-width: 12em; }
 #ask-provider { flex: 0 1 16em; min-width: 12em; }
 #llm-note {
@@ -823,7 +839,11 @@ summary.icon-btn::-webkit-details-marker { display: none; }
   align-items: center;
   flex-wrap: wrap;
 }
-.export-row .meta { flex: 0 0 auto; }
+.export-row .meta {
+  /* The caption names the section on its own line; the format select and
+   * the action share the line below it. */
+  flex: 1 1 100%;
+}
 .meta-table {
   display: grid;
   grid-template-columns: auto 1fr;

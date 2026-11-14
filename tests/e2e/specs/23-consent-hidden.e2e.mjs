@@ -59,6 +59,7 @@ export async function run(ctx) {
 
     // --- an ask on the default (local) provider never opens the prompt ----
     if (await browser.$("#ask").isExisting()) {
+      await ui.openAsk(browser); // the Ask input lives behind its fold
       const askInput = await browser.$("#ask");
       await askInput.click();
       await askInput.setValue("anything");
