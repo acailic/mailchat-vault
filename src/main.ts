@@ -1356,6 +1356,13 @@ let importBusy = false;
  * a failed run so the failure card can render; adopted from the tracker
  * at boot when an import survived an app restart. */
 let importJob: { id: number; kind: string; path: string | null } | null = null;
+/** Cancel was asked for on THIS flow's job and its terminal event has
+ * not landed yet. The card re-renders on every tracker change, so a
+ * `progress` event after Cancel would otherwise rebuild the button
+ * enabled; while this stands, every render keeps it at its disabled
+ * "Cancelling…" state. Cleared by the terminal event (and whenever a
+ * new import or a recovered job takes over the flow). */
+let importCancelRequested = false;
 
 /** Map a backend import error to something a first-time importer can
  * act on — no raw errno, no connector vocabulary. */
@@ -1460,6 +1467,7 @@ async function confirmImport(): Promise<void> {
   try {
     const handle = await ipc.jobSubmit(kind, params);
     importJob = { id: handle.id, kind, path: target.path };
+    importCancelRequested = false; // a fresh run: its Cancel is live
     renderImportProgressCard(); // queued card — events take over from here
   } catch (e) {
     // Refused before any job existed (queue full, demo lockout, moved
@@ -1500,6 +1508,17 @@ function renderImportProgressCard(): void {
     onCancel: () => void cancelImportJob(),
     onDismiss: dismissImportFailure,
   });
+  // A `progress` event after Cancel re-renders the card (the tracker
+  // changed) and would rebuild the button enabled; while the cancel
+  // request stands, keep it at its disabled "Cancelling…" state — the
+  // terminal `cancelled` event is what ends the card.
+  if (importCancelRequested) {
+    const button = importProgressEl.querySelector<HTMLButtonElement>("#import-cancel-btn");
+    if (button) {
+      button.disabled = true;
+      button.textContent = "Cancelling…";
+    }
+  }
 }
 
 /** Cancel this flow's import (cooperative: it stops at the next safe
@@ -1509,6 +1528,7 @@ function renderImportProgressCard(): void {
 async function cancelImportJob(): Promise<void> {
   const job = importJob;
   if (job === null) return;
+  importCancelRequested = true;
   const button = document.querySelector<HTMLButtonElement>("#import-cancel-btn");
   if (button) {
     button.disabled = true;
@@ -1517,6 +1537,7 @@ async function cancelImportJob(): Promise<void> {
   try {
     await ipc.jobCancel(job.id);
   } catch {
+    importCancelRequested = false; // the ask never left; the button lives
     renderImportProgressCard(); // restore the button; the stream still speaks
   }
 }
@@ -1571,6 +1592,7 @@ function feedImportJobEvent(event: JobEvent): void {
   if (event.type === "succeeded") {
     importJob = null;
     importBusy = false;
+    importCancelRequested = false;
     hideImportProgress(importProgressEl);
     const outcome = importOutcomeOf(event.result);
     if (outcome) {
@@ -1579,15 +1601,22 @@ function feedImportJobEvent(event: JobEvent): void {
       initialBrowseDone = true; // the archive view is live from here on
       void runSearch(0); // newest-first browse, ready when the user returns
       if (outcome.media) void refreshMediaUsage(); // media landed in the store
+    } else {
+      // Unexpected result shape (no invented numbers, no follow-up to
+      // scope): the run did finish — say so instead of hiding the card
+      // and leaving the section wordlessly at its start state.
+      importStatus.textContent = "Import finished.";
     }
   } else if (event.type === "cancelled") {
     importJob = null;
     importBusy = false;
+    importCancelRequested = false;
     hideImportProgress(importProgressEl);
     importStatus.textContent = "";
   } else if (event.type === "failed") {
     // A new import may start; the failure card stays until dismissed.
     importBusy = false;
+    importCancelRequested = false;
   }
 }
 
@@ -2246,6 +2275,7 @@ function adoptRecoveredImportJob(): void {
   if (recovered) {
     importJob = { id: recovered.id, kind: recovered.kind, path: null };
     importBusy = true; // the pick/confirm guards hold until it ends
+    importCancelRequested = false; // this run was never cancelled here
   }
 }
 
