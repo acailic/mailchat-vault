@@ -286,10 +286,8 @@ pub fn import_pick_bounded(
     progress: &mut dyn FnMut(u64, u64, &str),
 ) -> Result<crate::bounded::BoundedOutcome> {
     let (source, _zip_guard) = mail_source_for_pick(picked)?;
-    let mut run = crate::bounded::BoundedRun::new(crate::bounded::import_id_for(
-        "mbox-import",
-        picked,
-    ));
+    let mut run =
+        crate::bounded::BoundedRun::new(crate::bounded::import_id_for("mbox-import", picked));
     run.media = Some(crate::bounded::MediaPass::mail(data_dir));
     run.run(source.as_ref(), sink, is_cancelled, progress)
 }
