@@ -246,9 +246,11 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
   `matrix-macos.sh` / `matrix-windows.ps1` (real hosts; refuse
   off-platform). A full Linux column run is green at this tree.
 - Automated Windows installer smoke (fresh install, uninstall-retention,
-  in-place upgrade from 0.1.0 with a frozen archive fixture) is wired
-  and waiting for a real runner; the macOS dmg smoke
-  (`scripts/dmg-smoke-test.sh`) runs wherever a dmg exists.
+  in-place upgrade from 0.1.0 with a frozen archive fixture) runs on
+  demand from the re-enabled Actions (Windows smoke → Run workflow);
+  the macOS dmg smoke (`scripts/dmg-smoke-test.sh`) runs wherever a
+  dmg exists — including inside the Release workflow, before the dmg
+  is attached to the draft.
 - `scripts/release/prepare-release.sh` assembles the local
   draft-release candidate (bundles, checksums, notes) without tagging
   or publishing anything — see `docs/release.md`.
@@ -271,9 +273,17 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
   shows "Windows protected your PC" → *More info* → *Run anyway*.
   Real signing/notarization is an external dependency, deliberately not
   acquired by this codebase.
-- **macOS/Windows bundles for this release wait on a maintainer
-  decision** — real machines versus temporarily re-enabling GitHub
-  Actions; the Linux column is fully validated at this tree.
+- **macOS/Windows bundles are built by re-enabled GitHub Actions** —
+  the release route was decided on 2026-11-14 (route (c)): CI and
+  Release workflows are on again, and pushing the v0.2.0 tag builds
+  all three platforms on GitHub-hosted runners (Linux AppImage + deb,
+  macOS universal dmg, Windows msi + NSIS) and attaches them to a
+  draft release. What remains a limitation: only the Linux column is
+  validated on the maintainer's own machines at this tree; macOS and
+  Windows ride on the workflow's built-in smokes (dmg mount/copy/
+  `--version` checks on the runner, deb + AppImage in clean
+  22.04/24.04 containers) and the manually dispatched Windows smoke,
+  not on physical test machines.
 - **Backups are manual and never carry credentials** — versioned
   backup/restore is shipped in 0.2.0 (Settings → Storage & backup);
   what remains a limitation: backups run only when you start one (no
