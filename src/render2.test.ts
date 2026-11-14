@@ -174,12 +174,18 @@ describe("filter chips", () => {
 });
 
 describe("import scope picker", () => {
-  it("lists scopes with counts and keeps the selection", () => {
+  it("lists scopes with human labels and keeps the selection", () => {
     const select = document.createElement("select");
     fillImportScopes(
       select,
       [
-        { import_id: "imp-a", messages: 12, first_observed_at: "", last_observed_at: "" },
+        {
+          import_id: "imp-a",
+          messages: 12,
+          // Local noon: the same calendar day in every timezone.
+          first_observed_at: "2026-11-01T12:00:00",
+          last_observed_at: "2026-11-02T12:00:00",
+        },
         { import_id: "imp-b", messages: 3, first_observed_at: "", last_observed_at: "" },
       ],
       "imp-b",
@@ -187,7 +193,11 @@ describe("import scope picker", () => {
     const options = [...select.querySelectorAll("option")];
     expect(options.map((o) => o.value)).toEqual(["", "imp-a", "imp-b"]);
     expect(options[0].textContent).toBe("any import");
-    expect(options[1].textContent).toContain("12 messages");
+    // The raw import id never leads the label; it stays one hover away.
+    expect(options[1].textContent).toBe("Imported Nov 1, 2026 — 12 messages");
+    expect(options[1].title).toBe("imp-a");
+    expect(options[2].textContent).toBe("3 messages");
+    expect(options[2].title).toBe("imp-b");
     expect(select.value).toBe("imp-b");
   });
 

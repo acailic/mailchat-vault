@@ -6,6 +6,7 @@
 import {
   conversationConfidenceLabel,
   formatSentAt,
+  importScopeLabel,
   snippet as truncateBody,
   timeConfidenceDetail,
   timeConfidenceLabel,
@@ -196,7 +197,10 @@ export function renderFilterChips(el: HTMLElement, opts: FilterChipsOptions): vo
 // Import-scope picker
 // ---------------------------------------------------------------------------
 
-/** Fill the import-scope <select> from the listed scopes. */
+/** Fill the import-scope <select> from the listed scopes. Each option is
+ * labeled by the run's first-observed day and message count (see
+ * importScopeLabel); the raw import id stays one hover away in the
+ * option's title. */
 export function fillImportScopes(
   select: HTMLSelectElement,
   scopes: ImportScope[],
@@ -210,7 +214,8 @@ export function fillImportScopes(
   for (const scope of scopes) {
     const option = document.createElement("option");
     option.value = scope.import_id;
-    option.textContent = `${scope.import_id} (${scope.messages} messages)`;
+    option.textContent = importScopeLabel(scope);
+    option.title = scope.import_id;
     options.push(option);
   }
   select.replaceChildren(...options);

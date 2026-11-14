@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   conversationConfidenceLabel,
   folderSummaryLine,
+  formatDayLabel,
   formatSentAt,
   humanSize,
+  importScopeLabel,
   mediaSummaryPart,
   snippet,
   timeConfidenceDetail,
@@ -82,6 +84,40 @@ describe("formatSentAt", () => {
     const justAfterMidnightUtc = "2026-03-09T00:20:00Z";
     expect(formatSentAt(justBeforeMidnightUtc)).toBe(expectLocal(justBeforeMidnightUtc));
     expect(formatSentAt(justAfterMidnightUtc)).toBe(expectLocal(justAfterMidnightUtc));
+  });
+});
+
+describe("formatDayLabel", () => {
+  it("renders a short local day label", () => {
+    // Local noon is the same calendar day in every timezone, so the
+    // literal expectation is timezone-independent.
+    expect(formatDayLabel("2026-11-01T12:00:00")).toBe("Nov 1, 2026");
+  });
+
+  it("is empty for absent or unparsable timestamps — nothing fabricated", () => {
+    expect(formatDayLabel("")).toBe("");
+    expect(formatDayLabel("not-a-date")).toBe("");
+  });
+});
+
+describe("importScopeLabel", () => {
+  it("leads with the first-observed day, then the count", () => {
+    expect(importScopeLabel({ messages: 6, first_observed_at: "2026-11-01T12:00:00" })).toBe(
+      "Imported Nov 1, 2026 — 6 messages",
+    );
+  });
+
+  it("speaks one message in the singular", () => {
+    expect(importScopeLabel({ messages: 1, first_observed_at: "2026-11-01T12:00:00" })).toBe(
+      "Imported Nov 1, 2026 — 1 message",
+    );
+  });
+
+  it("falls back to the count alone when no timestamp was recorded", () => {
+    expect(importScopeLabel({ messages: 3, first_observed_at: "" })).toBe("3 messages");
+    expect(importScopeLabel({ messages: 3, first_observed_at: "not-a-date" })).toBe(
+      "3 messages",
+    );
   });
 });
 
