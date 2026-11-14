@@ -35,7 +35,7 @@ fn check_probes(storage: &Storage, model: &HashMap<(String, String), &NewMessage
             .map(|m| (m.source.clone(), m.external_id.clone()))
             .collect();
         let hits: BTreeSet<_> = storage
-            .search_filtered(&fixtures::quoted_term(term), None, None, limit)
+            .search_filtered(&fixtures::quoted_term(term), None, None, None, false, limit)
             .unwrap()
             .into_iter()
             .map(|m| (m.source, m.external_id))
@@ -100,7 +100,7 @@ proptest! {
             .iter()
             .map(|t| {
                 storage
-                    .search_filtered(&fixtures::quoted_term(t), None, None, model.len() as u32 + 8)
+                    .search_filtered(&fixtures::quoted_term(t), None, None, None, false, model.len() as u32 + 8)
                     .unwrap()
                     .into_iter()
                     .map(|m| (m.source, m.external_id))
@@ -110,7 +110,7 @@ proptest! {
         storage.rebuild_fts().unwrap();
         for (i, term) in probe_terms().iter().enumerate() {
             let after: BTreeSet<_> = storage
-                .search_filtered(&fixtures::quoted_term(term), None, None, model.len() as u32 + 8)
+                .search_filtered(&fixtures::quoted_term(term), None, None, None, false, model.len() as u32 + 8)
                 .unwrap()
                 .into_iter()
                 .map(|m| (m.source, m.external_id))
@@ -126,7 +126,7 @@ proptest! {
         prop_assert_eq!(storage.stats().unwrap().total, model.len() as u64);
         for term in probe_terms() {
             let hits = storage
-                .search_filtered(&fixtures::quoted_term(term), None, None, model.len() as u32 + 8)
+                .search_filtered(&fixtures::quoted_term(term), None, None, None, false, model.len() as u32 + 8)
                 .unwrap();
             prop_assert!(hits.is_empty(), "wiped index must match nothing ({})", term);
         }

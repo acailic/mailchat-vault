@@ -16,16 +16,16 @@ export function formatCountdown(secs: number): string {
 /** One-line status over the scheduler view. */
 export function autoSyncStatusText(view: SyncScheduleView): string {
   if (!view.enabled) {
-    return "Auto-sync off — every IMAP source syncs when you press Sync (or run imap_sync_all).";
+    return "Auto-sync off: every IMAP source syncs when you press Sync (or run imap_sync_all).";
   }
   if (view.active_job !== null && view.active_job !== undefined) {
-    return `Auto-sync round running (job ${view.active_job}) — never overlapping, missed time is never queued.`;
+    return `Auto-sync round running (job ${view.active_job}): never overlapping, missed time is never queued.`;
   }
   const countdown =
     view.next_due_in_secs !== null && view.next_due_in_secs !== undefined
       ? `next round ${formatCountdown(view.next_due_in_secs)}`
       : "next round scheduled";
-  return `Auto-sync on — ${countdown}.`;
+  return `Auto-sync on: ${countdown}.`;
 }
 
 /** The interval choices the UI offers (minutes); 15 is the default. */

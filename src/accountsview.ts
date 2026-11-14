@@ -12,7 +12,7 @@
 
 import type { AccountView, SourceCount, SourceInstance } from "./types";
 import type { ImapAuthMode } from "./ipc";
-import { iconEl } from "./icons";
+import { iconEl, type IconName } from "./icons";
 
 /** The arguments of one `sync_imap` invocation for a stored account. */
 export interface SyncNowRequest {
@@ -49,6 +49,17 @@ export function syncNowRequest(account: AccountView): SyncNowRequest | null {
 /** One-line kind label for an account row. */
 export function accountKindLabel(account: AccountView): string {
   return account.kind === "imap" ? "Email (IMAP)" : "Import";
+}
+
+/** The taxonomy icon of one source: live email → the envelope, a chat
+ * export (WhatsApp/Telegram/Signal/Discord/Messenger — the backend's
+ * `"chat"` medium) → the chat bubble, everything else (mbox/.eml
+ * imports, mixed or not-yet-archived imports) → the file sheet. The
+ * medium comes from the messages' own `channel` column, so the icon
+ * never guesses from the label. */
+export function sourceIcon(account: Pick<AccountView, "kind" | "medium">): IconName {
+  if (account.kind === "imap") return "mail";
+  return account.medium === "chat" ? "chat" : "file";
 }
 
 /** The account's headline label — the identity the user knows the
@@ -169,6 +180,9 @@ export interface SourceChipRow {
   /** Message count when it belongs to this row alone; null when the
    * label is shared and a per-row count would be a lie. */
   count: number | null;
+  /** The source's taxonomy icon (mail / chat / file). Decorative —
+   * the label carries the meaning for assistive tech. */
+  icon: IconName;
 }
 
 /** Build the navigation chip rows from the canonical instances, the
@@ -191,10 +205,22 @@ export function sourceChipRows(
   }
   const importSeen = new Map<string, number>();
   const imapSeen = new Map<string, number>();
+  /** The chip's taxonomy icon: the account row's medium when the cache
+   * has one (mail/chat/file per `sourceIcon`), else the generic file
+   * glyph — a missing account row must not lose the chip. */
+  function iconOf(id: string): IconName {
+    const account = accountById.get(id);
+    return account ? sourceIcon(account) : "file";
+  }
   return present.map((s) => {
     const duplicated = (labelCounts.get(s.label) ?? 0) > 1;
     if (!duplicated) {
-      return { id: s.id, label: s.label, count: countByLabel.get(s.label) ?? null };
+      return {
+        id: s.id,
+        label: s.label,
+        count: countByLabel.get(s.label) ?? null,
+        icon: iconOf(s.id),
+      };
     }
     // Email vs import is the instance's own kind; the account row only
     // supplies the imap identity (username · host) detail. The identity
@@ -215,7 +241,7 @@ export function sourceChipRows(
       importSeen.set(s.label, n);
       label = n === 1 ? `${s.label} · import` : `${s.label} · import ${n}`;
     }
-    return { id: s.id, label, count: null };
+    return { id: s.id, label, count: null, icon: iconOf(s.id) };
   });
 }
 
@@ -256,7 +282,7 @@ export function renderSourcesList(
 
     const main = document.createElement("div");
     main.className = "account-main";
-    main.append(iconEl(account.kind === "imap" ? "mail" : "file"));
+    main.append(iconEl(sourceIcon(account)));
     const title = document.createElement("span");
     title.className = "account-label";
     const displayName = accountTitle(account);

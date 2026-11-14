@@ -971,6 +971,102 @@ describe("v2 filters", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Era chips: the archive's timeline as one-click date filters. The from/to
+// inputs stay the single source of truth — the pressed chip is derived
+// from them on every render, never stored.
+// ---------------------------------------------------------------------------
+
+describe("era chips", () => {
+  /** Three years of history → year chips 2019, 2020, 2021. */
+  const ERA_STATS: ArchiveStats = {
+    ...ARCHIVE_STATS,
+    first_sent_at: "2019-05-01T10:00:00Z",
+    last_sent_at: "2021-07-04T10:00:00Z",
+    by_day: [
+      { day: "2019-05-01", count: 2 },
+      { day: "2020-06-02", count: 3 },
+      { day: "2021-07-04", count: 4 },
+    ],
+  };
+
+  function eraChips(): HTMLElement[] {
+    return [...win.document.querySelectorAll("#era-chips .era-chip")] as unknown as HTMLElement[];
+  }
+
+  it("renders the archive's years; a click sets the from/to inputs and filters", async () => {
+    tauri.handlers.set("archive_stats", () => ERA_STATS);
+    searchRespondsWith(() => pageOf(HITS.slice(0, 1), 1));
+    await boot();
+    await vi.waitFor(() => expect(eraChips().length).toBe(3));
+    expect(eraChips().map((c) => c.textContent)).toEqual(["2019", "2020", "2021"]);
+    expect(eraChips().every((c) => c.getAttribute("aria-pressed") === "false")).toBe(true);
+
+    eraChips()[1].click();
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    expect(input("#from-date").value).toBe("2020-01-01");
+    expect(input("#to-date").value).toBe("2020-12-31");
+    expect(searchCalls()[0].args).toMatchObject({
+      request: { from_date: "2020-01-01", to_date: "2020-12-31" },
+    });
+    // Pressed only because the inputs hold exactly this bucket's bounds.
+    await vi.waitFor(() => expect(eraChips()[1].getAttribute("aria-pressed")).toBe("true"));
+    // The existing applied-filter system shows the era as removable chips.
+    const applied = [...win.document.querySelectorAll("#active-filter-chips .filter-chip")];
+    expect(applied.map((c) => c.textContent?.trim())).toEqual([
+      "from 2020-01-01 ×",
+      "to 2020-12-31 ×",
+    ]);
+  });
+
+  it("clicking the active era removes the bound; Clear clears it end to end", async () => {
+    tauri.handlers.set("archive_stats", () => ERA_STATS);
+    searchRespondsWith(() => pageOf(HITS.slice(0, 1), 1));
+    await boot();
+    await vi.waitFor(() => expect(eraChips().length).toBe(3));
+    eraChips()[2].click();
+    await vi.waitFor(() => expect(eraChips()[2].getAttribute("aria-pressed")).toBe("true"));
+
+    // Toggling the pressed chip off clears the inputs and the request.
+    eraChips()[2].click();
+    await vi.waitFor(() => expect(input("#from-date").value).toBe(""));
+    expect(input("#to-date").value).toBe("");
+    expect(eraChips().every((c) => c.getAttribute("aria-pressed") === "false")).toBe(true);
+
+    // Re-applied through the chip, the toolbar's Clear must clear it too.
+    eraChips()[0].click();
+    await vi.waitFor(() => expect(eraChips()[0].getAttribute("aria-pressed")).toBe("true"));
+    $("#clear-filters").click();
+    await vi.waitFor(() => expect(input("#from-date").value).toBe(""));
+    expect(input("#to-date").value).toBe("");
+    expect(eraChips().every((c) => c.getAttribute("aria-pressed") === "false")).toBe(true);
+  });
+
+  it("hand-typed bounds inside an era never light its chip", async () => {
+    tauri.handlers.set("archive_stats", () => ERA_STATS);
+    searchRespondsWith(() => pageOf(HITS, 3));
+    await boot();
+    await vi.waitFor(() => expect(eraChips().length).toBe(3));
+    input("#from-date").value = "2020-03-01";
+    input("#to-date").value = "2020-12-31";
+    fireChange(input("#to-date"));
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    expect(searchCalls()[0].args).toMatchObject({
+      request: { from_date: "2020-03-01", to_date: "2020-12-31" },
+    });
+    await vi.waitFor(() =>
+      expect(eraChips().every((c) => c.getAttribute("aria-pressed") === "false")).toBe(true),
+    );
+  });
+
+  it("a one-month timeline renders no strip (no dead chrome)", async () => {
+    tauri.handlers.set("archive_stats", () => ARCHIVE_STATS);
+    await boot();
+    await vi.waitFor(() => expect($("#dashboard p.meta")).toBeTruthy());
+    expect(win.document.querySelectorAll("#era-chips .era-chip").length).toBe(0);
+  });
+});
+
 describe("deep links", () => {
   it("a pasted mailchat://message/<id> locator opens that message directly", async () => {
     await boot();
@@ -1316,53 +1412,101 @@ describe("import picker → preview → confirm (U03)", () => {
     return tauri.calls.filter((c) => c.cmd === cmd);
   }
 
-  it("previews the pick, then imports with the extract-media toggle and offers the follow-up", async () => {
+  function jobSubmits(): Array<{ cmd: string; args: unknown }> {
+    return tauri.calls.filter((c) => c.cmd === "job_submit");
+  }
+
+  /** Emit one job-event exactly as the backend stream delivers it. */
+  const emitJob = (payload: unknown) =>
+    tauriEvents.listeners.get("job-event")!({ payload });
+
+  /** A succeeded import job's result — the same outcome shape the
+   * direct import commands return. */
+  const jobResult = (summary: unknown, importId: string, media: unknown = null) => ({
+    summary,
+    import_id: importId,
+    media,
+  });
+
+  it("previews the pick, then follows its import job inline and offers the follow-up", async () => {
     await boot();
     dialog.open.mockResolvedValue("/tmp/tg-export/result.json");
     tauri.handlers.set("preview_import", () => Promise.resolve(TELEGRAM_PREVIEW));
-    tauri.handlers.set(
-      "import_chat_export",
-      () =>
-        Promise.resolve({
-          summary: { source: "telegram", seen: 4, inserted: 4, skipped: 0, failed: 0 },
-          import_id: "chat-import-abc123",
-          media: { referenced: 3, stored: 3, deduped: 1, missing: 0, linked: 3 },
-        }),
-    );
+    tauri.handlers.set("job_submit", () => ({ id: 31 }));
     tauri.handlers.set("list_import_scopes_v2", () => []);
     $("#import-pick-btn").click();
 
     // The preview card renders before anything is stored.
     await vi.waitFor(() => expect($("#import-preview").getAttribute("hidden")).toBeNull());
     expect(importCalls("preview_import")).toHaveLength(1);
-    expect(importCalls("import_chat_export")).toHaveLength(0);
+    expect(jobSubmits()).toHaveLength(0);
     expect($(".preview-title").textContent).toBe("Telegram export");
     expect($(".preview-path").textContent).toBe("/tmp/tg-export/result.json");
     expect($("#import-preview").textContent).toContain("4 messages found");
 
-    // Confirm imports with the checked media toggle.
+    // Confirm submits the import job with the checked media toggle.
     $("#preview-import-btn").click();
-    await vi.waitFor(() => expect(importCalls("import_chat_export")).toHaveLength(1));
-    expect(importCalls("import_chat_export")[0].args).toEqual({
-      path: "/tmp/tg-export/result.json",
-      extractMedia: true,
+    await vi.waitFor(() => expect(jobSubmits()).toHaveLength(1));
+    expect(jobSubmits()[0].args).toEqual({
+      kind: "import_chat_export",
+      params: { path: "/tmp/tg-export/result.json", extract_media: true },
+    });
+
+    // The inline card owns the run: queued before the first event, with
+    // Cancel right there — no detour to Activity.
+    await vi.waitFor(() => expect($("#import-progress").getAttribute("hidden")).toBeNull());
+    expect($(".import-progress-line").textContent).toContain("Queued");
+    expect($(".preview-path").textContent).toBe("/tmp/tg-export/result.json");
+    expect($("#import-cancel-btn").textContent).toBe("Cancel");
+
+    // The job's own events drive the card: counts, %, determinate bar.
+    emitJob({ seq: 1, at: "t", job: 31, type: "submitted", kind: "import_chat_export" });
+    emitJob({ seq: 2, at: "t", job: 31, type: "started" });
+    emitJob({
+      seq: 3,
+      at: "t",
+      job: 31,
+      type: "progress",
+      done: 2,
+      total: 4,
+      message: "reading messages",
+    });
+    expect($(".import-progress-line").textContent).toBe("2/4 (50%) · reading messages");
+    expect(($(".progress-fill") as HTMLElement).style.width).toBe("50%");
+
+    // Success hands off: the summary line lands, the card steps aside.
+    emitJob({
+      seq: 4,
+      at: "t",
+      job: 31,
+      type: "succeeded",
+      result: jobResult(
+        { source: "telegram", seen: 4, inserted: 4, skipped: 0, failed: 0 },
+        "chat-import-abc123",
+        { referenced: 3, stored: 3, deduped: 1, missing: 0, linked: 3 },
+      ),
     });
     await vi.waitFor(() =>
       expect($("#import-status").textContent).toBe(
         "Imported 4 new, 0 already present (of 4 in telegram). Media: 3 stored, 1 deduped, 3 linked.",
       ),
     );
+    expect($("#import-progress").getAttribute("hidden")).not.toBeNull();
     // The follow-up jumps to this run's messages via the import scope.
     expect($("#import-followup").getAttribute("hidden")).toBeNull();
+    // The post-import browse settles first; the follow-up's click runs a
+    // fresh search scoped to exactly this run.
+    await vi.waitFor(() => expect(searchCalls().length).toBeGreaterThanOrEqual(1));
     searchRespondsWith(() => pageOf(HITS.slice(0, 1), 1));
+    const beforeFollowup = searchCalls().length;
     $("#view-imported-btn").click();
-    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
-    expect(searchCalls()[0].args).toMatchObject({
+    await vi.waitFor(() => expect(searchCalls().length).toBe(beforeFollowup + 1));
+    expect(searchCalls().at(-1)!.args).toMatchObject({
       request: { import_job_id: "chat-import-abc123" },
     });
   });
 
-  it("an mbox preview dispatches to import_mbox", async () => {
+  it("an mbox preview submits an import_mbox job", async () => {
     await boot();
     dialog.open.mockResolvedValue("/tmp/archive.mbox");
     tauri.handlers.set("preview_import", () =>
@@ -1374,17 +1518,29 @@ describe("import picker → preview → confirm (U03)", () => {
         media_missing: 0,
       }),
     );
-    tauri.handlers.set("import_mbox", () =>
-      Promise.resolve({
-        summary: { source: "mbox", seen: 2, inserted: 2, skipped: 0, failed: 0 },
-        import_id: "mbox-import-def456",
-      }),
-    );
+    tauri.handlers.set("job_submit", () => ({ id: 32 }));
     $("#import-pick-btn").click();
     await vi.waitFor(() => expect($(".preview-title").textContent).toBe("Email archive (.mbox)"));
     $("#preview-import-btn").click();
-    await vi.waitFor(() => expect(importCalls("import_mbox")).toHaveLength(1));
-    expect(importCalls("import_mbox")[0].args).toEqual({ path: "/tmp/archive.mbox" });
+    await vi.waitFor(() => expect(jobSubmits()).toHaveLength(1));
+    expect(jobSubmits()[0].args).toEqual({
+      kind: "import_mbox",
+      params: { path: "/tmp/archive.mbox" },
+    });
+    // The card follows this flow's job (queued before any event lands).
+    expect($("#import-progress").getAttribute("hidden")).toBeNull();
+    expect($(".import-progress-line").textContent).toContain("Queued");
+    emitJob({ seq: 1, at: "t", job: 32, type: "submitted", kind: "import_mbox" });
+    emitJob({
+      seq: 2,
+      at: "t",
+      job: 32,
+      type: "succeeded",
+      result: jobResult(
+        { source: "mbox", seen: 2, inserted: 2, skipped: 0, failed: 0 },
+        "mbox-import-def456",
+      ),
+    });
     await vi.waitFor(() =>
       expect($("#import-status").textContent).toBe(
         "Imported 2 new, 0 already present (of 2 in mbox).",
@@ -1392,7 +1548,7 @@ describe("import picker → preview → confirm (U03)", () => {
     );
   });
 
-  it("an eml preview dispatches to import_mbox, not the chat-export path", async () => {
+  it("an eml preview submits import_mbox, not the chat-export path", async () => {
     await boot();
     dialog.open.mockResolvedValue("/tmp/mail.eml");
     tauri.handlers.set("preview_import", () =>
@@ -1405,18 +1561,29 @@ describe("import picker → preview → confirm (U03)", () => {
         media_missing: 0,
       }),
     );
-    tauri.handlers.set("import_mbox", () =>
-      Promise.resolve({
-        summary: { source: "mbox", seen: 1, inserted: 1, skipped: 0, failed: 0 },
-        import_id: "mbox-import-eml789",
-      }),
-    );
+    tauri.handlers.set("job_submit", () => ({ id: 33 }));
     $("#import-pick-btn").click();
     await vi.waitFor(() => expect($(".preview-title").textContent).toBe("Email messages (.eml)"));
     $("#preview-import-btn").click();
-    await vi.waitFor(() => expect(importCalls("import_mbox")).toHaveLength(1));
-    expect(importCalls("import_mbox")[0].args).toEqual({ path: "/tmp/mail.eml" });
-    expect(importCalls("import_chat_export")).toHaveLength(0);
+    await vi.waitFor(() => expect(jobSubmits()).toHaveLength(1));
+    expect(jobSubmits()[0].args).toEqual({
+      kind: "import_mbox",
+      params: { path: "/tmp/mail.eml" },
+    });
+    expect(
+      jobSubmits().some((c) => (c.args as { kind?: string }).kind === "import_chat_export"),
+    ).toBe(false);
+    emitJob({ seq: 1, at: "t", job: 33, type: "submitted", kind: "import_mbox" });
+    emitJob({
+      seq: 2,
+      at: "t",
+      job: 33,
+      type: "succeeded",
+      result: jobResult(
+        { source: "mbox", seen: 1, inserted: 1, skipped: 0, failed: 0 },
+        "mbox-import-eml789",
+      ),
+    });
     await vi.waitFor(() =>
       expect($("#import-status").textContent).toBe(
         "Imported 1 new, 0 already present (of 1 in mbox).",
@@ -1438,7 +1605,7 @@ describe("import picker → preview → confirm (U03)", () => {
     await vi.waitFor(() => expect($("#preview-cancel-btn")).toBeTruthy());
     $("#preview-cancel-btn").click();
     await flush();
-    expect(importCalls("import_chat_export")).toHaveLength(0);
+    expect(jobSubmits()).toHaveLength(0);
     expect($("#import-preview").getAttribute("hidden")).not.toBeNull();
     expect($("#import-status").textContent).toBe("");
   });
@@ -1454,15 +1621,132 @@ describe("import picker → preview → confirm (U03)", () => {
       expect($("#import-status").textContent).toContain("Could not read /moved.txt"),
     );
 
+    // A submission refused before any job existed: no card, the friendly
+    // line says what happened.
     dialog.open.mockResolvedValue("/tmp/chat.txt");
     tauri.handlers.set("preview_import", () => Promise.resolve(TELEGRAM_PREVIEW));
-    tauri.handlers.set("import_chat_export", () => Promise.reject("bad export"));
+    tauri.handlers.set("job_submit", () =>
+      Promise.reject("io error: No such file or directory (os error 2)"),
+    );
     $("#import-pick-btn").click();
     await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
     $("#preview-import-btn").click();
     await vi.waitFor(() =>
-      expect($("#import-status").textContent).toBe("Import failed: bad export"),
+      expect($("#import-status").textContent).toBe(
+        "Could not read /tmp/chat.txt — the file may have moved or been deleted. Pick it again.",
+      ),
     );
+    expect($("#import-progress").getAttribute("hidden")).not.toBeNull();
+  });
+
+  it("a failed import keeps its plain-language message in the card until dismissed", async () => {
+    await boot();
+    dialog.open.mockResolvedValue("/tmp/chat.txt");
+    tauri.handlers.set("preview_import", () => Promise.resolve(TELEGRAM_PREVIEW));
+    tauri.handlers.set("job_submit", () => ({ id: 34 }));
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
+    $("#preview-import-btn").click();
+    await vi.waitFor(() => expect($("#import-progress").getAttribute("hidden")).toBeNull());
+    emitJob({ seq: 1, at: "t", job: 34, type: "submitted", kind: "import_chat_export" });
+    emitJob({ seq: 2, at: "t", job: 34, type: "started" });
+    emitJob({
+      seq: 3,
+      at: "t",
+      job: 34,
+      type: "failed",
+      error: { kind: "import", message: "bad export" },
+    });
+    // The card carries the message (typed job error, described plainly)
+    // and the recovery note; the status line stays out of it.
+    expect($(".import-progress-line").textContent).toBe("Import failed — bad export.");
+    expect($("#import-progress").textContent).toContain("nothing is duplicated");
+    expect($("#import-status").textContent).toBe("");
+    expect($("#import-progress").getAttribute("hidden")).toBeNull();
+
+    // Dismiss returns the section to its start state.
+    $("#import-progress-dismiss").click();
+    expect($("#import-progress").getAttribute("hidden")).not.toBeNull();
+    expect($("#import-progress").children.length).toBe(0);
+  });
+
+  it("Cancel stops this flow's job with no confirm dialog, then the section resets", async () => {
+    await boot();
+    // happy-dom ships no window.confirm; provide the spy the assertion
+    // needs (Cancel must never open one).
+    const confirmSpy = vi.fn(() => false);
+    (win as unknown as { confirm: unknown }).confirm = confirmSpy;
+    dialog.open.mockResolvedValue("/tmp/chat.txt");
+    tauri.handlers.set("preview_import", () => Promise.resolve(TELEGRAM_PREVIEW));
+    let nextJobId = 35;
+    tauri.handlers.set("job_submit", () => ({ id: nextJobId++ }));
+    tauri.handlers.set("job_cancel", () => true);
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
+    $("#preview-import-btn").click();
+    await vi.waitFor(() => expect($("#import-cancel-btn")).toBeTruthy());
+
+    // Confirm-free: cancellation is recoverable (re-import never
+    // duplicates), so one click asks the engine to stop.
+    $("#import-cancel-btn").click();
+    await vi.waitFor(() =>
+      expect(tauri.calls.some((c) => c.cmd === "job_cancel")).toBe(true),
+    );
+    expect(tauri.calls.find((c) => c.cmd === "job_cancel")!.args).toEqual({ id: 35 });
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(($("#import-cancel-btn") as HTMLButtonElement).disabled).toBe(true);
+    expect($("#import-cancel-btn").textContent).toBe("Cancelling…");
+
+    // A progress event after the cancel request re-renders the card but
+    // must not re-enable the button: the engine stops cooperatively, so
+    // "Cancelling…" stands until the terminal `cancelled` event.
+    emitJob({ seq: 1, at: "t", job: 35, type: "submitted", kind: "import_chat_export" });
+    emitJob({
+      seq: 2,
+      at: "t",
+      job: 35,
+      type: "progress",
+      done: 2,
+      total: 4,
+      message: "messages",
+    });
+    expect(($("#import-cancel-btn") as HTMLButtonElement).disabled).toBe(true);
+    expect($("#import-cancel-btn").textContent).toBe("Cancelling…");
+    expect($(".import-progress-line").textContent).toBe("2/4 (50%) · messages");
+
+    // Cooperative: the stop is requested, the engine confirms by event.
+    emitJob({ seq: 3, at: "t", job: 35, type: "cancelled" });
+    await vi.waitFor(() => expect($("#import-progress").getAttribute("hidden")).not.toBeNull());
+    expect($("#import-status").textContent).toBe("");
+    // A new import can start right away — and its Cancel button is live
+    // again (the request died with the job it was aimed at).
+    dialog.open.mockResolvedValue("/tmp/other.txt");
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect(importCalls("preview_import")).toHaveLength(2));
+    $("#preview-import-btn").click();
+    await vi.waitFor(() => expect($("#import-cancel-btn")).toBeTruthy());
+    expect(($("#import-cancel-btn") as HTMLButtonElement).disabled).toBe(false);
+    expect($("#import-cancel-btn").textContent).toBe("Cancel");
+  });
+
+  it("an unrecognized succeeded result still says the import finished", async () => {
+    await boot();
+    dialog.open.mockResolvedValue("/tmp/chat.txt");
+    tauri.handlers.set("preview_import", () => Promise.resolve(TELEGRAM_PREVIEW));
+    tauri.handlers.set("job_submit", () => ({ id: 37 }));
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
+    $("#preview-import-btn").click();
+    await vi.waitFor(() => expect($("#import-progress").getAttribute("hidden")).toBeNull());
+    emitJob({ seq: 1, at: "t", job: 37, type: "submitted", kind: "import_chat_export" });
+    // A result the outcome reader does not recognize: no invented counts,
+    // no follow-up to scope — but the section still reports that the run
+    // finished instead of silently hiding the card.
+    emitJob({ seq: 2, at: "t", job: 37, type: "succeeded", result: { nonsense: true } });
+    await vi.waitFor(() => expect($("#import-progress").getAttribute("hidden")).not.toBeNull());
+    expect($("#import-status").textContent).toBe("Import finished.");
+    expect($("#import-followup").getAttribute("hidden")).not.toBeNull();
+    expect(win.document.querySelector("#view-imported-btn")).toBeNull();
   });
 
   it("the confirm button disables when free space cannot fit the input", async () => {
@@ -1488,11 +1772,21 @@ describe("import picker → preview → confirm (U03)", () => {
     dialog.open.mockResolvedValue("/tmp/tg-export/result.json");
     tauri.handlers.set("preview_import", () => Promise.resolve(TELEGRAM_PREVIEW));
     tauri.handlers.set("list_import_scopes_v2", () => []);
-    tauri.handlers.set("import_chat_export", () =>
-      Promise.resolve({
-        summary: { source: "telegram", seen: 2, inserted: 0, skipped: 2, failed: 0 },
-        import_id: "chat-import-dedup",
-        media: {
+    tauri.handlers.set("job_submit", () => ({ id: 36 }));
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
+    $("#preview-import-btn").click();
+    await vi.waitFor(() => expect($("#import-progress").getAttribute("hidden")).toBeNull());
+    emitJob({ seq: 1, at: "t", job: 36, type: "submitted", kind: "import_chat_export" });
+    emitJob({
+      seq: 2,
+      at: "t",
+      job: 36,
+      type: "succeeded",
+      result: jobResult(
+        { source: "telegram", seen: 2, inserted: 0, skipped: 2, failed: 0 },
+        "chat-import-dedup",
+        {
           referenced: 1,
           stored: 0,
           deduped: 1,
@@ -1503,11 +1797,8 @@ describe("import picker → preview → confirm (U03)", () => {
           unlinked_dropped: 0,
           unlinked_walk_failed: 0,
         },
-      }),
-    );
-    $("#import-pick-btn").click();
-    await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
-    $("#preview-import-btn").click();
+      ),
+    });
     await vi.waitFor(() =>
       expect($("#import-status").textContent).toBe(
         "Imported 0 new, 2 already present (of 2 in telegram)." +
@@ -1517,9 +1808,9 @@ describe("import picker → preview → confirm (U03)", () => {
   });
 
   it("an mbox import's status line renders its media counters", async () => {
-    // M4.2: import_mbox returns { summary, media } — the mail pass's
-    // stored MIME attachments surface in the picker status line (they
-    // used to be dropped on the floor).
+    // M4.2: the import_mbox job result carries { summary, media } — the
+    // mail pass's stored MIME attachments surface in the status line
+    // (they used to be dropped on the floor).
     await boot();
     dialog.open.mockResolvedValue("/tmp/archive.mbox");
     tauri.handlers.set("preview_import", () =>
@@ -1531,11 +1822,21 @@ describe("import picker → preview → confirm (U03)", () => {
         media_missing: 0,
       }),
     );
-    tauri.handlers.set("import_mbox", () =>
-      Promise.resolve({
-        summary: { source: "mbox", seen: 2, inserted: 2, skipped: 0, failed: 0 },
-        import_id: "mbox-import-media",
-        media: {
+    tauri.handlers.set("job_submit", () => ({ id: 37 }));
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($(".preview-title").textContent).toBe("Email archive (.mbox)"));
+    $("#preview-import-btn").click();
+    await vi.waitFor(() => expect($("#import-progress").getAttribute("hidden")).toBeNull());
+    emitJob({ seq: 1, at: "t", job: 37, type: "submitted", kind: "import_mbox" });
+    emitJob({
+      seq: 2,
+      at: "t",
+      job: 37,
+      type: "succeeded",
+      result: jobResult(
+        { source: "mbox", seen: 2, inserted: 2, skipped: 0, failed: 0 },
+        "mbox-import-media",
+        {
           referenced: 2,
           stored: 2,
           deduped: 0,
@@ -1546,11 +1847,8 @@ describe("import picker → preview → confirm (U03)", () => {
           unlinked_dropped: 0,
           unlinked_walk_failed: 0,
         },
-      }),
-    );
-    $("#import-pick-btn").click();
-    await vi.waitFor(() => expect($(".preview-title").textContent).toBe("Email archive (.mbox)"));
-    $("#preview-import-btn").click();
+      ),
+    });
     await vi.waitFor(() =>
       expect($("#import-status").textContent).toBe(
         "Imported 2 new, 0 already present (of 2 in mbox). Media: 2 stored, 2 linked.",
@@ -1566,11 +1864,21 @@ describe("import picker → preview → confirm (U03)", () => {
     dialog.open.mockResolvedValue("/tmp/tg-export/result.json");
     tauri.handlers.set("preview_import", () => Promise.resolve(TELEGRAM_PREVIEW));
     tauri.handlers.set("list_import_scopes_v2", () => []);
-    tauri.handlers.set("import_chat_export", () =>
-      Promise.resolve({
-        summary: { source: "telegram", seen: 1, inserted: 1, skipped: 0, failed: 0 },
-        import_id: "chat-import-honesty",
-        media: {
+    tauri.handlers.set("job_submit", () => ({ id: 38 }));
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
+    $("#preview-import-btn").click();
+    await vi.waitFor(() => expect($("#import-progress").getAttribute("hidden")).toBeNull());
+    emitJob({ seq: 1, at: "t", job: 38, type: "submitted", kind: "import_chat_export" });
+    emitJob({
+      seq: 2,
+      at: "t",
+      job: 38,
+      type: "succeeded",
+      result: jobResult(
+        { source: "telegram", seen: 1, inserted: 1, skipped: 0, failed: 0 },
+        "chat-import-honesty",
+        {
           referenced: 0,
           stored: 0,
           deduped: 0,
@@ -1581,17 +1889,66 @@ describe("import picker → preview → confirm (U03)", () => {
           unlinked_dropped: 2,
           unlinked_walk_failed: 1,
         },
-      }),
-    );
-    $("#import-pick-btn").click();
-    await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
-    $("#preview-import-btn").click();
+      ),
+    });
     await vi.waitFor(() =>
       expect($("#import-status").textContent).toBe(
         "Imported 1 new, 0 already present (of 1 in telegram)." +
           " Media: 3 unlinked (deduped), 2 dropped (budget), walk failed.",
       ),
     );
+  });
+
+  it("an import still running from a previous session shows its card on boot", async () => {
+    // Recovery: the boot poll's records snapshot carries an import job
+    // that outlived a restart (or a webview reload) — the import section
+    // adopts it and finishes the journey inline.
+    tauri.handlers.set("job_events_since", () => ({
+      events: [],
+      latest_seq: 3,
+      oldest_kept: 1,
+      trimmed: false,
+      jobs: [
+        {
+          id: 5,
+          kind: "import_mbox",
+          state: { state: "running" },
+          submitted_at: "t",
+          started_at: "t",
+          finished_at: null,
+          progress: { done: 10, total: 40, message: "reading messages" },
+        },
+      ],
+    }));
+    await boot();
+    await vi.waitFor(() => expect($("#import-progress").getAttribute("hidden")).toBeNull());
+    expect($(".import-progress-line").textContent).toBe("10/40 (25%) · reading messages");
+    expect(($(".progress-fill") as HTMLElement).style.width).toBe("25%");
+    expect($("#import-cancel-btn")).toBeTruthy();
+    // While it runs, this flow will not start a second import.
+    dialog.open.mockResolvedValue("/tmp/other.mbox");
+    $("#import-pick-btn").click();
+    await flush();
+    expect(importCalls("preview_import")).toHaveLength(0);
+
+    // Its success lands the same follow-up as a fresh import.
+    emitJob({
+      seq: 4,
+      at: "t",
+      job: 5,
+      type: "succeeded",
+      result: jobResult(
+        { source: "mbox", seen: 40, inserted: 40, skipped: 0, failed: 0 },
+        "mbox-import-recovered",
+      ),
+    });
+    await vi.waitFor(() =>
+      expect($("#import-status").textContent).toBe(
+        "Imported 40 new, 0 already present (of 40 in mbox).",
+      ),
+    );
+    expect($("#import-followup").getAttribute("hidden")).toBeNull();
+    expect($("#import-progress").getAttribute("hidden")).not.toBeNull();
   });
 });
 
@@ -1693,6 +2050,37 @@ describe("first-run state and the isolated sample archive (U02)", () => {
 // ---------------------------------------------------------------------------
 
 describe("export", () => {
+  it("one Export… picker holds the format and both what-to-export choices, folded by default", async () => {
+    await bootSearched();
+    const menu = $("#export-menu") as HTMLDetailsElement;
+    expect(menu.open).toBe(false);
+    expect($("#export-summary").textContent).toBe("Export…");
+    // Everything the old always-visible strip offered now lives inside
+    // the one disclosure — nothing export-related sits beside it.
+    for (const id of ["export-format", "export-btn", "selection-format", "export-selection-btn"]) {
+      expect($(`#${id}`)!.closest("#export-menu")).toBe(menu);
+    }
+    // The outcome lines stay outside the fold so a finished export is
+    // still reported after the picker closes.
+    expect($("#export-status")!.closest("#export-menu")).toBeNull();
+    expect($("#selection-status")!.closest("#export-menu")).toBeNull();
+    // The disabled-until-selection rule survives the move.
+    expect($<HTMLButtonElement>("#export-selection-btn").disabled).toBe(true);
+    ($(".hit-item[data-id=\"1\"] .row-select") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect($<HTMLButtonElement>("#export-selection-btn").disabled).toBe(false),
+    );
+  });
+
+  it("the picker hides with the first-run card: no export offered on an empty archive", async () => {
+    tauri.handlers.set("stats", () => ({ total: 0, by_source: [] }));
+    await boot();
+    await vi.waitFor(() => expect($("#first-run").getAttribute("hidden")).toBeNull());
+    // The summary, the picker, and its status lines disappear together.
+    expect($("#export-controls").getAttribute("hidden")).not.toBeNull();
+    expect($("#export-menu")!.closest("#export-controls")).toBeTruthy();
+  });
+
   it("exports the executed search with all its filters, not just the page", async () => {
     await boot();
     searchRespondsWith(() => pageOf(HITS.slice(0, 2), 120));
@@ -1794,7 +2182,8 @@ describe("export", () => {
 
     dialog.savedPath = "/tmp/thread.jsonl";
     tauri.handlers.set("export_chat", () => ({ format: "json", written: 5, skipped: 0 }));
-    $<HTMLSelectElement>("#export-format").value = "json";
+    // The chat format select lives in the reading header's Export picker.
+    $<HTMLSelectElement>("#chat-format").value = "json";
     ($(".export-chat-btn") as HTMLElement).click();
     await vi.waitFor(() =>
       expect($("#export-status").textContent).toBe("Exported 5 messages to /tmp/thread.jsonl."),
@@ -1971,7 +2360,14 @@ const EMBED_STATUS: EmbeddingStatus = {
 };
 
 const ASK_OUTCOME: AskOutcome = {
-  plan: { match_expr: '"vault"', date_from: "2026-10-01", date_to: null },
+  plan: {
+    match_expr: '"vault"',
+    date_from: "2026-10-01",
+    date_to: null,
+    from: null,
+    has_link: null,
+    extract_links: false,
+  },
   plan_source: "llm",
   ranking: "hybrid_fts_vector",
   results: [
@@ -1989,6 +2385,21 @@ describe("ask and local embeddings", () => {
     await vi.waitFor(() => expect($("#embed-status").textContent).toContain("3/4"));
     expect($("#embed-status").textContent).toContain("1 pending");
     expect($("#embed-status").textContent).toContain("hash-ngram-v1");
+  });
+
+  it("Ask stays collapsed behind its toggle; embeddings live on the AI settings page", async () => {
+    tauri.handlers.set("embed_status", () => EMBED_STATUS);
+    await boot();
+    // Progressive disclosure: nothing retrieval-irrelevant is spread under
+    // the results until the user folds it open.
+    expect(($("#ask-fold") as HTMLDetailsElement).open).toBe(false);
+    expect($("#ask-summary").textContent).toBe("Ask the archive");
+    // The local-embeddings controls moved out of the workspace into
+    // Settings → AI assistance, next to the rest of the AI configuration.
+    expect($("#embed-btn")!.closest("#settings-ai")).toBeTruthy();
+    expect($("#embed-status")!.closest("#settings-ai")).toBeTruthy();
+    expect($("#embed-btn")!.closest("#ask-section")).toBeNull();
+    expect($("#embed-btn")!.closest("#results-col")).toBeNull();
   });
 
   it("an embed_status failure leaves the line empty, not broken", async () => {
@@ -2066,6 +2477,45 @@ describe("ask and local embeddings", () => {
     expect($("#answer").textContent).toBe(ASK_OUTCOME.answer);
     expect($("#answer").hidden).toBe(false);
     expect($("#ask-notes").hidden).toBe(true);
+  });
+
+  it("renders collected links with cited hits and exports them", async () => {
+    await boot();
+    tauri.handlers.set("llm_ask", () => ({
+      plan: { match_expr: "example", date_from: null, date_to: null, from: "ana@", has_link: true, extract_links: true },
+      plan_source: "llm",
+      ranking: "fts_only",
+      results: [],
+      answer: "here is what I found",
+      notes: [],
+      collected: [
+        {
+          url: "https://example.com/a",
+          hits: [
+            { message_id: 7, author: "ana", sent_at: "2026-10-01T00:00:00Z", context: "see the link" },
+          ],
+        },
+      ],
+    }));
+    tauri.handlers.set("conversation_context_v2", () => ({}));
+    input("#ask").value = "collect links from ana";
+    pressKey(input("#ask"), "Enter");
+    await vi.waitFor(() => expect($("#ask-collected").hidden).toBe(false));
+    expect($("#ask-collected-count").textContent).toBe("1 link from 1 message");
+    expect($("#ask-collected-list summary").textContent).toContain("https://example.com/a");
+    // A hit opens its citing message in thread context.
+    ($("#ask-collected-list .ask-source") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(tauri.calls.some((c) => c.cmd === "conversation_context_v2" && (c.args as { id: number }).id === 7)).toBe(true),
+    );
+    // Export goes through the save dialog and save_text.
+    dialog.savedPath = "/tmp/links.txt";
+    ($("#ask-collected-export") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(tauri.calls.some((c) => c.cmd === "save_text")).toBe(true),
+    );
+    const call = tauri.calls.find((c) => c.cmd === "save_text")!;
+    expect((call.args as { contents: string }).contents).toContain("https://example.com/a");
   });
 
   it("an empty question asks nothing", async () => {
@@ -2407,6 +2857,7 @@ describe("IMAP sync auth mode", () => {
       source_id: "inst-imap-failed",
       kind: "imap",
       label: "imap:127.0.0.1:59993:first@h.invalid",
+      medium: "mail",
       imap: {
         host: "127.0.0.1",
         port: 59993,
@@ -2776,7 +3227,7 @@ describe("ask provider menu", () => {
 /** What `llm_ask` returns for a consent-less network ask: fully local,
  * with the visible backend note (mirrors the backend's downgrade). */
 const LOCAL_ASK_OUTCOME: AskOutcome = {
-  plan: { match_expr: '"vault"', date_from: null, date_to: null },
+  plan: { match_expr: '"vault"', date_from: null, date_to: null, from: null, has_link: null, extract_links: false },
   plan_source: "local",
   ranking: "fts_only",
   results: [
@@ -2950,15 +3401,22 @@ describe("ask AI consent + evidence navigation", () => {
 
   it("Revoke resets a granted consent mid-session", async () => {
     await bootConsentable();
+    expect($("#ask-summary").textContent).toBe("Ask the archive");
     await askFromInput("vault?");
     $("#consent-allow-btn").click();
     await vi.waitFor(() =>
       expect($("#consent-status").textContent).toContain("granted for this session"),
     );
+    // A live grant stays visible on the fold's summary even when Ask is
+    // collapsed again (the Filters convention for applied state).
+    expect($("#ask-summary").textContent).toBe("Ask the archive · AI consent on");
+    expect($("#ask-summary").classList.contains("on")).toBe(true);
     $("#consent-revoke-btn").click();
     await vi.waitFor(() =>
       expect($("#consent-status").textContent).toContain("not granted"),
     );
+    expect($("#ask-summary").textContent).toBe("Ask the archive");
+    expect($("#ask-summary").classList.contains("on")).toBe(false);
     expect($<HTMLButtonElement>("#consent-revoke-btn").hidden).toBe(true);
     await askFromInput("after revoke?");
     expect(askCalls().at(-1)!.args).toMatchObject({ consent: false });
@@ -3889,7 +4347,9 @@ describe("workspace shell", () => {
     input("#search").value = "vault";
     pressKey(input("#search"), "Enter");
     await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
-    const row = $("#results .hit-item") as HTMLElement;
+    // The row's button (role=button .hit-main) is the focus target; the
+    // li itself is a plain list item.
+    const row = $("#results .hit-item .hit-main") as HTMLElement;
     row.focus();
     row.click();
     await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
@@ -3900,19 +4360,23 @@ describe("workspace shell", () => {
     expect(app().dataset.reading).toBe("closed");
     // The initiating result row receives focus again.
     const active = win.document.activeElement as unknown as HTMLElement | null;
-    expect(active?.classList.contains("hit-item")).toBe(true);
-    expect(active?.getAttribute("aria-current")).toBe("true");
+    expect(active?.classList.contains("hit-main")).toBe(true);
+    expect(active?.closest(".hit-item")?.getAttribute("aria-current")).toBe("true");
   });
 
   it("Enter on a focused result row opens that row's message", async () => {
     await bootSearched();
-    const rows = win.document.querySelectorAll("#results .hit-item") as unknown as HTMLElement[];
+    const rows = win.document.querySelectorAll(
+      "#results .hit-item .hit-main",
+    ) as unknown as HTMLElement[];
     const row = rows[2];
     expect(row.getAttribute("role")).toBe("button");
     row.focus();
     pressKey(row, "Enter");
     await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
-    expect(ctxCalls().at(-1)?.args).toMatchObject({ id: Number(row.dataset.id) });
+    expect(ctxCalls().at(-1)?.args).toMatchObject({
+      id: Number((row.closest(".hit-item") as HTMLElement)?.dataset.id),
+    });
   });
 
   it("opening a message in wide layout keeps focus on the current thread row", async () => {
@@ -3923,7 +4387,7 @@ describe("workspace shell", () => {
     input("#search").value = "vault";
     pressKey(input("#search"), "Enter");
     await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
-    const row = $("#results .hit-item") as HTMLElement;
+    const row = $("#results .hit-item .hit-main") as HTMLElement;
     row.focus();
     row.click();
     await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
@@ -3977,12 +4441,12 @@ describe("workspace shell", () => {
 
   it("ArrowDown from a focused row keeps focus on the new active row", async () => {
     await bootSearched();
-    const row = $("#results .hit-item") as HTMLElement;
+    const row = $("#results .hit-item .hit-main") as HTMLElement;
     row.focus();
     pressKey(win.document, "ArrowDown");
     const active = win.document.activeElement as unknown as HTMLElement | null;
-    expect(active?.classList.contains("hit-item")).toBe(true);
-    expect(active?.getAttribute("aria-current")).toBe("true");
+    expect(active?.classList.contains("hit-main")).toBe(true);
+    expect(active?.closest(".hit-item")?.getAttribute("aria-current")).toBe("true");
     const activeRow = $<HTMLElement>("#results .hit-item.active");
     expect(activeRow.dataset.index).toBe("0");
   });
@@ -4020,7 +4484,7 @@ describe("workspace shell", () => {
     input("#search").value = "vault";
     pressKey(input("#search"), "Enter");
     await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
-    const row = $("#results .hit-item") as HTMLElement;
+    const row = $("#results .hit-item .hit-main") as HTMLElement;
     row.focus();
     row.click();
     await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(true));
@@ -4029,8 +4493,8 @@ describe("workspace shell", () => {
     closeBtn.click();
     expect($("#detail").classList.contains("open")).toBe(false);
     const active = win.document.activeElement as unknown as HTMLElement | null;
-    expect(active?.classList.contains("hit-item")).toBe(true);
-    expect(active?.getAttribute("aria-current")).toBe("true");
+    expect(active?.classList.contains("hit-main")).toBe(true);
+    expect(active?.closest(".hit-item")?.getAttribute("aria-current")).toBe("true");
   });
 
   it("Ctrl/Cmd+K focuses the search box from anywhere", async () => {
@@ -4052,6 +4516,75 @@ describe("workspace shell", () => {
     author.focus();
     pressKey(author, "/");
     expect(win.document.activeElement).toBe(author);
+  });
+});
+
+describe("workspace tabs (Search / Ask) and the hideable sidebar", () => {
+  function app(): HTMLElement {
+    return $("#app");
+  }
+
+  function setViewportWidth(width: number): void {
+    win.innerWidth = width;
+    win.dispatchEvent(new win.Event("resize"));
+  }
+
+  it("switches panels via the tab strip; both panels stay mounted", async () => {
+    await boot();
+    expect(app().dataset.workspaceSection).toBe("search");
+    const searchTab = $("#tab-search") as HTMLElement;
+    const askTab = $("#tab-ask") as HTMLElement;
+    expect(askTab.getAttribute("aria-selected")).toBe("false");
+    askTab.click();
+    expect(app().dataset.workspaceSection).toBe("ask");
+    expect(askTab.getAttribute("aria-selected")).toBe("true");
+    expect(searchTab.getAttribute("aria-selected")).toBe("false");
+    // The tabpanels point at each other and both stay in the DOM.
+    expect(askTab.getAttribute("aria-controls")).toBe("ask-section");
+    expect($("#search-section")).toBeTruthy();
+    expect($("#ask-section")).toBeTruthy();
+    searchTab.click();
+    expect(app().dataset.workspaceSection).toBe("search");
+  });
+
+  it("leaving and returning keeps the active tab; Ctrl+K lands on Search", async () => {
+    await boot();
+    ($("#tab-ask") as HTMLElement).click();
+    expect(app().dataset.workspaceSection).toBe("ask");
+    $(".nav-view-btn[data-view-target='settings']").click();
+    expect(app().dataset.view).toBe("settings");
+    $(".nav-view-btn[data-view-target='workspace']").click();
+    expect(app().dataset.workspaceSection).toBe("ask"); // preserved
+    win.document.dispatchEvent(
+      new win.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true }),
+    );
+    expect(app().dataset.workspaceSection).toBe("search");
+    expect(win.document.activeElement?.id).toBe("search");
+  });
+
+  it("desktop: the hamburger collapses the nav column and persists the choice", async () => {
+    await boot();
+    setViewportWidth(1280);
+    const toggle = $("#nav-toggle") as HTMLButtonElement;
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    toggle.click();
+    expect(app().dataset.navCollapsed).toBe("true");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(win.localStorage.getItem("mcv.navCollapsed")).toBe("1");
+    toggle.click();
+    expect(app().dataset.navCollapsed).toBe("false");
+    expect(win.localStorage.getItem("mcv.navCollapsed")).toBe("0");
+  });
+
+  it("compact: the hamburger keeps working the drawer, not the desktop collapse", async () => {
+    await boot();
+    setViewportWidth(640);
+    const toggle = $("#nav-toggle") as HTMLButtonElement;
+    toggle.click();
+    expect(app().dataset.nav).toBe("open");
+    expect(app().dataset.navCollapsed).toBe("false"); // untouched
+    toggle.click();
+    expect(app().dataset.nav).toBe("closed");
   });
 });
 
@@ -4226,6 +4759,7 @@ const IMAP_ACCOUNT = {
   source_id: "inst-imap-1",
   kind: "imap",
   label: "imap:imap.gmail.com:993:ana@gmail.com",
+  medium: "mail",
   imap: {
     host: "imap.gmail.com",
     port: 993,
@@ -4248,6 +4782,7 @@ const IMPORT_ACCOUNT = {
   source_id: "inst-import-1",
   kind: "import",
   label: "mbox:archive.mbox",
+  medium: "mail",
   imap: null,
   message_count: 6,
   failed_items: 0,
@@ -4497,6 +5032,7 @@ describe("accounts panel", () => {
         source_id: "inst-mail",
         kind: "imap",
         label: "imap:imap.gmail.com:993:ana@gmail.com",
+        medium: "mail",
         imap: {
           host: "imap.gmail.com", port: 993, username: "ana@gmail.com",
           folders: ["INBOX"], has_password: true, has_oauth: false,

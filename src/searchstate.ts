@@ -2,12 +2,14 @@
 /// everything here is unit-tested in searchstate.test.ts. The DOM glue
 /// lives in render2.ts / main.ts.
 ///
-/// Owns: the filter model and its removable chips, the flat results
+/// Owns: the filter model and its removable chips, the era-chip timeline
+/// over the archive's day distribution, the flat results
 /// selection model, results selection/scroll restoration, deep links
 /// (`mailchat://message/<id>`), archive-revision refresh detection, and
 /// the readable copy-text rendering (kept format-compatible with the
 /// Rust `detail_as_text` used for file exports).
 
+import type { DayCount } from "./types";
 import type {
   ConversationContext,
   MessageDetail,
@@ -149,6 +151,68 @@ export function withoutChip(f: SearchFilters, chip: FilterChip): SearchFilters {
 export function dateBoundsValid(fromDate: string, toDate: string): boolean {
   if (!fromDate || !toDate) return true;
   return fromDate <= toDate;
+}
+
+// ---------------------------------------------------------------------------
+// Era chips (the archive's timeline as one-click date filters)
+// ---------------------------------------------------------------------------
+
+/** One era chip: a timeline bucket over the archive's dated messages. */
+export interface EraBucket {
+  /** Chip label: a year ("2019") or an ISO month ("2026-10"). */
+  label: string;
+  /** Inclusive day bounds — the exact values the from/to inputs take. */
+  from: string;
+  to: string;
+}
+
+/** Last calendar day of an ISO month "YYYY-MM" ("2024-02" → "2024-02-29"). */
+function monthEnd(month: string): string {
+  const year = Number(month.slice(0, 4));
+  const mm = Number(month.slice(5, 7));
+  const lastDay = new Date(Date.UTC(year, mm, 0)).getUTCDate();
+  return `${month}-${String(lastDay).padStart(2, "0")}`;
+}
+
+/**
+ * Derive the era chips from the archive's day distribution (the same
+ * `by_day` series the Activity dashboard charts). Years when the archive
+ * spans multiple calendar years, months when it all sits inside one; a
+ * single month of history (or nothing dated) has no timeline to strip, so
+ * it renders nothing. Over-cap months coarsen to the year (the same
+ * months→years step `dayBars` takes); over-cap years keep the most recent
+ * `maxChips` — nothing coarser exists, and the date inputs remain the
+ * full-fidelity path. Buckets appear only for periods with messages (the
+ * backend series omits empty days) and stay in ascending order.
+ */
+export function eraBuckets(days: DayCount[], maxChips = 8): EraBucket[] {
+  if (days.length === 0) return [];
+  const years = [...new Set(days.map((d) => d.day.slice(0, 4)))].sort();
+  if (years.length >= 2) {
+    const buckets = years.map((year) => ({
+      label: year,
+      from: `${year}-01-01`,
+      to: `${year}-12-31`,
+    }));
+    return buckets.length > maxChips ? buckets.slice(-maxChips) : buckets;
+  }
+  const months = [...new Set(days.map((d) => d.day.slice(0, 7)))].sort();
+  if (months.length < 2) return [];
+  if (months.length > maxChips) {
+    const year = years[0];
+    return [{ label: year, from: `${year}-01-01`, to: `${year}-12-31` }];
+  }
+  return months.map((month) => ({ label: month, from: `${month}-01`, to: monthEnd(month) }));
+}
+
+/**
+ * The bucket the filters currently hold, by exact bounds: a chip lights up
+ * only when fromDate/toDate are precisely its bucket's bounds — a hand-
+ * typed range inside 2019 must not read as "the 2019 chip is on". -1 when
+ * no bucket matches.
+ */
+export function activeEraIndex(buckets: EraBucket[], f: SearchFilters): number {
+  return buckets.findIndex((b) => b.from === f.fromDate && b.to === f.toDate);
 }
 
 /** Build the v2 IPC request from the filter model. */

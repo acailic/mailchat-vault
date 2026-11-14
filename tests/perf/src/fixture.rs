@@ -566,6 +566,8 @@ mod tests {
                 &format!("\"{}\"", word_at(UBIQUITOUS_RANK)),
                 Some("2018-01-01"),
                 Some("2026-12-31"),
+                None,
+                false,
                 2000,
             )
             .unwrap();
@@ -582,6 +584,8 @@ mod tests {
                 &format!("\"{}\"", word_at(AUTHOR_HANDLE_RANK)),
                 None,
                 None,
+                None,
+                false,
                 2000,
             )
             .unwrap();

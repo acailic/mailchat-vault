@@ -38,12 +38,16 @@ import {
   type RestorePreviewView,
 } from "./backupview";
 import {
+  collectedCountLine,
   consentPromptText,
   consentStatusLine,
   describePlan,
+  linksToJson,
+  linksToText,
   privacyNoteFor,
   splitCitations,
   type AskOutcome,
+  type CollectedLink,
   type LlmStatus,
 } from "./llmview";
 import {
@@ -54,16 +58,19 @@ import {
 import {
   fillImportScopes,
   renderDetail2,
+  renderEraChips,
   renderFilterChips,
   renderFlatResults,
   renderRefreshNotice,
 } from "./render2";
 import {
+  activeEraIndex,
   buildRequest,
   captureResults,
   contextCursors,
   contextEntries,
   dateBoundsValid,
+  eraBuckets,
   filterChips,
   hasActiveFilters,
   mergeContextPages,
@@ -74,6 +81,7 @@ import {
   revisionChanged,
   selectionIds,
   withoutChip,
+  type EraBucket,
   type FilterChip,
   type SearchFilters,
 } from "./searchstate";
@@ -113,9 +121,7 @@ import type {
   ChatImportOutcome,
   EmbeddingStatus,
   ExportSummary,
-  IngestSummary,
   JobEvent,
-  MediaSummary,
   Message,
   SourceInstance,
   SyncScheduleView,
@@ -129,6 +135,7 @@ import {
   hasActiveJob,
   jobsStatusText,
   newJobsTracker,
+  orderedRecords,
   renderJobsList,
 } from "./jobsview";
 import { renderWatchEvents, renderWatchFolders, watchStatusText } from "./watchview";
@@ -160,6 +167,7 @@ const sortOrderSelect = document.querySelector<HTMLSelectElement>("#sort-order")
 const hasAttachmentSelect = document.querySelector<HTMLSelectElement>("#has-attachment")!;
 const importScopeSelect = document.querySelector<HTMLSelectElement>("#import-scope")!;
 const filtersSummary = document.querySelector<HTMLElement>("#filters-summary")!;
+const eraChips = document.querySelector<HTMLElement>("#era-chips")!;
 const activeFilterChips = document.querySelector<HTMLElement>("#active-filter-chips")!;
 const refreshNotice = document.querySelector<HTMLElement>("#refresh-notice")!;
 const selectionFormatSelect = document.querySelector<HTMLSelectElement>("#selection-format")!;
@@ -175,6 +183,7 @@ const importPickButton = document.querySelector<HTMLButtonElement>("#import-pick
 const importFolderButton = document.querySelector<HTMLButtonElement>("#import-folder-btn")!;
 const chatMediaToggle = document.querySelector<HTMLInputElement>("#chat-media")!;
 const importPreviewEl = document.querySelector<HTMLElement>("#import-preview")!;
+const importProgressEl = document.querySelector<HTMLElement>("#import-progress")!;
 const importStatus = document.querySelector<HTMLElement>("#import-status")!;
 const importFollowup = document.querySelector<HTMLElement>("#import-followup")!;
 const sourcesAddButton = document.querySelector<HTMLButtonElement>("#sources-add-btn")!;
@@ -197,10 +206,17 @@ const exportControls = document.querySelector<HTMLElement>("#export-controls")!;
 const askInput = document.querySelector<HTMLInputElement>("#ask")!;
 const askButton = document.querySelector<HTMLButtonElement>("#ask-btn")!;
 const askStatus = document.querySelector<HTMLElement>("#ask-status")!;
+const askSummary = document.querySelector<HTMLElement>("#ask-summary")!;
 const llmNote = document.querySelector<HTMLElement>("#llm-note")!;
 const answerBox = document.querySelector<HTMLElement>("#answer")!;
 const askNotes = document.querySelector<HTMLElement>("#ask-notes")!;
 const askResults = document.querySelector<HTMLUListElement>("#ask-results")!;
+const askCollected = document.querySelector<HTMLElement>("#ask-collected")!;
+const askCollectedCount = document.querySelector<HTMLElement>("#ask-collected-count")!;
+const askCollectedFormat = document.querySelector<HTMLSelectElement>("#ask-collected-format")!;
+const askCollectedExport = document.querySelector<HTMLButtonElement>("#ask-collected-export")!;
+const askCollectedStatus = document.querySelector<HTMLElement>("#ask-collected-status")!;
+const askCollectedList = document.querySelector<HTMLUListElement>("#ask-collected-list")!;
 const embedButton = document.querySelector<HTMLButtonElement>("#embed-btn")!;
 const embedStatus = document.querySelector<HTMLElement>("#embed-status")!;
 const imapHostInput = document.querySelector<HTMLInputElement>("#imap-host")!;
@@ -301,6 +317,7 @@ const searchGuard = new SequenceGuard();
 const detailGuard = new SequenceGuard();
 const statsGuard = new SequenceGuard();
 const dashboardGuard = new SequenceGuard();
+const eraGuard = new SequenceGuard();
 const askGuard = new SequenceGuard();
 const embedGuard = new SequenceGuard();
 const accountsGuard = new SequenceGuard();
@@ -325,6 +342,12 @@ let demoActive = false;
  * first source instead of a dead search box). While the demo is open
  * this still reflects the personal vault underneath. */
 let archiveTotal = 0;
+
+/** The era strip's timeline buckets, derived from the last `archive_stats`
+ * day distribution (same series the dashboard charts). Which chip is on
+ * is NOT held here — it is derived from the filters' from/to bounds on
+ * every render, so the date inputs stay the single source of truth. */
+let eraBucketsCache: EraBucket[] = [];
 
 /** Whether the initial newest-first browse already ran once this page
  * (U04: "All messages" shows the archive immediately, not after the
@@ -422,7 +445,80 @@ function renderAsk(outcome: AskOutcome): void {
   askNotes.textContent = outcome.notes.join(" · ");
   askNotes.hidden = outcome.notes.length === 0;
   renderAskResults(askResults, sources);
+  const collected = outcome.collected ?? [];
+  lastCollected = collected.length > 0 ? collected : null;
+  // A new outcome invalidates the previous ask's export status ("Exported N
+  // links."), which would otherwise survive next to the new link list.
+  askCollectedStatus.textContent = "";
+  if (collected.length > 0) {
+    askCollectedCount.textContent = collectedCountLine(collected);
+    renderCollected(collected);
+    askCollected.hidden = false;
+  } else {
+    askCollected.hidden = true;
+  }
 }
+
+/** The links the last ask collected — what Export saves (always what is
+ * on screen). */
+let lastCollected: CollectedLink[] | null = null;
+
+/** One <li> per link: a details/summary holding one clickable hit row per
+ * citing message (same open-in-thread-context behavior as citations). */
+function renderCollected(links: CollectedLink[]): void {
+  askCollectedList.replaceChildren();
+  for (const link of links) {
+    const li = document.createElement("li");
+    const details = document.createElement("details");
+    details.open = links.length === 1 && link.hits.length === 1;
+    const summary = document.createElement("summary");
+    summary.textContent =
+      link.hits.length === 1 ? link.url : `${link.url} (${link.hits.length} hits)`;
+    details.append(summary);
+    for (const hit of link.hits) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "ask-source";
+      const meta = document.createElement("span");
+      meta.className = "meta";
+      meta.textContent = `${hit.author || "unknown"} · ${hit.sent_at || "date unknown"}`;
+      const ctx = document.createElement("span");
+      ctx.textContent = hit.context;
+      row.append(meta, document.createElement("br"), ctx);
+      row.addEventListener("click", () => void openDetail(hit.message_id));
+      details.append(row);
+    }
+    li.append(details);
+    askCollectedList.append(li);
+  }
+}
+
+/** Save the collected links through the OS save dialog (text or JSON). */
+async function exportCollected(links: CollectedLink[]): Promise<void> {
+  const format = askCollectedFormat.value === "json" ? "json" : "text";
+  const ext = format === "json" ? "json" : "txt";
+  const path = await save({
+    title: "Export collected links",
+    defaultPath: `mailchat-links.${ext}`,
+    filters: [
+      format === "json"
+        ? { name: "JSON file", extensions: ["json"] }
+        : { name: "Text file", extensions: ["txt"] },
+    ],
+  });
+  if (typeof path !== "string") return;
+  try {
+    await ipc.saveText({ path, contents: format === "json" ? linksToJson(links) : linksToText(links) });
+    askCollectedStatus.textContent = `Exported ${links.length} link${links.length === 1 ? "" : "s"}.`;
+  } catch (e) {
+    askCollectedStatus.textContent = describeError(e);
+  }
+}
+
+askCollectedExport.addEventListener("click", () => {
+  const collected = lastCollected;
+  if (collected) void exportCollected(collected);
+});
 
 /** The menu entry an ask with the current selection would use, when it
  * is an *available network* provider (the only case needing consent). */
@@ -438,6 +534,10 @@ function selectedNetworkProvider(): ProviderMenuItem | null {
 function updateConsentUi(): void {
   consentStatus.textContent = consentStatusLine(aiConsentGranted);
   consentRevokeButton.hidden = !aiConsentGranted;
+  // The fold's summary is the glanceable state while Ask is collapsed
+  // (the Filters convention): a live session grant must never hide.
+  askSummary.textContent = aiConsentGranted ? "Ask the archive · AI consent on" : "Ask the archive";
+  askSummary.classList.toggle("on", aiConsentGranted);
   const network = selectedNetworkProvider();
   if (!network) hideConsentPrompt();
   else if (!consentPrompt.hidden) showConsentPrompt(network);
@@ -534,6 +634,13 @@ function renderAll(): void {
     onRemove: (chip) => removeFilterChip(chip),
     onClear: clearFilters,
   });
+  // The era strip's active state is derived, never stored: a chip is on
+  // only while the filters hold exactly its bounds.
+  renderEraChips(eraChips, {
+    buckets: eraBucketsCache,
+    activeIndex: activeEraIndex(eraBucketsCache, state.filters),
+    onToggle: toggleEraBucket,
+  });
   renderFiltersSummary(chips.length);
   renderRefreshNotice(refreshNotice, state.refreshNeeded, () => void runSearch(0));
   if (state.detail) {
@@ -582,7 +689,7 @@ function renderSourceChipsNow(): void {
         ? state.sources.filter((s) => s !== id)
         : [...state.sources, id];
       // Source scoping is a search action: show the results it produced.
-      workspace.store.setView("workspace");
+      workspace.store.setWorkspaceSection("search");
       renderSourceChipsNow();
       void runSearch(0);
     },
@@ -943,6 +1050,10 @@ async function refreshStats(): Promise<void> {
     renderSourceChipsNow();
     updateVaultChrome();
     maybeInitialBrowse();
+    // The era strip reads the same mutation point: whenever the totals
+    // refresh (boot, imports, syncs, vault switches), the timeline the
+    // chips strip along may have changed with them.
+    void refreshEraChips();
   } catch {
     if (statsGuard.isCurrent(token)) {
       statsLabel.textContent = "";
@@ -967,6 +1078,28 @@ function maybeInitialBrowse(): void {
   }
   initialBrowseDone = true;
   void runSearch(0);
+}
+
+/** Re-derive the era strip from the archive's day distribution. The
+ * dashboard's own `archive_stats` round trip is dashboard-guarded and
+ * Activity-scoped, so the strip fetches its own copy. A failure keeps the
+ * last known buckets — an unavailable timeline is not a reason to drop a
+ * filter affordance that was honest a moment ago. */
+async function refreshEraChips(): Promise<void> {
+  const token = eraGuard.next();
+  try {
+    const stats = await ipc.archiveStats(10);
+    if (!eraGuard.isCurrent(token)) return; // a newer refresh superseded this response
+    const next = eraBuckets(stats.by_day);
+    const unchanged =
+      next.length === eraBucketsCache.length &&
+      next.every((b, i) => b.from === eraBucketsCache[i].from && b.to === eraBucketsCache[i].to);
+    if (unchanged) return;
+    eraBucketsCache = next;
+    renderAll();
+  } catch {
+    // Keep the last known buckets.
+  }
 }
 
 async function refreshDashboard(): Promise<void> {
@@ -1021,6 +1154,23 @@ function writeFilters(f: SearchFilters): void {
 /** Remove one applied filter chip and re-run (resets to page one). */
 function removeFilterChip(chip: FilterChip): void {
   writeFilters(withoutChip(state.filters, chip));
+  void runSearch(0);
+}
+
+/** Toggle one era chip: apply its exact from/to bounds through the date
+ * inputs (the existing filter machinery then applies them), or remove the
+ * bound when that era is already active. The inputs stay the single
+ * source of truth — the chip highlight is derived from them on render. */
+function toggleEraBucket(index: number): void {
+  const bucket = eraBucketsCache[index];
+  if (!bucket) return;
+  if (activeEraIndex(eraBucketsCache, state.filters) === index) {
+    fromDateInput.value = "";
+    toDateInput.value = "";
+  } else {
+    fromDateInput.value = bucket.from;
+    toDateInput.value = bucket.to;
+  }
   void runSearch(0);
 }
 
@@ -1222,12 +1372,15 @@ function copyLink(): void {
   if (state.detail) void copyText(messageLink(state.detail.anchor.id), "Message link");
 }
 
-async function exportSelection(ids: number[]): Promise<void> {
+async function exportSelection(ids: number[], formatOverride?: string): Promise<void> {
   if (ids.length === 0) {
     selectionStatus.textContent = "Check result rows first, then export them.";
     return;
   }
-  const format = selectionFormatSelect.value === "json" ? "json" : "text";
+  // The reading pane's picker passes its own format; the results picker
+  // reads the #selection-format select beside the checked-rows button.
+  const format =
+    formatOverride ?? (selectionFormatSelect.value === "json" ? "json" : "text");
   const ext = format === "json" ? "json" : "txt";
   const path = await save({
     title: "Export selection",
@@ -1262,7 +1415,11 @@ function exportSelectionFromResults(): void {
 }
 
 function exportSingleMessage(): void {
-  if (state.detail) void exportSelection([state.detail.anchor.id]);
+  if (!state.detail) return;
+  // The message picker lives inside the re-rendered detail card, so the
+  // select is read at click time, never cached.
+  const pickerFormat = document.querySelector<HTMLSelectElement>("#message-format")?.value;
+  void exportSelection([state.detail.anchor.id], pickerFormat === "json" ? "json" : "text");
 }
 
 // Back-to-results (medium/compact): the results area is restored with its
@@ -1321,7 +1478,9 @@ document.addEventListener("keydown", (event) => {
     renderAll();
     const activeRow = resultsList.querySelector<HTMLElement>(".hit-item.active");
     activeRow?.scrollIntoView({ block: "nearest" });
-    if (rowFocused) activeRow?.focus();
+    // The row's button (role=button .hit-main) is the focus target; the
+    // li itself is a plain list item.
+    if (rowFocused) activeRow?.querySelector<HTMLElement>(".hit-main")?.focus();
     event.preventDefault();
   } else if (event.key === "Enter") {
     if (state.activeIndex >= 0 && state.hits[state.activeIndex]) {
@@ -1338,13 +1497,29 @@ document.addEventListener("keydown", (event) => {
 import {
   formatLabel,
   hideImportPreview,
+  hideImportProgress,
+  isImportJobKind,
   renderImportPreview,
+  renderImportProgress,
 } from "./importview";
 
 /** The pick currently awaiting confirmation, if any. */
 let pendingImport: { path: string; kind: string } | null = null;
-/** An import is running (guards double-clicks). */
+/** An import is running (guards double-clicks): true while this flow's
+ * import job is being submitted, queued, or running. */
 let importBusy = false;
+/** The import job THIS flow is following — the inline progress card
+ * tracks exactly this job (the tracker keys records by id). Kept through
+ * a failed run so the failure card can render; adopted from the tracker
+ * at boot when an import survived an app restart. */
+let importJob: { id: number; kind: string; path: string | null } | null = null;
+/** Cancel was asked for on THIS flow's job and its terminal event has
+ * not landed yet. The card re-renders on every tracker change, so a
+ * `progress` event after Cancel would otherwise rebuild the button
+ * enabled; while this stands, every render keeps it at its disabled
+ * "Cancelling…" state. Cleared by the terminal event (and whenever a
+ * new import or a recovered job takes over the flow). */
+let importCancelRequested = false;
 
 /** Map a backend import error to something a first-time importer can
  * act on — no raw errno, no connector vocabulary. */
@@ -1425,58 +1600,191 @@ function cancelPreview(): void {
   importStatus.textContent = "";
 }
 
-/** Confirm the previewed import: dispatch to the bounded importer for
- * the detected format, then offer "View imported messages" scoped to
- * exactly this run. The preview parameter is the one whose confirm
- * button was clicked; the pending pick must still match it. */
+/** Confirm the previewed import: submit it as a background job (the v2
+ * protocol — the same importer the direct commands run, with progress
+ * and cooperative cancellation) and follow it through the job-event
+ * stream in the inline progress card. Success lands the summary line
+ * and the "View imported messages" follow-up scoped to exactly this run;
+ * failures stay in the card until dismissed or the next import. */
 async function confirmImport(): Promise<void> {
   const target = pendingImport;
   if (!target || importBusy) return;
   importBusy = true;
+  pendingImport = null;
   const extractMedia = chatMediaToggle.checked;
   hideImportPreview(importPreviewEl);
-  importStatus.textContent =
-    `Importing ${target.path}` +
-    (target.kind !== "mbox" && target.kind !== "eml" && extractMedia
-      ? " (extracting media)"
-      : "") +
-    "…";
+  importFollowup.hidden = true;
+  importStatus.textContent = "";
+  const kind =
+    target.kind === "mbox" || target.kind === "eml" ? "import_mbox" : "import_chat_export";
+  const params =
+    kind === "import_mbox"
+      ? { path: target.path }
+      : { path: target.path, extract_media: extractMedia };
   try {
-    let summary: IngestSummary;
-    let importId: string;
-    let mediaSummary: MediaSummary | null = null;
-    if (target.kind === "mbox" || target.kind === "eml") {
-      const outcome = await ipc.importMbox(target.path);
-      summary = outcome.summary;
-      importId = outcome.import_id;
-      mediaSummary = outcome.media;
-    } else {
-      const outcome = await ipc.importChatExport(target.path, extractMedia);
-      summary = outcome.summary;
-      importId = outcome.import_id;
-      mediaSummary = outcome.media;
-    }
-    const failedPart = summary.failed > 0 ? `, ${summary.failed} failed to parse` : "";
-    const mediaPart = describeMedia(mediaSummary);
-    importStatus.textContent =
-      `Imported ${summary.inserted} new, ${summary.skipped} already present` +
-      `${failedPart} (of ${summary.seen} in ${summary.source}).` +
-      mediaPart;
-    showImportFollowup(importId, summary.inserted);
-    initialBrowseDone = true; // the archive view is live from here on
-    await refreshStats();
-    void refreshImportScopes();
-    void refreshSources();
-    void refreshAccounts();
-    void refreshEmbedStatus();
-    void refreshDashboard();
-    void runSearch(0); // newest-first browse, ready when the user returns
-    if (mediaSummary) void refreshMediaUsage(); // media landed in the store
+    const handle = await ipc.jobSubmit(kind, params);
+    importJob = { id: handle.id, kind, path: target.path };
+    importCancelRequested = false; // a fresh run: its Cancel is live
+    renderImportProgressCard(); // queued card — events take over from here
   } catch (e) {
-    importStatus.textContent = friendlyImportError(e, target.path);
-  } finally {
+    // Refused before any job existed (queue full, demo lockout, moved
+    // file): no card, the friendly line says what to do.
     importBusy = false;
-    pendingImport = null;
+    importStatus.textContent = friendlyImportError(e, target.path);
+  }
+}
+
+/** The synthetic queued record for the gap between `job_submit`
+ * resolving and its first event teaching the tracker the job. */
+function importJobRecord() {
+  const job = importJob;
+  if (job === null) return null;
+  return (
+    jobs.records.get(job.id) ?? {
+      id: job.id,
+      kind: job.kind,
+      state: { state: "queued" } as const,
+      submitted_at: "",
+      started_at: null,
+      finished_at: null,
+      progress: null,
+    }
+  );
+}
+
+/** Bring the inline card in step with this flow's job (called after
+ * every tracker change). Hidden unless a job is being followed. */
+function renderImportProgressCard(): void {
+  const record = importJobRecord();
+  if (record === null) {
+    hideImportProgress(importProgressEl);
+    return;
+  }
+  renderImportProgress(importProgressEl, record, {
+    path: importJob?.path ?? undefined,
+    onCancel: () => void cancelImportJob(),
+    onDismiss: dismissImportFailure,
+  });
+  // A `progress` event after Cancel re-renders the card (the tracker
+  // changed) and would rebuild the button enabled; while the cancel
+  // request stands, keep it at its disabled "Cancelling…" state — the
+  // terminal `cancelled` event is what ends the card.
+  if (importCancelRequested) {
+    const button = importProgressEl.querySelector<HTMLButtonElement>("#import-cancel-btn");
+    if (button) {
+      button.disabled = true;
+      button.textContent = "Cancelling…";
+    }
+  }
+}
+
+/** Cancel this flow's import (cooperative: it stops at the next safe
+ * point; re-importing resumes without duplicating, so no confirm
+ * step). A refusal here means the job already ended — its terminal
+ * event re-renders the section. */
+async function cancelImportJob(): Promise<void> {
+  const job = importJob;
+  if (job === null) return;
+  importCancelRequested = true;
+  const button = document.querySelector<HTMLButtonElement>("#import-cancel-btn");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Cancelling…";
+  }
+  try {
+    await ipc.jobCancel(job.id);
+  } catch {
+    importCancelRequested = false; // the ask never left; the button lives
+    renderImportProgressCard(); // restore the button; the stream still speaks
+  }
+}
+
+/** Dismiss a failed import's card: back to the section's start state. */
+function dismissImportFailure(): void {
+  importJob = null;
+  hideImportProgress(importProgressEl);
+}
+
+/** Read a succeeded import job's result as the importer's outcome shape
+ * ({ summary, import_id, media } — the same object the direct commands
+ * return); null for anything else (no invented numbers). */
+function importOutcomeOf(result: unknown): ChatImportOutcome | null {
+  if (typeof result !== "object" || result === null) return null;
+  const r = result as Record<string, unknown>;
+  const summary = r.summary;
+  if (
+    typeof r.import_id !== "string" ||
+    typeof summary !== "object" ||
+    summary === null ||
+    typeof (summary as Record<string, unknown>).source !== "string" ||
+    typeof (summary as Record<string, unknown>).inserted !== "number"
+  ) {
+    return null;
+  }
+  return { summary, import_id: r.import_id, media: (r.media ?? null) } as ChatImportOutcome;
+}
+
+/** The one-line import result for #import-status (the follow-up's
+ * companion): counts, parse failures, media counters. */
+function importSummaryLine(outcome: ChatImportOutcome): string {
+  const summary = outcome.summary;
+  const failedPart = summary.failed > 0 ? `, ${summary.failed} failed to parse` : "";
+  return (
+    `Imported ${summary.inserted} new, ${summary.skipped} already present` +
+    `${failedPart} (of ${summary.seen} in ${summary.source}).` +
+    describeMedia(outcome.media)
+  );
+}
+
+/** Feed this flow's import job through its inline card. Terminal states
+ * hand off (the card re-renders via renderJobs on every tracker
+ * change): success → the summary line + "View imported messages"
+ * follow-up (plus the refreshes the generic job handler does not own);
+ * cancel → the card goes and the section returns to its start state;
+ * failure → the card keeps the message until dismissed or the next
+ * import. */
+function feedImportJobEvent(event: JobEvent): void {
+  const job = importJob;
+  if (job === null || event.job !== job.id) return;
+  if (event.type === "succeeded") {
+    importJob = null;
+    importBusy = false;
+    importCancelRequested = false;
+    hideImportProgress(importProgressEl);
+    const outcome = importOutcomeOf(event.result);
+    if (outcome) {
+      importStatus.textContent = importSummaryLine(outcome);
+      showImportFollowup(outcome.import_id, outcome.summary.inserted);
+      // The archive view is live from here on — but the counts must
+      // land first: runSearch reads archiveTotal, which refreshStats
+      // owns. Browsing before that refresh resolves reads a stale
+      // total (an import into an empty archive still reads as empty),
+      // takes the first-run empty branch, and the initialBrowseDone
+      // flag set along the way then blocks the stats-driven browse
+      // (maybeInitialBrowse) that would surface the import a moment
+      // later — the workspace would stay on "Your archive is empty"
+      // until the next manual search.
+      void refreshStats().then(() => {
+        initialBrowseDone = true; // the archive view is live from here on
+        void runSearch(0); // newest-first browse, ready when the user returns
+      });
+      if (outcome.media) void refreshMediaUsage(); // media landed in the store
+    } else {
+      // Unexpected result shape (no invented numbers, no follow-up to
+      // scope): the run did finish — say so instead of hiding the card
+      // and leaving the section wordlessly at its start state.
+      importStatus.textContent = "Import finished.";
+    }
+  } else if (event.type === "cancelled") {
+    importJob = null;
+    importBusy = false;
+    importCancelRequested = false;
+    hideImportProgress(importProgressEl);
+    importStatus.textContent = "";
+  } else if (event.type === "failed") {
+    // A new import may start; the failure card stays until dismissed.
+    importBusy = false;
+    importCancelRequested = false;
   }
 }
 
@@ -1507,7 +1815,7 @@ function showImportFollowup(importId: string | undefined, inserted: number): voi
       importScopeSelect.append(option);
     }
     importScopeSelect.value = importId;
-    workspace.store.setView("workspace");
+    workspace.store.setWorkspaceSection("search");
     void runSearch(0);
   });
   importFollowup.append(view);
@@ -1568,7 +1876,7 @@ async function enterDemo(): Promise<void> {
   try {
     await ipc.demoEnter();
     demoActive = true;
-    workspace.store.setView("workspace");
+    workspace.store.setWorkspaceSection("search");
     await refreshAfterVaultSwitch();
   } catch (e) {
     setStatus(`Could not open the sample archive: ${e}`, true);
@@ -1948,7 +2256,7 @@ function viewSourceMessages(account: AccountView): void {
   state.sources = [account.source_id];
   renderSourceChipsNow();
   void runSearch(0);
-  workspace.store.setView("workspace");
+  workspace.store.setWorkspaceSection("search");
   searchInput.focus();
 }
 
@@ -2118,6 +2426,25 @@ function renderJobs(): void {
   if (!embedButton.disabled && embedStatus.textContent.startsWith("Embedding…")) {
     embedStatus.textContent = "";
   }
+  adoptRecoveredImportJob();
+  renderImportProgressCard();
+}
+
+/** Boot recovery: an import that survived an app restart (or a webview
+ * reload) still deserves its inline card — adopt the newest active
+ * import-kind job the tracker knows. The generic boot poll
+ * (`job_events_since(0)`) populates the tracker before this runs. */
+function adoptRecoveredImportJob(): void {
+  if (importJob !== null) return;
+  const recovered = orderedRecords(jobs).find(
+    (r) =>
+      isImportJobKind(r.kind) && (r.state.state === "queued" || r.state.state === "running"),
+  );
+  if (recovered) {
+    importJob = { id: recovered.id, kind: recovered.kind, path: null };
+    importBusy = true; // the pick/confirm guards hold until it ends
+    importCancelRequested = false; // this run was never cancelled here
+  }
 }
 
 /** Poll `job_events_since(cursor)` — the recovery path for missed window
@@ -2163,6 +2490,7 @@ void ipc.onEvent<JobEvent>("job-event", (payload) => {
   notifier.onJobEvent(payload, jobs.records.get(payload.job)?.kind);
   refreshAfterJobEvent(payload);
   feedBackupJobEvent(payload);
+  feedImportJobEvent(payload);
   renderJobs();
   if (jobs.needsPoll) {
     void syncJobs(); // seq gap: recover the missed events by polling
@@ -2234,7 +2562,10 @@ async function exportChat(): Promise<void> {
   const detail = state.detail;
   if (!detail) return;
   exportStatus.textContent = "";
-  const format = exportFormatSelect.value;
+  // The chat-format select lives in the reading header's Export picker
+  // (re-rendered with the card), so it is read at click time.
+  const chatFormat = document.querySelector<HTMLSelectElement>("#chat-format")?.value;
+  const format = chatFormat === "json" || chatFormat === "mbox" ? chatFormat : "csv";
   const path = await pickExportPath(format);
   if (path === null) return; // cancelled
   exportStatus.textContent = "Exporting chat…";

@@ -392,6 +392,7 @@ export async function run(ctx) {
     // With content and a zero-result search, the guard message stays.
     await ui.importMbox(browser, ui.archiveMbox);
     await ui.openView(browser, "workspace");
+    await ui.openExportMenu(browser); // the button lives inside the Export… picker
     await browser.waitUntil(async () => (await button.isDisplayed()) === true);
     const miss = await ui.search(browser, "quartzxyz");
     assert.matches(miss, /0 results|0 of/, "zero-result search ran");

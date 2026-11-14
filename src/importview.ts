@@ -3,9 +3,20 @@
 // The preview shows what the bounded backend scan found — detected
 // format, sample messages, bounded counts, media presence, size and
 // free-space guidance — and the confirm/cancel actions the wiring in
-// main.ts attaches. Unit-tested via happy-dom in importview.test.ts.
+// main.ts attaches. The inline progress card (wave 3) stays with the
+// import while its background job runs: stage, counts, a determinate bar
+// when the backend knows a total, and Cancel. Unit-tested via happy-dom
+// in importview.test.ts.
 
 import { humanSize } from "./format";
+import {
+  describeJobError,
+  jobKindLabel,
+  jobProgressPercent,
+  jobProgressText,
+} from "./jobsview";
+import { iconEl } from "./icons";
+import type { JobRecord } from "./types";
 import type { ImportPreview } from "./types";
 
 /** How the confirm button labels itself for each detected format. */
@@ -191,6 +202,141 @@ export function renderImportPreview(el: HTMLElement, preview: ImportPreview, opt
 
 /** Hide the preview card (cancel / after the import finished). */
 export function hideImportPreview(el: HTMLElement): void {
+  el.hidden = true;
+  el.replaceChildren();
+}
+
+// ---------------------------------------------------------------------------
+// Inline progress card (wave 3): the import's own job, followed where the
+// archivist started it — no detour to Activity required (Activity stays
+// the aggregate over every job).
+// ---------------------------------------------------------------------------
+
+/** Whether a job kind is one the import flow submits (used to adopt a
+ * job that survived an app restart — recovery shows its card too). */
+export function isImportJobKind(kind: string): boolean {
+  return kind === "import_mbox" || kind === "import_chat_export";
+}
+
+export interface ImportProgressOptions {
+  /** What is being imported, so the run stays anchored to the pick the
+   * archivist confirmed (omitted for a job recovered from a previous
+   * session — its path did not survive the restart). */
+  path?: string;
+  /** Cancel the running import (cooperative; recoverable by re-import). */
+  onCancel: () => void;
+  /** Dismiss a failed import's card. */
+  onDismiss: () => void;
+}
+
+/**
+ * Render the inline progress card for the import flow's job.
+ *
+ * queued/running: job label, progress line (`done/total (pct%) · hint`
+ * via the shared jobs formatter), a determinate bar only when the total
+ * is known (an indeterminate bar otherwise), and Cancel. failed: the
+ * plain-language error inline, with the card kept until dismissed or the
+ * next import starts. succeeded/cancelled render nothing — the caller
+ * owns those hand-offs (the follow-up button / returning to the start
+ * state), so this builder never duplicates them.
+ *
+ * The progress line is the live region (role="status", the app's
+ * convention): state changes announce themselves; the buttons live
+ * outside it so they are not re-announced.
+ */
+export function renderImportProgress(
+  el: HTMLElement,
+  record: JobRecord,
+  opts: ImportProgressOptions,
+): void {
+  const state = record.state.state;
+  if (state === "succeeded" || state === "cancelled") {
+    hideImportProgress(el);
+    return;
+  }
+  el.hidden = false;
+  el.replaceChildren();
+
+  const card = document.createElement("div");
+  card.className = `import-progress-card ${state}`;
+
+  const head = document.createElement("div");
+  head.className = "row";
+  const title = document.createElement("h3");
+  title.className = "preview-title";
+  if (state === "running") title.append(iconEl("spinner", "icon-spin"));
+  else if (state === "failed") title.append(iconEl("error"));
+  title.append(document.createTextNode(jobKindLabel(record.kind)));
+  const path = document.createElement("span");
+  path.className = "meta preview-path";
+  path.textContent = opts.path ?? "";
+  if (opts.path === undefined) path.hidden = true;
+  else path.title = opts.path;
+  const action = document.createElement("button");
+  action.type = "button";
+  if (state === "failed") {
+    action.id = "import-progress-dismiss";
+    action.textContent = "Close";
+    action.addEventListener("click", opts.onDismiss);
+  } else {
+    action.id = "import-cancel-btn";
+    action.textContent = "Cancel";
+    action.addEventListener("click", opts.onCancel);
+  }
+  const spacer = document.createElement("div");
+  spacer.className = "spacer";
+  head.append(title, path, spacer, action);
+  card.append(head);
+
+  const line = document.createElement("p");
+  line.className = "meta import-progress-line";
+  line.setAttribute("role", "status");
+  if (state === "queued") {
+    line.textContent = "Queued — the import starts as soon as the vault is free.";
+  } else if (state === "failed" && record.state.state === "failed") {
+    line.classList.add("error");
+    line.textContent = `Import failed — ${describeJobError(record.state.error)}.`;
+  } else {
+    const progress = record.progress;
+    const counts = progress ? jobProgressText(progress) : null;
+    line.textContent = counts ?? progress?.message ?? "Importing…";
+  }
+  card.append(line);
+
+  if (state === "queued" || state === "running") {
+    const track = document.createElement("div");
+    track.className = "progress-track";
+    // The bar is visual; the line above already states the numbers as
+    // text (the live region), so neither bar duplicates them to AT.
+    track.setAttribute("aria-hidden", "true");
+    const pct = record.progress ? jobProgressPercent(record.progress) : null;
+    if (pct === null) {
+      // Unknown total (the backend has not measured the archive yet):
+      // motion says "working", the counts line stays honest.
+      track.classList.add("indeterminate");
+    } else {
+      const fill = document.createElement("div");
+      fill.className = "progress-fill";
+      fill.style.width = `${pct}%`;
+      track.append(fill);
+    }
+    card.append(track);
+  }
+
+  if (state === "failed") {
+    // Recovery in the app's own words: interrupted imports commit in
+    // batches and re-importing skips what already landed.
+    const note = document.createElement("p");
+    note.className = "meta";
+    note.textContent = "Re-importing the same file picks up where this stopped — nothing is duplicated.";
+    card.append(note);
+  }
+
+  el.append(card);
+}
+
+/** Hide the progress card (terminal hand-off, cancel, or dismiss). */
+export function hideImportProgress(el: HTMLElement): void {
   el.hidden = true;
   el.replaceChildren();
 }

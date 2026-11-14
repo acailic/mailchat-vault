@@ -1,9 +1,11 @@
-/// DOM rendering for the v2 search UI (M3.2): flat results rows, applied
-/// filter chips, and the v2 reading pane (detail + chronological context).
+/// DOM rendering for the v2 search UI (M3.2): flat results rows, era
+/// chips, applied filter chips, and the v2 reading pane (detail +
+/// chronological context).
 /// Pure builders like render.ts — every dynamic string goes through
 /// textContent, tested via happy-dom in render2.test.ts.
 
 import {
+  authorDisplayName,
   conversationConfidenceLabel,
   formatSentAt,
   importScopeLabel,
@@ -11,12 +13,13 @@ import {
   timeConfidenceDetail,
   timeConfidenceLabel,
 } from "./format";
-import { icon } from "./icons";
+import { type IconName, icon, iconEl } from "./icons";
 import {
   appendSegments,
 } from "./render";
 import {
   type ContextEntry,
+  type EraBucket,
   type FilterChip,
   messageLink,
 } from "./searchstate";
@@ -74,7 +77,9 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
   li.dataset.index = String(at);
   if (at === opts.activeIndex) li.setAttribute("aria-current", "true");
 
-  // Selection checkbox for the explicit selection export.
+  // Selection checkbox for the explicit selection export — a sibling of
+  // the row's button, never a control nested inside one (no double
+  // announcement, no Space-key ambiguity).
   const check = document.createElement("input");
   check.type = "checkbox";
   check.className = "row-select";
@@ -83,17 +88,35 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
   check.addEventListener("click", (event) => event.stopPropagation());
   check.addEventListener("change", () => opts.onToggleSelect(hit.id));
 
+  // The row's activatable area: role=button + tabindex live here, on an
+  // element that contains only text. The li stays a plain list item
+  // (class/data/aria-current remain on it for styling and keyboard nav).
   const main = document.createElement("div");
   main.className = "hit-main";
+  main.setAttribute("role", "button");
+  main.setAttribute("tabindex", "0");
+  main.title = "Open this message";
   const meta = document.createElement("div");
   meta.className = "meta";
-  const parts = [
-    hit.author || "unknown",
-    timeLabel(hit),
-    hit.source_label,
-  ];
-  if (hit.conversation_label) parts.push(hit.conversation_label);
-  meta.textContent = parts.join(" · ");
+  const displayAuthor = authorDisplayName(hit.author) || "unknown";
+  // The time sits in its own span so a marked-uncertain time can
+  // explain itself on hover: "(assumed)" no longer waits for the
+  // detail pane to say what it means (A04 honesty). The wording is
+  // the detail pane's own one-sentence explanation, so both surfaces
+  // say the same thing.
+  const time = document.createElement("span");
+  time.className = "time";
+  time.textContent = timeLabel(hit);
+  if (
+    hit.time_confidence === "legacy_assumed" ||
+    hit.time_confidence === "unresolved"
+  ) {
+    time.title = timeConfidenceDetail(hit.time_confidence);
+  }
+  meta.append(displayAuthor, " · ", time, " · ", hit.source_label);
+  if (hit.conversation_label) meta.append(" · ", hit.conversation_label);
+  // The full "Name <address>" form stays one hover away.
+  if (displayAuthor !== (hit.author || "unknown")) meta.title = hit.author;
   if (hit.attachment_count > 0) {
     const files = document.createElement("span");
     files.className = "badge attachments";
@@ -134,12 +157,13 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
 
   main.append(meta, body);
   li.append(check, main);
-  li.setAttribute("role", "button");
-  li.setAttribute("tabindex", "0");
-  li.title = "Open this message";
   const open = () => opts.onOpen(hit.id);
+  // Clicks anywhere in the row except the checkbox open the message:
+  // the li listener is plain delegation (the li carries no button
+  // semantics), and the checkbox stops its own clicks from bubbling.
   li.addEventListener("click", open);
-  li.addEventListener("keydown", (event) => {
+  // Keyboard activation belongs to the button element alone.
+  main.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       event.stopPropagation();
@@ -192,6 +216,47 @@ export function renderFilterChips(el: HTMLElement, opts: FilterChipsOptions): vo
   } else {
     el.replaceChildren();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Era chips (timeline filters)
+// ---------------------------------------------------------------------------
+
+export interface EraChipsOptions {
+  buckets: EraBucket[];
+  /** The bucket the filters currently hold (-1 = none). */
+  activeIndex: number;
+  onToggle: (index: number) => void;
+}
+
+/**
+ * The era strip: one quiet row of timeline toggles under the toolbar.
+ * Each chip applies its bucket's exact from/to bounds through the normal
+ * date-input machinery (main.ts sets the inputs and re-runs the search);
+ * the active chip is a pressed toggle whose click removes the bound.
+ * Fewer than two buckets render nothing — no dead chrome over a timeline
+ * too short to strip.
+ */
+export function renderEraChips(el: HTMLElement, opts: EraChipsOptions): void {
+  if (opts.buckets.length < 2) {
+    el.replaceChildren();
+    return;
+  }
+  const chips = opts.buckets.map((bucket, index) => {
+    const active = index === opts.activeIndex;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "chip era-chip" + (active ? " on" : "");
+    button.dataset.era = bucket.label;
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+    button.title = active
+      ? `Remove the ${bucket.label} date range (${bucket.from} → ${bucket.to})`
+      : `Filter to ${bucket.label} (${bucket.from} → ${bucket.to})`;
+    button.textContent = bucket.label;
+    button.addEventListener("click", () => opts.onToggle(index));
+    return button;
+  });
+  el.replaceChildren(...chips);
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +377,134 @@ function contextRow(
   return row;
 }
 
+/** A quiet icon-only action for the reading header. The icon is
+ * decorative; the accessible name is the explicit aria-label and the
+ * tooltip (title) carries the longer explanation. */
+function iconButton(
+  name: IconName,
+  cls: string,
+  label: string,
+  title: string,
+  onClick: () => void,
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `icon-btn ${cls}`;
+  button.setAttribute("aria-label", label);
+  button.title = title;
+  button.append(iconEl(name));
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+/** One format <select> for the reading header's Export picker. */
+function formatSelect(
+  id: string,
+  label: string,
+  options: Array<[value: string, text: string]>,
+  selected: string | null,
+): HTMLSelectElement {
+  const select = document.createElement("select");
+  select.id = id;
+  select.setAttribute("aria-label", label);
+  select.title = label;
+  for (const [value, text] of options) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = text;
+    select.append(option);
+  }
+  // A re-render (opening a neighbour, loading more context) keeps the
+  // format the user already chose instead of snapping back to the default.
+  if (selected !== null && options.some(([value]) => value === selected)) {
+    select.value = selected;
+  }
+  return select;
+}
+
+/** The reading header's single Export… action: a native disclosure whose
+ * picker offers this message (text/JSON) and the whole conversation
+ * (CSV/JSON Lines/MBOX). Chat export lives here as the picker's second
+ * section rather than in a separate overflow menu. */
+function exportPicker(el: HTMLElement, opts: Detail2Options): HTMLDetailsElement {
+  const previous = (id: string) =>
+    el.querySelector<HTMLSelectElement>(`#${id}`)?.value ?? null;
+  // The picker stays open across a re-render of the SAME message (a
+  // background refresh must not snap it shut mid-choice); opening another
+  // message starts with it closed.
+  const previousCard = el.querySelector<HTMLElement>("article.detail-card");
+  const wasOpen =
+    previousCard?.dataset.messageId === String(opts.ctx.anchor.id) &&
+    (previousCard.querySelector<HTMLDetailsElement>("details.reading-export")?.open ?? false);
+
+  const picker = document.createElement("details");
+  picker.className = "reading-export";
+  picker.open = wasOpen;
+  const summary = document.createElement("summary");
+  summary.className = "icon-btn";
+  summary.setAttribute("aria-label", "Export");
+  summary.title = "Export this message or the whole conversation";
+  summary.append(iconEl("export"));
+
+  const row = (caption: string, select: HTMLSelectElement, action: HTMLButtonElement) => {
+    const line = document.createElement("div");
+    line.className = "export-row";
+    const label = document.createElement("span");
+    label.className = "meta";
+    label.textContent = caption;
+    line.append(label, select, action);
+    return line;
+  };
+
+  const exportButton = document.createElement("button");
+  exportButton.type = "button";
+  exportButton.className = "export-selection-btn";
+  exportButton.textContent = "Export message…";
+  exportButton.title = "Export this message as text or JSON";
+  exportButton.addEventListener("click", opts.onExport);
+
+  const exportChatButton = document.createElement("button");
+  exportChatButton.type = "button";
+  exportChatButton.className = "export-chat-btn";
+  exportChatButton.textContent = "Export chat…";
+  exportChatButton.title = "Export the whole conversation thread";
+  exportChatButton.addEventListener("click", opts.onExportChat);
+
+  const body = document.createElement("div");
+  body.className = "export-popover";
+  body.append(
+    row(
+      "This message",
+      formatSelect(
+        "message-format",
+        "Message export format",
+        [
+          ["text", "Text"],
+          ["json", "JSON"],
+        ],
+        previous("message-format"),
+      ),
+      exportButton,
+    ),
+    row(
+      "Conversation",
+      formatSelect(
+        "chat-format",
+        "Chat export format",
+        [
+          ["csv", "CSV"],
+          ["json", "JSON Lines"],
+          ["mbox", "MBOX (email rows)"],
+        ],
+        previous("chat-format"),
+      ),
+      exportChatButton,
+    ),
+  );
+  picker.append(summary, body);
+  return picker;
+}
+
 /** Render the v2 reading pane: detail card + context thread + actions. */
 export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
   const { ctx, entries } = opts;
@@ -320,42 +513,41 @@ export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
 
   const card = document.createElement("article");
   card.className = "detail-card";
+  card.dataset.messageId = String(detail.id);
 
   const header = document.createElement("header");
   const title = document.createElement("h2");
-  title.textContent = detail.author || "unknown";
+  // The headline follows the rows' discipline: the display name, with
+  // the full "Name <address>" form one hover away. The exact address
+  // stays in the meta table below either way.
+  const displayAuthor = authorDisplayName(detail.author) || "unknown";
+  title.textContent = displayAuthor;
+  if (displayAuthor !== (detail.author || "unknown")) title.title = detail.author;
   const actions = document.createElement("div");
   actions.className = "header-actions";
-  const copyButton = document.createElement("button");
-  copyButton.type = "button";
-  copyButton.className = "copy-btn";
-  copyButton.textContent = "Copy";
-  copyButton.title = "Copy the message text with provenance";
-  copyButton.addEventListener("click", opts.onCopy);
-  const linkButton = document.createElement("button");
-  linkButton.type = "button";
-  linkButton.className = "copy-link-btn";
-  linkButton.textContent = "Copy link";
-  linkButton.title = `Copy the internal locator (${messageLink(detail.id)})`;
-  linkButton.addEventListener("click", opts.onCopyLink);
-  const exportButton = document.createElement("button");
-  exportButton.type = "button";
-  exportButton.className = "export-selection-btn";
-  exportButton.textContent = "Export…";
-  exportButton.title = "Export this message as text or JSON";
-  exportButton.addEventListener("click", opts.onExport);
-  const exportChatButton = document.createElement("button");
-  exportChatButton.type = "button";
-  exportChatButton.className = "export-chat-btn";
-  exportChatButton.textContent = "Export chat…";
-  exportChatButton.title = "Export the whole conversation thread";
-  exportChatButton.addEventListener("click", opts.onExportChat);
-  const closeButton = document.createElement("button");
-  closeButton.type = "button";
-  closeButton.className = "close-btn";
-  closeButton.textContent = "Back to results";
-  closeButton.addEventListener("click", opts.onClose);
-  actions.append(copyButton, linkButton, exportButton, exportChatButton, closeButton);
+  // Utility actions are icon-only and equal in weight; Export… opens the
+  // picker. "Back to results" is not here: the swap layouts
+  // (medium/compact) own it in the reading toolbar, and the wide layout —
+  // where the results sit beside the pane — gets a plain Close instead
+  // (hidden by CSS whenever the toolbar's Back is showing).
+  actions.append(
+    iconButton(
+      "copy",
+      "copy-btn",
+      "Copy message",
+      "Copy the message text with provenance",
+      opts.onCopy,
+    ),
+    iconButton(
+      "link",
+      "copy-link-btn",
+      "Copy link",
+      `Copy the internal locator (${messageLink(detail.id)})`,
+      opts.onCopyLink,
+    ),
+    exportPicker(el, opts),
+    iconButton("close", "close-btn", "Close", "Close the reading pane (Esc)", opts.onClose),
+  );
   header.append(title, actions);
 
   const meta = document.createElement("dl");

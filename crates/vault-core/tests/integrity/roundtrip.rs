@@ -116,13 +116,13 @@ fn export_import_round_trip_is_bit_identical() {
     let b = Storage::open(&imported).unwrap();
     for term in ["vault", "arhiva", "čćžšđ", "terminator", "morning"] {
         let ids_a: Vec<String> = a
-            .search_filtered(term, None, None, 100)
+            .search_filtered(term, None, None, None, false, 100)
             .unwrap()
             .into_iter()
             .map(|m| m.external_id)
             .collect();
         let ids_b: Vec<String> = b
-            .search_filtered(term, None, None, 100)
+            .search_filtered(term, None, None, None, false, 100)
             .unwrap()
             .into_iter()
             .map(|m| m.external_id)

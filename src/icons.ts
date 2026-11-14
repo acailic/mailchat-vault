@@ -9,6 +9,8 @@ export type IconName =
   | "close"
   | "export"
   | "paperclip"
+  | "copy"
+  | "link"
   | "check"
   | "warning"
   | "error"

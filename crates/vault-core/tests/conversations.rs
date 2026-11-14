@@ -93,7 +93,7 @@ fn telegram_rename_stays_one_conversation_and_label_follows() {
 
     // Thread context spans the whole chat, across both imports.
     let hits = storage
-        .search_filtered("\"poruka\"", None, None, 10)
+        .search_filtered("\"poruka\"", None, None, None, false, 10)
         .unwrap();
     assert_eq!(hits.len(), 3);
     let ctx = storage.chat_context(hits[1].id, 8).unwrap().unwrap();
@@ -125,7 +125,7 @@ fn telegram_same_name_different_ids_stay_separated() {
     assert_eq!(count_conversations(&raw), 2);
     // And their messages never mix: the other chat's message has no peers.
     let hit = storage
-        .search_filtered("\"drugi chat\"", None, None, 10)
+        .search_filtered("\"drugi chat\"", None, None, None, false, 10)
         .unwrap()[0]
         .id;
     let ctx = storage.chat_context(hit, 8).unwrap().unwrap();
@@ -478,7 +478,7 @@ fn email_reply_chain_groups_into_one_thread() {
     // chain as before/after peers.
     assert_eq!(count_conversations(&raw), 1);
     let hit = storage
-        .search_filtered("\"odgovor jedan\"", None, None, 10)
+        .search_filtered("\"odgovor jedan\"", None, None, None, false, 10)
         .unwrap()[0]
         .id;
     let ctx = storage.chat_context(hit, 8).unwrap().unwrap();

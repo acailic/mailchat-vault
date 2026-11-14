@@ -8,6 +8,8 @@
  *   data-layout  wide (>=1100px) | medium (800–1099px) | compact (<800px)
  *   data-reading open | closed   (a message is open in the reading pane)
  *   data-nav     open | closed   (compact navigation drawer)
+ *   data-nav-collapsed true | false  (desktop: the nav column is removed)
+ *   data-workspace-section search | ask  (the tab inside the Archive view)
  * The CSS media queries mirror the JS breakpoints exactly.
  * ------------------------------------------------------------------------- */
 
@@ -65,7 +67,16 @@
   margin: 0;
 }
 
-html, body { height: 100%; }
+html, body {
+  height: 100%;
+  /* The document never scrolls — every pane scrolls on its own. This
+   * hard-guards the WebKitGTK viewport/100vh glitch class (stale layout
+   * viewport after a resize or monitor change), where the page briefly
+   * becomes taller than the window and wheel chaining scrolls the whole
+   * app into empty canvas. On the root element, not just body: body's
+   * overflow alone does not always propagate to the viewport. */
+  overflow: hidden;
+}
 
 body {
   margin: 0;
@@ -116,7 +127,11 @@ body {
 #app {
   display: grid;
   grid-template-columns: var(--nav-width) 1fr;
-  height: 100vh;
+  /* 100%, not 100vh: a percentage resolves against body's height, which
+   * tracks the real viewport in every engine — 100vh can go stale in
+   * WebKitGTK after a window resize or monitor change and leave the page
+   * taller than the window. */
+  height: 100%;
   overflow: hidden; /* each area scrolls on its own */
 }
 
@@ -239,7 +254,16 @@ body {
   font-size: 12px;
 }
 
-/* --- Content column: topbar (compact) + views --------------------------- */
+/* Desktop sidebar hiding (wide/medium): the nav column leaves the grid
+ * entirely and the content takes the full width — no scrim, no overlay
+ * (that is the compact drawer below). */
+@media (min-width: 800px) {
+  #app[data-nav-collapsed="true"] { grid-template-columns: 1fr; }
+  #app[data-nav-collapsed="true"] #nav { display: none; }
+  #app[data-nav-collapsed="true"] #content { grid-column: 1; }
+}
+
+/* --- Content column: topbar (nav toggle + view title) + views ------------ */
 
 #content {
   grid-column: 2;
@@ -249,8 +273,10 @@ body {
   min-height: 0;
 }
 
+/* The topbar is visible at every width: its hamburger hides the nav column
+ * on desktop and works the drawer on compact. */
 #topbar {
-  display: none; /* compact only */
+  display: flex;
   align-items: center;
   gap: var(--sp-2);
   padding: var(--sp-1) var(--sp-2);
@@ -325,6 +351,34 @@ body {
   background: var(--selection);
   border-color: var(--border-strong);
   font-weight: 600;
+}
+
+/* --- Workspace view: Search / Ask tabs (one panel at a time) ------------- */
+
+/* Same segmented-control language as the settings pages; aria-selected is
+ * the state (role=tab, not aria-current). */
+.workspace-tabs { gap: var(--sp-1); margin-bottom: var(--sp-3); }
+.workspace-tab-btn {
+  padding: var(--sp-1) var(--sp-2);
+  font: inherit;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+.workspace-tab-btn:hover { background: var(--panel-2); }
+.workspace-tab-btn[aria-selected="true"] {
+  background: var(--selection);
+  border-color: var(--border-strong);
+  font-weight: 600;
+}
+
+/* Panels stay mounted; only visibility is switched (results, scroll, and
+ * the last answer survive tab switches). */
+#app[data-view="workspace"][data-workspace-section="search"] #ask-section,
+#app[data-view="workspace"][data-workspace-section="ask"] #search-section {
+  display: none;
 }
 
 #view-sources,
@@ -436,7 +490,9 @@ kbd {
  * more quiet control in the row (the .chip recipe, kept separate so
  * ".chip" stays the removable-chip contract) and carries the
  * active-filter count. */
-#filters > summary {
+#filters > summary,
+#export-menu > summary,
+#ask-fold > summary {
   /* Default list-item display keeps the native disclosure marker — the
    * same affordance as the IMAP form's Advanced fold. */
   cursor: pointer;
@@ -448,8 +504,11 @@ kbd {
   color: inherit;
   width: fit-content;
 }
-#filters > summary:hover { background: var(--panel-2); }
-#filters > summary.on {
+#filters > summary:hover,
+#export-menu > summary:hover,
+#ask-fold > summary:hover { background: var(--panel-2); }
+#filters > summary.on,
+#ask-fold > summary.on {
   background: var(--selection);
   border-color: var(--accent);
 }
@@ -480,6 +539,20 @@ kbd {
 .chip.on {
   background: var(--selection);
   border-color: var(--accent);
+}
+/* Nav source chips carry the source's taxonomy icon (mail/chat/file) at
+ * chip scale — decorative (aria-hidden, currentColor like every icon),
+ * inline-flex so icon and label sit on one line and the pill still
+ * wraps like an inline box. Scoped to #source-chips: the removable
+ * filter chips keep their text-only contract. */
+#source-chips .chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+#source-chips .chip .icon {
+  width: 12px;
+  height: 12px;
 }
 
 #status {
@@ -568,6 +641,71 @@ button.link-btn:hover:not(:disabled) { background: none; color: var(--accent-hov
   margin-top: 2px;
 }
 
+/* Inline import progress (wave 3): the preview card's sibling, built
+ * from the same parts — border, panel surface, one quiet bar. */
+.import-progress-card {
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  background: var(--panel);
+}
+.import-progress-card .preview-title {
+  /* Room for the state glyph beside the label. */
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.import-progress-card.failed .preview-title .icon {
+  color: var(--danger);
+}
+.import-progress-line { margin: var(--sp-2) 0 0; }
+
+/* Determinate: accent fill on a bordered track (the chart-bar pair). */
+.progress-track {
+  position: relative;
+  margin-top: var(--sp-2);
+  height: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  background: var(--panel-2);
+}
+.progress-fill {
+  height: 100%;
+  min-width: 2px;
+  background: var(--accent);
+  border-radius: var(--radius-pill);
+  transition: width var(--motion-slow) ease-out;
+}
+
+/* Indeterminate (total not yet known): one accent segment traverses the
+ * track. Under reduced motion it rests as a static partial fill — the
+ * state stays legible without the movement. */
+.progress-track.indeterminate::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 30%;
+  background: var(--accent);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .progress-track.indeterminate::after {
+    animation: progress-traverse 1.4s ease-in-out infinite;
+  }
+}
+@keyframes progress-traverse {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(calc(100% / 0.3)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress-track.indeterminate::after {
+    left: 35%;
+  }
+}
+
 /* Results list */
 #results { list-style: none; margin: 0; padding: 0; }
 .group { margin-bottom: 10px; }
@@ -604,13 +742,24 @@ mark.hit {
 /* Pagination + export */
 #pagination { display: flex; gap: 10px; align-items: center; margin-top: var(--sp-3); }
 .page-info { font-size: var(--text-meta); color: var(--muted); }
-#export-controls { display: flex; gap: var(--sp-2); align-items: center; margin-top: var(--sp-2); flex-wrap: wrap; }
-#export-status { font-size: var(--text-meta); color: var(--muted); }
+/* One Export… action: the picker folds behind the summary; the outcome
+ * line stays readable below it once the picker is closed again. */
+#export-controls { margin-top: var(--sp-2); }
+#export-controls .export-fields {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  align-items: center;
+  padding-top: var(--sp-2);
+}
+#export-status, #selection-status { font-size: var(--text-meta); color: var(--muted); }
 
 #keyboard-hint { margin-top: var(--sp-2); font-size: 12px; color: var(--muted); }
 
-/* Ask section (secondary mode beside Search in the results area) */
-#ask-section h2 { font-size: var(--text-section); margin: var(--sp-4) 0 var(--sp-2); }
+/* Ask section (secondary mode beside Search in the results area): a
+ * quiet fold like Filters; the heading weight moves to the summary. */
+#ask-fold { margin-top: var(--sp-4); }
+#ask-section .ask-fields { padding-top: var(--sp-2); }
 #ask { flex: 1; min-width: 12em; }
 #ask-provider { flex: 0 1 16em; min-width: 12em; }
 #llm-note {
@@ -660,6 +809,26 @@ mark.hit {
 #ask-notes { margin-top: var(--sp-1); font-size: var(--text-meta); color: var(--warning); }
 #ask-results, .watch-list, .jobs-list { list-style: none; margin: var(--sp-1) 0 0; padding: 0; font-size: var(--text-meta); }
 #ask-results li, .watch-list li, .jobs-list li { padding: 3px 0; }
+/* ask-collect-links: one details/summary per URL, one .ask-source row per hit. */
+#ask-collected-list { list-style: none; margin: var(--sp-1) 0 0; padding: 0; font-size: var(--text-meta); }
+#ask-collected-list li { padding: 3px 0; }
+#ask-collected-list summary { cursor: pointer; color: var(--accent); }
+#ask-collected-list .ask-source {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  border-radius: var(--radius-m);
+  padding: 3px 4px;
+  cursor: pointer;
+}
+#ask-collected-list .ask-source:hover, #ask-collected-list .ask-source:focus-visible {
+  background: var(--selection);
+}
+#ask-collected-list .ask-source .meta { color: var(--accent); }
 
 /* --- Reading pane -------------------------------------------------------- */
 
@@ -701,8 +870,8 @@ mark.hit {
 }
 #detail:not(.open) { display: none; }
 
-.detail-card header { display: flex; justify-content: space-between; align-items: baseline; gap: var(--sp-2); }
-.detail-card header .header-actions { display: flex; gap: 6px; }
+.detail-card header { display: flex; justify-content: space-between; align-items: center; gap: var(--sp-2); }
+.detail-card header .header-actions { display: flex; gap: 6px; align-items: center; }
 .detail-card h2 { font-size: var(--text-section); margin: 0 0 var(--sp-2); }
 .detail-card .body { max-width: 78ch; }
 /* Rendered/Raw toggle for email bodies: quiet segmented control over
@@ -725,11 +894,63 @@ mark.hit {
   border-radius: var(--radius-s);
   background: #fff;
 }
-.export-chat-btn, .close-btn {
-  font-size: var(--text-meta);
+
+/* Icon-only utility actions (reading header): quiet squares that name
+ * their action through aria-label/title; the keyboard focus ring comes
+ * from the global :focus-visible rule. */
+.icon-btn {
   display: inline-flex;
   align-items: center;
-  gap: var(--sp-1);
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-s);
+}
+.icon-btn:hover:not(:disabled) {
+  background: var(--panel-2);
+  border-color: var(--border);
+}
+summary.icon-btn {
+  list-style: none;
+  cursor: pointer;
+}
+summary.icon-btn::-webkit-details-marker { display: none; }
+
+/* The reading header's Export… picker: an anchored popover under the
+ * summary (absolute, so opening it never reflows the pane). */
+.reading-export { position: relative; }
+.reading-export[open] > summary.icon-btn {
+  background: var(--selection);
+  border-color: var(--border-strong);
+}
+.export-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: min(34ch, 84vw);
+  padding: var(--sp-3);
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow);
+}
+.export-row {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+  flex-wrap: wrap;
+}
+.export-row .meta {
+  /* The caption names the section on its own line; the format select and
+   * the action share the line below it. */
+  flex: 1 1 100%;
 }
 .meta-table {
   display: grid;
@@ -868,25 +1089,77 @@ mark.hit {
 #view-activity section { margin-bottom: var(--sp-4); }
 
 /* Statistics dashboard: pure CSS bars + tables, no chart library. */
+.day-chart-block { margin: 10px 0 14px; }
 .day-chart {
   display: flex;
   align-items: flex-end;
   gap: 1px;
   height: 72px;
-  margin: 10px 0 14px;
+  /* Room above the axis for the per-bar count labels. */
+  padding-top: var(--sp-4);
+  margin: 0;
   border-bottom: 1px solid var(--border-strong);
 }
 .day-bar {
+  position: relative;
   flex: 1 1 0;
   min-width: 1px;
-  background: var(--accent);
+  background: var(--accent); /* fallback: engines without color-mix */
   border-radius: 1px 1px 0 0;
+}
+.day-bar-count {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: var(--text-meta);
+  line-height: 1.2;
+  color: var(--muted);
+  white-space: nowrap;
+}
+/* One bucket is not a distribution: the count renders as plain text,
+ * never one misleading full-width bar. */
+.day-chart.single {
+  height: auto;
+  align-items: center;
+  padding-top: 0;
+  border-bottom: none;
+}
+.day-single {
+  font-size: var(--text-meta);
+  color: var(--muted);
+}
+/* Heat ramp: quiet days blend toward the idle floor, the busiest day
+ * reaches the full accent, so density reads without hover tooltips. */
+@supports (background: color-mix(in oklab, red, blue)) {
+  .day-bar {
+    background: color-mix(
+      in oklab,
+      var(--accent) calc(35% + var(--bar-heat, 100) * 0.65%),
+      var(--chart-idle)
+    );
+  }
+}
+/* Time axis under the histogram: first, middle, and last bucket label. */
+.day-chart-axis {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-top: 2px;
+  font-size: var(--text-meta);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 .stat-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
   gap: 10px 24px;
 }
+/* One categorical color per card (accent → ochre → slate blue), echoed
+ * by the dot before each heading so the tables read at a glance. */
+.stat-table { --stat-fill: var(--accent); }
+.stat-grid .stat-table:nth-child(2) { --stat-fill: var(--chart-2); }
+.stat-grid .stat-table:nth-child(3) { --stat-fill: var(--chart-3); }
 .stat-table h3 {
   font-size: 12px;
   font-weight: 600;
@@ -894,6 +1167,15 @@ mark.hit {
   letter-spacing: 0.04em;
   color: var(--muted);
   margin: 0 0 var(--sp-1);
+}
+.stat-table h3::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 2px;
+  background: var(--stat-fill);
 }
 .stat-table table { border-collapse: collapse; width: 100%; font-size: var(--text-meta); }
 .stat-table td {
@@ -913,7 +1195,7 @@ mark.hit {
   height: 6px;
   border-radius: 3px;
   min-width: 1px;
-  background: var(--accent);
+  background: var(--stat-fill);
 }
 
 /* --- Settings view -------------------------------------------------------- */
@@ -944,14 +1226,15 @@ mark.hit {
 
   #reading-toolbar { display: flex; }
   #detail:not(.open) { display: none; }
+  /* The toolbar owns "‹ Back to results" in the swap layouts; the wide
+   * layout's icon Close would be a second way out — hide it here. */
+  .detail-card .close-btn { display: none; }
 }
 
 /* --- Compact layout (<800px): one column, navigation drawer --------------- */
 
 @media (max-width: 799.98px) {
   #app { grid-template-columns: 1fr; }
-
-  #topbar { display: flex; }
 
   #nav {
     position: fixed;

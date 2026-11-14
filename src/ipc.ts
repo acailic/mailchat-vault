@@ -15,7 +15,6 @@ import type {
   AccountView,
   ArchiveStats,
   ChatContext,
-  ChatImportOutcome,
   DemoMode,
   EmbeddingStatus,
   ExportSummary,
@@ -264,23 +263,8 @@ export function archiveStats(top = 10): Promise<ArchiveStats> {
 // Import / sync / watch
 // ---------------------------------------------------------------------------
 
-// M4.2+: the mbox import runs the mail media pass (MIME attachments are
-// stored and linked), so its outcome mirrors the chat import's: the
-// ingest summary, the run's import_id (the import-scope filter value),
-// plus how the media pass went.
-export function importMbox(path: string): Promise<ChatImportOutcome> {
-  return invoke<ChatImportOutcome>("import_mbox", { path });
-}
-
-export function importChatExport(
-  path: string,
-  extractMedia: boolean,
-): Promise<ChatImportOutcome> {
-  return invoke<ChatImportOutcome>("import_chat_export", { path, extractMedia });
-}
-
 /** Bounded preview of a picked import input (U03): nothing is stored;
- * the confirm step dispatches to importMbox/importChatExport. */
+ * the confirm step dispatches to the import jobs below. */
 export function previewImport(path: string): Promise<ImportPreview> {
   return invoke<ImportPreview>("preview_import", { path });
 }
@@ -344,6 +328,13 @@ export function jobEventsSince(seq: number): Promise<JobEventsPage> {
   return invoke<JobEventsPage>("job_events_since", { seq });
 }
 
+/** Ask a job to stop (cooperative: it finishes at its next safe point).
+ * Returns whether the job was still cancellable — `false` means it had
+ * already reached a terminal state. */
+export function jobCancel(id: number): Promise<boolean> {
+  return invoke<boolean>("job_cancel", { id });
+}
+
 export function embedStatus(): Promise<EmbeddingStatus> {
   return invoke<EmbeddingStatus>("embed_status");
 }
@@ -405,6 +396,11 @@ export function exportChat(args: {
   path: string;
 }): Promise<ExportSummary | null> {
   return invoke<ExportSummary | null>("export_chat", args);
+}
+
+/** Write a UTF-8 text file to a path picked with the save dialog. */
+export function saveText(args: { path: string; contents: string }): Promise<null> {
+  return invoke<null>("save_text", args);
 }
 
 // ---------------------------------------------------------------------------

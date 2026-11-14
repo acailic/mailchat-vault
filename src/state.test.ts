@@ -165,6 +165,68 @@ describe("WorkspaceStore sub-view sections", () => {
   });
 });
 
+describe("WorkspaceStore workspace tabs (Search / Ask)", () => {
+  it("starts on the search tab", () => {
+    const store = new WorkspaceStore();
+    expect(store.get().workspaceSection).toBe("search");
+  });
+
+  it("setWorkspaceSection navigates to the workspace, closes the drawer, keeps reading", () => {
+    const store = new WorkspaceStore();
+    store.setReadingOpen(true);
+    store.setView("settings");
+    store.setNavOpen(true);
+    store.setWorkspaceSection("ask");
+    const s = store.get();
+    expect(s.view).toBe("workspace");
+    expect(s.workspaceSection).toBe("ask");
+    expect(s.navOpen).toBe(false);
+    expect(s.reading.open).toBe(true);
+  });
+
+  it("setView keeps the active workspace tab (like the reading pane)", () => {
+    const store = new WorkspaceStore();
+    store.setWorkspaceSection("ask");
+    store.setView("sources");
+    expect(store.get().workspaceSection).toBe("ask");
+    store.setView("workspace");
+    expect(store.get().workspaceSection).toBe("ask");
+  });
+
+  it("setWorkspaceSection is a no-op only when already showing that tab", () => {
+    const store = new WorkspaceStore();
+    let notifications = 0;
+    store.subscribe(() => notifications++);
+    store.setWorkspaceSection("search"); // true no-op (view is workspace)
+    expect(notifications).toBe(0);
+    store.setView("settings");
+    store.setWorkspaceSection("search"); // navigates back
+    expect(notifications).toBe(2);
+    expect(store.get().view).toBe("workspace");
+  });
+});
+
+describe("WorkspaceStore desktop sidebar collapse", () => {
+  it("setNavCollapsed transitions and notifies only on change", () => {
+    const store = new WorkspaceStore();
+    expect(store.get().navCollapsed).toBe(false);
+    let notifications = 0;
+    store.subscribe(() => notifications++);
+    store.setNavCollapsed(false); // no-op
+    store.setNavCollapsed(true);
+    store.setNavCollapsed(true); // no-op
+    expect(notifications).toBe(1);
+    expect(store.get().navCollapsed).toBe(true);
+  });
+
+  it("collapsing the sidebar never touches the compact drawer state", () => {
+    const store = new WorkspaceStore();
+    store.setNavOpen(true);
+    store.setNavCollapsed(true);
+    expect(store.get().navOpen).toBe(true);
+  });
+});
+
 describe("initialUiState", () => {
   it("boots empty with no selection", () => {
     const s = initialUiState();

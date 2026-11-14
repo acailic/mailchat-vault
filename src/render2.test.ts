@@ -1,12 +1,14 @@
 // @vitest-environment happy-dom
 // DOM tests for the v2 rendering (M3.2): flat results rows with badges
-// and selection checkboxes, applied filter chips, import-scope picker,
-// refresh notice, and the reading pane (detail + context + actions).
+// and selection checkboxes, era chips, applied filter chips, import-scope
+// picker, refresh notice, and the reading pane (detail + context +
+// actions).
 
 import { describe, expect, it, vi } from "vitest";
 import {
   fillImportScopes,
   renderDetail2,
+  renderEraChips,
   renderFilterChips,
   renderFlatResults,
   renderRefreshNotice,
@@ -65,6 +67,39 @@ describe("flat results", () => {
     expect(el.querySelector(".group")).toBeNull();
   });
 
+  it("the row's button is the main area, never the list item around the checkbox", () => {
+    const el = document.createElement("div");
+    renderFlatResults(el, {
+      hits: [hit({ author: "Mailchat Vault <demo@mailchat-vault.local>" })],
+      activeIndex: -1,
+      selectedId: null,
+      selection: new Set(),
+      terms: [],
+      onOpen: () => {},
+      onToggleSelect: () => {},
+    });
+    // The list item is a plain list item: the checkbox inside it is a
+    // sibling interactive control, not a control nested in a button
+    // (no double announcement, no Space-key ambiguity).
+    const li = el.querySelector("li.hit-item") as HTMLElement;
+    expect(li.getAttribute("role")).toBeNull();
+    expect(li.getAttribute("tabindex")).toBeNull();
+    const main = li.querySelector(".hit-main") as HTMLElement;
+    expect(main.getAttribute("role")).toBe("button");
+    expect(main.getAttribute("tabindex")).toBe("0");
+    expect(main.getAttribute("title")).toBe("Open this message");
+    const check = li.querySelector("input.row-select") as HTMLInputElement;
+    expect(check.getAttribute("aria-label")).toBe("Select message 1 for export");
+    // The meta line shows the display name; the full address stays in
+    // the title attribute.
+    const meta = main.querySelector(".meta") as HTMLElement;
+    expect(meta.textContent).toContain("Mailchat Vault · ");
+    expect(meta.textContent).not.toContain("demo@mailchat-vault.local");
+    expect(meta.getAttribute("title")).toBe(
+      "Mailchat Vault <demo@mailchat-vault.local>",
+    );
+  });
+
   it("marks the hit markers as <mark> runs", () => {
     const el = document.createElement("div");
     renderFlatResults(el, {
@@ -107,6 +142,37 @@ describe("flat results", () => {
     expect(timeLabel(hit({ time_confidence: "explicit_offset" }))).not.toContain("(");
   });
 
+  it("a marked-uncertain time explains itself on the row, not just in the detail pane", () => {
+    const el = document.createElement("div");
+    renderFlatResults(el, {
+      hits: [
+        hit(),
+        hit({ time_confidence: "explicit_offset" }),
+        hit({ time_confidence: "unresolved" }),
+      ],
+      activeIndex: -1,
+      selectedId: null,
+      selection: new Set(),
+      terms: [],
+      onOpen: () => {},
+      onToggleSelect: () => {},
+    });
+    const times = [...el.querySelectorAll(".hit-main .meta span.time")] as HTMLElement[];
+    expect(times.length).toBe(3);
+    // The meta line still reads the same (the span changes no text).
+    expect(times[0].textContent).toContain("(assumed)");
+    // Assumed: the hover title is the detail pane's own explanation, so
+    // both surfaces say the same thing.
+    expect(times[0].title).toBe(
+      "The time was assumed during import and may be off — the source did not state it directly.",
+    );
+    expect(times[2].title).toBe(
+      "The message's time could not be read; no instant was fabricated.",
+    );
+    // Exact times carry no marker, so they carry no tooltip noise either.
+    expect(times[1].title).toBe("");
+  });
+
   it("row selection checkboxes reflect and drive the selection", () => {
     const el = document.createElement("div");
     const toggled: number[] = [];
@@ -142,6 +208,31 @@ describe("flat results", () => {
     (el.querySelector("li.hit-item") as HTMLElement).click();
     expect(opened).toEqual([9]);
   });
+
+  it("Enter and Space activate the row's button; the checkbox stays its own control", () => {
+    const el = document.createElement("div");
+    const opened: number[] = [];
+    renderFlatResults(el, {
+      hits: [hit({ id: 9 })],
+      activeIndex: -1,
+      selectedId: null,
+      selection: new Set(),
+      terms: [],
+      onOpen: (id) => opened.push(id),
+      onToggleSelect: () => {},
+    });
+    const main = el.querySelector(".hit-main") as HTMLElement;
+    main.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+    );
+    main.dispatchEvent(
+      new KeyboardEvent("keydown", { key: " ", bubbles: true, cancelable: true }),
+    );
+    expect(opened).toEqual([9, 9]);
+    // The checkbox is a sibling control: its clicks never open the row.
+    (el.querySelector("input.row-select") as HTMLElement).click();
+    expect(opened).toEqual([9, 9]);
+  });
 });
 
 describe("filter chips", () => {
@@ -169,6 +260,41 @@ describe("filter chips", () => {
   it("no active filters render no chips", () => {
     const el = document.createElement("div");
     renderFilterChips(el, { chips: [], onRemove: () => {}, onClear: () => {} });
+    expect(el.children.length).toBe(0);
+  });
+});
+
+describe("era chips", () => {
+  const buckets = [
+    { label: "2019", from: "2019-01-01", to: "2019-12-31" },
+    { label: "2020", from: "2020-01-01", to: "2020-12-31" },
+  ];
+
+  it("renders one pressed toggle per bucket; clicks report the index", () => {
+    const el = document.createElement("div");
+    const toggled: number[] = [];
+    renderEraChips(el, { buckets, activeIndex: 1, onToggle: (i) => toggled.push(i) });
+    const chips = [...el.querySelectorAll("button.era-chip")] as HTMLElement[];
+    expect(chips.map((c) => c.textContent)).toEqual(["2019", "2020"]);
+    expect(chips.map((c) => c.getAttribute("aria-pressed"))).toEqual(["false", "true"]);
+    expect(chips[1].classList.contains("on")).toBe(true);
+    // Controls name their action; the active chip names removal.
+    expect(chips[0].title).toContain("Filter to 2019");
+    expect(chips[1].title).toContain("Remove the 2020 date range");
+    chips[0].click();
+    chips[0].click();
+    expect(toggled).toEqual([0, 0]);
+  });
+
+  it("fewer than two buckets render nothing (no dead chrome)", () => {
+    const el = document.createElement("div");
+    renderEraChips(el, { buckets: [], activeIndex: -1, onToggle: () => {} });
+    expect(el.children.length).toBe(0);
+    renderEraChips(el, {
+      buckets: [{ label: "2026", from: "2026-01-01", to: "2026-12-31" }],
+      activeIndex: 0,
+      onToggle: () => {},
+    });
     expect(el.children.length).toBe(0);
   });
 });
@@ -325,6 +451,25 @@ describe("reading pane", () => {
     expect(card.querySelectorAll("li.thread-row.current").length).toBe(1);
   });
 
+  it("an addressed author headlines as the display name, full form one hover away", () => {
+    // The rows show the display name (wave-1 discipline); the pane's
+    // headline follows it instead of the raw "Name <address>" form.
+    const raw = ctx.anchor.author;
+    ctx.anchor.author = "Ana Sender <ana@example.com>";
+    try {
+      const el = render();
+      const h2 = el.querySelector(".detail-card h2") as HTMLElement;
+      expect(h2.textContent).toBe("Ana Sender");
+      expect(h2.title).toBe("Ana Sender <ana@example.com>");
+      // The exact address stays in the meta table.
+      expect(el.querySelector(".detail-card .meta-table")?.textContent).toContain(
+        "ana@example.com",
+      );
+    } finally {
+      ctx.anchor.author = raw;
+    }
+  });
+
   it("attachments list separates preserved from not preserved", () => {
     const el = render();
     const items = [...el.querySelectorAll("li.media-item")];
@@ -352,21 +497,93 @@ describe("reading pane", () => {
     expect(el.querySelectorAll("li.thread-row").length).toBe(1);
   });
 
-  it("actions are wired: copy, copy link, export, close, open neighbor", () => {
+  it("actions are wired: copy, copy link, export, export chat, close, open neighbor", () => {
     const calls: string[] = [];
     const el = render({
       onCopy: () => calls.push("copy"),
       onCopyLink: () => calls.push("link"),
       onExport: () => calls.push("export"),
+      onExportChat: () => calls.push("export-chat"),
       onClose: () => calls.push("close"),
       onOpenMessage: (id) => calls.push(`open:${id}`),
     });
     (el.querySelector("button.copy-btn") as HTMLElement).click();
     (el.querySelector("button.copy-link-btn") as HTMLElement).click();
     (el.querySelector("button.export-selection-btn") as HTMLElement).click();
+    (el.querySelector("button.export-chat-btn") as HTMLElement).click();
     (el.querySelector("button.close-btn") as HTMLElement).click();
     (el.querySelector("li.thread-row.link") as HTMLElement).click();
-    expect(calls).toEqual(["copy", "link", "export", "close", "open:1"]);
+    expect(calls).toEqual(["copy", "link", "export", "export-chat", "close", "open:1"]);
+  });
+
+  it("header utilities are icon-only buttons named by aria-label", () => {
+    const el = render();
+    const actions = el.querySelector(".header-actions") as HTMLElement;
+    const named = (selector: string) => {
+      const button = actions.querySelector(selector) as HTMLElement;
+      expect(button.textContent).toBe(""); // icon only, no text label
+      expect(button.getAttribute("aria-label")).toBeTruthy();
+      expect(button.title).toBeTruthy();
+      return button;
+    };
+    named("button.copy-btn");
+    named("button.copy-link-btn");
+    named("button.close-btn");
+    // Back to results is gone from the header: the swap layouts own it in
+    // the reading toolbar, and the wide pane gets a plain Close instead.
+    expect(actions.textContent).not.toContain("Back to results");
+    // Three icon utilities + the Export… disclosure: nothing else.
+    expect([...actions.children].map((c) => c.tagName)).toEqual([
+      "BUTTON",
+      "BUTTON",
+      "DETAILS",
+      "BUTTON",
+    ]);
+  });
+
+  it("Export… opens a picker with this message and the conversation", () => {
+    const el = render();
+    const picker = el.querySelector("details.reading-export") as HTMLDetailsElement;
+    expect(picker.open).toBe(false);
+    const summary = picker.querySelector("summary") as HTMLElement;
+    expect(summary.getAttribute("aria-label")).toBe("Export");
+    const rows = [...picker.querySelectorAll(".export-row")];
+    expect(rows.length).toBe(2);
+    expect(rows[0].textContent).toContain("This message");
+    const messageFormat = rows[0].querySelector("select") as HTMLSelectElement;
+    expect([...messageFormat.options].map((o) => o.value)).toEqual(["text", "json"]);
+    expect(rows[1].textContent).toContain("Conversation");
+    const chatFormat = rows[1].querySelector("select") as HTMLSelectElement;
+    expect([...chatFormat.options].map((o) => o.value)).toEqual(["csv", "json", "mbox"]);
+  });
+
+  it("a re-render keeps the chosen formats and the picker's open state", () => {
+    const el = render();
+    const picker = el.querySelector("details.reading-export") as HTMLDetailsElement;
+    picker.open = true;
+    (el.querySelector("#message-format") as HTMLSelectElement).value = "json";
+    (el.querySelector("#chat-format") as HTMLSelectElement).value = "mbox";
+    // Same message (a context page load / background refresh):
+    renderDetail2(el, {
+      ctx,
+      entries: contextEntries(ctx),
+      queryText: "vault",
+      hasMoreBefore: true,
+      hasMoreAfter: true,
+      onOpenMessage: () => {},
+      onLoadEarlier: () => {},
+      onLoadLater: () => {},
+      onCopy: () => {},
+      onCopyLink: () => {},
+      onExport: () => {},
+      onExportChat: () => {},
+      onExportMedia: () => {},
+      onOpenExternalMedia: () => {},
+      onClose: () => {},
+    });
+    expect((el.querySelector("details.reading-export") as HTMLDetailsElement).open).toBe(true);
+    expect((el.querySelector("#message-format") as HTMLSelectElement).value).toBe("json");
+    expect((el.querySelector("#chat-format") as HTMLSelectElement).value).toBe("mbox");
   });
 
   it("raw JSON stays collapsed behind Technical details", () => {

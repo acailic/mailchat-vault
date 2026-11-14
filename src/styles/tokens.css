@@ -96,6 +96,14 @@
   --accent: #2d6a4f;
   --accent-hover: #1f5440;
   --accent-fg: #ffffff;
+
+  /* Chart palette (statistics dashboard). The accent is the first
+   * category; two quiet companions (ochre, slate blue) keep the three
+   * count tables distinguishable at a glance. The idle tone is the
+   * floor the day-histogram heat ramp blends up to the accent from. */
+  --chart-2: #8a5a00;
+  --chart-3: #3f6f9e;
+  --chart-idle: #a9a08d;
   --selection: #cfe5d8;
   --match: #f5d66b;          /* amber search-match highlight (mark.hit) */
   --match-ink: #3a2f00;
@@ -120,8 +128,13 @@
   --accent: #7fb99a;
   --accent-hover: #9ccdb2;
   --accent-fg: #10241a;
+  --chart-2: #d9a84e;
+  --chart-3: #8fb6de;
+  --chart-idle: #5a635c;
   --selection: #33473c;
-  --match: #8a6d1d;
+  /* Amber search-match pair, measured: #ffe9a8 ink on #7a5f18 bar =
+   * 5.02:1 (WCAG AA; the previous #8a6d1d bar measured 4.08:1). */
+  --match: #7a5f18;
   --match-ink: #ffe9a8;
   --success: #7fc492;
   --warning: #d9a84e;
@@ -145,8 +158,12 @@
     --accent: #7fb99a;
     --accent-hover: #9ccdb2;
     --accent-fg: #10241a;
+    --chart-2: #d9a84e;
+    --chart-3: #8fb6de;
+    --chart-idle: #5a635c;
     --selection: #33473c;
-    --match: #8a6d1d;
+    /* Same measured pair as the explicit dark block: 5.02:1 (WCAG AA). */
+    --match: #7a5f18;
     --match-ink: #ffe9a8;
     --success: #7fc492;
     --warning: #d9a84e;
