@@ -117,6 +117,13 @@ export function attachmentOf(rawJson: string): MessageAttachment | null {
   return typeof name === "string" ? { kind, name } : { kind };
 }
 
+/** The stored rendered-HTML body of an email message, when present
+ * (invalid raw_json → null; empty or non-string → null). */
+export function htmlOf(rawJson: string): string | null {
+  const html = parseRawJson(rawJson).html;
+  return typeof html === "string" && html.length > 0 ? html : null;
+}
+
 /** One chat/thread group of consecutive search hits. */
 export interface HitGroup {
   /** `${source}∕${chat_id}` — unique group key. */
