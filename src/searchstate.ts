@@ -38,6 +38,12 @@ export interface SearchFilters {
   timezone: string;
   /** null = filter off. */
   hasAttachment: boolean | null;
+  /** null/absent = filter off; true = assumed/missing dates, false = confirmed. */
+  timeAssumed?: boolean | null;
+  /** null/absent = filter off; true = unresolved grouping, false = verified. */
+  groupingUnverified?: boolean | null;
+  /** null/absent = filter off; true = references without preserved bytes. */
+  filesMissing?: boolean | null;
   /** null = filter off. */
   importJobId: string | null;
   sort: SearchSort;
@@ -51,6 +57,9 @@ export const DEFAULT_FILTERS: SearchFilters = {
   toDate: "",
   timezone: "",
   hasAttachment: null,
+  timeAssumed: null,
+  groupingUnverified: null,
+  filesMissing: null,
   importJobId: null,
   sort: "relevance",
 };
@@ -63,6 +72,9 @@ export function hasActiveFilters(f: SearchFilters): boolean {
     f.fromDate.length > 0 ||
     f.toDate.length > 0 ||
     f.hasAttachment !== null ||
+    f.timeAssumed != null ||
+    f.groupingUnverified != null ||
+    f.filesMissing != null ||
     f.importJobId !== null
   );
 }
@@ -76,6 +88,9 @@ export interface FilterChip {
     | "from-date"
     | "to-date"
     | "attachment"
+    | "time-assumed"
+    | "grouping-unverified"
+    | "files-missing"
     | "import-scope";
   /** Chip text ("author: Ana", "from 2026-01-01", "has attachment", …). */
   label: string;
@@ -112,6 +127,27 @@ export function filterChips(
       value: "",
     });
   }
+  if (f.timeAssumed != null) {
+    chips.push({
+      kind: "time-assumed",
+      label: f.timeAssumed ? "dates assumed" : "dates confirmed",
+      value: "",
+    });
+  }
+  if (f.groupingUnverified != null) {
+    chips.push({
+      kind: "grouping-unverified",
+      label: f.groupingUnverified ? "grouping unverified" : "grouping verified",
+      value: "",
+    });
+  }
+  if (f.filesMissing != null) {
+    chips.push({
+      kind: "files-missing",
+      label: f.filesMissing ? "files missing" : "files preserved",
+      value: "",
+    });
+  }
   if (f.importJobId !== null) {
     chips.push({
       kind: "import-scope",
@@ -140,6 +176,15 @@ export function withoutChip(f: SearchFilters, chip: FilterChip): SearchFilters {
       break;
     case "attachment":
       next.hasAttachment = null;
+      break;
+    case "time-assumed":
+      next.timeAssumed = null;
+      break;
+    case "grouping-unverified":
+      next.groupingUnverified = null;
+      break;
+    case "files-missing":
+      next.filesMissing = null;
       break;
     case "import-scope":
       next.importJobId = null;
@@ -226,6 +271,9 @@ export function buildRequest(f: SearchFilters, limit: number, offset: number): S
     to_date: f.toDate || null,
     timezone: f.timezone,
     has_attachment: f.hasAttachment,
+    time_assumed: f.timeAssumed ?? null,
+    grouping_unverified: f.groupingUnverified ?? null,
+    files_missing: f.filesMissing ?? null,
     import_job_id: f.importJobId,
     // Empty text browses newest regardless of the requested sort; the
     // backend enforces it too — send the user's choice as-is.
