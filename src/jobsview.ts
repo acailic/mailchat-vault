@@ -137,7 +137,7 @@ export function jobsStatusText(tracker: JobsTrackerState): string {
     (r) => r.state.state === "queued" || r.state.state === "running",
   );
   if (records.length === 0) {
-    return "No background jobs yet — imports, IMAP syncs and embedding run here.";
+    return "No background jobs yet. Imports, IMAP syncs and embedding run here.";
   }
   if (active.length === 0) {
     return `No active jobs (${records.length} finished).`;

@@ -694,9 +694,11 @@ const MIGRATIONS: &[(i64, &str)] = &[
         15,
         // Covering index for the per-source mail-vs-chat taxonomy (the
         // source icons). `archive_messages.channel` records what each
-        // parser actually stored (`"chat"` for chat exports, `"email"`
-        // for mail files and IMAP), so channel presence per source is
-        // the honest signal — but probing it through
+        // parser actually stored (`"chat"` for a chat-export import,
+        // `"email"` for a mail-file import; IMAP rows carry their folder
+        // name as the channel, so an IMAP source's medium is decided by
+        // its kind), so channel presence per source is the honest
+        // signal — but probing it through
         // `idx_archive_messages_source` would walk every row of a
         // million-message import. This index turns each
         // `EXISTS(… WHERE source_instance_id = ? AND channel = ?)` into
@@ -1953,7 +1955,9 @@ impl Storage {
     /// mail-vs-chat taxonomy behind the source icons): whether each
     /// source's archived messages include any `"chat"`-channel row (a
     /// chat-export import) and any `"email"`-channel row (a mail-file
-    /// import or IMAP). Two seeks per source over the covering
+    /// import; IMAP rows carry their folder name as the channel, so an
+    /// IMAP source's medium is decided by its kind). Two seeks per
+    /// source over the covering
     /// `idx_archive_messages_source_channel` (migration 15) —
     /// O(number of accounts), never a scan of the archive, matching
     /// [`Storage::account_counts`]'s budget.
@@ -3440,7 +3444,9 @@ pub struct AccountCounts {
 /// One source's channel presence for the accounts overview (see
 /// [`Storage::account_channel_flags`]): whether the source's archived
 /// messages include any `"chat"`-channel row (a chat-export import) and
-/// any `"email"`-channel row (a mail-file import or IMAP).
+/// any `"email"`-channel row (a mail-file import; IMAP rows carry their
+/// folder name as the channel, so an IMAP source's medium is decided by
+/// its kind).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountChannels {
     /// The durable source instance id (same ids as
@@ -3448,7 +3454,9 @@ pub struct AccountChannels {
     pub source_id: String,
     /// At least one archived message carries channel `"chat"`.
     pub has_chat: bool,
-    /// At least one archived message carries channel `"email"`.
+    /// At least one archived message carries channel `"email"` — a
+    /// mail-file import. (IMAP rows carry folder names as their channel;
+    /// an IMAP source's medium is decided by kind.)
     pub has_email: bool,
 }
 
