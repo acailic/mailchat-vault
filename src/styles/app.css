@@ -65,7 +65,16 @@
   margin: 0;
 }
 
-html, body { height: 100%; }
+html, body {
+  height: 100%;
+  /* The document never scrolls — every pane scrolls on its own. This
+   * hard-guards the WebKitGTK viewport/100vh glitch class (stale layout
+   * viewport after a resize or monitor change), where the page briefly
+   * becomes taller than the window and wheel chaining scrolls the whole
+   * app into empty canvas. On the root element, not just body: body's
+   * overflow alone does not always propagate to the viewport. */
+  overflow: hidden;
+}
 
 body {
   margin: 0;
@@ -116,7 +125,11 @@ body {
 #app {
   display: grid;
   grid-template-columns: var(--nav-width) 1fr;
-  height: 100vh;
+  /* 100%, not 100vh: a percentage resolves against body's height, which
+   * tracks the real viewport in every engine — 100vh can go stale in
+   * WebKitGTK after a window resize or monitor change and leave the page
+   * taller than the window. */
+  height: 100%;
   overflow: hidden; /* each area scrolls on its own */
 }
 
