@@ -12,3 +12,7 @@ src-tauri/gen/
 # ...except the frozen Windows-upgrade smoke fixture (committed content)
 !tests/windows-smoke/fixtures/*.db
 .omc/
+
+# Local-only notes: monetization/strategy material must never be committed
+# (see the mailchat-vault-private directory outside the repo)
+docs/private/
