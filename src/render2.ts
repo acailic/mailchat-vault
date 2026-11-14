@@ -229,20 +229,49 @@ export interface EraChipsOptions {
   onToggle: (index: number) => void;
 }
 
+/** How many era chips stay visible before the "Older…" toggle: the most
+ * recent buckets, so a long timeline leads with the eras near today. */
+export const ERA_CHIP_VISIBLE = 5;
+
 /**
- * The era strip: one quiet row of timeline toggles under the toolbar.
- * Each chip applies its bucket's exact from/to bounds through the normal
- * date-input machinery (main.ts sets the inputs and re-runs the search);
- * the active chip is a pressed toggle whose click removes the bound.
- * Fewer than two buckets render nothing — no dead chrome over a timeline
- * too short to strip.
+ * The era strip: one quiet row of timeline toggles under the toolbar,
+ * labelled "Time". Each chip applies its bucket's exact from/to bounds
+ * through the normal date-input machinery (main.ts sets the inputs and
+ * re-runs the search); the active chip is a pressed toggle whose click
+ * removes the bound. Longer timelines cap the visible chips at the
+ * [`ERA_CHIP_VISIBLE`] most recent, with an "Older…" toggle for the rest
+ * (the expansion state lives on the strip's own data attribute, so it
+ * survives re-renders). The active era never hides behind the cap —
+ * hiding the pressed chip would hide the applied filter's own
+ * affordance. Fewer than two buckets render nothing — no dead chrome
+ * over a timeline too short to strip.
  */
 export function renderEraChips(el: HTMLElement, opts: EraChipsOptions): void {
   if (opts.buckets.length < 2) {
+    delete el.dataset.expanded;
     el.replaceChildren();
     return;
   }
-  const chips = opts.buckets.map((bucket, index) => {
+  const expanded = el.dataset.expanded === "true";
+  const hidden = Math.max(0, opts.buckets.length - ERA_CHIP_VISIBLE);
+  // Buckets ascend oldest → newest; the cap keeps the most recent, and
+  // `onToggle` always reports the index into the FULL bucket array.
+  let visible: number[];
+  if (expanded || hidden === 0) {
+    visible = opts.buckets.map((_, index) => index);
+  } else {
+    visible = opts.buckets.slice(hidden).map((_, i) => hidden + i);
+    if (opts.activeIndex >= 0 && opts.activeIndex < hidden) {
+      visible.unshift(opts.activeIndex); // stays ascending: it is older
+    }
+  }
+
+  const label = document.createElement("span");
+  label.className = "era-chip-label";
+  label.textContent = "Time";
+
+  const chips = visible.map((index) => {
+    const bucket = opts.buckets[index];
     const active = index === opts.activeIndex;
     const button = document.createElement("button");
     button.type = "button";
@@ -256,7 +285,29 @@ export function renderEraChips(el: HTMLElement, opts: EraChipsOptions): void {
     button.addEventListener("click", () => opts.onToggle(index));
     return button;
   });
-  el.replaceChildren(...chips);
+
+  const more =
+    hidden > 0
+      ? (() => {
+          const toggle = document.createElement("button");
+          toggle.type = "button";
+          toggle.className = "chip era-more";
+          toggle.textContent = expanded ? "Fewer" : "Older…";
+          toggle.setAttribute("aria-expanded", String(expanded));
+          toggle.title = expanded
+            ? "Show only the most recent time periods"
+            : `Show ${hidden} older time period${hidden === 1 ? "" : "s"}`;
+          toggle.addEventListener("click", () => {
+            // Expansion is the strip's own state: it rides the element's
+            // data attribute through every re-render.
+            el.dataset.expanded = expanded ? "false" : "true";
+            renderEraChips(el, opts);
+          });
+          return [toggle];
+        })()
+      : [];
+
+  el.replaceChildren(label, ...chips, ...more);
 }
 
 // ---------------------------------------------------------------------------
