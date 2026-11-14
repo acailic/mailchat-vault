@@ -10,7 +10,7 @@
 // event ring no longer holds part of the gap, so it reconciles from the
 // snapshot instead of the timeline.
 
-import type { JobEvent, JobEventsPage, JobRecord } from "./types";
+import type { JobEvent, JobEventsPage, JobProgress, JobRecord } from "./types";
 import { iconEl, type IconName } from "./icons";
 
 /** Protocol types (see crates/vault-core/src/jobs.rs). */
@@ -174,6 +174,23 @@ export function jobKindLabel(kind: string): string {
   }
 }
 
+/** The `done/total (pct%) · hint` line for a running job, shared by the
+ * Activity row and the import flow's inline card. Null when the total is
+ * unknown — the caller falls back to its own indeterminate wording. */
+export function jobProgressText(progress: JobProgress): string | null {
+  if (progress.total <= 0) return null;
+  const pct = jobProgressPercent(progress)!;
+  const hint = progress.message ? ` · ${progress.message}` : "";
+  return `${progress.done}/${progress.total} (${pct}%)${hint}`;
+}
+
+/** Whole-number percent (0–100, clamped) for a determinate progress bar;
+ * null when the total is unknown — render an indeterminate bar instead. */
+export function jobProgressPercent(progress: JobProgress): number | null {
+  if (progress.total <= 0) return null;
+  return Math.min(100, Math.round((progress.done / progress.total) * 100));
+}
+
 /** One-line description of a job's current state (with progress). */
 export function describeJobState(record: JobRecord): string {
   const label = jobKindLabel(record.kind);
@@ -182,12 +199,8 @@ export function describeJobState(record: JobRecord): string {
       return `${label} — queued`;
     case "running": {
       const progress = record.progress;
-      if (progress && progress.total > 0) {
-        const pct = Math.min(100, Math.round((progress.done / progress.total) * 100));
-        const hint = progress.message ? ` · ${progress.message}` : "";
-        return `${label} — ${progress.done}/${progress.total} (${pct}%)${hint}`;
-      }
-      return `${label} — running`;
+      const counts = progress ? jobProgressText(progress) : null;
+      return counts ? `${label} — ${counts}` : `${label} — running`;
     }
     case "succeeded":
       return `${label} — done${describeResult(record.state.result)}`;
