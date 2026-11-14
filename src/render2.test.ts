@@ -375,4 +375,45 @@ describe("reading pane", () => {
     expect(details.open).toBe(false);
     expect(details.querySelector("pre.raw-json")?.textContent).toContain('"keep": 1');
   });
+
+  const htmlCtx: ConversationContext = {
+    ...ctx,
+    anchor: {
+      ...ctx.anchor,
+      raw_json: JSON.stringify({ html: "<p>telo pisma</p>" }),
+    },
+  };
+
+  it("email HTML renders inside a sandboxed iframe behind a Rendered/Raw toggle", () => {
+    const el = render({ ctx: htmlCtx, entries: contextEntries(htmlCtx) });
+    const buttons = [...el.querySelectorAll("button.mode-btn")] as HTMLButtonElement[];
+    expect(buttons.map((b) => b.textContent)).toEqual(["Rendered", "Raw"]);
+    // Default mode is Rendered: sandboxed iframe, CSP meta, the HTML
+    // itself only ever inside the srcdoc attribute.
+    const frame = el.querySelector("iframe.rendered-frame") as HTMLIFrameElement;
+    expect(frame).not.toBeNull();
+    expect(frame.getAttribute("sandbox")).toBe("");
+    expect(frame.getAttribute("srcdoc")).toContain("default-src 'none'");
+    expect(frame.getAttribute("srcdoc")).toContain("<p>telo pisma</p>");
+    expect(el.querySelector(".detail-card .body")?.innerHTML).not.toContain(
+      "<p>telo pisma</p>",
+    );
+    expect(buttons[0].getAttribute("aria-pressed")).toBe("true");
+    // Raw restores today's highlighted plain-text body and drops the frame.
+    buttons[1].click();
+    expect(el.querySelector("iframe.rendered-frame")).toBeNull();
+    expect(buttons[0].getAttribute("aria-pressed")).toBe("false");
+    expect(buttons[1].getAttribute("aria-pressed")).toBe("true");
+    expect(el.querySelector(".detail-card .body")?.textContent).toContain("arrives");
+    // Rendered comes back.
+    buttons[0].click();
+    expect(el.querySelector("iframe.rendered-frame")).not.toBeNull();
+  });
+
+  it("no stored HTML: no toggle, plain body stays", () => {
+    const el = render(); // fixture raw_json is {"keep": 1}
+    expect(el.querySelector("button.mode-btn")).toBeNull();
+    expect(el.querySelector("iframe.rendered-frame")).toBeNull();
+    expect(el.querySelector(".detail-card .body")?.textContent).toContain("arrives");
+  });
 });
