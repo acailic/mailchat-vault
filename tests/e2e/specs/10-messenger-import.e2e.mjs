@@ -3,16 +3,16 @@
 // same folder the "Import folder" button hands the backend — previews
 // as kind "messenger" (rendered as "Messenger (Facebook) export" by
 // formatLabel, pinned by importview.test.ts), imports through the very
-// same `import_chat_export` backend command the preview card's confirm
-// button dispatches, and the archived thread is searchable through the
-// real search UI afterwards. The two thread parts merge in numeric
+// same `import_chat_export` job the preview card's confirm button
+// submits (`job_submit`), and the archived thread is searchable through
+// the real search UI afterwards. The two thread parts merge in numeric
 // order, the photo message's real bytes land in the media store, and
 // the reactions-only entry is skipped without counting as a failure.
 //
 // The native GTK folder chooser behind "Import folder…" cannot be
 // automated over WebDriver (the documented limitation every import
-// spec works around), so the spec drives the backend seam the button
-// handler drives — `preview_import`, then `import_chat_export` on the
+// spec works around), so the spec drives the seams the button handler
+// drives — `preview_import`, then the `job_submit` confirm path on the
 // same path — and reloads so the normal boot path renders the stats
 // label from the freshly imported archive.
 export const name = "messenger-import";
@@ -51,18 +51,17 @@ export async function run(ctx) {
     assert.equal(preview.samples.length, 3, "samples are capped at three");
     assert.equal(preview.samples[0].author, "Ana Peric", "samples carry authors");
 
-    // --- confirm: the same command the preview card's button runs ----
-    const outcome = await ui.invokeCommand(browser, "import_chat_export", {
-      path: messengerDir,
-    });
+    // --- confirm: the same job the preview card's button submits -----
+    const outcome = await ui.importChatExport(browser, messengerDir);
+    assert.ok(outcome.ok, `import job succeeded: ${outcome.error ?? ""}`);
     assert.deepEqual(
-      outcome.summary,
+      outcome.value.summary,
       { source: "messenger", seen: 5, inserted: 5, skipped: 0, failed: 0 },
       "import summary (both parts, thread merged)",
     );
     // The pick is the DYI root, so the media pass runs: the referenced
     // photo's bytes are stored and linked onto its message.
-    const media = outcome.media;
+    const media = outcome.value.media;
     assert.ok(media, "media pass ran for the tree pick");
     assert.equal(media.referenced, 1, "one referenced media file");
     assert.equal(media.stored, 1, "ana.jpg bytes stored");
@@ -88,13 +87,12 @@ export async function run(ctx) {
     assert.includes(hitMeta, "messenger", "flat row meta shows the messenger source");
 
     // --- re-import dedups on the generated ids ------------------------
-    const reimport = await ui.invokeCommand(browser, "import_chat_export", {
-      path: messengerDir,
-    });
+    const reimport = await ui.importChatExport(browser, messengerDir);
+    assert.ok(reimport.ok, `re-import job succeeded: ${reimport.error ?? ""}`);
     assert.ok(
-      reimport.summary.inserted === 0 && reimport.summary.skipped === 5,
+      reimport.value.summary.inserted === 0 && reimport.value.summary.skipped === 5,
       "re-import dedups (0 new, 5 already present) " +
-        `(got inserted=${reimport.summary.inserted} skipped=${reimport.summary.skipped})`,
+      `(got inserted=${reimport.value.summary.inserted} skipped=${reimport.value.summary.skipped})`,
     );
     assert.equal(
       await browser.execute(() => document.querySelector("#stats")?.textContent),

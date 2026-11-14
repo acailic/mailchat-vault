@@ -65,10 +65,7 @@ export async function run(ctx) {
         ],
       }),
     );
-    const outcome = await invoke(browser, "import_chat_export", {
-      path: exportDir,
-      extractMedia: true,
-    });
+    const outcome = await ui.importChatExport(browser, exportDir, { extractMedia: true });
     assert.ok(outcome.ok, `import succeeded: ${outcome.error ?? ""}`);
     const sha = await sha256Hex(beep);
 
