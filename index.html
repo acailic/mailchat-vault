@@ -205,6 +205,21 @@
                 </div>
                 <div id="ask-status" class="meta" style="margin-top: 6px; min-height: 1em" role="status"></div>
                 <div id="answer" hidden></div>
+                <!-- ask-collect-links: the locally extracted, deduplicated
+                     link list with the messages that cite each link. -->
+                <div id="ask-collected" hidden>
+                  <div class="row" style="margin-top: 6px">
+                    <span id="ask-collected-count" class="meta" role="status"></span>
+                    <label class="visually-hidden" for="ask-collected-format">Export format for collected links</label>
+                    <select id="ask-collected-format" title="File format for the collected links">
+                      <option value="text" selected>Text</option>
+                      <option value="json">JSON</option>
+                    </select>
+                    <button id="ask-collected-export" type="button" title="Save the collected links to a file">Export links…</button>
+                    <span id="ask-collected-status" class="meta" role="status"></span>
+                  </div>
+                  <ul id="ask-collected-list" aria-label="Collected links (each hit opens in thread context)"></ul>
+                </div>
                 <div id="ask-notes" hidden></div>
                 <ul id="ask-results" aria-label="Answer sources (each opens in thread context)"></ul>
               </section>

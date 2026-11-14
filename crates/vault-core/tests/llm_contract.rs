@@ -384,11 +384,11 @@ fn summary_prompt_carries_exactly_the_default_top_8() {
     let s = seeded(12, "topn marker");
     let llm = MockLlm::with_replies(["summary"]);
     let results = s
-        .search_filtered(&build_match_query("vault"), None, None, 50)
+        .search_filtered(&build_match_query("vault"), None, None, None, false, 50)
         .unwrap();
     assert_eq!(results.len(), 12);
 
-    let summarized = summarize_results(&llm, "vault?", &results, DEFAULT_SUMMARIZE_TOP);
+    let summarized = summarize_results(&llm, "vault?", &results, DEFAULT_SUMMARIZE_TOP, &[]);
     assert_eq!(summarized.answer.as_deref(), Some("summary"));
     let user = &llm.prompts()[0].1;
 
@@ -443,9 +443,9 @@ fn summary_prompt_truncates_long_bodies() {
     .unwrap();
     let llm = MockLlm::with_replies(["summary"]);
     let results = s
-        .search_filtered(&build_match_query("vault"), None, None, 50)
+        .search_filtered(&build_match_query("vault"), None, None, None, false, 50)
         .unwrap();
-    let summarized = summarize_results(&llm, "q", &results, DEFAULT_SUMMARIZE_TOP);
+    let summarized = summarize_results(&llm, "q", &results, DEFAULT_SUMMARIZE_TOP, &[]);
     assert_eq!(summarized.answer.as_deref(), Some("summary"));
     let user = &llm.prompts()[0].1;
     let prefix: String = long_body.chars().take(BODY_LIMIT).collect();
@@ -665,7 +665,7 @@ fn without_a_key_outcome_equals_plain_search_exactly() {
     assert_eq!(outcome.answer, None);
     assert!(outcome.notes.is_empty());
     let direct = s
-        .search_filtered(&build_match_query(question), None, None, 50)
+        .search_filtered(&build_match_query(question), None, None, None, false, 50)
         .unwrap();
     assert_eq!(
         outcome.results, direct,
@@ -705,7 +705,7 @@ fn search_results_never_depend_on_the_llm_succeeding() {
     assert!(outcome.notes[1].contains("LLM summary failed"));
 
     let direct = s
-        .search_filtered(&build_match_query(question), None, None, 50)
+        .search_filtered(&build_match_query(question), None, None, None, false, 50)
         .unwrap();
     assert_eq!(
         outcome.results, direct,

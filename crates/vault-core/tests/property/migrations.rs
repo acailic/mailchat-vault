@@ -100,7 +100,14 @@ fn assert_model_visible(storage: &Storage, model: &HashMap<(String, String), &Ne
             .or_else(|| fixtures::tokenize(&msg.author).into_iter().next());
         let Some(token) = token else { continue };
         let hits = storage
-            .search_filtered(&fixtures::quoted_term(&token), None, None, 10_000)
+            .search_filtered(
+                &fixtures::quoted_term(&token),
+                None,
+                None,
+                None,
+                false,
+                10_000,
+            )
             .unwrap();
         let hit = hits
             .iter()
