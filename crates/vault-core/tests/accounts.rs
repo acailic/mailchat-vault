@@ -235,6 +235,65 @@ fn import_accounts_and_empty_imap_accounts_appear_with_zero_failures() {
 }
 
 #[test]
+fn channel_flags_report_mail_vs_chat_per_source() {
+    // The taxonomy behind the source icons: a chat export stores
+    // `"chat"`-channel messages, a mail-file import `"email"`-channel
+    // ones, and an empty account nothing — the flags read the messages'
+    // own channel column, never the label.
+    let storage = Storage::open_in_memory().unwrap();
+    let cfg_empty = config("imap.empty.test", "erin@e.test");
+    let inst_empty = instance_id(&storage, &cfg_empty);
+
+    let mut chat = vault_core::message::NewMessage::new(
+        "whatsapp",
+        "w1",
+        "ana",
+        "2026-01-01 10:00:00",
+        "chat body",
+    );
+    chat.channel = "chat".into();
+    storage
+        .commit_import_batch("imp-w", "whatsapp", &[chat], &[], &[], 1, true)
+        .unwrap();
+    let mut mail = vault_core::message::NewMessage::new(
+        "mbox:archive.mbox",
+        "m1",
+        "bruno",
+        "2026-01-02 10:00:00",
+        "mail body",
+    );
+    mail.channel = "email".into();
+    storage
+        .commit_import_batch("imp-m", "mbox:archive.mbox", &[mail], &[], &[], 1, true)
+        .unwrap();
+
+    let flags: HashMap<String, vault_core::storage::AccountChannels> = storage
+        .account_channel_flags()
+        .unwrap()
+        .into_iter()
+        .map(|c| (c.source_id.clone(), c))
+        .collect();
+    assert_eq!(flags.len(), 3, "one row per source instance");
+    // Exactly one of each mix, independent of instance-id ordering: the
+    // chat export (chat-only), the mail import (email-only), and the
+    // empty account (neither).
+    let mut chat_only = 0;
+    let mut email_only = 0;
+    let mut neither = 0;
+    for row in flags.values() {
+        match (row.has_chat, row.has_email) {
+            (true, false) => chat_only += 1,
+            (false, true) => email_only += 1,
+            (false, false) => neither += 1,
+            (true, true) => panic!("no source mixes channels in this vault"),
+        }
+    }
+    assert_eq!((chat_only, email_only, neither), (1, 1, 1));
+    assert!(!flags[&inst_empty].has_chat, "nothing synced yet");
+    assert!(!flags[&inst_empty].has_email, "nothing synced yet");
+}
+
+#[test]
 fn legacy_namespace_cursors_for_two_accounts_coexist() {
     // The legacy `imap_sync_state` surface (pre-canonical namespaces)
     // also keys per account: two namespaces' cursors never overwrite

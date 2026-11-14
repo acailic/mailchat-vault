@@ -2494,6 +2494,14 @@ struct AccountView {
     /// Human-readable label (`imap:host:port:username` or the import's
     /// source name).
     label: String,
+    /// Medium of the account's archived messages — the mail-vs-chat
+    /// taxonomy behind the source icons: `"mail"` (a live IMAP account
+    /// or an email-file import), `"chat"` (a chat-export import),
+    /// `"mixed"` when both channels are present, `"unknown"` when
+    /// nothing is archived yet. Derived from the messages' own
+    /// `channel` column (what the parser actually stored), never the
+    /// label.
+    medium: String,
     /// IMAP connection identity (never present for imports).
     imap: Option<AccountImap>,
     /// Archived messages of the account (trigger-maintained counters).
@@ -2532,16 +2540,20 @@ struct AccountImap {
 }
 
 /// Assemble the accounts overview from the stored source instances, the
-/// per-account counts, and a credential probe (`(password?, oauth?)` per
-/// stored IMAP config — the keyring in the app, plain closures in tests).
+/// per-account counts, the per-source channel flags (the mail-vs-chat
+/// taxonomy), and a credential probe (`(password?, oauth?)` per stored
+/// IMAP config — the keyring in the app, plain closures in tests).
 /// Pure: unit-tested below, command-thread free.
 fn assemble_accounts(
     instances: &[SourceInstance],
     counts: &[vault_core::storage::AccountCounts],
+    channels: &[vault_core::storage::AccountChannels],
     credentials: impl Fn(&StoredImapConfig) -> (bool, bool),
 ) -> Vec<AccountView> {
     let counts: std::collections::HashMap<&str, &vault_core::storage::AccountCounts> =
         counts.iter().map(|c| (c.source_id.as_str(), c)).collect();
+    let channels: std::collections::HashMap<&str, &vault_core::storage::AccountChannels> =
+        channels.iter().map(|c| (c.source_id.as_str(), c)).collect();
     instances
         .iter()
         .map(|instance| {
@@ -2550,7 +2562,16 @@ fn assemble_accounts(
                 messages: 0,
                 failed_items: 0,
             };
+            let no_channels = vault_core::storage::AccountChannels {
+                source_id: String::new(),
+                has_chat: false,
+                has_email: false,
+            };
             let count = counts.get(instance.id.as_str()).copied().unwrap_or(&zero);
+            let channel = channels
+                .get(instance.id.as_str())
+                .copied()
+                .unwrap_or(&no_channels);
             let imap = StoredImapConfig::of(instance).map(|stored| {
                 let (has_password, has_oauth) = credentials(&stored);
                 AccountImap {
@@ -2570,6 +2591,21 @@ fn assemble_accounts(
                     "import".into()
                 },
                 label: instance.label.clone(),
+                // IMAP is mail by construction (kind decides). Imports
+                // follow what their parsers actually stored — the
+                // channel flags — with "unknown" when nothing is
+                // archived yet and "mixed" if one namespace ever held
+                // both channels.
+                medium: if instance.kind == "imap" {
+                    "mail".into()
+                } else {
+                    match (channel.has_chat, channel.has_email) {
+                        (true, false) => "chat".into(),
+                        (true, true) => "mixed".into(),
+                        (false, true) => "mail".into(),
+                        (false, false) => "unknown".into(),
+                    }
+                },
                 imap,
                 message_count: count.messages,
                 failed_items: count.failed_items,
@@ -2597,19 +2633,28 @@ async fn accounts_list(
     let vault = ActiveVault::from(&state);
     let secrets = Arc::clone(secrets.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        let (instances, counts) = vault
+        let (instances, counts, channels) = vault
             .with_read(|s| -> vault_core::Result<_> {
-                Ok((s.list_source_instances()?, s.account_counts()?))
+                Ok((
+                    s.list_source_instances()?,
+                    s.account_counts()?,
+                    s.account_channel_flags()?,
+                ))
             })
             .map_err(|e: vault_core::Error| e.to_string())?;
-        Ok(assemble_accounts(&instances, &counts, |stored| {
-            (
-                secrets.load(&stored.host, &stored.username).is_some(),
-                secrets
-                    .load_refresh(&stored.host, &stored.username)
-                    .is_some(),
-            )
-        }))
+        Ok(assemble_accounts(
+            &instances,
+            &counts,
+            &channels,
+            |stored| {
+                (
+                    secrets.load(&stored.host, &stored.username).is_some(),
+                    secrets
+                        .load_refresh(&stored.host, &stored.username)
+                        .is_some(),
+                )
+            },
+        ))
     })
     .await
     .map_err(|e| format!("accounts task failed: {e}"))?
@@ -4026,8 +4071,13 @@ mod tests {
                 failed_items: 0,
             },
         ];
+        let channels = vec![vault_core::storage::AccountChannels {
+            source_id: "inst-mbox".into(),
+            has_chat: false,
+            has_email: true,
+        }];
 
-        let views = assemble_accounts(&instances, &counts, |stored| {
+        let views = assemble_accounts(&instances, &counts, &channels, |stored| {
             (stored.username == "ana@gmail.com", false)
         });
 
@@ -4054,13 +4104,55 @@ mod tests {
     }
 
     #[test]
+    fn accounts_assembly_derives_the_medium_from_stored_channels() {
+        // The mail-vs-chat taxonomy reaches the panel from the messages'
+        // own channel column: IMAP is mail by construction, a chat
+        // export is chat, a mail-file import is mail, an import with
+        // nothing archived yet is unknown, and a namespace that somehow
+        // holds both channels is mixed — never a guess from the label.
+        let imap_acct = imap_instance("inst-imap", "imap.gmail.com", 993, "ana@gmail.com", &[]);
+        let views = assemble_accounts(&[imap_acct], &[], &[], |_: &StoredImapConfig| {
+            (false, false)
+        });
+        assert_eq!(views[0].medium, "mail", "IMAP is mail by kind");
+
+        let medium_of = |has_chat: bool, has_email: bool| {
+            let channels = vec![vault_core::storage::AccountChannels {
+                source_id: "inst-x".into(),
+                has_chat,
+                has_email,
+            }];
+            let views = assemble_accounts(
+                &[import_instance("inst-x", "whatsapp")],
+                &[],
+                &channels,
+                |_: &StoredImapConfig| (false, false),
+            );
+            views[0].medium.clone()
+        };
+        assert_eq!(medium_of(true, false), "chat", "chat export");
+        assert_eq!(medium_of(false, true), "mail", "mbox/.eml import");
+        assert_eq!(medium_of(true, true), "mixed", "both channels stored");
+        assert_eq!(medium_of(false, false), "unknown", "nothing archived yet");
+        // A missing channel row (the flags query missed the instance)
+        // reads as unknown, never as a fabricated mail/chat claim.
+        let views = assemble_accounts(
+            &[import_instance("inst-y", "telegram")],
+            &[],
+            &[],
+            |_: &StoredImapConfig| (false, false),
+        );
+        assert_eq!(views[0].medium, "unknown");
+    }
+
+    #[test]
     fn accounts_assembly_defaults_missing_counts_to_zero_and_marks_pause() {
         // An instance the counts query somehow did not cover still lists
         // (a connected-but-empty account), and the exclusion flag rides
         // through as the account's paused state.
         let mut paused = imap_instance("inst-paused", "imap.b.test", 993, "bob@b.test", &[]);
         paused.excluded = true;
-        let views = assemble_accounts(&[paused], &[], |_: &StoredImapConfig| (false, true));
+        let views = assemble_accounts(&[paused], &[], &[], |_: &StoredImapConfig| (false, true));
         assert_eq!(views.len(), 1);
         assert!(views[0].excluded, "exclusion is the pause state");
         assert_eq!(views[0].message_count, 0);
@@ -4083,7 +4175,7 @@ mod tests {
                 .into(),
         );
         failed.last_error_at = Some("2026-11-09 23:00:00".into());
-        let views = assemble_accounts(&[failed], &[], |_: &StoredImapConfig| (false, false));
+        let views = assemble_accounts(&[failed], &[], &[], |_: &StoredImapConfig| (false, false));
         assert_eq!(views.len(), 1);
         let view = &views[0];
         assert_eq!(view.state, "disconnected");
@@ -4094,7 +4186,7 @@ mod tests {
         assert_eq!(view.last_error_at.as_deref(), Some("2026-11-09 23:00:00"));
         // A healthy account carries the empty error state, not a stale one.
         let healthy = imap_instance("inst-ok", "imap.d.test", 993, "dee@d.test", &[]);
-        let views = assemble_accounts(&[healthy], &[], |_: &StoredImapConfig| (true, false));
+        let views = assemble_accounts(&[healthy], &[], &[], |_: &StoredImapConfig| (true, false));
         assert_eq!(views[0].last_error, None);
         assert_eq!(views[0].last_error_at, None);
     }

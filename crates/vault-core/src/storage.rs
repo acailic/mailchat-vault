@@ -690,6 +690,24 @@ const MIGRATIONS: &[(i64, &str)] = &[
         ALTER TABLE source_instances ADD COLUMN last_error_at TEXT;
         "#,
     ),
+    (
+        15,
+        // Covering index for the per-source mail-vs-chat taxonomy (the
+        // source icons). `archive_messages.channel` records what each
+        // parser actually stored (`"chat"` for chat exports, `"email"`
+        // for mail files and IMAP), so channel presence per source is
+        // the honest signal — but probing it through
+        // `idx_archive_messages_source` would walk every row of a
+        // million-message import. This index turns each
+        // `EXISTS(… WHERE source_instance_id = ? AND channel = ?)` into
+        // a pure seek (see [`Storage::account_channel_flags`]); it
+        // shares its leading column with `idx_archive_messages_source`,
+        // so it also serves any future per-source channel grouping.
+        r#"
+        CREATE INDEX idx_archive_messages_source_channel
+            ON archive_messages (source_instance_id, channel);
+        "#,
+    ),
 ];
 
 /// Rust halves of migrations, for backfill logic that SQL alone cannot
@@ -1929,6 +1947,35 @@ impl Storage {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(counts)
+    }
+
+    /// Per-source channel presence for the accounts overview (the
+    /// mail-vs-chat taxonomy behind the source icons): whether each
+    /// source's archived messages include any `"chat"`-channel row (a
+    /// chat-export import) and any `"email"`-channel row (a mail-file
+    /// import or IMAP). Two seeks per source over the covering
+    /// `idx_archive_messages_source_channel` (migration 15) —
+    /// O(number of accounts), never a scan of the archive, matching
+    /// [`Storage::account_counts`]'s budget.
+    pub fn account_channel_flags(&self) -> Result<Vec<AccountChannels>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT si.id,
+                    EXISTS(SELECT 1 FROM archive_messages AS am
+                           WHERE am.source_instance_id = si.id AND am.channel = 'chat'),
+                    EXISTS(SELECT 1 FROM archive_messages AS am
+                           WHERE am.source_instance_id = si.id AND am.channel = 'email')
+             FROM source_instances AS si ORDER BY si.id",
+        )?;
+        let flags = stmt
+            .query_map([], |row| {
+                Ok(AccountChannels {
+                    source_id: row.get(0)?,
+                    has_chat: row.get(1)?,
+                    has_email: row.get(2)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(flags)
     }
 
     /// Full dashboard statistics (see [`crate::stats::ArchiveStats`]):
@@ -3388,6 +3435,21 @@ pub struct AccountCounts {
     pub messages: u64,
     /// Open rows in the IMAP failed-item ledger (0 for import accounts).
     pub failed_items: u64,
+}
+
+/// One source's channel presence for the accounts overview (see
+/// [`Storage::account_channel_flags`]): whether the source's archived
+/// messages include any `"chat"`-channel row (a chat-export import) and
+/// any `"email"`-channel row (a mail-file import or IMAP).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountChannels {
+    /// The durable source instance id (same ids as
+    /// [`Storage::list_source_instances`]).
+    pub source_id: String,
+    /// At least one archived message carries channel `"chat"`.
+    pub has_chat: bool,
+    /// At least one archived message carries channel `"email"`.
+    pub has_email: bool,
 }
 
 /// A recorded observation of one archived message
