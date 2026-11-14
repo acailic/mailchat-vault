@@ -439,6 +439,37 @@ mod tests {
     }
 
     #[test]
+    fn reader_detection_pins_the_same_order() {
+        // The reader variant real picks use must answer in the same
+        // Discord → Messenger → Telegram order as the bytes probe:
+        // a Discord temp file answers Discord, a Messenger one
+        // Messenger — never Telegram.
+        let dir = tempfile::tempdir().unwrap();
+        let discord = dir.path().join("messages.json");
+        std::fs::write(&discord, discord_bytes()).unwrap();
+        assert_eq!(
+            detect_chat_format_reader(&discord).unwrap(),
+            Some(ChatFormat::Discord)
+        );
+        let messenger = dir.path().join("message_1.json");
+        std::fs::write(
+            &messenger,
+            br#"{"participants": [{"name": "Ana"}], "messages": [{"sender_name": "Ana", "timestamp_ms": 1, "content": "hi"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            detect_chat_format_reader(&messenger).unwrap(),
+            Some(ChatFormat::Messenger)
+        );
+        let telegram = dir.path().join("result.json");
+        std::fs::write(&telegram, telegram_bytes()).unwrap();
+        assert_eq!(
+            detect_chat_format_reader(&telegram).unwrap(),
+            Some(ChatFormat::Telegram)
+        );
+    }
+
+    #[test]
     fn messenger_dir_resolves_over_the_export_files_error() {
         // A thread folder holds multiple message_*.json files; as generic
         // export files that errors ("pick one file") — for Messenger it
