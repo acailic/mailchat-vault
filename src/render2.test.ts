@@ -1,12 +1,14 @@
 // @vitest-environment happy-dom
 // DOM tests for the v2 rendering (M3.2): flat results rows with badges
-// and selection checkboxes, applied filter chips, import-scope picker,
-// refresh notice, and the reading pane (detail + context + actions).
+// and selection checkboxes, era chips, applied filter chips, import-scope
+// picker, refresh notice, and the reading pane (detail + context +
+// actions).
 
 import { describe, expect, it, vi } from "vitest";
 import {
   fillImportScopes,
   renderDetail2,
+  renderEraChips,
   renderFilterChips,
   renderFlatResults,
   renderRefreshNotice,
@@ -227,6 +229,41 @@ describe("filter chips", () => {
   it("no active filters render no chips", () => {
     const el = document.createElement("div");
     renderFilterChips(el, { chips: [], onRemove: () => {}, onClear: () => {} });
+    expect(el.children.length).toBe(0);
+  });
+});
+
+describe("era chips", () => {
+  const buckets = [
+    { label: "2019", from: "2019-01-01", to: "2019-12-31" },
+    { label: "2020", from: "2020-01-01", to: "2020-12-31" },
+  ];
+
+  it("renders one pressed toggle per bucket; clicks report the index", () => {
+    const el = document.createElement("div");
+    const toggled: number[] = [];
+    renderEraChips(el, { buckets, activeIndex: 1, onToggle: (i) => toggled.push(i) });
+    const chips = [...el.querySelectorAll("button.era-chip")] as HTMLElement[];
+    expect(chips.map((c) => c.textContent)).toEqual(["2019", "2020"]);
+    expect(chips.map((c) => c.getAttribute("aria-pressed"))).toEqual(["false", "true"]);
+    expect(chips[1].classList.contains("on")).toBe(true);
+    // Controls name their action; the active chip names removal.
+    expect(chips[0].title).toContain("Filter to 2019");
+    expect(chips[1].title).toContain("Remove the 2020 date range");
+    chips[0].click();
+    chips[0].click();
+    expect(toggled).toEqual([0, 0]);
+  });
+
+  it("fewer than two buckets render nothing (no dead chrome)", () => {
+    const el = document.createElement("div");
+    renderEraChips(el, { buckets: [], activeIndex: -1, onToggle: () => {} });
+    expect(el.children.length).toBe(0);
+    renderEraChips(el, {
+      buckets: [{ label: "2026", from: "2026-01-01", to: "2026-12-31" }],
+      activeIndex: 0,
+      onToggle: () => {},
+    });
     expect(el.children.length).toBe(0);
   });
 });

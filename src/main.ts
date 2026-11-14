@@ -54,16 +54,19 @@ import {
 import {
   fillImportScopes,
   renderDetail2,
+  renderEraChips,
   renderFilterChips,
   renderFlatResults,
   renderRefreshNotice,
 } from "./render2";
 import {
+  activeEraIndex,
   buildRequest,
   captureResults,
   contextCursors,
   contextEntries,
   dateBoundsValid,
+  eraBuckets,
   filterChips,
   hasActiveFilters,
   mergeContextPages,
@@ -74,6 +77,7 @@ import {
   revisionChanged,
   selectionIds,
   withoutChip,
+  type EraBucket,
   type FilterChip,
   type SearchFilters,
 } from "./searchstate";
@@ -159,6 +163,7 @@ const sortOrderSelect = document.querySelector<HTMLSelectElement>("#sort-order")
 const hasAttachmentSelect = document.querySelector<HTMLSelectElement>("#has-attachment")!;
 const importScopeSelect = document.querySelector<HTMLSelectElement>("#import-scope")!;
 const filtersSummary = document.querySelector<HTMLElement>("#filters-summary")!;
+const eraChips = document.querySelector<HTMLElement>("#era-chips")!;
 const activeFilterChips = document.querySelector<HTMLElement>("#active-filter-chips")!;
 const refreshNotice = document.querySelector<HTMLElement>("#refresh-notice")!;
 const selectionFormatSelect = document.querySelector<HTMLSelectElement>("#selection-format")!;
@@ -302,6 +307,7 @@ const searchGuard = new SequenceGuard();
 const detailGuard = new SequenceGuard();
 const statsGuard = new SequenceGuard();
 const dashboardGuard = new SequenceGuard();
+const eraGuard = new SequenceGuard();
 const askGuard = new SequenceGuard();
 const embedGuard = new SequenceGuard();
 const accountsGuard = new SequenceGuard();
@@ -326,6 +332,12 @@ let demoActive = false;
  * first source instead of a dead search box). While the demo is open
  * this still reflects the personal vault underneath. */
 let archiveTotal = 0;
+
+/** The era strip's timeline buckets, derived from the last `archive_stats`
+ * day distribution (same series the dashboard charts). Which chip is on
+ * is NOT held here — it is derived from the filters' from/to bounds on
+ * every render, so the date inputs stay the single source of truth. */
+let eraBucketsCache: EraBucket[] = [];
 
 /** Whether the initial newest-first browse already ran once this page
  * (U04: "All messages" shows the archive immediately, not after the
@@ -538,6 +550,13 @@ function renderAll(): void {
     chips,
     onRemove: (chip) => removeFilterChip(chip),
     onClear: clearFilters,
+  });
+  // The era strip's active state is derived, never stored: a chip is on
+  // only while the filters hold exactly its bounds.
+  renderEraChips(eraChips, {
+    buckets: eraBucketsCache,
+    activeIndex: activeEraIndex(eraBucketsCache, state.filters),
+    onToggle: toggleEraBucket,
   });
   renderFiltersSummary(chips.length);
   renderRefreshNotice(refreshNotice, state.refreshNeeded, () => void runSearch(0));
@@ -948,6 +967,10 @@ async function refreshStats(): Promise<void> {
     renderSourceChipsNow();
     updateVaultChrome();
     maybeInitialBrowse();
+    // The era strip reads the same mutation point: whenever the totals
+    // refresh (boot, imports, syncs, vault switches), the timeline the
+    // chips strip along may have changed with them.
+    void refreshEraChips();
   } catch {
     if (statsGuard.isCurrent(token)) {
       statsLabel.textContent = "";
@@ -972,6 +995,28 @@ function maybeInitialBrowse(): void {
   }
   initialBrowseDone = true;
   void runSearch(0);
+}
+
+/** Re-derive the era strip from the archive's day distribution. The
+ * dashboard's own `archive_stats` round trip is dashboard-guarded and
+ * Activity-scoped, so the strip fetches its own copy. A failure keeps the
+ * last known buckets — an unavailable timeline is not a reason to drop a
+ * filter affordance that was honest a moment ago. */
+async function refreshEraChips(): Promise<void> {
+  const token = eraGuard.next();
+  try {
+    const stats = await ipc.archiveStats(10);
+    if (!eraGuard.isCurrent(token)) return; // a newer refresh superseded this response
+    const next = eraBuckets(stats.by_day);
+    const unchanged =
+      next.length === eraBucketsCache.length &&
+      next.every((b, i) => b.from === eraBucketsCache[i].from && b.to === eraBucketsCache[i].to);
+    if (unchanged) return;
+    eraBucketsCache = next;
+    renderAll();
+  } catch {
+    // Keep the last known buckets.
+  }
 }
 
 async function refreshDashboard(): Promise<void> {
@@ -1026,6 +1071,23 @@ function writeFilters(f: SearchFilters): void {
 /** Remove one applied filter chip and re-run (resets to page one). */
 function removeFilterChip(chip: FilterChip): void {
   writeFilters(withoutChip(state.filters, chip));
+  void runSearch(0);
+}
+
+/** Toggle one era chip: apply its exact from/to bounds through the date
+ * inputs (the existing filter machinery then applies them), or remove the
+ * bound when that era is already active. The inputs stay the single
+ * source of truth — the chip highlight is derived from them on render. */
+function toggleEraBucket(index: number): void {
+  const bucket = eraBucketsCache[index];
+  if (!bucket) return;
+  if (activeEraIndex(eraBucketsCache, state.filters) === index) {
+    fromDateInput.value = "";
+    toDateInput.value = "";
+  } else {
+    fromDateInput.value = bucket.from;
+    toDateInput.value = bucket.to;
+  }
   void runSearch(0);
 }
 

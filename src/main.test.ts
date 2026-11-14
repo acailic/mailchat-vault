@@ -971,6 +971,102 @@ describe("v2 filters", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Era chips: the archive's timeline as one-click date filters. The from/to
+// inputs stay the single source of truth — the pressed chip is derived
+// from them on every render, never stored.
+// ---------------------------------------------------------------------------
+
+describe("era chips", () => {
+  /** Three years of history → year chips 2019, 2020, 2021. */
+  const ERA_STATS: ArchiveStats = {
+    ...ARCHIVE_STATS,
+    first_sent_at: "2019-05-01T10:00:00Z",
+    last_sent_at: "2021-07-04T10:00:00Z",
+    by_day: [
+      { day: "2019-05-01", count: 2 },
+      { day: "2020-06-02", count: 3 },
+      { day: "2021-07-04", count: 4 },
+    ],
+  };
+
+  function eraChips(): HTMLElement[] {
+    return [...win.document.querySelectorAll("#era-chips .era-chip")] as unknown as HTMLElement[];
+  }
+
+  it("renders the archive's years; a click sets the from/to inputs and filters", async () => {
+    tauri.handlers.set("archive_stats", () => ERA_STATS);
+    searchRespondsWith(() => pageOf(HITS.slice(0, 1), 1));
+    await boot();
+    await vi.waitFor(() => expect(eraChips().length).toBe(3));
+    expect(eraChips().map((c) => c.textContent)).toEqual(["2019", "2020", "2021"]);
+    expect(eraChips().every((c) => c.getAttribute("aria-pressed") === "false")).toBe(true);
+
+    eraChips()[1].click();
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    expect(input("#from-date").value).toBe("2020-01-01");
+    expect(input("#to-date").value).toBe("2020-12-31");
+    expect(searchCalls()[0].args).toMatchObject({
+      request: { from_date: "2020-01-01", to_date: "2020-12-31" },
+    });
+    // Pressed only because the inputs hold exactly this bucket's bounds.
+    await vi.waitFor(() => expect(eraChips()[1].getAttribute("aria-pressed")).toBe("true"));
+    // The existing applied-filter system shows the era as removable chips.
+    const applied = [...win.document.querySelectorAll("#active-filter-chips .filter-chip")];
+    expect(applied.map((c) => c.textContent?.trim())).toEqual([
+      "from 2020-01-01 ×",
+      "to 2020-12-31 ×",
+    ]);
+  });
+
+  it("clicking the active era removes the bound; Clear clears it end to end", async () => {
+    tauri.handlers.set("archive_stats", () => ERA_STATS);
+    searchRespondsWith(() => pageOf(HITS.slice(0, 1), 1));
+    await boot();
+    await vi.waitFor(() => expect(eraChips().length).toBe(3));
+    eraChips()[2].click();
+    await vi.waitFor(() => expect(eraChips()[2].getAttribute("aria-pressed")).toBe("true"));
+
+    // Toggling the pressed chip off clears the inputs and the request.
+    eraChips()[2].click();
+    await vi.waitFor(() => expect(input("#from-date").value).toBe(""));
+    expect(input("#to-date").value).toBe("");
+    expect(eraChips().every((c) => c.getAttribute("aria-pressed") === "false")).toBe(true);
+
+    // Re-applied through the chip, the toolbar's Clear must clear it too.
+    eraChips()[0].click();
+    await vi.waitFor(() => expect(eraChips()[0].getAttribute("aria-pressed")).toBe("true"));
+    $("#clear-filters").click();
+    await vi.waitFor(() => expect(input("#from-date").value).toBe(""));
+    expect(input("#to-date").value).toBe("");
+    expect(eraChips().every((c) => c.getAttribute("aria-pressed") === "false")).toBe(true);
+  });
+
+  it("hand-typed bounds inside an era never light its chip", async () => {
+    tauri.handlers.set("archive_stats", () => ERA_STATS);
+    searchRespondsWith(() => pageOf(HITS, 3));
+    await boot();
+    await vi.waitFor(() => expect(eraChips().length).toBe(3));
+    input("#from-date").value = "2020-03-01";
+    input("#to-date").value = "2020-12-31";
+    fireChange(input("#to-date"));
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    expect(searchCalls()[0].args).toMatchObject({
+      request: { from_date: "2020-03-01", to_date: "2020-12-31" },
+    });
+    await vi.waitFor(() =>
+      expect(eraChips().every((c) => c.getAttribute("aria-pressed") === "false")).toBe(true),
+    );
+  });
+
+  it("a one-month timeline renders no strip (no dead chrome)", async () => {
+    tauri.handlers.set("archive_stats", () => ARCHIVE_STATS);
+    await boot();
+    await vi.waitFor(() => expect($("#dashboard p.meta")).toBeTruthy());
+    expect(win.document.querySelectorAll("#era-chips .era-chip").length).toBe(0);
+  });
+});
+
 describe("deep links", () => {
   it("a pasted mailchat://message/<id> locator opens that message directly", async () => {
     await boot();

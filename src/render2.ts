@@ -1,5 +1,6 @@
-/// DOM rendering for the v2 search UI (M3.2): flat results rows, applied
-/// filter chips, and the v2 reading pane (detail + chronological context).
+/// DOM rendering for the v2 search UI (M3.2): flat results rows, era
+/// chips, applied filter chips, and the v2 reading pane (detail +
+/// chronological context).
 /// Pure builders like render.ts — every dynamic string goes through
 /// textContent, tested via happy-dom in render2.test.ts.
 
@@ -18,6 +19,7 @@ import {
 } from "./render";
 import {
   type ContextEntry,
+  type EraBucket,
   type FilterChip,
   messageLink,
 } from "./searchstate";
@@ -204,6 +206,47 @@ export function renderFilterChips(el: HTMLElement, opts: FilterChipsOptions): vo
   } else {
     el.replaceChildren();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Era chips (timeline filters)
+// ---------------------------------------------------------------------------
+
+export interface EraChipsOptions {
+  buckets: EraBucket[];
+  /** The bucket the filters currently hold (-1 = none). */
+  activeIndex: number;
+  onToggle: (index: number) => void;
+}
+
+/**
+ * The era strip: one quiet row of timeline toggles under the toolbar.
+ * Each chip applies its bucket's exact from/to bounds through the normal
+ * date-input machinery (main.ts sets the inputs and re-runs the search);
+ * the active chip is a pressed toggle whose click removes the bound.
+ * Fewer than two buckets render nothing — no dead chrome over a timeline
+ * too short to strip.
+ */
+export function renderEraChips(el: HTMLElement, opts: EraChipsOptions): void {
+  if (opts.buckets.length < 2) {
+    el.replaceChildren();
+    return;
+  }
+  const chips = opts.buckets.map((bucket, index) => {
+    const active = index === opts.activeIndex;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "chip era-chip" + (active ? " on" : "");
+    button.dataset.era = bucket.label;
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+    button.title = active
+      ? `Remove the ${bucket.label} date range (${bucket.from} → ${bucket.to})`
+      : `Filter to ${bucket.label} (${bucket.from} → ${bucket.to})`;
+    button.textContent = bucket.label;
+    button.addEventListener("click", () => opts.onToggle(index));
+    return button;
+  });
+  el.replaceChildren(...chips);
 }
 
 // ---------------------------------------------------------------------------
