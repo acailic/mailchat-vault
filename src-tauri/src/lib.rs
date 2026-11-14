@@ -130,7 +130,7 @@ use vault_core::jobs::{
     DbPool, JobContext, JobError, JobEventsPage, JobId, JobRecord, PoolConfig, PoolSink, PoolSync,
 };
 use vault_core::llm::{
-    self, AnthropicLlm, AskOutcome, LlmConfig, LlmStatus, PlanSource, PlannedQuery, QueryPlan,
+    self, AnthropicLlm, AskOutcome, LlmStatus, PlanSource, PlannedQuery, QueryPlan,
 };
 use vault_core::oauth::{self, OAuthConfig};
 use vault_core::object_store::{MediaUsage, ObjectStore, ReconcileReport};
@@ -3218,11 +3218,10 @@ pub fn run() {
             if let Err(e) = &settings {
                 eprintln!("Settings ignored: {e}");
             }
-            let env = LlmConfig::from_env();
-            if let Err(e) = &env {
-                eprintln!("LLM env config ignored: {e}");
-            }
-            let registry = LlmRegistry::load(settings, env, |id| secrets.load_llm_key(id));
+            let registry =
+                LlmRegistry::load(settings, Box::new(|name| std::env::var(name).ok()), |id| {
+                    secrets.load_llm_key(id)
+                });
             // Folder watcher: imports new/modified export files from the
             // user's chosen folders through the pool's write queue and
             // pushes every status change to the UI as a `watch-status`
@@ -3743,6 +3742,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     use vault_core::jobs::PoolConfig;
+    use vault_core::llm::LlmConfig;
     use vault_core::vector::HashEmbedder;
 
     /// Read one HTTP/1.1 request (headers + Content-Length body) and return
