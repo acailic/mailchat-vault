@@ -690,6 +690,26 @@ const MIGRATIONS: &[(i64, &str)] = &[
         ALTER TABLE source_instances ADD COLUMN last_error_at TEXT;
         "#,
     ),
+    (
+        15,
+        // Covering index for the per-source mail-vs-chat taxonomy (the
+        // source icons). `archive_messages.channel` records what each
+        // parser actually stored (`"chat"` for a chat-export import,
+        // `"email"` for a mail-file import; IMAP rows carry their folder
+        // name as the channel, so an IMAP source's medium is decided by
+        // its kind), so channel presence per source is the honest
+        // signal — but probing it through
+        // `idx_archive_messages_source` would walk every row of a
+        // million-message import. This index turns each
+        // `EXISTS(… WHERE source_instance_id = ? AND channel = ?)` into
+        // a pure seek (see [`Storage::account_channel_flags`]); it
+        // shares its leading column with `idx_archive_messages_source`,
+        // so it also serves any future per-source channel grouping.
+        r#"
+        CREATE INDEX idx_archive_messages_source_channel
+            ON archive_messages (source_instance_id, channel);
+        "#,
+    ),
 ];
 
 /// Rust halves of migrations, for backfill logic that SQL alone cannot
@@ -1528,11 +1548,19 @@ impl Storage {
     /// unknown (NULL) instant are excluded while a bound is active — they
     /// cannot be placed in time. The MATCH expression is a bound parameter
     /// throughout, so it can never spill into SQL text.
+    ///
+    /// `from_filter` keeps only messages whose author contains the value
+    /// (case-insensitive for ASCII, as SQLite `LIKE` is); `require_link`
+    /// keeps only bodies containing an `http…://` URL. Both are bound
+    /// parameters applied before `LIMIT`. `%`/`_` inside `from_filter` pass
+    /// through as LIKE wildcards.
     pub fn search_filtered(
         &self,
         match_query: &str,
         date_from: Option<&str>,
         date_to: Option<&str>,
+        from_filter: Option<&str>,
+        require_link: bool,
         limit: u32,
     ) -> Result<Vec<Message>> {
         let from = match parse_date_bound(date_from, "date_from")? {
@@ -1564,13 +1592,22 @@ impl Storage {
               AND (?2 IS NULL OR m.sent_instant >= ?2)
               AND (?3 IS NULL OR m.sent_instant < ?3)
               AND ((?2 IS NULL AND ?3 IS NULL) OR m.sent_instant IS NOT NULL)
+              AND (?4 IS NULL OR m.author LIKE '%' || ?4 || '%')
+              AND (?5 = 0 OR m.body LIKE '%http%://%')
             ORDER BY bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, {BM25_WEIGHT_SUBJECT}), m.id
-            LIMIT ?4
+            LIMIT ?6
             "#,
         ))?;
         let rows = stmt
             .query_map(
-                params![match_query, from, to_exclusive, limit],
+                params![
+                    match_query,
+                    from,
+                    to_exclusive,
+                    from_filter,
+                    require_link,
+                    limit
+                ],
                 message_from_row,
             )?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1929,6 +1966,37 @@ impl Storage {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(counts)
+    }
+
+    /// Per-source channel presence for the accounts overview (the
+    /// mail-vs-chat taxonomy behind the source icons): whether each
+    /// source's archived messages include any `"chat"`-channel row (a
+    /// chat-export import) and any `"email"`-channel row (a mail-file
+    /// import; IMAP rows carry their folder name as the channel, so an
+    /// IMAP source's medium is decided by its kind). Two seeks per
+    /// source over the covering
+    /// `idx_archive_messages_source_channel` (migration 15) —
+    /// O(number of accounts), never a scan of the archive, matching
+    /// [`Storage::account_counts`]'s budget.
+    pub fn account_channel_flags(&self) -> Result<Vec<AccountChannels>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT si.id,
+                    EXISTS(SELECT 1 FROM archive_messages AS am
+                           WHERE am.source_instance_id = si.id AND am.channel = 'chat'),
+                    EXISTS(SELECT 1 FROM archive_messages AS am
+                           WHERE am.source_instance_id = si.id AND am.channel = 'email')
+             FROM source_instances AS si ORDER BY si.id",
+        )?;
+        let flags = stmt
+            .query_map([], |row| {
+                Ok(AccountChannels {
+                    source_id: row.get(0)?,
+                    has_chat: row.get(1)?,
+                    has_email: row.get(2)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(flags)
     }
 
     /// Full dashboard statistics (see [`crate::stats::ArchiveStats`]):
@@ -2339,11 +2407,14 @@ impl Storage {
 
     /// Vector search: cosine of `query` against every `model` embedding,
     /// under the same LOCAL-day date bounds as [`Storage::search_filtered`]
-    /// (`None` = unbounded). Returns the best `limit` hits, score-descending
+    /// (`None` = unbounded) and the same `from_filter` / `require_link`
+    /// filters, applied in SQL before the scan is ranked and truncated.
+    /// Returns the best `limit` hits, score-descending
     /// (ties by ascending id). Stored vectors are normalized at write time,
     /// so cosine is a plain dot product. Rows whose blob length disagrees
     /// with `dim` (a foreign model's leftovers) are skipped, not fatal.
     /// This is the manual-cosine index described in [`crate::vector`].
+    #[allow(clippy::too_many_arguments)]
     pub fn vector_scan(
         &self,
         model: &str,
@@ -2351,6 +2422,8 @@ impl Storage {
         query: &[f32],
         date_from: Option<&str>,
         date_to: Option<&str>,
+        from_filter: Option<&str>,
+        require_link: bool,
         limit: u32,
     ) -> Result<Vec<VectorHit>> {
         if query.len() != dim as usize {
@@ -2377,30 +2450,39 @@ impl Storage {
         };
 
         // Same bound-parameter shape as search_filtered: the date bounds
-        // are values, never spliced into the SQL text. Without bounds the
-        // scan skips the messages join entirely (the embedding table alone
-        // answers it); with bounds the join applies the same local-day
-        // sent_at filter as the FTS leg.
-        let (sql, has_bounds) = if from.is_some() || to_exclusive.is_some() {
-            (
-                "SELECT e.message_id, e.embedding
+        // and sender/link filters are values, never spliced into the SQL
+        // text. Without any filter the scan skips the messages join
+        // entirely (the embedding table alone answers it); with one the
+        // join applies the same filters as the FTS leg.
+        let (sql, has_filters) =
+            if from.is_some() || to_exclusive.is_some() || from_filter.is_some() || require_link {
+                (
+                    "SELECT e.message_id, e.embedding
                  FROM message_embeddings AS e
                  JOIN archive_messages AS m ON m.id = e.message_id
                  WHERE e.model = ?1
                    AND (?2 IS NULL OR m.sent_instant >= ?2)
                    AND (?3 IS NULL OR m.sent_instant < ?3)
-                   AND ((?2 IS NULL AND ?3 IS NULL) OR m.sent_instant IS NOT NULL)",
-                true,
-            )
-        } else {
-            (
-                "SELECT message_id, embedding FROM message_embeddings WHERE model = ?1",
-                false,
-            )
-        };
+                   AND ((?2 IS NULL AND ?3 IS NULL) OR m.sent_instant IS NOT NULL)
+                   AND (?4 IS NULL OR m.author LIKE '%' || ?4 || '%')
+                   AND (?5 = 0 OR m.body LIKE '%http%://%')",
+                    true,
+                )
+            } else {
+                (
+                    "SELECT message_id, embedding FROM message_embeddings WHERE model = ?1",
+                    false,
+                )
+            };
         let mut stmt = self.conn.prepare(sql)?;
-        let mut rows = if has_bounds {
-            stmt.query(params![model, from, to_exclusive])?
+        let mut rows = if has_filters {
+            stmt.query(params![
+                model,
+                from,
+                to_exclusive,
+                from_filter,
+                require_link
+            ])?
         } else {
             stmt.query(params![model])?
         };
@@ -3390,6 +3472,25 @@ pub struct AccountCounts {
     pub failed_items: u64,
 }
 
+/// One source's channel presence for the accounts overview (see
+/// [`Storage::account_channel_flags`]): whether the source's archived
+/// messages include any `"chat"`-channel row (a chat-export import) and
+/// any `"email"`-channel row (a mail-file import; IMAP rows carry their
+/// folder name as the channel, so an IMAP source's medium is decided by
+/// its kind).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountChannels {
+    /// The durable source instance id (same ids as
+    /// [`Storage::list_source_instances`]).
+    pub source_id: String,
+    /// At least one archived message carries channel `"chat"`.
+    pub has_chat: bool,
+    /// At least one archived message carries channel `"email"` — a
+    /// mail-file import. (IMAP rows carry folder names as their channel;
+    /// an IMAP source's medium is decided by kind.)
+    pub has_email: bool,
+}
+
 /// A recorded observation of one archived message
 /// (see [`Storage::message_occurrences`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4195,6 +4296,87 @@ mod tests {
             err.to_string().contains("archive_fts"),
             "error must name the corrupt index: {err}"
         );
+    }
+
+    fn seeded_links() -> Storage {
+        let s = Storage::open_in_memory().unwrap();
+        let rows = [
+            ("ana@example.com", "see https://example.com/a now"),
+            ("Ana Example <ana@example.com>", "no links here, just words"),
+            (
+                "bo@example.com",
+                "docs at https://example.com/b and HTTP://example.com/c",
+            ),
+            ("carol@example.com", "nothing to see"),
+        ];
+        for (i, (author, body)) in rows.iter().enumerate() {
+            s.insert_message(&crate::message::NewMessage::new(
+                "test",
+                format!("m{i}"),
+                *author,
+                "2026-01-01T00:00:00Z",
+                *body,
+            ))
+            .unwrap();
+        }
+        s
+    }
+
+    #[test]
+    fn search_filtered_from_is_case_insensitive_substring() {
+        let s = seeded_links();
+        let out = s
+            .search_filtered("example", None, None, Some("ANA@"), false, 50)
+            .unwrap();
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert!(out.iter().all(|m| m.author.to_lowercase().contains("ana@")));
+    }
+
+    #[test]
+    fn search_filtered_require_link_keeps_only_url_bodies() {
+        let s = seeded_links();
+        let out = s
+            .search_filtered("example", None, None, None, true, 50)
+            .unwrap();
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|m| m.body.contains("://")));
+    }
+
+    #[test]
+    fn search_filtered_combines_from_and_require_link() {
+        let s = seeded_links();
+        let out = s
+            .search_filtered("example", None, None, Some("bo@"), true, 50)
+            .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].author, "bo@example.com");
+    }
+
+    #[test]
+    fn vector_scan_applies_the_same_filters() {
+        let s = seeded_links();
+        // Embed two messages (ids 1 and 4) with identical normalized vectors:
+        // id 1 is ana's (has a URL), id 4 is carol's (no URL, not ana).
+        let model = "test-embed";
+        s.embed_messages_batch(model, 2, &[(1, vec![1.0, 0.0]), (4, vec![1.0, 0.0])])
+            .unwrap();
+        // Unfiltered: both ids are candidates.
+        let all = s
+            .vector_scan(model, 2, &[1.0, 0.0], None, None, None, false, 10)
+            .unwrap();
+        assert_eq!(all.len(), 2, "{all:?}");
+        // Sender filter: only message 1 (ana) survives.
+        let filtered = s
+            .vector_scan(model, 2, &[1.0, 0.0], None, None, Some("ana"), false, 10)
+            .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].message_id, 1);
+        // Link filter: only message 1 (has a URL) survives.
+        let linked = s
+            .vector_scan(model, 2, &[1.0, 0.0], None, None, None, true, 10)
+            .unwrap();
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].message_id, 1);
     }
 }
 

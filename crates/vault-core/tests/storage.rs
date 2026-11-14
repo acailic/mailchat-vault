@@ -29,11 +29,11 @@ fn migrations_apply_and_are_idempotent() {
     let db = dir.path().join("vault.db");
 
     let s = Storage::open(&db).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 14);
+    assert_eq!(s.schema_version().unwrap(), 15);
 
     // Reopening the same file applies nothing new and keeps the data.
     let s2 = Storage::open(&db).unwrap();
-    assert_eq!(s2.schema_version().unwrap(), 14);
+    assert_eq!(s2.schema_version().unwrap(), 15);
     s.insert_message(&msg("a", "x", "hello vault")).unwrap();
     assert_eq!(s2.stats().unwrap().total, 1);
 }
@@ -187,6 +187,9 @@ fn subject_column_filter_flows_through_the_ask_plan() {
         match_expr: "subject: vault".into(),
         date_from: None,
         date_to: None,
+        from: None,
+        has_link: None,
+        extract_links: false,
     };
     let vetted = validate(&s, "vault migration plan", Ok(plan));
     assert_eq!(vetted.source, PlanSource::Llm);
@@ -202,7 +205,7 @@ fn subject_column_filter_flows_through_the_ask_plan() {
     assert_eq!(run, vec![subject_id]);
 
     let filtered: Vec<i64> = s
-        .search_filtered("subject: vault", None, None, 10)
+        .search_filtered("subject: vault", None, None, None, false, 10)
         .unwrap()
         .iter()
         .map(|m| m.id)
@@ -210,7 +213,7 @@ fn subject_column_filter_flows_through_the_ask_plan() {
     assert_eq!(filtered, vec![subject_id]);
 
     let plain: Vec<i64> = s
-        .search_filtered("\"vault\"", None, None, 10)
+        .search_filtered("\"vault\"", None, None, None, false, 10)
         .unwrap()
         .iter()
         .map(|m| m.id)
@@ -280,7 +283,7 @@ fn subject_hit_outranks_denser_body_hit() {
     assert_eq!(paged, vec![a, b], "the subject hit must rank first");
 
     let filtered: Vec<i64> = s
-        .search_filtered("\"vault\"", None, None, 10)
+        .search_filtered("\"vault\"", None, None, None, false, 10)
         .unwrap()
         .iter()
         .map(|m| m.id)
@@ -384,37 +387,44 @@ fn date_bounds_are_canonicalized_before_text_comparison() {
 
     // Non-padded bounds must behave exactly like their padded spellings.
     let found = s
-        .search_filtered("\"vault\"", Some("2026-10-1"), Some("2026-10-9"), 10)
+        .search_filtered(
+            "\"vault\"",
+            Some("2026-10-1"),
+            Some("2026-10-9"),
+            None,
+            false,
+            10,
+        )
         .unwrap();
     let ids: Vec<&str> = found.iter().map(|m| m.external_id.as_str()).collect();
     assert_eq!(ids, ["2", "3", "4"]);
 
     // Padded bounds keep working unchanged.
     let found = s
-        .search_filtered("\"vault\"", Some("2026-10-01"), None, 10)
+        .search_filtered("\"vault\"", Some("2026-10-01"), None, None, false, 10)
         .unwrap();
     assert_eq!(found.len(), 4);
 
     // Non-padded spelling of an invalid date is still an error.
     assert!(s
-        .search_filtered("\"vault\"", Some("2026-13-1"), None, 10)
+        .search_filtered("\"vault\"", Some("2026-13-1"), None, None, false, 10)
         .is_err());
 
     // Wide signed years are refused instead of panicking or silently
     // mis-ordering against 4-digit sent_at text.
     assert!(s
-        .search_filtered("\"vault\"", Some("+262143-12-31"), None, 10)
+        .search_filtered("\"vault\"", Some("+262143-12-31"), None, None, false, 10)
         .is_err());
     assert!(s
-        .search_filtered("\"vault\"", None, Some("+262143-12-31"), 10)
+        .search_filtered("\"vault\"", None, Some("+262143-12-31"), None, false, 10)
         .is_err());
     assert!(
-        s.search_filtered("\"vault\"", None, Some("9999-12-31"), 10)
+        s.search_filtered("\"vault\"", None, Some("9999-12-31"), None, false, 10)
             .is_err(),
         "date_to whose successor leaves the 4-digit range is refused"
     );
     // The last upper bound with a representable successor still works.
     assert!(s
-        .search_filtered("\"vault\"", None, Some("9999-12-30"), 10)
+        .search_filtered("\"vault\"", None, Some("9999-12-30"), None, false, 10)
         .is_ok());
 }

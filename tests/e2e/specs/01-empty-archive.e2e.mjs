@@ -13,6 +13,7 @@ export async function run(ctx) {
 
     // Without an API key the LLM note must say so up front (classic UI).
     if (await browser.$("#llm-note").isExisting()) {
+      await ui.openAsk(browser); // the note lives behind the Ask fold
       const note = await browser.$("#llm-note").getText();
       assert.ok(
         note.startsWith("LLM assist is off"),

@@ -256,18 +256,25 @@ fn imported_chat_is_full_text_searchable() {
 
     for term in ["arhiva", "reagiram", "odgovaram"] {
         let hits = storage
-            .search_filtered(&build_match_query(term), None, None, 10)
+            .search_filtered(&build_match_query(term), None, None, None, false, 10)
             .unwrap();
         assert!(!hits.is_empty(), "no hits for {term:?}");
     }
     // Service entries are never stored, so their vocabulary is absent.
     assert!(storage
-        .search_filtered(&build_match_query("call-history"), None, None, 10)
+        .search_filtered(
+            &build_match_query("call-history"),
+            None,
+            None,
+            None,
+            false,
+            10
+        )
         .unwrap()
         .is_empty());
     // Unicode text is searchable verbatim.
     let hits = storage
-        .search_filtered(&build_match_query("Čujem"), None, None, 10)
+        .search_filtered(&build_match_query("Čujem"), None, None, None, false, 10)
         .unwrap();
     assert_eq!(hits.len(), 1);
 }

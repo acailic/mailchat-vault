@@ -55,10 +55,18 @@ export async function run(ctx) {
       /^6 messages · 1 source · 2026-11-01 → 2026-11-01$/,
       "dashboard summary after demo seed",
     );
+    // A single day is not a distribution: the count renders as plain
+    // text, never one misleading full-width bar.
     assert.equal(
       (await browser.$$("#dashboard .day-chart .day-bar").length),
-      1,
-      "one day bar for the single demo day",
+      0,
+      "a single demo day renders no full-width bar",
+    );
+    const singleDay = await browser.$("#dashboard .day-chart .day-single").getText();
+    assert.equal(
+      singleDay,
+      "2026-11-01: 6 messages",
+      "the single demo day's count as plain text",
     );
     assert.equal(
       (await browser.$$("#dashboard .stat-table").length),

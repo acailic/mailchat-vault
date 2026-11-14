@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       webkit2gtk-driver \
       xauth \
       xvfb \
+      xdotool \
     && rm -rf /var/lib/apt/lists/*
 
 # tauri-driver: fixed version (2.1.0 — the version the CI e2e job and

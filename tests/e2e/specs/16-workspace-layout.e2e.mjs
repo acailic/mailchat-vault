@@ -179,6 +179,78 @@ export async function run(ctx) {
     );
     await fixtureShot(browser, "16-wide.png");
 
+    // --- workspace tabs: Search and Ask share the results column ---------
+    const tabs = await browser.execute(() => ({
+      section: document.querySelector("#app").dataset.workspaceSection,
+      tablist: !!document.querySelector('#workspace-tabs[role="tablist"]'),
+      searchSelected: document.querySelector("#tab-search")?.getAttribute("aria-selected"),
+      askControls: document.querySelector("#tab-ask")?.getAttribute("aria-controls"),
+      panels: [
+        !!document.querySelector("#search-section"),
+        !!document.querySelector("#ask-section"),
+      ],
+    }));
+    assert.equal(tabs.section, "search", "workspace boots on the Search tab");
+    assert.ok(tabs.tablist, "the workspace tab strip is a tablist");
+    assert.equal(tabs.searchSelected, "true", "Search tab starts selected");
+    assert.equal(tabs.askControls, "ask-section", "the Ask tab controls its panel");
+    assert.ok(tabs.panels[0] && tabs.panels[1], "both tabpanels stay mounted");
+
+    await (await browser.$("#tab-ask")).click();
+    await browser.waitUntil(
+      async () =>
+        (await (await browser.$("#app")).getAttribute("data-workspace-section")) === "ask",
+      { timeout: 5_000, timeoutMsg: "the Ask tab never switched the workspace section" },
+    );
+    assert.ok(
+      await (await browser.$("#ask-section")).isDisplayed(),
+      "Ask panel visible after the switch",
+    );
+    assert.equal(
+      await (await browser.$("#search-section")).isDisplayed(),
+      false,
+      "Search panel hidden while Ask is active",
+    );
+    await fixtureShot(browser, "16-ask-tab.png");
+    await (await browser.$("#tab-search")).click();
+    await browser.waitUntil(
+      async () =>
+        (await (await browser.$("#app")).getAttribute("data-workspace-section")) === "search",
+      { timeout: 5_000, timeoutMsg: "the Search tab never switched back" },
+    );
+
+    // --- desktop sidebar collapse (the hamburger removes the nav column) --
+    assert.ok(
+      await (await browser.$("#nav")).isDisplayed(),
+      "navigation column visible by default in wide",
+    );
+    assert.equal(
+      await (await browser.$("#nav-toggle")).getAttribute("aria-expanded"),
+      "true",
+      "toggle announces the nav as shown",
+    );
+    await (await browser.$("#nav-toggle")).click();
+    await browser.waitUntil(
+      async () => (await (await browser.$("#nav")).isDisplayed()) === false,
+      { timeout: 5_000, timeoutMsg: "the hamburger never hid the nav column" },
+    );
+    assert.equal(
+      await (await browser.$("#nav-toggle")).getAttribute("aria-expanded"),
+      "false",
+      "toggle announces the nav as hidden",
+    );
+    assert.ok(
+      await (await browser.$("#content")).isDisplayed(),
+      "content stays visible with the nav collapsed",
+    );
+    assert.ok(await noHorizontalClip(browser), "collapsed nav never clips horizontally");
+    await fixtureShot(browser, "16-nav-collapsed.png");
+    await (await browser.$("#nav-toggle")).click();
+    await browser.waitUntil(
+      async () => (await (await browser.$("#nav"))).isDisplayed() === true,
+      { timeout: 5_000, timeoutMsg: "the hamburger never restored the nav column" },
+    );
+
     // --- medium (800–1099px): reading replaces the results area -----------
     await ui.setViewport(browser, 900, 700);
     assert.equal(await ui.layoutMode(browser), "medium", "900px is the medium layout");
@@ -269,16 +341,21 @@ export async function run(ctx) {
     await ui.importMbox(browser, ui.archiveMbox);
     await ui.search(browser, "vault");
 
-    // Result rows announce as activatable buttons for screen readers.
-    const rowRole = await browser.execute(
-      () => document.querySelector("#results .hit-item")?.getAttribute("role"),
-    );
-    assert.equal(rowRole, "button", "result rows announce as buttons");
+    // Result rows announce as activatable buttons for screen readers:
+    // the row's main area carries role=button, and the list item itself
+    // does not (the selection checkbox is a sibling interactive control,
+    // never a control nested inside a button).
+    const rowRole = await browser.execute(() => ({
+      li: document.querySelector("#results li.hit-item")?.getAttribute("role"),
+      main: document.querySelector("#results li.hit-item .hit-main")?.getAttribute("role"),
+    }));
+    assert.equal(rowRole.main, "button", "the row's main area announces as a button");
+    assert.equal(rowRole.li, null, "the list item itself is not a button");
 
     // Enter on a focused row opens THAT row's message, not whatever the
     // global selection points at (the row-level handler wins).
     await browser.execute(() => {
-      const rows = document.querySelectorAll("#results .hit-item");
+      const rows = document.querySelectorAll("#results .hit-item .hit-main");
       rows[2].focus();
     });
     await browser.keys("Enter");
@@ -302,7 +379,7 @@ export async function run(ctx) {
 
     // Space activates a focused row the same way (button semantics).
     await browser.execute(() => {
-      document.querySelectorAll("#results .hit-item")[1].focus();
+      document.querySelectorAll("#results .hit-item .hit-main")[1].focus();
     });
     await browser.keys(" ");
     await browser.waitUntil(
@@ -335,12 +412,12 @@ export async function run(ctx) {
       ),
     );
     await browser.execute(() => {
-      document.querySelector("#results .hit-item").focus();
+      document.querySelector("#results .hit-item .hit-main").focus();
     });
     await browser.keys("ArrowDown");
     const arrowFocus = await browser.execute(() => ({
       activeFocused:
-        document.activeElement === document.querySelector("#results .hit-item.active"),
+        document.activeElement === document.querySelector("#results .hit-item.active .hit-main"),
       currentIndex: [...document.querySelectorAll("#results .hit-item")].indexOf(
         document.querySelector('.hit-item[aria-current="true"]'),
       ),
@@ -350,7 +427,10 @@ export async function run(ctx) {
 
     // Keydown guard: with focus on a select, ArrowDown must change the
     // select natively and NOT move the result selection; Enter must run the
-    // focused control's action, not open the selected message.
+    // focused control's action, not open the selected message. (The format
+    // select lives inside the Export… picker, so the picker is opened
+    // first — a closed fold's controls cannot take focus.)
+    await ui.openExportMenu(browser);
     const guardBefore = await browser.execute(() => ({
       selected: document.querySelector("#export-format").value,
       currentRow: document.querySelector('.hit-item[aria-current="true"]')?.textContent ?? "",
@@ -451,12 +531,35 @@ export async function run(ctx) {
     await ui.setViewport(browser, 1280, 800);
     await ui.openView(browser, "activity");
     const chart = await browser.$("#dashboard .day-chart");
-    assert.ok(await chart.isExisting(), "day histogram rendered for demo data");
-    assert.equal(await chart.getAttribute("role"), "img", "histogram is role=img");
-    assert.ok(
-      (await chart.getAttribute("aria-label"))?.includes("histogram"),
-      "histogram carries a label for screen readers",
+    assert.ok(await chart.isExisting(), "day chart rendered for demo data");
+    assert.equal(await chart.getAttribute("role"), "group", "chart container is role=group");
+    assert.matches(
+      await chart.getAttribute("aria-label"),
+      /^Messages per day/,
+      "chart carries a screen-reader label",
     );
+    // By now the archive spans the demo seed, the mbox import, and the
+    // signal conversation — several day buckets, so the multi-bar branch
+    // applies: every .day-bar is itself a labelled image ("2026-11-01:
+    // 6 messages"; month buckets "2026-11" once the series outgrows the
+    // bar budget; the count is singular for a lone message). The
+    // single-bucket plain-text branch (.day-single) is pinned by the
+    // stats-dashboard spec.
+    const bars = await browser.execute(() =>
+      Array.from(document.querySelectorAll("#dashboard .day-chart .day-bar"), (bar) => ({
+        role: bar.getAttribute("role"),
+        label: bar.getAttribute("aria-label"),
+      })),
+    );
+    assert.ok(bars.length >= 2, `multi-day archive draws per-day bars (got ${bars.length})`);
+    bars.forEach((bar, i) => {
+      assert.equal(bar.role, "img", `day bar ${i} is role=img`);
+      assert.matches(
+        bar.label,
+        /^\d{4}-\d{2}(-\d{2})?: [\d,]+ messages?$/,
+        `day bar ${i} carries a dated count label`,
+      );
+    });
 
     // Deferred from the medium Back step: the captured focus state must
     // show the initiating result row focused, not <body>.

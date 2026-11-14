@@ -306,6 +306,13 @@ export interface AccountView {
   /** `"imap"` for live email accounts, `"import"` for file imports. */
   kind: "imap" | "import" | string;
   label: string;
+  /** Medium of the account's archived messages — the mail-vs-chat
+   *  taxonomy behind the source icons: `"mail"` (a live IMAP account
+   *  or an email-file import), `"chat"` (a chat-export import),
+   *  `"mixed"` when both channels are present, `"unknown"` when
+   *  nothing is archived yet. The backend derives it from the
+   *  messages' own `channel` column, never the label. */
+  medium: "mail" | "chat" | "mixed" | "unknown" | string;
   /** IMAP connection identity; `null` for imports. */
   imap: AccountImap | null;
   /** Archived messages of the account. */

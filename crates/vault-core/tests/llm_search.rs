@@ -172,10 +172,10 @@ fn summary_prompt_is_limited_to_top_n_results() {
     }
     let llm = MockLlm::with_replies(["summary"]);
     let results = s
-        .search_filtered(&build_match_query("vault"), None, None, 50)
+        .search_filtered(&build_match_query("vault"), None, None, None, false, 50)
         .unwrap();
     assert_eq!(results.len(), 10);
-    let summarized = summarize_results(&llm, "vault?", &results, 3);
+    let summarized = summarize_results(&llm, "vault?", &results, 3, &[]);
     assert_eq!(summarized.answer.as_deref(), Some("summary"));
     let user = &llm.prompts()[0].1;
     // Which three are top-ranked is rank's business, but exactly three
@@ -263,6 +263,9 @@ fn invalid_fts5_from_llm_falls_back_but_keeps_dates() {
         match_expr: "\"vault\" (".into(),
         date_from: Some("2026-10-01".into()),
         date_to: Some("2026-10-31".into()),
+        from: None,
+        has_link: None,
+        extract_links: false,
     };
     let planned = validate(&s, "vault october", Ok(candidate));
     assert_eq!(planned.source, PlanSource::LlmFallback);
@@ -290,25 +293,34 @@ fn unparseable_llm_json_falls_back_to_plain_plan() {
 fn storage_date_filters_are_inclusive_and_validated() {
     let s = seeded();
 
-    let all = s.search_filtered("\"vault\"", None, None, 50).unwrap();
+    let all = s
+        .search_filtered("\"vault\"", None, None, None, false, 50)
+        .unwrap();
     assert_eq!(all.len(), 5, "no bounds: every vault row, incl. date-less");
 
     let october = s
-        .search_filtered("\"vault\"", Some("2026-10-01"), Some("2026-10-31"), 50)
+        .search_filtered(
+            "\"vault\"",
+            Some("2026-10-01"),
+            Some("2026-10-31"),
+            None,
+            false,
+            50,
+        )
         .unwrap();
     assert_eq!(october.len(), 3, "inclusive both ends; date-less excluded");
 
     let from_only = s
-        .search_filtered("\"vault\"", Some("2026-10-13"), None, 50)
+        .search_filtered("\"vault\"", Some("2026-10-13"), None, None, false, 50)
         .unwrap();
     assert_eq!(from_only.len(), 2, "m3 and m4 (m2 is on the 12th)");
 
     assert!(matches!(
-        s.search_filtered("\"vault\"", Some("October"), None, 50),
+        s.search_filtered("\"vault\"", Some("October"), None, None, false, 50),
         Err(Error::InvalidDate(_))
     ));
     assert!(matches!(
-        s.search_filtered("\"vault\"", None, Some("2026-13-01"), 50),
+        s.search_filtered("\"vault\"", None, Some("2026-13-01"), None, false, 50),
         Err(Error::InvalidDate(_))
     ));
 }
@@ -332,6 +344,9 @@ fn ask_with_empty_plan_expression_returns_no_results() {
             match_expr: String::new(),
             date_from: None,
             date_to: None,
+            from: None,
+            has_link: None,
+            extract_links: false,
         },
         source: PlanSource::NoLlm,
         notes: Vec::new(),

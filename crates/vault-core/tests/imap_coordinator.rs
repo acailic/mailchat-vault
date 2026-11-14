@@ -131,7 +131,10 @@ fn sources(pool: &Arc<DbPool>) -> Vec<SourceInstance> {
 /// Search the archive for one phrase.
 fn find(pool: &Arc<DbPool>, phrase: &str) -> Vec<Message> {
     let query = build_match_query(phrase);
-    pool.with_read(|s| s.search_filtered(&query, None, None, 100).unwrap())
+    pool.with_read(|s| {
+        s.search_filtered(&query, None, None, None, false, 100)
+            .unwrap()
+    })
 }
 
 fn total(pool: &Arc<DbPool>) -> u64 {

@@ -124,7 +124,7 @@ fn imported_thread_is_full_text_searchable() {
     let storage = Storage::open_in_memory().unwrap();
     ingest(&storage, &MessengerSource::new(&path)).unwrap();
     assert!(!storage
-        .search_filtered(&build_match_query("zdravo"), None, None, 10)
+        .search_filtered(&build_match_query("zdravo"), None, None, None, false, 10)
         .unwrap()
         .is_empty());
 }

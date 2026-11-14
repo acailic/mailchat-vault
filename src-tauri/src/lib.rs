@@ -120,7 +120,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 use vault_core::backup::{self, BackupCounts, BackupManifest, RecoveryStatus, RestoreOutcome};
-use vault_core::bounded::{import_id_for, BoundedRun, Flow, MediaPass, StreamItem, StreamSource};
+use vault_core::bounded::{BoundedRun, Flow, StreamItem, StreamSource};
 use vault_core::chat_export::{self, ChatImportOutcome};
 use vault_core::export::{self, ExportFormat, ExportSummary};
 use vault_core::imap::{self, FolderSyncSummary, ImapAuth, ImapConfig};
@@ -132,7 +132,6 @@ use vault_core::jobs::{
 use vault_core::llm::{
     self, AnthropicLlm, AskOutcome, LlmConfig, LlmStatus, PlanSource, PlannedQuery, QueryPlan,
 };
-use vault_core::mbox::MboxSource;
 use vault_core::oauth::{self, OAuthConfig};
 use vault_core::object_store::{MediaUsage, ObjectStore, ReconcileReport};
 use vault_core::query::{ChatContext, SearchPage, SearchQuery};
@@ -976,6 +975,14 @@ async fn export_messages_v2(
     .map_err(|e| AppError::internal(format!("export task failed: {e}")))?
 }
 
+/// Write a UTF-8 text file to an absolute path the frontend picked with
+/// its save dialog (used by the collected-links export; no dialog logic
+/// lives here).
+#[tauri::command]
+fn save_text(path: String, contents: String) -> Result<(), String> {
+    std::fs::write(&path, contents.as_bytes()).map_err(|e| format!("write {path}: {e}"))
+}
+
 /// Natural-language search: translate the question into an FTS5 plan
 /// (MATCH expression + optional date range), run it locally, fuse the FTS
 /// ranking with the local vector leg when embeddings exist, then summarize
@@ -1108,9 +1115,15 @@ fn run_ask(
             .map_err(|e| e.to_string())?;
         (hybrid.results, hybrid.ranking)
     };
+    let collected = if planned.plan.extract_links {
+        vault_core::extract::extract_links(&results)
+    } else {
+        Vec::new()
+    };
     let (answer, summary_notes) = match &backend {
         Some(backend) => {
-            let summarized = llm::summarize_results(backend, question, &results, summarize_top);
+            let summarized =
+                llm::summarize_results(backend, question, &results, summarize_top, &collected);
             (summarized.answer, summarized.notes)
         }
         None => (None, Vec::new()),
@@ -1123,6 +1136,7 @@ fn run_ask(
         ranking,
         results,
         answer,
+        collected,
         notes,
     })
 }
@@ -1336,16 +1350,20 @@ async fn import_mbox(
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let pool = Arc::clone(&state.pool);
     tauri::async_runtime::spawn_blocking(move || {
-        let path = Path::new(&path);
-        let (source, _zip_guard) =
-            vault_core::mbox::mail_source_for_pick(path).map_err(|e| e.to_string())?;
-        let mut run = BoundedRun::new(import_id_for("mbox-import", path));
-        run.media = Some(MediaPass::mail(&data_dir));
+        // The shared bounded body resolves the pick (directory → `.eml`
+        // folder, `.zip` → fenced temp tree, else a single mbox/.eml
+        // file) and keeps any temp tree alive for the whole run.
         let mut sink = PoolSink(&pool);
         let mut no_progress = |_: u64, _: u64, _: &str| {};
-        run.run(source.as_ref(), &mut sink, &|| false, &mut no_progress)
-            .map(ChatImportOutcome::from)
-            .map_err(|e: Error| e.to_string())
+        vault_core::mbox::import_pick_bounded(
+            &mut sink,
+            Path::new(&path),
+            &data_dir,
+            &|| false,
+            &mut no_progress,
+        )
+        .map(ChatImportOutcome::from)
+        .map_err(|e: Error| e.to_string())
     })
     .await
     .map_err(|e| format!("import task failed: {e}"))?
@@ -2117,10 +2135,28 @@ fn run_job_spec(
             if ctx.is_cancelled() {
                 return Err(JobError::Cancelled);
             }
-            let source = MboxSource::new(path);
-            let import_id = import_id_for("mbox-import", Path::new(path));
-            let media = MediaPass::mail(data_dir);
-            let outcome = run_bounded(ctx, pool, import_id, &source, Some(media), path)?;
+            // Resolve the pick exactly like the direct `import_mbox`
+            // command — through the shared bounded body (`import_mbox`
+            // job-path regression: the pick is a directory of `.eml`
+            // files or a `.zip` of them just as often as a single mbox
+            // file). The body keeps the zip's temp-tree guard alive for
+            // the whole run; dropping it early would un-squash the zip
+            // mid-import.
+            let mut sink = PoolSink(pool);
+            let cancelled = || ctx.is_cancelled();
+            let mut progress =
+                |done: u64, total: u64, message: &str| ctx.progress(done, total, message);
+            let outcome = vault_core::mbox::import_pick_bounded(
+                &mut sink,
+                Path::new(path),
+                data_dir,
+                &cancelled,
+                &mut progress,
+            )
+            .map_err(JobError::from)?;
+            if outcome.cancelled {
+                return Err(JobError::Cancelled);
+            }
             // The outcome carries the media pass's counters too — the
             // same shape as `import_mbox` and the chat-export import.
             Ok(serde_json::to_value(ChatImportOutcome::from(outcome)).unwrap_or(Value::Null))
@@ -2473,6 +2509,14 @@ struct AccountView {
     /// Human-readable label (`imap:host:port:username` or the import's
     /// source name).
     label: String,
+    /// Medium of the account's archived messages — the mail-vs-chat
+    /// taxonomy behind the source icons: `"mail"` (a live IMAP account
+    /// or an email-file import), `"chat"` (a chat-export import),
+    /// `"mixed"` when both channels are present, `"unknown"` when
+    /// nothing is archived yet. Derived from the messages' own
+    /// `channel` column (what the parser actually stored), never the
+    /// label.
+    medium: String,
     /// IMAP connection identity (never present for imports).
     imap: Option<AccountImap>,
     /// Archived messages of the account (trigger-maintained counters).
@@ -2511,16 +2555,20 @@ struct AccountImap {
 }
 
 /// Assemble the accounts overview from the stored source instances, the
-/// per-account counts, and a credential probe (`(password?, oauth?)` per
-/// stored IMAP config — the keyring in the app, plain closures in tests).
+/// per-account counts, the per-source channel flags (the mail-vs-chat
+/// taxonomy), and a credential probe (`(password?, oauth?)` per stored
+/// IMAP config — the keyring in the app, plain closures in tests).
 /// Pure: unit-tested below, command-thread free.
 fn assemble_accounts(
     instances: &[SourceInstance],
     counts: &[vault_core::storage::AccountCounts],
+    channels: &[vault_core::storage::AccountChannels],
     credentials: impl Fn(&StoredImapConfig) -> (bool, bool),
 ) -> Vec<AccountView> {
     let counts: std::collections::HashMap<&str, &vault_core::storage::AccountCounts> =
         counts.iter().map(|c| (c.source_id.as_str(), c)).collect();
+    let channels: std::collections::HashMap<&str, &vault_core::storage::AccountChannels> =
+        channels.iter().map(|c| (c.source_id.as_str(), c)).collect();
     instances
         .iter()
         .map(|instance| {
@@ -2529,7 +2577,16 @@ fn assemble_accounts(
                 messages: 0,
                 failed_items: 0,
             };
+            let no_channels = vault_core::storage::AccountChannels {
+                source_id: String::new(),
+                has_chat: false,
+                has_email: false,
+            };
             let count = counts.get(instance.id.as_str()).copied().unwrap_or(&zero);
+            let channel = channels
+                .get(instance.id.as_str())
+                .copied()
+                .unwrap_or(&no_channels);
             let imap = StoredImapConfig::of(instance).map(|stored| {
                 let (has_password, has_oauth) = credentials(&stored);
                 AccountImap {
@@ -2549,6 +2606,21 @@ fn assemble_accounts(
                     "import".into()
                 },
                 label: instance.label.clone(),
+                // IMAP is mail by construction (kind decides). Imports
+                // follow what their parsers actually stored — the
+                // channel flags — with "unknown" when nothing is
+                // archived yet and "mixed" if one namespace ever held
+                // both channels.
+                medium: if instance.kind == "imap" {
+                    "mail".into()
+                } else {
+                    match (channel.has_chat, channel.has_email) {
+                        (true, false) => "chat".into(),
+                        (true, true) => "mixed".into(),
+                        (false, true) => "mail".into(),
+                        (false, false) => "unknown".into(),
+                    }
+                },
                 imap,
                 message_count: count.messages,
                 failed_items: count.failed_items,
@@ -2576,19 +2648,28 @@ async fn accounts_list(
     let vault = ActiveVault::from(&state);
     let secrets = Arc::clone(secrets.inner());
     tauri::async_runtime::spawn_blocking(move || {
-        let (instances, counts) = vault
+        let (instances, counts, channels) = vault
             .with_read(|s| -> vault_core::Result<_> {
-                Ok((s.list_source_instances()?, s.account_counts()?))
+                Ok((
+                    s.list_source_instances()?,
+                    s.account_counts()?,
+                    s.account_channel_flags()?,
+                ))
             })
             .map_err(|e: vault_core::Error| e.to_string())?;
-        Ok(assemble_accounts(&instances, &counts, |stored| {
-            (
-                secrets.load(&stored.host, &stored.username).is_some(),
-                secrets
-                    .load_refresh(&stored.host, &stored.username)
-                    .is_some(),
-            )
-        }))
+        Ok(assemble_accounts(
+            &instances,
+            &counts,
+            &channels,
+            |stored| {
+                (
+                    secrets.load(&stored.host, &stored.username).is_some(),
+                    secrets
+                        .load_refresh(&stored.host, &stored.username)
+                        .is_some(),
+                )
+            },
+        ))
     })
     .await
     .map_err(|e| format!("accounts task failed: {e}"))?
@@ -3283,6 +3364,7 @@ pub fn run() {
             conversation_context_v2,
             list_import_scopes_v2,
             export_messages_v2,
+            save_text,
             media_reconcile,
             media_usage,
             media_export,
@@ -3870,6 +3952,57 @@ mod tests {
     }
 
     #[test]
+    fn run_ask_collects_links_when_the_plan_extracts() {
+        let (_tmp, pool) = ask_pool(2);
+        // One message must carry a URL for the extractor to find; the plan's
+        // has_link filter keeps only that row.
+        pool.submit_write(move |s| {
+            s.insert_message(&vault_core::message::NewMessage::new(
+                "test",
+                String::from("links"),
+                "Author 00",
+                "2026-10-01T12:00:00Z",
+                "consent marker 42 about vault topics and https://example.com/a".to_string(),
+            ))?;
+            Ok(())
+        })
+        .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (base_url, server) = spawn_llm_recorder(
+            vec![
+                "{\"match\": \"consent\", \"has_link\": true, \"extract_links\": true}".into(),
+                "collected one link [1].".into(),
+            ],
+            Arc::clone(&stop),
+        );
+
+        let outcome = run_ask(
+            &ActiveVault::Pool(Arc::clone(&pool)),
+            &HashEmbedder::new(),
+            recorder_selection(base_url),
+            true,
+            "collect all consent links",
+            50,
+            8,
+            ask_today(),
+            true,
+        )
+        .unwrap();
+
+        assert!(outcome.plan.extract_links);
+        assert_eq!(outcome.collected.len(), 1, "{:?}", outcome.collected);
+        assert_eq!(outcome.collected[0].url, "https://example.com/a");
+        assert_eq!(outcome.collected[0].hits[0].author, "Author 00");
+
+        stop.store(true, Ordering::SeqCst);
+        let bodies = server.join().expect("recorder thread");
+        assert_eq!(bodies.len(), 2, "translate + summarize round trips");
+        // The summarize round trip carries the collected-links section.
+        assert!(bodies[1].contains("Collected links"), "{}", bodies[1]);
+        pool.shutdown();
+    }
+
+    #[test]
     fn ask_without_a_key_falls_back_to_local_exactly_like_before() {
         // AC 4: consent changes nothing about the no-key fallback — a
         // selection without a usable provider (no key stored) still
@@ -4005,8 +4138,13 @@ mod tests {
                 failed_items: 0,
             },
         ];
+        let channels = vec![vault_core::storage::AccountChannels {
+            source_id: "inst-mbox".into(),
+            has_chat: false,
+            has_email: true,
+        }];
 
-        let views = assemble_accounts(&instances, &counts, |stored| {
+        let views = assemble_accounts(&instances, &counts, &channels, |stored| {
             (stored.username == "ana@gmail.com", false)
         });
 
@@ -4033,13 +4171,55 @@ mod tests {
     }
 
     #[test]
+    fn accounts_assembly_derives_the_medium_from_stored_channels() {
+        // The mail-vs-chat taxonomy reaches the panel from the messages'
+        // own channel column: IMAP is mail by construction, a chat
+        // export is chat, a mail-file import is mail, an import with
+        // nothing archived yet is unknown, and a namespace that somehow
+        // holds both channels is mixed — never a guess from the label.
+        let imap_acct = imap_instance("inst-imap", "imap.gmail.com", 993, "ana@gmail.com", &[]);
+        let views = assemble_accounts(&[imap_acct], &[], &[], |_: &StoredImapConfig| {
+            (false, false)
+        });
+        assert_eq!(views[0].medium, "mail", "IMAP is mail by kind");
+
+        let medium_of = |has_chat: bool, has_email: bool| {
+            let channels = vec![vault_core::storage::AccountChannels {
+                source_id: "inst-x".into(),
+                has_chat,
+                has_email,
+            }];
+            let views = assemble_accounts(
+                &[import_instance("inst-x", "whatsapp")],
+                &[],
+                &channels,
+                |_: &StoredImapConfig| (false, false),
+            );
+            views[0].medium.clone()
+        };
+        assert_eq!(medium_of(true, false), "chat", "chat export");
+        assert_eq!(medium_of(false, true), "mail", "mbox/.eml import");
+        assert_eq!(medium_of(true, true), "mixed", "both channels stored");
+        assert_eq!(medium_of(false, false), "unknown", "nothing archived yet");
+        // A missing channel row (the flags query missed the instance)
+        // reads as unknown, never as a fabricated mail/chat claim.
+        let views = assemble_accounts(
+            &[import_instance("inst-y", "telegram")],
+            &[],
+            &[],
+            |_: &StoredImapConfig| (false, false),
+        );
+        assert_eq!(views[0].medium, "unknown");
+    }
+
+    #[test]
     fn accounts_assembly_defaults_missing_counts_to_zero_and_marks_pause() {
         // An instance the counts query somehow did not cover still lists
         // (a connected-but-empty account), and the exclusion flag rides
         // through as the account's paused state.
         let mut paused = imap_instance("inst-paused", "imap.b.test", 993, "bob@b.test", &[]);
         paused.excluded = true;
-        let views = assemble_accounts(&[paused], &[], |_: &StoredImapConfig| (false, true));
+        let views = assemble_accounts(&[paused], &[], &[], |_: &StoredImapConfig| (false, true));
         assert_eq!(views.len(), 1);
         assert!(views[0].excluded, "exclusion is the pause state");
         assert_eq!(views[0].message_count, 0);
@@ -4062,7 +4242,7 @@ mod tests {
                 .into(),
         );
         failed.last_error_at = Some("2026-11-09 23:00:00".into());
-        let views = assemble_accounts(&[failed], &[], |_: &StoredImapConfig| (false, false));
+        let views = assemble_accounts(&[failed], &[], &[], |_: &StoredImapConfig| (false, false));
         assert_eq!(views.len(), 1);
         let view = &views[0];
         assert_eq!(view.state, "disconnected");
@@ -4073,7 +4253,7 @@ mod tests {
         assert_eq!(view.last_error_at.as_deref(), Some("2026-11-09 23:00:00"));
         // A healthy account carries the empty error state, not a stale one.
         let healthy = imap_instance("inst-ok", "imap.d.test", 993, "dee@d.test", &[]);
-        let views = assemble_accounts(&[healthy], &[], |_: &StoredImapConfig| (true, false));
+        let views = assemble_accounts(&[healthy], &[], &[], |_: &StoredImapConfig| (true, false));
         assert_eq!(views[0].last_error, None);
         assert_eq!(views[0].last_error_at, None);
     }

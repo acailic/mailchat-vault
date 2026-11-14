@@ -15,6 +15,7 @@ import {
   passwordStoreNote,
   renderSourcesList,
   sourceChipRows,
+  sourceIcon,
   sourcesEmptyLine,
   syncFailureText,
   syncNowRequest,
@@ -24,6 +25,7 @@ const imapAccount = (over: Partial<AccountView> = {}): AccountView => ({
   source_id: "inst-imap-1",
   kind: "imap",
   label: "imap:imap.gmail.com:993:ana@gmail.com",
+  medium: "mail",
   imap: {
     host: "imap.gmail.com",
     port: 993,
@@ -47,6 +49,7 @@ const importAccount = (over: Partial<AccountView> = {}): AccountView => ({
   source_id: "inst-import-1",
   kind: "import",
   label: "mbox:archive.mbox",
+  medium: "mail",
   imap: null,
   message_count: 7,
   failed_items: 0,
@@ -121,6 +124,19 @@ describe("labels and status lines", () => {
   it("labels the account kinds", () => {
     expect(accountKindLabel(imapAccount())).toBe("Email (IMAP)");
     expect(accountKindLabel(importAccount())).toBe("Import");
+  });
+
+  it("maps every source medium to its taxonomy icon", () => {
+    // Live email → envelope; a chat export (WhatsApp/Telegram/Signal/
+    // Discord/Messenger) → chat bubble; mbox/.eml imports → file sheet.
+    expect(sourceIcon(imapAccount())).toBe("mail");
+    expect(sourceIcon(importAccount({ medium: "chat" }))).toBe("chat");
+    expect(sourceIcon(importAccount({ medium: "mail" }))).toBe("file");
+    // Mixed and not-yet-archived imports stay on the generic file glyph
+    // rather than guessing; kind wins over medium for IMAP always.
+    expect(sourceIcon(importAccount({ medium: "mixed" }))).toBe("file");
+    expect(sourceIcon(importAccount({ medium: "unknown" }))).toBe("file");
+    expect(sourceIcon(imapAccount({ medium: "unknown" }))).toBe("mail");
   });
 
   it("titles rows with the account label", () => {
@@ -265,6 +281,29 @@ describe("renderSourcesList", () => {
     expect(rows[1].querySelector(".account-sync-btn")).toBe(null);
   });
 
+  it("leads each row with the source's taxonomy icon", () => {
+    // The mail-vs-chat axis has a visual expression: IMAP → envelope,
+    // a chat export → chat bubble, an mbox import → file sheet. The
+    // icon is decorative (aria-hidden), so the row's text is unchanged.
+    const chatImport = importAccount({
+      source_id: "inst-whatsapp-1",
+      label: "whatsapp",
+      medium: "chat",
+    });
+    const { el } = render([IMAP_ACCOUNT, chatImport, IMPORT_ACCOUNT]);
+    const icons = [...el.querySelectorAll(".account-main > svg.icon")];
+    expect(icons.map((i) => i.getAttribute("aria-hidden"))).toEqual([
+      "true",
+      "true",
+      "true",
+    ]);
+    expect(icons.map((i) => i.querySelector("use")?.getAttribute("href"))).toEqual([
+      "#i-mail",
+      "#i-chat",
+      "#i-file",
+    ]);
+  });
+
   it("management actions live inside the Details fold", () => {
     const { el, opts } = render([IMAP_ACCOUNT]);
     const details = el.querySelector("details.source-details")!;
@@ -384,13 +423,13 @@ describe("sourceChipRows", () => {
     last_attempt_at: null, last_success_at: null, created_at: "2026-01-01 00:00:00",
   });
   const imap = (id: string, label: string, user: string, host: string): AccountView => ({
-    source_id: id, kind: "imap", label, imap: {
+    source_id: id, kind: "imap", label, medium: "mail", imap: {
       host, port: 993, username: user, folders: [], has_password: true, has_oauth: false,
     }, message_count: 0, failed_items: 0, state: "connected", excluded: false,
     last_attempt_at: null, last_success_at: null, last_error: null, last_error_at: null,
   });
-  const imp = (id: string, label: string): AccountView => ({
-    source_id: id, kind: "import", label, imap: null,
+  const imp = (id: string, label: string, medium = "mail"): AccountView => ({
+    source_id: id, kind: "import", label, medium, imap: null,
     message_count: 0, failed_items: 0, state: "connected", excluded: false,
     last_attempt_at: null, last_success_at: null, last_error: null, last_error_at: null,
   });
@@ -406,9 +445,34 @@ describe("sourceChipRows", () => {
       counts,
     );
     expect(rows).toEqual([
-      { id: "a", label: "mbox", count: 3 },
-      { id: "b", label: "demo", count: 5 },
+      { id: "a", label: "mbox", count: 3, icon: "file" },
+      { id: "b", label: "demo", count: 5, icon: "file" },
     ]);
+  });
+
+  it("carries the taxonomy icon per chip (mail/chat/file)", () => {
+    // Kind is visible at the exact place users think "which of my
+    // worlds is this from?": IMAP → envelope, a chat export → bubble,
+    // an mbox import → file — from the account's medium, with the
+    // generic file glyph when the account cache has no row.
+    const rows = sourceChipRows(
+      [inst("a", "whatsapp"), inst("b", "imap.gmail.com-ana"), inst("c", "mbox")],
+      [
+        imp("a", "whatsapp", "chat"),
+        imap("b", "imap.gmail.com-ana", "ana@gmail.com", "imap.gmail.com"),
+        imp("c", "mbox", "mail"),
+      ],
+      [
+        { source: "whatsapp", count: 80 },
+        { source: "imap.gmail.com-ana", count: 12 },
+        { source: "mbox", count: 8 },
+      ],
+    );
+    expect(rows.map((r) => r.icon)).toEqual(["chat", "mail", "file"]);
+    // A missing account row (the accounts refresh failed once) keeps
+    // the chip and falls back to the generic file glyph.
+    const orphan = sourceChipRows([inst("x", "solo")], [], [{ source: "solo", count: 1 }]);
+    expect(orphan.map((r) => r.icon)).toEqual(["file"]);
   });
 
   it("duplicate labels are disambiguated and lose the shared count", () => {
@@ -428,7 +492,7 @@ describe("sourceChipRows", () => {
 
   it("instances without an account row still appear (id, label, label count)", () => {
     const rows = sourceChipRows([inst("x", "solo")], [], [{ source: "solo", count: 1 }]);
-    expect(rows).toEqual([{ id: "x", label: "solo", count: 1 }]);
+    expect(rows).toEqual([{ id: "x", label: "solo", count: 1, icon: "file" }]);
   });
 
   it("imap twins sharing label, username, and host get numbered chip labels", () => {

@@ -14,7 +14,7 @@ use crate::util::{migrations_table, msg, raw, version1_db_with_data};
 
 /// The schema version this build knows; bump expectation when a migration
 /// is added (the assertions below are version-agnostic where possible).
-const KNOWN_VERSION: i64 = 14;
+const KNOWN_VERSION: i64 = 15;
 
 fn migrations_rows(db: &std::path::Path) -> Vec<i64> {
     let conn = raw(db);
@@ -63,7 +63,12 @@ fn fresh_database_applies_every_migration_exactly_once() {
         "no duplicate bookkeeping rows"
     );
     assert_eq!(s.stats().unwrap().total, 1);
-    assert_eq!(s.search_filtered("smoke", None, None, 10).unwrap().len(), 1);
+    assert_eq!(
+        s.search_filtered("smoke", None, None, None, false, 10)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -82,7 +87,9 @@ fn version0_database_upgrades_in_place() {
     s.insert_message(&msg("integrity", "up-1", "upgraded archive body"))
         .unwrap();
     assert_eq!(
-        s.search_filtered("upgraded", None, None, 10).unwrap().len(),
+        s.search_filtered("upgraded", None, None, None, false, 10)
+            .unwrap()
+            .len(),
         1
     );
 }
@@ -114,11 +121,13 @@ fn v1_database_with_data_upgrades_in_place_to_current() {
     assert_eq!(stats.total, 7);
     assert_eq!(stats.by_source.len(), 1);
     assert_eq!(
-        s.search_filtered("vintage", None, None, 10).unwrap().len(),
+        s.search_filtered("vintage", None, None, None, false, 10)
+            .unwrap()
+            .len(),
         7
     );
     assert_eq!(
-        s.search_filtered("\"v1 era\"", None, None, 10)
+        s.search_filtered("\"v1 era\"", None, None, None, false, 10)
             .unwrap()
             .len(),
         7
@@ -158,6 +167,8 @@ fn v1_database_with_data_upgrades_in_place_to_current() {
                 &embedder.embed("vintage body of the v1 era"),
                 None,
                 None,
+                None,
+                false,
                 3,
             )
             .unwrap();
@@ -299,7 +310,9 @@ fn failed_migration_rolls_back_completely() {
     s.insert_message(&msg("integrity", "after-unblock", "post rollback body"))
         .unwrap();
     assert_eq!(
-        s.search_filtered("rollback", None, None, 10).unwrap().len(),
+        s.search_filtered("rollback", None, None, None, false, 10)
+            .unwrap()
+            .len(),
         1
     );
 }

@@ -78,6 +78,7 @@ export async function run(ctx) {
 
         // --- the provider menu appears in Ask ------------------------------
         await ui.openView(browser, "workspace");
+        await ui.openAsk(browser); // the provider menu lives behind the Ask fold
         const askProvider = await browser.$("#ask-provider");
         const options = await askProvider.$$("option");
         assert.equal(options.length, 2, "local + the configured provider");
@@ -242,6 +243,7 @@ export async function run(ctx) {
       // Nothing is enabled: local-only menu, off note — the evil provider
       // (which would route the stored key to attacker.example) never ran.
       await ui.openView(browser, "workspace");
+      await ui.openAsk(browser); // the provider menu lives behind the Ask fold
       const askProvider = await browser.$("#ask-provider");
       const options = await askProvider.$$("option");
       assert.equal(options.length, 1, "no provider from the refused file");

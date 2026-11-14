@@ -71,12 +71,19 @@
           <!-- Workspace: results area + reading pane. -->
           <section id="view-workspace" class="view" aria-label="Search and results">
             <div id="results-col">
+              <!-- Search / Ask: two modes over the same archive, one column.
+                   Panels stay mounted; data-workspace-section picks the
+                   visible one (CSS), so results and answers survive switches. -->
+              <div id="workspace-tabs" class="row" role="tablist" aria-label="Workspace sections">
+                <button type="button" id="tab-search" class="workspace-tab-btn" data-workspace-tab="search" role="tab" aria-selected="true" aria-controls="search-section">Search</button>
+                <button type="button" id="tab-ask" class="workspace-tab-btn" data-workspace-tab="ask" role="tab" aria-selected="false" aria-controls="ask-section">Ask</button>
+              </div>
               <!-- U02: shown while the isolated sample archive is open. -->
               <div id="demo-banner" class="row banner" hidden>
-                <span class="meta grow">Sample archive — an isolated demo. Nothing you see here is saved to your vault.</span>
+                <span class="meta grow">Sample archive: an isolated demo. Nothing you see here is saved to your vault.</span>
                 <button id="demo-leave-btn" type="button">Leave sample</button>
               </div>
-              <section>
+              <section id="search-section" role="tabpanel" aria-labelledby="tab-search">
                 <h2 class="visually-hidden">Search</h2>
                 <!-- One quiet toolbar row: search + Filters fold + sort + Clear.
                      The advanced filters (author, dates, files, import scope)
@@ -122,6 +129,13 @@
                   <div class="spacer"></div>
                   <button id="clear-filters" type="button" title="Reset all filters">Clear</button>
                 </div>
+                <!-- The archive's timeline as one-click filters: one quiet
+                     row of era chips (years, or months for a short span)
+                     derived from the day distribution. Clicking a chip sets
+                     the from/to date inputs to its bounds — the existing
+                     filter machinery applies it; the active chip toggles
+                     off. Empty for tiny/undated archives. -->
+                <div id="era-chips" class="row" style="gap: 6px; margin-top: 6px" aria-label="Filter by time period"></div>
                 <div id="active-filter-chips" class="row" style="gap: 6px; margin-top: 6px"></div>
                 <div id="refresh-notice" class="row mt-s" hidden></div>
                 <div id="status" role="status" aria-live="polite"></div>
@@ -135,6 +149,8 @@
                     account, and everything lands in one searchable place. Search runs
                     locally; connecting an account contacts your mail provider, and
                     optional AI search sends only what the consent prompt shows.
+                    Anything uncertain (dates we had to infer, threads we could not
+                    verify) is always marked as such.
                   </p>
                   <div class="row">
                     <button id="first-run-import-btn" class="primary" type="button">Import files…</button>
@@ -148,24 +164,33 @@
                 </section>
                 <div id="results" tabindex="-1"></div>
                 <div id="pagination" aria-label="Result pages"></div>
+                <!-- One Export… action: the format + what-to-export choices
+                     (current results / checked rows) fold behind a native
+                     disclosure, like Filters. The outcome line stays
+                     visible below it after the picker closes. This-chat
+                     export lives in the reading header's own picker. -->
                 <div id="export-controls">
-                  <span class="meta">export:</span>
-                  <label class="visually-hidden" for="export-format">Export format</label>
-                  <select id="export-format" title="File format for exports">
-                    <option value="csv" selected>CSV</option>
-                    <option value="json">JSON Lines</option>
-                    <option value="mbox">MBOX (email rows)</option>
-                  </select>
-                  <button id="export-btn" type="button" title="Export every row of the current search results (all pages), not just this page">
-                    Export results…
-                  </button>
-                  <label class="meta" title="Export only the rows you check in the results list, with provenance">selection:
-                    <select id="selection-format" title="File format for the checked rows" style="max-width: 7em">
-                      <option value="text" selected>Text</option>
-                      <option value="json">JSON</option>
-                    </select>
-                  </label>
-                  <button id="export-selection-btn" type="button" disabled title="Export the rows checked in the results list">Export selected…</button>
+                  <details id="export-menu">
+                    <summary id="export-summary" title="Export the current results or the rows you checked">Export…</summary>
+                    <div class="export-fields">
+                      <label class="visually-hidden" for="export-format">Export format</label>
+                      <select id="export-format" title="File format for exports">
+                        <option value="csv" selected>CSV</option>
+                        <option value="json">JSON Lines</option>
+                        <option value="mbox">MBOX (email rows)</option>
+                      </select>
+                      <button id="export-btn" type="button" title="Export every row of the current search results (all pages), not just this page">
+                        Export results…
+                      </button>
+                      <label class="meta" title="Export only the rows you check in the results list, with provenance">selection:
+                        <select id="selection-format" title="File format for the checked rows" style="max-width: 7em">
+                          <option value="text" selected>Text</option>
+                          <option value="json">JSON</option>
+                        </select>
+                      </label>
+                      <button id="export-selection-btn" type="button" disabled title="Export the rows checked in the results list">Export selected…</button>
+                    </div>
+                  </details>
                   <span id="export-status" class="meta" role="status"></span>
                   <span id="selection-status" class="meta" role="status"></span>
                 </div>
@@ -175,41 +200,57 @@
                 </p>
               </section>
 
-              <section id="ask-section" aria-label="Ask the archive">
-                <h2>Ask the archive (natural language)</h2>
-                <div class="row">
-                  <label class="visually-hidden" for="ask-provider">LLM provider for this ask</label>
-                  <select id="ask-provider" title="LLM provider for this ask (configured in Settings)">
-                    <option value="local">Local full-text (no LLM)</option>
-                  </select>
-                  <label class="visually-hidden" for="ask">Question</label>
-                  <input id="ask" type="text" placeholder='e.g. “what did Ana say about the vault in October?”' />
-                  <button id="ask-btn" type="button">Ask</button>
-                </div>
-                <div class="row" style="margin-top: 6px">
-                  <button id="embed-btn" type="button" title="Embed messages that don't have a local embedding yet (incremental, offline)">
-                    Update local embeddings
-                  </button>
-                  <span id="embed-status" class="meta" style="min-height: 1em" role="status"></span>
-                </div>
-                <div id="llm-note" class="meta" role="status"></div>
-                <!-- M5: explicit, session-scoped AI consent. The status line
-                     always shows the current state; the prompt (with what
-                     exactly would leave the machine) appears when an ask
-                     wants the network without consent yet granted. -->
-                <div id="consent-row" class="row" style="margin-top: 6px">
-                  <span id="consent-status" class="meta" role="status"></span>
-                  <button id="consent-revoke-btn" type="button" hidden title="Revoke this session's AI consent; asks run fully locally again">Revoke</button>
-                </div>
-                <div id="consent-prompt" class="row" style="margin-top: 6px" hidden>
-                  <span id="consent-text" class="meta"></span>
-                  <button id="consent-allow-btn" type="button" title="Allow sending your question and the top results to the selected provider for this session only">Send &amp; ask for this session</button>
-                  <button id="consent-local-btn" type="button" title="Keep asking fully locally; nothing leaves this machine">Keep asking locally</button>
-                </div>
-                <div id="ask-status" class="meta" style="margin-top: 6px; min-height: 1em" role="status"></div>
-                <div id="answer" hidden></div>
-                <div id="ask-notes" hidden></div>
-                <ul id="ask-results" aria-label="Answer sources (each opens in thread context)"></ul>
+              <!-- Ask is a secondary mode: collapsed behind a quiet toggle
+                   (native details/summary, like Filters) so the reading
+                   surface stays about retrieval until it is wanted. -->
+              <section id="ask-section" role="tabpanel" aria-labelledby="tab-ask" aria-label="Ask the archive">
+                <details id="ask-fold">
+                  <summary id="ask-summary" title="Ask a question in plain language; the answer cites the matching messages">Ask the archive</summary>
+                  <div class="ask-fields">
+                    <div class="row">
+                      <label class="visually-hidden" for="ask-provider">LLM provider for this ask</label>
+                      <select id="ask-provider" title="LLM provider for this ask (configured in Settings)">
+                        <option value="local">Local full-text (no LLM)</option>
+                      </select>
+                      <label class="visually-hidden" for="ask">Question</label>
+                      <input id="ask" type="text" placeholder='e.g. “what did Ana say about the vault in October?”' />
+                      <button id="ask-btn" type="button">Ask</button>
+                    </div>
+                    <div id="llm-note" class="meta" role="status"></div>
+                    <!-- M5: explicit, session-scoped AI consent. The status line
+                         always shows the current state; the prompt (with what
+                         exactly would leave the machine) appears when an ask
+                         wants the network without consent yet granted. -->
+                    <div id="consent-row" class="row" style="margin-top: 6px">
+                      <span id="consent-status" class="meta" role="status"></span>
+                      <button id="consent-revoke-btn" type="button" hidden title="Revoke this session's AI consent; asks run fully locally again">Revoke</button>
+                    </div>
+                    <div id="consent-prompt" class="row" style="margin-top: 6px" hidden>
+                      <span id="consent-text" class="meta"></span>
+                      <button id="consent-allow-btn" type="button" title="Allow sending your question and the top results to the selected provider for this session only">Send &amp; ask for this session</button>
+                      <button id="consent-local-btn" type="button" title="Keep asking fully locally; nothing leaves this machine">Keep asking locally</button>
+                    </div>
+                    <div id="ask-status" class="meta" style="margin-top: 6px; min-height: 1em" role="status"></div>
+                    <div id="answer" hidden></div>
+                    <!-- ask-collect-links: the locally extracted, deduplicated
+                         link list with the messages that cite each link. -->
+                    <div id="ask-collected" hidden>
+                      <div class="row" style="margin-top: 6px">
+                        <span id="ask-collected-count" class="meta" role="status"></span>
+                        <label class="visually-hidden" for="ask-collected-format">Export format for collected links</label>
+                        <select id="ask-collected-format" title="File format for the collected links">
+                          <option value="text" selected>Text</option>
+                          <option value="json">JSON</option>
+                        </select>
+                        <button id="ask-collected-export" type="button" title="Save the collected links to a file">Export links…</button>
+                        <span id="ask-collected-status" class="meta" role="status"></span>
+                      </div>
+                      <ul id="ask-collected-list" aria-label="Collected links (each hit opens in thread context)"></ul>
+                    </div>
+                    <div id="ask-notes" hidden></div>
+                    <ul id="ask-results" aria-label="Answer sources (each opens in thread context)"></ul>
+                  </div>
+                </details>
               </section>
             </div>
 
@@ -259,7 +300,7 @@
                 <button id="add-back-btn" type="button">Back to sources</button>
               </div>
               <p class="meta" style="margin: 6px 0 0">
-                Import an export you already have — a file or a folder — or connect an
+                Import an export you already have (a file or a folder), or connect an
                 email account that syncs over IMAP. Everything lands in the same
                 searchable archive.
               </p>
@@ -282,11 +323,14 @@
               <p class="meta" id="import-help" style="margin: 6px 0 0">
                 An .mbox email archive, a bare .eml (or a folder of them), a WhatsApp .txt,
                 a Telegram result.json, a Signal conversation .json, a Discord messages.json,
-                a Facebook Messenger message_*.json (or its export folder) —
+                a Facebook Messenger message_*.json (or its export folder),
                 or a .zip of any of these. You will see a preview before anything is stored;
                 re-importing never duplicates.
               </p>
               <div id="import-preview" hidden></div>
+              <!-- This flow's import job, followed inline: stage, counts,
+                   bar, Cancel (Activity stays the aggregate over all jobs). -->
+              <div id="import-progress" hidden></div>
               <div id="import-status" class="meta" style="margin-top: 6px" role="status"></div>
               <div id="import-followup" class="row" style="margin-top: 6px" hidden></div>
             </section>
@@ -315,7 +359,7 @@
               </div>
               <div id="imap-oauth-hint" class="meta" style="margin-top: 4px" role="status"></div>
               <details id="imap-advanced">
-                <summary class="meta">Advanced — server, port, folders</summary>
+                <summary class="meta">Advanced: server, port, folders</summary>
                 <div class="row" style="margin-top: 6px">
                   <label for="imap-host">Server</label>
                   <input id="imap-host" type="text" placeholder="imap.gmail.com" value="imap.gmail.com" />
@@ -508,6 +552,19 @@
                 <div class="spacer"></div>
                 <button id="settings-save-ai" type="button">Save</button>
               </div>
+              <!-- Local embeddings: the offline half of Ask. Maintenance of
+                   the local index lives here with the rest of the AI
+                   configuration, not under every result set. -->
+              <div class="row">
+                <button id="embed-btn" type="button" title="Embed messages that don't have a local embedding yet (incremental, offline)">
+                  Update local embeddings
+                </button>
+                <span id="embed-status" class="meta" style="flex: 1; min-height: 1em" role="status"></span>
+              </div>
+              <p class="meta" style="margin-top: 4px">
+                Local embeddings run entirely on this device and feed Ask's offline
+                matching; updating is incremental, so only new messages are embedded.
+              </p>
               <p class="meta" style="font-size: 12px; margin-top: 8px">
                 Providers live in settings.json in the app data dir; API keys are stored in the OS keyring
                 (session memory when none is available) — never in the settings file or the database.
@@ -524,7 +581,13 @@
     <!-- Icon sprite: stroke-only symbols, 24×24 grid, 1.5px round strokes.
          Referenced via <use href="#i-…">; presentation (color/size/stroke)
          comes from the .icon classes in app.css. Keep symbols free of
-         fill/stroke attributes so currentColor inheritance works. -->
+         fill/stroke attributes so currentColor inheritance works.
+
+         Source taxonomy (mail vs chat — the product's own axis): IMAP
+         accounts and mail-file imports render i-mail / i-file, chat
+         exports (WhatsApp/Telegram/Signal/Discord/Messenger) render
+         i-chat; the choice comes from the backend's per-source
+         `medium` (accountsview.ts `sourceIcon`), never the label. -->
     <svg xmlns="http://www.w3.org/2000/svg" hidden>
       <symbol id="i-archive" viewBox="0 0 24 24">
         <rect x="3.5" y="4.5" width="17" height="5" rx="1.2"/>
@@ -560,6 +623,14 @@
       <symbol id="i-paperclip" viewBox="0 0 24 24">
         <path d="M9 11.5l6.3-6.3a3.5 3.5 0 0 1 4.9 4.9l-8.4 8.4a5.5 5.5 0 0 1-7.8-7.8L11 3.7"/>
       </symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24">
+        <rect x="8.5" y="8.5" width="11" height="11" rx="1.5"/>
+        <path d="M15.5 5.5v-.5A1.5 1.5 0 0 0 14 3.5H6A1.5 1.5 0 0 0 4.5 5v8a1.5 1.5 0 0 0 1.5 1.5h.5"/>
+      </symbol>
+      <symbol id="i-link" viewBox="0 0 24 24">
+        <path d="M10 14a4 4 0 0 1 0-5.7l2.3-2.3a4 4 0 0 1 5.7 5.7L16.8 13"/>
+        <path d="M14 10a4 4 0 0 1 0 5.7l-2.3 2.3a4 4 0 0 1-5.7-5.7L7.2 11"/>
+      </symbol>
       <symbol id="i-check" viewBox="0 0 24 24">
         <path d="m5 12.5 4.5 4.5L19 7.5"/>
       </symbol>
@@ -586,6 +657,10 @@
         <path d="M6 3.5h7.5L18.5 8.5V19a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 19V5A1.5 1.5 0 0 1 6 3.5Z"/>
         <path d="M13.5 3.5V8.5h5"/><path d="M8.5 12.5h7"/><path d="M8.5 16h7"/>
       </symbol>
+      <!-- Reserved: no managed/enterprise source kind exists in the data
+           model yet (source kinds are "imap" | "import" | "legacy").
+           Drawn and kept for the day one arrives; do not force it onto
+           ordinary sources. -->
       <symbol id="i-server" viewBox="0 0 24 24">
         <rect x="4" y="4.5" width="16" height="6" rx="1.5"/>
         <rect x="4" y="13.5" width="16" height="6" rx="1.5"/>

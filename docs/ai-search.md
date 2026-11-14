@@ -18,6 +18,22 @@ Every network ask passes an **explicit consent gate**, enforced in the backend (
 - **Per session, never forever**: consent lives in memory only — it resets on every app start and is never written to any file or storage. The always-visible status line shows the current state (`AI consent: granted for this session …` / `not granted — asks run fully locally`), and **Revoke** resets it mid-session; the next ask then asks anew.
 - **Answers carry their evidence**: citations `[1]`, `[2]` in the answer are rendered as clickable links, and the numbered source rows beneath the answer match those numbers — either opens the original archived message in its conversation context in the reading pane. Citations beyond the summarized top-8 window (the model never saw those rows) and out-of-range citations stay plain text, never dead links.
 
+## Collect links (ask-collect-links)
+
+A question like *“collect all links ana sent about deploys”* can carry three
+extra plan fields the LLM may set: `from` (case-insensitive substring the
+sender must contain), `has_link` (only messages whose body contains a URL),
+and `extract_links`. The first two are SQL bound filters applied on both the
+FTS and the vector leg **before** the result limit; the third runs a local,
+dependency-free scanner over the result bodies and returns every http(s) URL
+deduplicated, each with sender, date, a ±60-char context, and a clickable
+citations trail into the original messages. The list renders and exports
+(Text/JSON) fully locally — without any LLM.
+
+Privacy: when extraction is active, the summary prompt additionally contains
+the collected link list (`URL · sender · date`, capped at 50 lines). The
+consent prompt says exactly this before anything is sent.
+
 ## Configuration (Settings UI, or environment variables)
 
 Providers are configured on the **Settings screen**; the key is stored in the OS keyring when one is available (session memory otherwise) — never in the database or the repo, and never in the settings file. Environment variables keep working as a read-only fallback for headless use:

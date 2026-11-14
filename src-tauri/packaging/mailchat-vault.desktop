@@ -1,6 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name={{name}}
+# The human-facing name, aligned with the window title; the package
+# name itself stays mailchat-vault via tauri.conf.json.
+Name=Mailchat Vault
 {{#if comment}}Comment={{comment}}
 {{/if}}
 Exec={{exec}}

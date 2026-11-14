@@ -204,8 +204,8 @@ describe("pagination", () => {
 describe("source chips", () => {
   it("renders toggles with counts and pressed state", () => {
     const rows: SourceChipRow[] = [
-      { id: "inst-mbox", label: "mbox", count: 900 },
-      { id: "inst-whatsapp", label: "whatsapp", count: 80 },
+      { id: "inst-mbox", label: "mbox", count: 900, icon: "file" },
+      { id: "inst-whatsapp", label: "whatsapp", count: 80, icon: "chat" },
     ];
     const el = document.createElement("div");
     renderSourceChips(el, { rows, selected: ["inst-whatsapp"], onToggle: () => {} });
@@ -213,11 +213,39 @@ describe("source chips", () => {
     expect(el.querySelector('[data-source="inst-whatsapp"]')?.getAttribute("aria-pressed")).toBe("true");
   });
 
+  it("leads each chip with its taxonomy icon without touching the text", () => {
+    // The mail-vs-chat axis is visible on the chip itself; the icon is
+    // decorative (aria-hidden svg), so the chip's accessible text — and
+    // every text-based assertion — is unchanged.
+    const el = document.createElement("div");
+    renderSourceChips(el, {
+      rows: [
+        { id: "inst-imap", label: "imap.gmail.com-ana", count: 12, icon: "mail" },
+        { id: "inst-whatsapp", label: "whatsapp", count: 80, icon: "chat" },
+      ],
+      selected: [],
+      onToggle: () => {},
+    });
+    const chips = [...el.querySelectorAll(".chip")];
+    expect(chips.map((c) => c.querySelector("use")?.getAttribute("href"))).toEqual([
+      "#i-mail",
+      "#i-chat",
+    ]);
+    expect(chips.map((c) => c.querySelector("svg")?.getAttribute("aria-hidden"))).toEqual([
+      "true",
+      "true",
+    ]);
+    expect(chips.map((c) => c.textContent)).toEqual([
+      "imap.gmail.com-ana (12)",
+      "whatsapp (80)",
+    ]);
+  });
+
   it("toggling fires with the source instance id", () => {
     let toggled = "";
     const el = document.createElement("div");
     renderSourceChips(el, {
-      rows: [{ id: "inst-mbox", label: "mbox", count: 1 }],
+      rows: [{ id: "inst-mbox", label: "mbox", count: 1, icon: "file" }],
       selected: [],
       onToggle: (id) => (toggled = id),
     });
@@ -229,8 +257,8 @@ describe("source chips", () => {
     const el = document.createElement("div");
     renderSourceChips(el, {
       rows: [
-        { id: "inst-mbox", label: "mbox", count: 900 },
-        { id: "inst-telegram", label: "telegram", count: 80 },
+        { id: "inst-mbox", label: "mbox", count: 900, icon: "file" },
+        { id: "inst-telegram", label: "telegram", count: 80, icon: "chat" },
       ],
       selected: [],
       onToggle: () => {},
@@ -425,18 +453,67 @@ describe("dashboard", () => {
       "1,234 messages · 2 sources · 2026-01-01 → 2026-03-31",
     );
     expect(el.querySelectorAll(".day-bar").length).toBe(3);
-    // Bar heights scale against the tallest day (20).
+    // Bar heights scale against the tallest day (20)…
     expect((el.querySelectorAll(".day-bar")[0] as HTMLElement).style.height).toBe("50%");
     expect((el.querySelectorAll(".day-bar")[1] as HTMLElement).style.height).toBe("100%");
     expect((el.querySelectorAll(".day-bar")[2] as HTMLElement).style.height).toBe("25%");
+    // …and the same share feeds the color ramp via --bar-heat.
+    expect(
+      (el.querySelectorAll(".day-bar")[0] as HTMLElement).style.getPropertyValue("--bar-heat"),
+    ).toBe("50");
+    expect(
+      (el.querySelectorAll(".day-bar")[1] as HTMLElement).style.getPropertyValue("--bar-heat"),
+    ).toBe("100");
+    // Time axis under the histogram: first, middle, and last bucket.
+    expect(
+      [...el.querySelectorAll(".day-chart-axis span")].map((s) => s.textContent),
+    ).toEqual(["2026-01-01", "2026-02-01", "2026-03-31"]);
     expect(el.querySelectorAll(".stat-table").length).toBe(3);
     expect(el.querySelectorAll(".stat-table tbody tr").length).toBe(6);
-    // The unknown author gets a readable label.
+    // The author shows its display name; the full address stays in the
+    // tooltip; the unknown author gets a readable label.
     const authorRows = [...el.querySelectorAll(".stat-table")[2].querySelectorAll("td.label")];
     expect(authorRows.map((td) => td.textContent)).toEqual([
-      "Ana <ana@example.com>",
+      "Ana",
       "(unknown)",
     ]);
+    expect(authorRows[0].getAttribute("title")).toBe("Ana <ana@example.com>");
+  });
+
+  it("labels every day bar with its count for eyes and machines", () => {
+    const el = document.createElement("div");
+    renderDashboard(el, { stats: archiveStats() });
+    const bars = [...el.querySelectorAll(".day-bar")];
+    // Machine-readable label (aria-label) and tooltip per bar.
+    expect(bars.map((b) => b.getAttribute("aria-label"))).toEqual([
+      "2026-01-01: 10 messages",
+      "2026-02-01: 20 messages",
+      "2026-03-31: 5 messages",
+    ]);
+    expect(bars[0].getAttribute("title")).toBe("2026-01-01: 10 messages");
+    // Few enough bars: the count is visible text too.
+    expect(bars.map((b) => b.querySelector(".day-bar-count")?.textContent)).toEqual([
+      "10",
+      "20",
+      "5",
+    ]);
+  });
+
+  it("a single day renders its count as plain text, not one full-width bar", () => {
+    const el = document.createElement("div");
+    renderDashboard(el, {
+      stats: archiveStats({
+        by_day: [{ day: "2026-11-01", count: 6 }],
+      }),
+    });
+    expect(el.querySelectorAll(".day-bar").length).toBe(0);
+    const chart = el.querySelector(".day-chart") as HTMLElement;
+    expect(chart.classList.contains("single")).toBe(true);
+    const note = chart.querySelector(".day-single");
+    expect(note?.textContent).toBe("2026-11-01: 6 messages");
+    expect(chart.getAttribute("aria-label")).toBe(
+      "Messages per day — 2026-11-01: 6 messages",
+    );
   });
 
   it("an empty archive renders the summary only", () => {
@@ -482,5 +559,29 @@ describe("dashboard", () => {
     const el = document.createElement("div");
     renderDashboard(el, { stats: archiveStats({ by_day }) });
     expect(el.querySelectorAll(".day-bar").length).toBe(12); // month buckets
+    // The axis follows the bucketing: month labels, no duplicates.
+    expect(
+      [...el.querySelectorAll(".day-chart-axis span")].map((s) => s.textContent),
+    ).toEqual(["2026-01", "2026-06", "2026-12"]);
+  });
+
+  it("dense charts keep every bar machine-readable but drop the visible counts", () => {
+    // Days spanning two years: 24 month buckets, too many for readable
+    // visible labels (every count is 6 to keep the check uniform).
+    const by_day = Array.from({ length: 700 }, (_, i) => ({
+      day: `${i % 24 < 12 ? 2025 : 2026}-${String((i % 12) + 1).padStart(2, "0")}-15`,
+      count: 6,
+    }));
+    const el = document.createElement("div");
+    renderDashboard(el, { stats: archiveStats({ by_day }) });
+    const bars = [...el.querySelectorAll(".day-bar")];
+    expect(bars.length).toBe(24);
+    expect(el.querySelectorAll(".day-bar-count").length).toBe(0);
+    // Every bar still names its bucket and its summed count for machines
+    // and tooltips ("2026-04: 30 messages").
+    expect(
+      bars.every((b) => /^\d{4}-\d{2}: [\d,]+ messages$/.test(b.getAttribute("aria-label") ?? "")),
+    ).toBe(true);
+    expect(bars.every((b) => b.getAttribute("title"))).toBe(true);
   });
 });
