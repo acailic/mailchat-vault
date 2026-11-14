@@ -731,6 +731,17 @@ button.link-btn:hover:not(:disabled) { background: none; color: var(--accent-hov
 }
 .meta { color: var(--muted); font-size: var(--text-meta); }
 .body { margin-top: 2px; white-space: pre-wrap; word-break: break-word; max-width: 72ch; }
+/* Result-row snippets are summaries: two lines, then an ellipsis — a
+ * raw-HTML body (now stripped to text by the backend) or a long match
+ * snippet never grows the row. The reading pane and thread rows keep the
+ * full-height .body above. */
+.hit-item .body {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
 
 mark.hit {
   background: var(--match);
