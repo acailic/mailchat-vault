@@ -1,6 +1,6 @@
 # Ask the archive: collect links — design
 
-Date: 2026-11-14 · Status: approved (user) · Branch: `feat/ask-collect-links`
+Date: 2026-11-14 · Status: implemented · Branch: `feat/ask-collect-links`
 
 ## Problem
 
