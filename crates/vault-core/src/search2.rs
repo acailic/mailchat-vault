@@ -111,6 +111,19 @@ pub struct SearchArchiveRequest {
     /// `Some(true)` = only messages with attachment references,
     /// `Some(false)` = only without, `None` = no filter.
     pub has_attachment: Option<bool>,
+    /// `Some(true)` = only messages whose resolved time is a guess
+    /// (`legacy_assumed`/`unresolved`/`missing`), `Some(false)` = only
+    /// exact/confirmed times, `None` = no filter.
+    pub time_assumed: Option<bool>,
+    /// `Some(true)` = only messages not resolved into a verified (or
+    /// user-linked) conversation, `Some(false)` = only resolved ones,
+    /// `None` = no filter.
+    pub grouping_unverified: Option<bool>,
+    /// `Some(true)` = only messages with at least one attachment
+    /// reference whose bytes are not preserved, `Some(false)` = only
+    /// messages whose references are all preserved (or absent),
+    /// `None` = no filter.
+    pub files_missing: Option<bool>,
     pub sort: SearchSort,
     /// Default 50, clamped to `1..=200`.
     pub limit: Option<u32>,
@@ -130,6 +143,9 @@ impl Default for SearchArchiveRequest {
             to_date: None,
             timezone: String::new(),
             has_attachment: None,
+            time_assumed: None,
+            grouping_unverified: None,
+            files_missing: None,
             sort: SearchSort::Relevance,
             limit: Some(DEFAULT_LIMIT),
             offset: Some(0),
@@ -253,6 +269,9 @@ impl SearchArchiveRequest {
                 }
             },
             has_attachment: self.has_attachment,
+            time_assumed: self.time_assumed,
+            grouping_unverified: self.grouping_unverified,
+            files_missing: self.files_missing,
             sort: self.sort,
             limit: self.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT),
             offset: self.offset.unwrap_or(0).min(MAX_OFFSET),
@@ -271,6 +290,9 @@ pub struct NormalizedSearch {
     pub from_instant: Option<String>,
     pub to_instant_exclusive: Option<String>,
     pub has_attachment: Option<bool>,
+    pub time_assumed: Option<bool>,
+    pub grouping_unverified: Option<bool>,
+    pub files_missing: Option<bool>,
     pub sort: SearchSort,
     pub limit: u32,
     pub offset: u32,
@@ -684,6 +706,54 @@ const HAS_ATTACHMENT_SQL: &str = "(COALESCE(json_array_length(m.raw_json, '$.med
      OR json_type(m.raw_json, '$.gifs[0].uri') IS NOT NULL \
      OR json_type(m.raw_json, '$.sticker.uri') IS NOT NULL)";
 
+/// SQL predicate (over alias `m`) matching messages whose resolved time
+/// is a guess — the "dates assumed" honesty filter. The store's CHECK
+/// constrains `time_confidence` to the five M1.1 tokens, so the
+/// negation is exactly exact/confirmed.
+const TIME_ASSUMED_SQL: &str = "(m.time_confidence IN \
+     ('legacy_assumed', 'unresolved', 'missing'))";
+
+/// SQL predicate (over aliases `m`/`c`) matching messages not resolved
+/// into a trusted conversation: standing alone (no conversation) or
+/// grouped by an unresolved legacy grouping. The negation is exactly
+/// verified/user-linked (the `conversations.confidence` CHECK).
+const GROUPING_UNVERIFIED_SQL: &str = "(m.conversation_id IS NULL \
+     OR c.confidence = 'legacy_unresolved')";
+
+/// SQL predicate (over alias `m`) matching messages with at least one
+/// attachment reference whose bytes are not preserved — the reader-side
+/// rule `attachment_count > available_attachment_count` as a WHERE
+/// clause, reading the same raw_json shapes [`attachment_summaries`]
+/// does (and mirroring [`HAS_ATTACHMENT_SQL`]'s first-element
+/// approximations): a `media` entry recorded missing or without stored
+/// bytes; a WhatsApp `attachment` placeholder no stored entry accounts
+/// for (name equality, the single shared suppression rule); a Discord
+/// `attachments` array (reference-only by construction); or a
+/// Telegram/Messenger reference with no `media` entry at all (the media
+/// pass names stored entries by exactly the reader's entry names, so a
+/// stored reference always suppresses the phantom row — and a processed
+/// but absent file already matched the missing-entry arm). The
+/// negation is "every reference preserved", including none at all.
+const FILES_MISSING_SQL: &str = "(EXISTS (SELECT 1 FROM json_each(m.raw_json, '$.media') je \
+     WHERE json_extract(je.value, '$.missing') = 1 \
+        OR COALESCE(json_extract(je.value, '$.sha256'), '') = '') \
+     OR (json_type(m.raw_json, '$.attachment') IS NOT NULL \
+         AND NOT EXISTS (SELECT 1 FROM json_each(m.raw_json, '$.media') je \
+             WHERE json_extract(je.value, '$.name') \
+                   IS json_extract(m.raw_json, '$.attachment.name'))) \
+     OR COALESCE(json_array_length(m.raw_json, '$.attachments'), 0) > 0 \
+     OR (json_type(m.raw_json, '$.photo') IS NOT NULL \
+         AND COALESCE(json_array_length(m.raw_json, '$.media'), 0) = 0) \
+     OR (json_type(m.raw_json, '$.file') IS NOT NULL \
+         AND COALESCE(json_array_length(m.raw_json, '$.media'), 0) = 0) \
+     OR ((json_type(m.raw_json, '$.photos[0].uri') IS NOT NULL \
+          OR json_type(m.raw_json, '$.videos[0].uri') IS NOT NULL \
+          OR json_type(m.raw_json, '$.audio_files[0].uri') IS NOT NULL \
+          OR json_type(m.raw_json, '$.files[0].uri') IS NOT NULL \
+          OR json_type(m.raw_json, '$.gifs[0].uri') IS NOT NULL \
+          OR json_type(m.raw_json, '$.sticker.uri') IS NOT NULL) \
+         AND COALESCE(json_array_length(m.raw_json, '$.media'), 0) = 0))";
+
 fn str_of<'a>(map: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a str> {
     map.get(key).and_then(Value::as_str)
 }
@@ -1015,6 +1085,22 @@ impl V2Filters {
                 format!(" AND NOT {HAS_ATTACHMENT_SQL}")
             };
             sql.push_str(&predicate);
+        }
+        // The honesty filters (the tri-state recipe above): each
+        // predicate is fully parenthesized, so `NOT` negates exactly it.
+        for (filter, predicate) in [
+            (req.time_assumed, TIME_ASSUMED_SQL),
+            (req.grouping_unverified, GROUPING_UNVERIFIED_SQL),
+            (req.files_missing, FILES_MISSING_SQL),
+        ] {
+            if let Some(on) = filter {
+                if on {
+                    sql.push_str(" AND ");
+                } else {
+                    sql.push_str(" AND NOT ");
+                }
+                sql.push_str(predicate);
+            }
         }
         Ok(Self { sql, values })
     }
@@ -2322,6 +2408,198 @@ mod tests {
             ),
             (1, 0)
         );
+    }
+
+    /// The shared tri-state assertion: `Some(true)` keeps the predicate's
+    /// rows, `Some(false)` its negation, `None` everything.
+    fn tri_state_ids(s: &Storage, set: fn(&Storage, Option<bool>) -> Vec<i64>) {
+        let mut all = set(s, None);
+        all.sort();
+        let mut yes = set(s, Some(true));
+        yes.sort();
+        let mut no = set(s, Some(false));
+        no.sort();
+        let mut yes_no = yes.clone();
+        yes_no.extend(no.iter().copied());
+        yes_no.sort();
+        assert_eq!(all, yes_no, "true ∪ false partitions the unfiltered set");
+    }
+
+    #[test]
+    fn time_assumed_filter_is_tri_state() {
+        let s = Storage::open_in_memory().unwrap();
+        let insert = |key: &str, sent: &str, confidence: &str| {
+            let mut msg =
+                NewMessage::new("demo", key.to_string(), "Ana", sent, format!("body {key}"));
+            if !confidence.is_empty() {
+                msg.time_confidence = confidence.into();
+            }
+            s.insert_message(&msg).unwrap();
+        };
+        insert("exact", "2026-01-01T10:00:00Z", "explicit_offset");
+        insert("confirmed", "2026-01-02T10:00:00Z", "user_confirmed");
+        insert("assumed", "2026-01-03T10:00:00Z", ""); // derived legacy_assumed
+        insert("no-time", "", ""); // derived missing
+
+        let hits = |s: &Storage, filter: Option<bool>| -> Vec<i64> {
+            let mut ids: Vec<i64> = s
+                .search_archive(&SearchArchiveRequest {
+                    time_assumed: filter,
+                    ..SearchArchiveRequest::default()
+                })
+                .unwrap()
+                .hits
+                .iter()
+                .map(|h| h.id)
+                .collect();
+            ids.sort();
+            ids
+        };
+        tri_state_ids(&s, hits);
+        // true = guessed times (legacy-assumed, no time recorded);
+        // false = exact/confirmed.
+        assert_eq!(hits(&s, Some(true)), vec![3, 4]);
+        assert_eq!(hits(&s, Some(false)), vec![1, 2]);
+    }
+
+    #[test]
+    fn grouping_unverified_filter_is_tri_state() {
+        let s = Storage::open_in_memory().unwrap();
+        // Verified conversation (provider key from the export itself).
+        let mut verified = NewMessage::new(
+            "demo",
+            "v1",
+            "Ana",
+            "2026-01-01T10:00:00Z",
+            "verified group body",
+        );
+        verified.channel = "chat".into();
+        verified.chat_id = "team".into();
+        verified.conversation_key = "telegram:chat:9".into();
+        s.insert_message(&verified).unwrap();
+        // Legacy grouping (chat name only) stays unresolved.
+        let mut legacy = NewMessage::new(
+            "demo",
+            "l1",
+            "Ana",
+            "2026-01-02T10:00:00Z",
+            "legacy group body",
+        );
+        legacy.channel = "chat".into();
+        legacy.chat_id = "oldgroup".into(); // no provider key → legacy grouping
+        s.insert_message(&legacy).unwrap();
+        // Standalone message: no conversation at all.
+        s.insert_message(&NewMessage::new(
+            "demo",
+            "s1",
+            "Ana",
+            "2026-01-03T10:00:00Z",
+            "standalone body",
+        ))
+        .unwrap();
+
+        let hits = |s: &Storage, filter: Option<bool>| -> Vec<i64> {
+            let mut ids: Vec<i64> = s
+                .search_archive(&SearchArchiveRequest {
+                    grouping_unverified: filter,
+                    ..SearchArchiveRequest::default()
+                })
+                .unwrap()
+                .hits
+                .iter()
+                .map(|h| h.id)
+                .collect();
+            ids.sort();
+            ids
+        };
+        tri_state_ids(&s, hits);
+        // true = no conversation or unresolved legacy grouping;
+        // false = verified/user-linked only.
+        assert_eq!(hits(&s, Some(true)), vec![2, 3]);
+        assert_eq!(hits(&s, Some(false)), vec![1]);
+    }
+
+    #[test]
+    fn files_missing_filter_is_tri_state() {
+        let s = Storage::open_in_memory().unwrap();
+        let insert = |key: &str, json: serde_json::Value| {
+            let mut msg = NewMessage::new(
+                "demo",
+                key.to_string(),
+                "Ana",
+                "2026-01-01T10:00:00Z",
+                format!("body {key}"),
+            );
+            msg.raw_json = json.to_string();
+            s.insert_message(&msg).unwrap();
+        };
+        // Preserved media entry (sha256 + path → available).
+        insert(
+            "stored",
+            serde_json::json!({
+                "media": [{ "sha256": "h", "path": "media/h.jpg", "name": "h.jpg", "kind": "image", "size": 10 }]
+            }),
+        );
+        // The media pass recorded the file absent (missing entry).
+        insert(
+            "gone",
+            serde_json::json!({
+                "media": [{ "name": "gone.jpg", "kind": "image", "missing": true, "reason": "not-in-export" }]
+            }),
+        );
+        // WhatsApp placeholder no stored entry accounts for.
+        insert(
+            "placeholder",
+            serde_json::json!({ "attachment": { "kind": "image", "name": "lost.jpg" } }),
+        );
+        // Discord reference rows (reference-only by construction).
+        insert(
+            "discord",
+            serde_json::json!({ "attachments": [{ "filename": "a.png", "content_type": "image/png", "size": 5 }] }),
+        );
+        // Telegram photo with no media entry at all.
+        insert(
+            "tg-unstored",
+            serde_json::json!({ "photo": { "file": "photos/p.jpg" } }),
+        );
+        // A stored DYI photo: the media entry is named by the uri
+        // basename, so the reference is preserved, not a phantom.
+        insert(
+            "dyi-stored",
+            serde_json::json!({
+                "photos": [{"uri": "messages/inbox/a_1/photos/x.jpg"}],
+                "media": [{ "sha256": "a", "path": "media/a.jpg", "name": "x.jpg", "kind": "image", "size": 9 }]
+            }),
+        );
+        // Plain message: no references, nothing missing.
+        s.insert_message(&NewMessage::new(
+            "demo",
+            "plain",
+            "Ana",
+            "2026-01-07T10:00:00Z",
+            "plain message",
+        ))
+        .unwrap();
+
+        let hits = |s: &Storage, filter: Option<bool>| -> Vec<i64> {
+            let mut ids: Vec<i64> = s
+                .search_archive(&SearchArchiveRequest {
+                    files_missing: filter,
+                    ..SearchArchiveRequest::default()
+                })
+                .unwrap()
+                .hits
+                .iter()
+                .map(|h| h.id)
+                .collect();
+            ids.sort();
+            ids
+        };
+        tri_state_ids(&s, hits);
+        // true = at least one reference without preserved bytes;
+        // false = every reference preserved (or none at all).
+        assert_eq!(hits(&s, Some(true)), vec![2, 3, 4, 5]);
+        assert_eq!(hits(&s, Some(false)), vec![1, 6, 7]);
     }
 
     #[test]
