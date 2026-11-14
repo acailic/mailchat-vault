@@ -699,11 +699,250 @@ fn truncate_chars(s: &str, max: usize) -> String {
         .unwrap_or_else(|| s.to_string())
 }
 
-/// The browse-mode snippet: a whitespace-collapsed body prefix, bounded
-/// so summaries stay summaries even without match positions.
+/// The browse-mode snippet: an HTML-extracted, whitespace-collapsed body
+/// prefix, bounded so summaries stay summaries even without match
+/// positions.
 fn browse_snippet(body: &str) -> String {
-    let collapsed: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
-    truncate_chars(&collapsed, BROWSE_SNIPPET_CHARS)
+    truncate_chars(&html_to_snippet_text(body), BROWSE_SNIPPET_CHARS)
+}
+
+// ---------------------------------------------------------------------------
+// Snippet text extraction (HTML mail)
+// ---------------------------------------------------------------------------
+
+/// Tag names whose open/close mark a visual break: the separator they
+/// contribute is a newline rather than a space, so paragraph-ish structure
+/// survives into the (single-line, whitespace-collapsed) snippet text.
+const SNIPPET_BLOCK_TAGS: &[&str] = &[
+    "address", "article", "aside", "blockquote", "br", "div", "dd", "dl", "dt", "fieldset",
+    "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header",
+    "hr", "li", "main", "nav", "ol", "p", "pre", "section", "table", "td", "th", "tr", "ul",
+];
+
+/// The named entities snippets decode (plus the numeric forms handled
+/// inline): enough for real mail, without an entity table.
+const SNIPPET_NAMED_ENTITIES: &[(&str, char)] = &[
+    ("amp", '&'),
+    ("lt", '<'),
+    ("gt", '>'),
+    ("quot", '"'),
+    ("apos", '\''),
+    // Decoded to a plain space, not U+00A0: snippets collapse whitespace
+    // anyway, and a non-breaking space would defeat the collapse.
+    ("nbsp", ' '),
+];
+
+/// Collapse every whitespace run to a single space and trim the ends.
+fn collapse_whitespace(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut pending_space = false;
+    for ch in s.chars() {
+        if ch.is_whitespace() {
+            pending_space = !out.is_empty();
+        } else {
+            if pending_space {
+                out.push(' ');
+                pending_space = false;
+            }
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Case-insensitive ASCII-prefix test (tag and entity syntax is ASCII).
+fn starts_with_ci(haystack: &[u8], prefix: &[u8]) -> bool {
+    haystack.len() >= prefix.len()
+        && haystack[..prefix.len()]
+            .iter()
+            .zip(prefix)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
+/// Best-effort HTML-to-text for **snippets only**. Stored bodies stay
+/// byte-exact (the reading pane renders them as text, and the raw JSON is
+/// provenance); this pass turns the raw HTML mail stores as its body into
+/// the few words a result row shows: `script`/`style` contents disappear,
+/// tags become separators (newlines for block tags, spaces otherwise),
+/// common entities decode, and whitespace collapses. Truncated markup at
+/// the input's edge (the browse path feeds a body prefix, the FTS5
+/// snippet() a token window) is dropped rather than leaked.
+///
+/// The FTS match markers (`\u{1}`/`\u{2}`) are not markup, not whitespace,
+/// and never ASCII `'<'`/`'&'` — they pass through untouched, so the same
+/// pass serves browse prefixes and match snippets. A body containing no
+/// `'<'` and no `'&'` (chat logs, plain-text mail) skips the scan
+/// entirely: only whitespace collapsing runs.
+fn html_to_snippet_text(input: &str) -> String {
+    if !input.contains('<') && !input.contains('&') {
+        return collapse_whitespace(input);
+    }
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'<' => {
+                if starts_with_ci(&bytes[i..], b"<!--") {
+                    // Comment: skip to its closer; a truncated comment is
+                    // dropped with the rest of the tail.
+                    let Some(end) = find_subslice(&bytes[i + 4..], b"-->") else {
+                        break;
+                    };
+                    i += 4 + end + 3;
+                    continue;
+                }
+                let name = tag_name_at(bytes, i);
+                if let Some(element) = name.as_deref() {
+                    if element == "script" || element == "style" {
+                        // Raw-text element: its content is not text. An
+                        // unterminated one at the edge is markup all the
+                        // way down — drop the tail.
+                        let Some(end) = find_closing_tag(bytes, i, element) else {
+                            break;
+                        };
+                        i = end;
+                        continue;
+                    }
+                }
+                let Some(gt) = bytes[i..].iter().position(|&b| b == b'>') else {
+                    break; // truncated tag at the edge: drop the tail
+                };
+                i += gt + 1;
+                let block = name
+                    .as_deref()
+                    .is_some_and(|n| SNIPPET_BLOCK_TAGS.contains(&n));
+                out.push(if block { '\n' } else { ' ' });
+            }
+            b'&' => {
+                match decode_entity(&bytes[i..]) {
+                    Some((ch, len)) => {
+                        out.push(ch);
+                        i += len;
+                    }
+                    None => {
+                        out.push('&');
+                        i += 1;
+                    }
+                }
+            }
+            _ => {
+                // Copy one UTF-8 scalar: '<'/'&' are ASCII, so any other
+                // start byte begins a multi-byte sequence that cannot
+                // contain markup.
+                let ch_len = utf8_char_len(bytes[i]);
+                let end = (i + ch_len).min(bytes.len());
+                out.push_str(&input[i..end]);
+                i = end;
+            }
+        }
+    }
+    collapse_whitespace(&out)
+}
+
+/// Length in bytes of the UTF-8 scalar starting at `first`.
+fn utf8_char_len(first: u8) -> usize {
+    match first {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        _ => 4,
+    }
+}
+
+/// The element name of the tag at `at`, lowercased (`Some("br")` for
+/// `<br>`, `Some("div")` for `</DIV>`); `None` for non-element syntax
+/// (`<!doctype …>`, `<?xml …>`), which still consumes to its `>`.
+fn tag_name_at(bytes: &[u8], at: usize) -> Option<String> {
+    let mut i = at + 1; // past '<'
+    if i < bytes.len() && bytes[i] == b'/' {
+        i += 1;
+    }
+    let start = i;
+    while i < bytes.len() && bytes[i].is_ascii_alphabetic() && i - start < 16 {
+        i += 1;
+    }
+    if i == start {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&bytes[start..i]).to_ascii_lowercase())
+}
+
+/// Byte offset just past the `>` of `</name …>` searched from `from`
+/// (case-insensitive); `None` when the document ends first.
+fn find_closing_tag(bytes: &[u8], from: usize, name: &str) -> Option<usize> {
+    let needle = format!("</{name}");
+    let hay = &bytes[from..];
+    let at = find_subslice(hay, needle.as_bytes())?;
+    let after = at + needle.len();
+    let gt = hay[after..].iter().position(|&b| b == b'>')?;
+    Some(from + after + gt + 1)
+}
+
+/// First index of `needle` in `hay` (ASCII, case-sensitive — callers pick
+/// the case-insensitivity that matters).
+fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Decode the entity at the start of `bytes` (which begins `&`). Returns
+/// the replacement char and the entity's byte length, or `None` to keep
+/// the `&` literal (no `;`, an unknown name, or an unpaired codepoint).
+fn decode_entity(bytes: &[u8]) -> Option<(char, usize)> {
+    debug_assert_eq!(bytes.first(), Some(&b'&'));
+    if bytes.len() < 3 {
+        return None;
+    }
+    if bytes[1] == b'#' {
+        // Numeric: `&#123;` decimal or `&#x1F;` hex, at most 8 digits.
+        let (hex, start) = if bytes.get(2).is_some_and(|b| b.eq_ignore_ascii_case(&b'x')) {
+            (true, 3)
+        } else {
+            (false, 2)
+        };
+        let max = (start + 8).min(bytes.len());
+        let mut digits = String::new();
+        let mut i = start;
+        while i < max
+            && bytes[i] != b';'
+            && (if hex {
+                bytes[i].is_ascii_hexdigit()
+            } else {
+                bytes[i].is_ascii_digit()
+            })
+        {
+            digits.push(bytes[i] as char);
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b';' || digits.is_empty() {
+            return None;
+        }
+        let code = u32::from_str_radix(&digits, if hex { 16 } else { 10 }).ok()?;
+        let ch = char::from_u32(code)?;
+        // The markers and controls are not text a snippet should carry.
+        if matches!(code, 0 | 1 | 2) {
+            return None;
+        }
+        return Some((ch, i + 1));
+    }
+    // Named: at most 12 letters, closed by ';'.
+    let max = (2 + 12).min(bytes.len());
+    let mut i = 1;
+    while i < max && bytes[i].is_ascii_alphanumeric() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b';' {
+        return None;
+    }
+    let name = &bytes[1..i];
+    let ch = SNIPPET_NAMED_ENTITIES
+        .iter()
+        .find(|(known, _)| name.eq_ignore_ascii_case(known.as_bytes()))
+        .map(|(_, ch)| *ch)?;
+    Some((ch, i + 1))
 }
 
 // ---------------------------------------------------------------------------
@@ -874,11 +1113,15 @@ impl Storage {
             // descending; unknown instants last, deterministically by id.
             // No match positions exist, so the row's bounded snippet is a
             // body prefix (the "two-line snippet" of the results list).
+            // The prefix reads 4000 raw bytes, not 600: HTML mail spends
+            // its first kilobytes on doctype/head/style, and the snippet
+            // pass (which strips that markup) needs enough left over to
+            // fill BROWSE_SNIPPET_CHARS of actual text.
             let mut bind = filters.bind_values();
             bind.push(SqlValue::Integer(req.limit as i64));
             bind.push(SqlValue::Integer(req.offset as i64));
             let sql = format!(
-                "SELECT {SUMMARY_COLUMNS}, substr(m.body, 1, 600) {SUMMARY_JOINS} \
+                "SELECT {SUMMARY_COLUMNS}, substr(m.body, 1, 4000) {SUMMARY_JOINS} \
                  WHERE 1=1 {} \
                  ORDER BY {order} \
                  LIMIT ? OFFSET ?",
@@ -921,7 +1164,10 @@ impl Storage {
             let rows: Vec<MessageSummary> = stmt
                 .query_map(rusqlite::params_from_iter(bind), |row| {
                     let raw: String = row.get(11)?;
-                    summary_from_row(row, Some(truncate_chars(&raw, MAX_SNIPPET_CHARS)))
+                    summary_from_row(
+                        row,
+                        Some(truncate_chars(&html_to_snippet_text(&raw), MAX_SNIPPET_CHARS)),
+                    )
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             rows
@@ -954,7 +1200,10 @@ impl Storage {
             let rows: Vec<MessageSummary> = stmt
                 .query_map(rusqlite::params_from_iter(bind), |row| {
                     let raw: String = row.get(11)?;
-                    summary_from_row(row, Some(truncate_chars(&raw, MAX_SNIPPET_CHARS)))
+                    summary_from_row(
+                        row,
+                        Some(truncate_chars(&html_to_snippet_text(&raw), MAX_SNIPPET_CHARS)),
+                    )
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             rows
@@ -1579,6 +1828,127 @@ mod tests {
         assert!(page.hits[0].snippet.starts_with("newest"));
         assert_eq!(page.hits[3].sent_at, None);
         assert_eq!(page.hits[3].time_confidence, "missing");
+    }
+
+    #[test]
+    fn snippet_extraction_handles_real_html_mail_shapes() {
+        // The doctype wall real HTML mail opens with: gone, not leaked.
+        let doctype = "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" \
+                       \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\">\
+                       <html><body>Release notes</body></html>";
+        assert_eq!(html_to_snippet_text(doctype), "Release notes");
+
+        // Nested tags collapse to single separators, block tags break runs.
+        assert_eq!(
+            html_to_snippet_text("<div><p>Hi <b>there</b></p><p>again</p></div>"),
+            "Hi there again"
+        );
+
+        // script/style contents are not text (and, like the renderer,
+        // contribute no separator); comments disappear.
+        assert_eq!(
+            html_to_snippet_text(
+                "<style>p{color:red}</style>A<script>steal()</script>B<!-- note -->C"
+            ),
+            "ABC"
+        );
+
+        // Entities: the common named set, decimal and hex numeric forms.
+        assert_eq!(
+            html_to_snippet_text("a &amp; b &lt;tag&gt; &quot;q&quot; &#39;s&#39; &nbsp;end"),
+            "a & b <tag> \"q\" 's' end"
+        );
+        assert_eq!(html_to_snippet_text("&#65;&#x42;&#x1F;"), "AB\u{1F}");
+        // A decoded '&lt;' is literal text, never re-parsed as a tag.
+        assert_eq!(html_to_snippet_text("&lt;b&gt;bold&lt;/b&gt;"), "<b>bold</b>");
+        // Unknown or unterminated entities stay literal.
+        assert_eq!(html_to_snippet_text("fish & chips &nosuch; &#;"), "fish & chips &nosuch; &#;");
+
+        // No-html fast path: only whitespace collapsing runs (CRLF and
+        // runs collapse to one space; ends trim).
+        assert_eq!(html_to_snippet_text("  one\r\ntwo\t\tthree  "), "one two three");
+
+        // Truncated markup at the edge (the browse path feeds a prefix)
+        // is dropped, never leaked as text.
+        assert_eq!(html_to_snippet_text("<p>kept</p><div class='x"), "kept");
+        assert_eq!(html_to_snippet_text("kept <script>gone"), "kept");
+
+        // The FTS match markers ride through untouched.
+        let marked = format!(
+            "a {}zephyr{} b",
+            crate::query::SNIPPET_OPEN_MARK,
+            crate::query::SNIPPET_CLOSE_MARK
+        );
+        assert_eq!(
+            html_to_snippet_text(&marked),
+            format!(
+                "a {}zephyr{} b",
+                crate::query::SNIPPET_OPEN_MARK,
+                crate::query::SNIPPET_CLOSE_MARK
+            )
+        );
+    }
+
+    #[test]
+    fn browse_snippets_extract_html_bodies() {
+        let s = Storage::open_in_memory().unwrap();
+        let body = concat!(
+            "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" ",
+            "\"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\">\n",
+            "<html><head><style>body{color:red}</style></head>\n",
+            "<body><div>Release&nbsp;notes &amp; plans</div>",
+            "<script>window.tracker()</script>",
+            "<p>quarterly vault report attached</p></body></html>"
+        );
+        let mut msg = NewMessage::new("demo", "html1", "Ana", "2026-02-02T10:00:00Z", body);
+        msg.channel = "email".into();
+        s.insert_message(&msg).unwrap();
+        let page = s.search_archive(&SearchArchiveRequest::default()).unwrap();
+        assert_eq!(page.hits.len(), 1);
+        let snippet = &page.hits[0].snippet;
+        assert!(
+            snippet.starts_with("Release notes & plans quarterly vault report attached"),
+            "snippet is extracted text, got {snippet:?}"
+        );
+        for leaked in ["<", ">", "&nbsp;", "&amp;", "DOCTYPE", "tracker", "style"] {
+            assert!(!snippet.contains(leaked), "leaked {leaked:?} in {snippet:?}");
+        }
+    }
+
+    #[test]
+    fn match_snippets_extract_html_and_keep_markers() {
+        let s = Storage::open_in_memory().unwrap();
+        let body = "<html><body><p>the zephyr &amp; vault meeting notes</p></body></html>";
+        let mut msg = NewMessage::new("demo", "html2", "Ana", "2026-02-02T10:00:00Z", body);
+        msg.channel = "email".into();
+        s.insert_message(&msg).unwrap();
+        let page = s
+            .search_archive(&SearchArchiveRequest {
+                text: "zephyr".into(),
+                ..SearchArchiveRequest::default()
+            })
+            .unwrap();
+        assert_eq!(page.hits.len(), 1);
+        let snippet = &page.hits[0].snippet;
+        assert!(
+            snippet.contains(crate::query::SNIPPET_OPEN_MARK),
+            "marker kept: {snippet:?}"
+        );
+        assert!(
+            snippet.contains(crate::query::SNIPPET_CLOSE_MARK),
+            "marker kept: {snippet:?}"
+        );
+        // Tags stripped, the entity decoded, the matched word still marked.
+        assert!(
+            snippet.contains(&format!(
+                "{}zephyr{}",
+                crate::query::SNIPPET_OPEN_MARK,
+                crate::query::SNIPPET_CLOSE_MARK
+            )),
+            "marked match in {snippet:?}"
+        );
+        assert!(snippet.contains("vault meeting"), "decoded text in {snippet:?}");
+        assert!(!snippet.contains("<"), "no markup in {snippet:?}");
     }
 
     #[test]

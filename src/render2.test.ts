@@ -115,6 +115,32 @@ describe("flat results", () => {
     expect(mark?.textContent).toBe("vault");
   });
 
+  it("a long snippet renders whole under the row's CSS two-line clamp", () => {
+    // The visual clamp lives in app.css (.hit-item .body,
+    // -webkit-line-clamp: 2) — this guards the DOM contract it hangs on:
+    // the snippet text arrives whole on the .body element (the backend
+    // already bounds it), with mark runs intact, and no JS truncation
+    // trims it before the clamp can do its quiet work.
+    const long =
+      "quarterly vault report attached please review before the board " +
+      "meeting on friday because the numbers changed after the export " +
+      "and the summary no longer matches what finance signed off on";
+    const el = document.createElement("div");
+    renderFlatResults(el, {
+      hits: [hit({ snippet: `report \x01numbers\x02 changed ${long}` })],
+      activeIndex: -1,
+      selectedId: null,
+      selection: new Set(),
+      terms: [],
+      onOpen: () => {},
+      onToggleSelect: () => {},
+    });
+    const body = el.querySelector("li.hit-item .body") as HTMLElement;
+    expect(body.className).toBe("body");
+    expect(body.textContent).toBe(`report numbers changed ${long}`);
+    expect(el.querySelector("mark.hit")?.textContent).toBe("numbers");
+  });
+
   it("attachment and conflict badges render honestly", () => {
     const el = document.createElement("div");
     renderFlatResults(el, {
