@@ -17,6 +17,10 @@ export interface SearchArchiveRequest {
   /** IANA timezone the day bounds are interpreted in; "" = OS default. */
   timezone: string;
   has_attachment?: boolean | null;
+  /** Tri-state honesty filters; null = filter off (NEWWO-21). */
+  time_assumed?: boolean | null;
+  grouping_unverified?: boolean | null;
+  files_missing?: boolean | null;
   sort: SearchSort;
   limit?: number;
   offset?: number;
