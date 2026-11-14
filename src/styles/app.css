@@ -874,6 +874,26 @@ mark.hit {
 .detail-card header .header-actions { display: flex; gap: 6px; align-items: center; }
 .detail-card h2 { font-size: var(--text-section); margin: 0 0 var(--sp-2); }
 .detail-card .body { max-width: 78ch; }
+/* Rendered/Raw toggle for email bodies: quiet segmented control over
+ * the plain-text body. */
+.detail-card .mode-toggle {
+  display: flex;
+  gap: var(--sp-1);
+  margin: 0 0 var(--sp-2);
+}
+.detail-card .mode-btn { font-size: 12px; padding: 3px 10px; }
+.detail-card .mode-btn[aria-pressed="true"] {
+  background: var(--panel-2);
+  border-color: var(--text);
+}
+/* Emails are authored against a white page; the frame renders one. */
+.detail-card iframe.rendered-frame {
+  width: 100%;
+  height: min(60vh, 480px);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-s);
+  background: #fff;
+}
 
 /* Icon-only utility actions (reading header): quiet squares that name
  * their action through aria-label/title; the keyboard focus ring comes

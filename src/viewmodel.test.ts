@@ -8,6 +8,7 @@ import {
   formatCount,
   groupHits,
   highlightSegments,
+  htmlOf,
   mediaOf,
   moveIndex,
   neighborId,
@@ -283,6 +284,19 @@ describe("mediaOf / attachmentOf", () => {
     const tg = JSON.stringify({ photo: "photos/p.jpg", text: "" });
     expect(mediaOf(tg)).toEqual([]);
     expect(attachmentOf(tg)).toBeNull();
+  });
+});
+
+describe("htmlOf", () => {
+  it("returns the stored HTML body when present", () => {
+    expect(htmlOf(JSON.stringify({ html: "<p>hi</p>" }))).toBe("<p>hi</p>");
+  });
+
+  it("returns null when absent, empty, non-string, or the JSON is invalid", () => {
+    expect(htmlOf(JSON.stringify({ subject: "s" }))).toBeNull();
+    expect(htmlOf(JSON.stringify({ html: "" }))).toBeNull();
+    expect(htmlOf(JSON.stringify({ html: 7 }))).toBeNull();
+    expect(htmlOf("not json")).toBeNull();
   });
 });
 
