@@ -204,8 +204,8 @@ describe("pagination", () => {
 describe("source chips", () => {
   it("renders toggles with counts and pressed state", () => {
     const rows: SourceChipRow[] = [
-      { id: "inst-mbox", label: "mbox", count: 900 },
-      { id: "inst-whatsapp", label: "whatsapp", count: 80 },
+      { id: "inst-mbox", label: "mbox", count: 900, icon: "file" },
+      { id: "inst-whatsapp", label: "whatsapp", count: 80, icon: "chat" },
     ];
     const el = document.createElement("div");
     renderSourceChips(el, { rows, selected: ["inst-whatsapp"], onToggle: () => {} });
@@ -213,11 +213,39 @@ describe("source chips", () => {
     expect(el.querySelector('[data-source="inst-whatsapp"]')?.getAttribute("aria-pressed")).toBe("true");
   });
 
+  it("leads each chip with its taxonomy icon without touching the text", () => {
+    // The mail-vs-chat axis is visible on the chip itself; the icon is
+    // decorative (aria-hidden svg), so the chip's accessible text — and
+    // every text-based assertion — is unchanged.
+    const el = document.createElement("div");
+    renderSourceChips(el, {
+      rows: [
+        { id: "inst-imap", label: "imap.gmail.com-ana", count: 12, icon: "mail" },
+        { id: "inst-whatsapp", label: "whatsapp", count: 80, icon: "chat" },
+      ],
+      selected: [],
+      onToggle: () => {},
+    });
+    const chips = [...el.querySelectorAll(".chip")];
+    expect(chips.map((c) => c.querySelector("use")?.getAttribute("href"))).toEqual([
+      "#i-mail",
+      "#i-chat",
+    ]);
+    expect(chips.map((c) => c.querySelector("svg")?.getAttribute("aria-hidden"))).toEqual([
+      "true",
+      "true",
+    ]);
+    expect(chips.map((c) => c.textContent)).toEqual([
+      "imap.gmail.com-ana (12)",
+      "whatsapp (80)",
+    ]);
+  });
+
   it("toggling fires with the source instance id", () => {
     let toggled = "";
     const el = document.createElement("div");
     renderSourceChips(el, {
-      rows: [{ id: "inst-mbox", label: "mbox", count: 1 }],
+      rows: [{ id: "inst-mbox", label: "mbox", count: 1, icon: "file" }],
       selected: [],
       onToggle: (id) => (toggled = id),
     });
@@ -229,8 +257,8 @@ describe("source chips", () => {
     const el = document.createElement("div");
     renderSourceChips(el, {
       rows: [
-        { id: "inst-mbox", label: "mbox", count: 900 },
-        { id: "inst-telegram", label: "telegram", count: 80 },
+        { id: "inst-mbox", label: "mbox", count: 900, icon: "file" },
+        { id: "inst-telegram", label: "telegram", count: 80, icon: "chat" },
       ],
       selected: [],
       onToggle: () => {},
