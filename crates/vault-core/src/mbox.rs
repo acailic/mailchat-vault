@@ -270,6 +270,30 @@ pub fn mail_source_for_pick(
     }
 }
 
+/// Run one mail-import pick as a bounded streaming import — the shared
+/// body of the direct `import_mbox` command and the `import_mbox` job
+/// (so the two paths can never resolve a pick differently again): the
+/// pick goes through [`mail_source_for_pick`] (a directory is an `.eml`
+/// folder, a `.zip` a fenced temp tree — the returned guard stays alive
+/// for the whole run, so a zip is never un-squashed mid-import), then a
+/// [`BoundedRun`] with the mail media pass drives it against `sink`.
+/// The same shape as [`crate::chat_export::import_bounded`].
+pub fn import_pick_bounded(
+    sink: &mut dyn crate::bounded::IngestSink,
+    picked: &Path,
+    data_dir: &Path,
+    is_cancelled: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(u64, u64, &str),
+) -> Result<crate::bounded::BoundedOutcome> {
+    let (source, _zip_guard) = mail_source_for_pick(picked)?;
+    let mut run = crate::bounded::BoundedRun::new(crate::bounded::import_id_for(
+        "mbox-import",
+        picked,
+    ));
+    run.media = Some(crate::bounded::MediaPass::mail(data_dir));
+    run.run(source.as_ref(), sink, is_cancelled, progress)
+}
+
 /// Parse raw `.mbox` file contents into messages.
 ///
 /// `chat_id` groups the messages (typically the file name stem). Message
@@ -688,5 +712,150 @@ mod tests {
         let (source, guard) = mail_source_for_pick(&path).unwrap();
         assert!(guard.is_none(), "a plain file pick needs no temp tree");
         assert_eq!(count_streamed(source.as_ref()), (2, 0));
+    }
+
+    // -----------------------------------------------------------------------
+    // The job path: the v2 `import_mbox` job body drives the pick
+    // resolution too (the direct command always did). Regression pin for
+    // the `job_submit("import_mbox", …)` migration that briefly ran the
+    // pick through `MboxSource::new` — single-file only — breaking
+    // folder and `.zip` mail picks.
+    // -----------------------------------------------------------------------
+
+    /// The v2 `import_mbox` job body, exactly as src-tauri's `run_job_spec`
+    /// `ImportMbox` arm drives it: the shared [`import_pick_bounded`] body,
+    /// cancellation and progress from the job context, every batch commit
+    /// through the pool sink.
+    fn import_mbox_job(
+        ctx: &crate::jobs::JobContext<'_>,
+        picked: &Path,
+        data_dir: &Path,
+    ) -> std::result::Result<serde_json::Value, crate::jobs::JobError> {
+        let mut sink = crate::jobs::PoolSink(ctx.pool());
+        let cancelled = || ctx.is_cancelled();
+        let mut progress = |done: u64, total: u64, message: &str| {
+            ctx.progress(done, total, message);
+        };
+        let outcome = import_pick_bounded(&mut sink, picked, data_dir, &cancelled, &mut progress)
+            .map_err(crate::jobs::JobError::from)?;
+        if outcome.cancelled {
+            return Err(crate::jobs::JobError::Cancelled);
+        }
+        Ok(serde_json::to_value(&outcome.summary).unwrap_or(serde_json::Value::Null))
+    }
+
+    /// Poll until the job reaches a terminal state (the runner thread,
+    /// writer, and readers are real threads over a real SQLite file).
+    fn wait_terminal(
+        pool: &std::sync::Arc<crate::jobs::DbPool>,
+        id: crate::jobs::JobId,
+    ) -> crate::jobs::JobRecord {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(record) = pool.job(id) {
+                if record.state.is_terminal() {
+                    return record;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "job never became terminal: {:?}",
+                pool.job(id)
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn import_mbox_job_imports_an_eml_directory_pick() {
+        // Same shape as `mail_source_for_pick_dir_streams_the_eml_folder`,
+        // driven through the job body so the pick resolution is pinned at
+        // the level that broke.
+        let tmp = tempfile::tempdir().unwrap();
+        let pick = tmp.path().join("mail");
+        std::fs::create_dir_all(&pick).unwrap();
+        std::fs::write(&pick.join("1.eml"), b"Subject: a\nMessage-ID: <1@x>\n\nA\n").unwrap();
+        std::fs::write(&pick.join("2.eml"), b"Subject: b\nMessage-ID: <2@x>\n\nB\n").unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let pool = crate::jobs::DbPool::spawn(
+            tmp.path().join("vault.db"),
+            crate::jobs::PoolConfig::default(),
+            |_| {},
+        )
+        .unwrap();
+        let id = pool
+            .submit_job("import_mbox", move |ctx| {
+                import_mbox_job(ctx, &pick, &data_dir)
+            })
+            .unwrap();
+        let record = wait_terminal(&pool, id);
+        assert_eq!(record.kind, "import_mbox");
+        let crate::jobs::JobState::Succeeded { result } = record.state else {
+            panic!("a directory pick must import on the job path: {record:?}");
+        };
+        assert_eq!(result["inserted"], serde_json::json!(2));
+        assert_eq!(
+            pool.with_read(|s| s.stats().unwrap().total),
+            2,
+            "both .eml files must be stored"
+        );
+        pool.shutdown();
+    }
+
+    #[test]
+    fn import_mbox_job_imports_a_zipped_eml_pick() {
+        // Same shape as `mail_source_for_pick_zip_expands_and_streams_the_eml_files`,
+        // driven through the job body. Success is also the guard-liveness
+        // proof: the run's batches read the extracted `.eml` files out of
+        // the temp tree, so a guard dropped before the run finished would
+        // un-squash the zip mid-import and fail the job.
+        use std::io::Write as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("emls.zip");
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        for (name, bytes) in [
+            (
+                "1.eml",
+                b"Subject: a\nMessage-ID: <1@x>\n\nA\n".as_slice().to_vec(),
+            ),
+            (
+                "2.eml",
+                b"Subject: b\nMessage-ID: <2@x>\n\nB\n".as_slice().to_vec(),
+            ),
+        ] {
+            zip.start_file(name, zip::write::FileOptions::<()>::default())
+                .unwrap();
+            zip.write_all(&bytes).unwrap();
+        }
+        zip.finish().unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let pool = crate::jobs::DbPool::spawn(
+            tmp.path().join("vault.db"),
+            crate::jobs::PoolConfig::default(),
+            |_| {},
+        )
+        .unwrap();
+        let id = pool
+            .submit_job("import_mbox", move |ctx| {
+                import_mbox_job(ctx, &zip_path, &data_dir)
+            })
+            .unwrap();
+        let record = wait_terminal(&pool, id);
+        assert_eq!(record.kind, "import_mbox");
+        let crate::jobs::JobState::Succeeded { result } = record.state else {
+            panic!("a .zip pick must import on the job path: {record:?}");
+        };
+        assert_eq!(result["inserted"], serde_json::json!(2));
+        assert_eq!(
+            pool.with_read(|s| s.stats().unwrap().total),
+            2,
+            "both zipped .eml files must be stored"
+        );
+        pool.shutdown();
     }
 }

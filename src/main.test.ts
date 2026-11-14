@@ -1582,7 +1582,8 @@ describe("import picker → preview → confirm (U03)", () => {
     (win as unknown as { confirm: unknown }).confirm = confirmSpy;
     dialog.open.mockResolvedValue("/tmp/chat.txt");
     tauri.handlers.set("preview_import", () => Promise.resolve(TELEGRAM_PREVIEW));
-    tauri.handlers.set("job_submit", () => ({ id: 35 }));
+    let nextJobId = 35;
+    tauri.handlers.set("job_submit", () => ({ id: nextJobId++ }));
     tauri.handlers.set("job_cancel", () => true);
     $("#import-pick-btn").click();
     await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
@@ -1597,16 +1598,59 @@ describe("import picker → preview → confirm (U03)", () => {
     );
     expect(tauri.calls.find((c) => c.cmd === "job_cancel")!.args).toEqual({ id: 35 });
     expect(confirmSpy).not.toHaveBeenCalled();
+    expect(($("#import-cancel-btn") as HTMLButtonElement).disabled).toBe(true);
+    expect($("#import-cancel-btn").textContent).toBe("Cancelling…");
+
+    // A progress event after the cancel request re-renders the card but
+    // must not re-enable the button: the engine stops cooperatively, so
+    // "Cancelling…" stands until the terminal `cancelled` event.
+    emitJob({ seq: 1, at: "t", job: 35, type: "submitted", kind: "import_chat_export" });
+    emitJob({
+      seq: 2,
+      at: "t",
+      job: 35,
+      type: "progress",
+      done: 2,
+      total: 4,
+      message: "messages",
+    });
+    expect(($("#import-cancel-btn") as HTMLButtonElement).disabled).toBe(true);
+    expect($("#import-cancel-btn").textContent).toBe("Cancelling…");
+    expect($(".import-progress-line").textContent).toBe("2/4 (50%) · messages");
 
     // Cooperative: the stop is requested, the engine confirms by event.
-    emitJob({ seq: 1, at: "t", job: 35, type: "submitted", kind: "import_chat_export" });
-    emitJob({ seq: 2, at: "t", job: 35, type: "cancelled" });
+    emitJob({ seq: 3, at: "t", job: 35, type: "cancelled" });
     await vi.waitFor(() => expect($("#import-progress").getAttribute("hidden")).not.toBeNull());
     expect($("#import-status").textContent).toBe("");
-    // A new import can start right away.
+    // A new import can start right away — and its Cancel button is live
+    // again (the request died with the job it was aimed at).
     dialog.open.mockResolvedValue("/tmp/other.txt");
     $("#import-pick-btn").click();
     await vi.waitFor(() => expect(importCalls("preview_import")).toHaveLength(2));
+    $("#preview-import-btn").click();
+    await vi.waitFor(() => expect($("#import-cancel-btn")).toBeTruthy());
+    expect(($("#import-cancel-btn") as HTMLButtonElement).disabled).toBe(false);
+    expect($("#import-cancel-btn").textContent).toBe("Cancel");
+  });
+
+  it("an unrecognized succeeded result still says the import finished", async () => {
+    await boot();
+    dialog.open.mockResolvedValue("/tmp/chat.txt");
+    tauri.handlers.set("preview_import", () => Promise.resolve(TELEGRAM_PREVIEW));
+    tauri.handlers.set("job_submit", () => ({ id: 37 }));
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
+    $("#preview-import-btn").click();
+    await vi.waitFor(() => expect($("#import-progress").getAttribute("hidden")).toBeNull());
+    emitJob({ seq: 1, at: "t", job: 37, type: "submitted", kind: "import_chat_export" });
+    // A result the outcome reader does not recognize: no invented counts,
+    // no follow-up to scope — but the section still reports that the run
+    // finished instead of silently hiding the card.
+    emitJob({ seq: 2, at: "t", job: 37, type: "succeeded", result: { nonsense: true } });
+    await vi.waitFor(() => expect($("#import-progress").getAttribute("hidden")).not.toBeNull());
+    expect($("#import-status").textContent).toBe("Import finished.");
+    expect($("#import-followup").getAttribute("hidden")).not.toBeNull();
+    expect(win.document.querySelector("#view-imported-btn")).toBeNull();
   });
 
   it("the confirm button disables when free space cannot fit the input", async () => {

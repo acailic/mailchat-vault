@@ -120,7 +120,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 use vault_core::backup::{self, BackupCounts, BackupManifest, RecoveryStatus, RestoreOutcome};
-use vault_core::bounded::{import_id_for, BoundedRun, Flow, MediaPass, StreamItem, StreamSource};
+use vault_core::bounded::{BoundedRun, Flow, StreamItem, StreamSource};
 use vault_core::chat_export::{self, ChatImportOutcome};
 use vault_core::export::{self, ExportFormat, ExportSummary};
 use vault_core::imap::{self, FolderSyncSummary, ImapAuth, ImapConfig};
@@ -132,7 +132,6 @@ use vault_core::jobs::{
 use vault_core::llm::{
     self, AnthropicLlm, AskOutcome, LlmConfig, LlmStatus, PlanSource, PlannedQuery, QueryPlan,
 };
-use vault_core::mbox::MboxSource;
 use vault_core::oauth::{self, OAuthConfig};
 use vault_core::object_store::{MediaUsage, ObjectStore, ReconcileReport};
 use vault_core::query::{ChatContext, SearchPage, SearchQuery};
@@ -1336,16 +1335,20 @@ async fn import_mbox(
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let pool = Arc::clone(&state.pool);
     tauri::async_runtime::spawn_blocking(move || {
-        let path = Path::new(&path);
-        let (source, _zip_guard) =
-            vault_core::mbox::mail_source_for_pick(path).map_err(|e| e.to_string())?;
-        let mut run = BoundedRun::new(import_id_for("mbox-import", path));
-        run.media = Some(MediaPass::mail(&data_dir));
+        // The shared bounded body resolves the pick (directory → `.eml`
+        // folder, `.zip` → fenced temp tree, else a single mbox/.eml
+        // file) and keeps any temp tree alive for the whole run.
         let mut sink = PoolSink(&pool);
         let mut no_progress = |_: u64, _: u64, _: &str| {};
-        run.run(source.as_ref(), &mut sink, &|| false, &mut no_progress)
-            .map(ChatImportOutcome::from)
-            .map_err(|e: Error| e.to_string())
+        vault_core::mbox::import_pick_bounded(
+            &mut sink,
+            Path::new(&path),
+            &data_dir,
+            &|| false,
+            &mut no_progress,
+        )
+        .map(ChatImportOutcome::from)
+        .map_err(|e: Error| e.to_string())
     })
     .await
     .map_err(|e| format!("import task failed: {e}"))?
@@ -2117,10 +2120,28 @@ fn run_job_spec(
             if ctx.is_cancelled() {
                 return Err(JobError::Cancelled);
             }
-            let source = MboxSource::new(path);
-            let import_id = import_id_for("mbox-import", Path::new(path));
-            let media = MediaPass::mail(data_dir);
-            let outcome = run_bounded(ctx, pool, import_id, &source, Some(media), path)?;
+            // Resolve the pick exactly like the direct `import_mbox`
+            // command — through the shared bounded body (`import_mbox`
+            // job-path regression: the pick is a directory of `.eml`
+            // files or a `.zip` of them just as often as a single mbox
+            // file). The body keeps the zip's temp-tree guard alive for
+            // the whole run; dropping it early would un-squash the zip
+            // mid-import.
+            let mut sink = PoolSink(pool);
+            let cancelled = || ctx.is_cancelled();
+            let mut progress =
+                |done: u64, total: u64, message: &str| ctx.progress(done, total, message);
+            let outcome = vault_core::mbox::import_pick_bounded(
+                &mut sink,
+                Path::new(path),
+                data_dir,
+                &cancelled,
+                &mut progress,
+            )
+            .map_err(JobError::from)?;
+            if outcome.cancelled {
+                return Err(JobError::Cancelled);
+            }
             // The outcome carries the media pass's counters too — the
             // same shape as `import_mbox` and the chat-export import.
             Ok(serde_json::to_value(ChatImportOutcome::from(outcome)).unwrap_or(Value::Null))
