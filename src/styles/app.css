@@ -1211,12 +1211,8 @@ summary.icon-btn::-webkit-details-marker { display: none; }
   border-bottom: 1px solid var(--border);
   vertical-align: top;
 }
-.stat-table td.label {
-  max-width: 15em;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* Label cells wrap within the column (the raw value is always in the
+ * title tooltip); the bar column keeps the table's shape. */
 .stat-table td.num { text-align: right; white-space: nowrap; color: var(--muted); }
 .stat-table td.bar { width: 30%; }
 .stat-table td.bar > div {

@@ -1120,9 +1120,13 @@ async function refreshStats(): Promise<void> {
     if (!statsGuard.isCurrent(token)) return; // a newer refresh superseded this response
     lastStats = stats;
     archiveTotal = demoActive ? archiveTotal : stats.total;
-    const parts = stats.by_source.map((s) => `${s.source}: ${s.count}`).join(", ");
+    // Thousands-grouped like the source chips beside the line
+    // (renderSourceChips), so the same count reads the same in both.
+    const parts = stats.by_source
+      .map((s) => `${s.source}: ${s.count.toLocaleString()}`)
+      .join(", ");
     statsLabel.textContent =
-      stats.total === 0 ? "empty archive" : `${stats.total} messages (${parts})`;
+      stats.total === 0 ? "empty archive" : `${stats.total.toLocaleString()} messages (${parts})`;
     renderSourceChipsNow();
     updateVaultChrome();
     maybeInitialBrowse();
