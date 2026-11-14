@@ -427,6 +427,9 @@ function renderAsk(outcome: AskOutcome): void {
   renderAskResults(askResults, sources);
   const collected = outcome.collected ?? [];
   lastCollected = collected.length > 0 ? collected : null;
+  // A new outcome invalidates the previous ask's export status ("Exported N
+  // links."), which would otherwise survive next to the new link list.
+  askCollectedStatus.textContent = "";
   if (collected.length > 0) {
     askCollectedCount.textContent = collectedCountLine(collected);
     renderCollected(collected);

@@ -103,7 +103,7 @@ export function privacyNoteFor(item: ProviderMenuItem, summarizeTop: number): st
     `LLM assist is on (${item.model} via ${item.host}): your question is sent ` +
     `to the provider to translate it into a search, and afterwards only the top ` +
     `${summarizeTop} result messages (bodies truncated to 500 chars) are sent ` +
-    `for the summary, plus the collected link list (URLs and senders, capped at 50) ` +
+    `for the summary, plus the collected link list (URLs, senders and dates, capped at 50) ` +
     `when your question asks to collect links. Nothing else leaves this machine; embeddings for hybrid ` +
     `ranking are computed locally and never sent; ${keySentence}.`
   );
@@ -137,7 +137,7 @@ export function consentPromptText(item: ProviderMenuItem, summarizeTop: number):
     `matching messages (bodies truncated to 500 chars), would be sent to ` +
     `${item.model} via ${item.host} to translate and summarize the ask. ` +
     `When your question asks to collect links, the collected link list ` +
-    `(URLs and senders, capped at 50) is sent too.`
+    `(URLs, senders and dates, capped at 50) is sent too.`
   );
 }
 

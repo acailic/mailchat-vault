@@ -261,11 +261,13 @@ describe("collected links", () => {
 describe("consent texts mention the link list", () => {
   it("consent prompt states the links cap", () => {
     expect(consentPromptText(zaiItem, 8)).toContain(
-      "collect links, the collected link list (URLs and senders, capped at 50)",
+      "collect links, the collected link list (URLs, senders and dates, capped at 50)",
     );
   });
   it("privacy note states the links cap", () => {
-    expect(privacyNoteFor(zaiItem, 8)).toContain("capped at 50");
+    expect(privacyNoteFor(zaiItem, 8)).toContain(
+      "the collected link list (URLs, senders and dates, capped at 50)",
+    );
   });
 });
 
