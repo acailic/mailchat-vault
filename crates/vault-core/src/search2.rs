@@ -873,7 +873,7 @@ fn tag_name_at(bytes: &[u8], at: usize) -> Option<String> {
 fn find_closing_tag(bytes: &[u8], from: usize, name: &str) -> Option<usize> {
     let needle = format!("</{name}");
     let hay = &bytes[from..];
-    let at = find_subslice(hay, needle.as_bytes())?;
+    let at = find_subslice_ci(hay, needle.as_bytes())?;
     let after = at + needle.len();
     let gt = hay[after..].iter().position(|&b| b == b'>')?;
     Some(from + after + gt + 1)
@@ -886,6 +886,17 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
         return None;
     }
     hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// First index of `needle` in `hay`, ASCII case-insensitive (the
+/// [`starts_with_ci`] comparison applied to every window). Raw-text
+/// closers need this: open-tag detection is case-insensitive, so
+/// `<STYLE>…</STYLE>` is legal legacy mail the closer scan must find.
+fn find_subslice_ci(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return None;
+    }
+    hay.windows(needle.len()).position(|w| starts_with_ci(w, needle))
 }
 
 /// Decode the entity at the start of `bytes` (which begins `&`). Returns
@@ -1887,6 +1898,30 @@ mod tests {
                 crate::query::SNIPPET_CLOSE_MARK
             )
         );
+    }
+
+    #[test]
+    fn snippet_extraction_drops_uppercase_raw_text_blocks() {
+        // Legacy mail may uppercase its raw-text tags: open-tag detection
+        // is case-insensitive, so the closer scan must be too, or the
+        // whole tail after `<STYLE>` is dropped as unterminated markup.
+        assert_eq!(
+            html_to_snippet_text("<STYLE>h1 {color:red}</STYLE>A<SCRIPT>steal()</SCRIPT>B"),
+            "AB"
+        );
+
+        // Head-heavy shape: the body text after one uppercase style block
+        // survives instead of a near-empty snippet.
+        assert_eq!(
+            html_to_snippet_text(
+                "<HTML><HEAD><STYLE>body{color:red}</STYLE></HEAD>\
+                 <BODY>quarterly vault report attached</BODY></HTML>"
+            ),
+            "quarterly vault report attached"
+        );
+
+        // Mixed case closers match as well.
+        assert_eq!(html_to_snippet_text("<style>x</StYlE>after"), "after");
     }
 
     #[test]
