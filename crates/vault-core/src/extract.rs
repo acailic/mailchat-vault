@@ -38,20 +38,23 @@ const TRAILING: &[char] = &['.', ',', ';', ':', '!', '?', '"', '\''];
 
 /// Next `http://`/`https://` at or after `from` (case-insensitive):
 /// byte index of the scheme start and of the `://` end.
+///
+/// The fixed-width probes compare raw byte slices — `&[u8]` has no
+/// char-boundary rule — so a multi-byte char straddling the probe width
+/// cannot panic; boundary alignment is not what makes them safe. A match
+/// is pure ASCII, so `at + len` is a valid char boundary for callers.
 fn find_scheme(body: &str, from: usize) -> Option<(usize, usize)> {
     let bytes = body.as_bytes();
     let mut at = from;
-    while at + 8 <= bytes.len() {
-        // The scheme is pure ASCII, so `at + len` is always a valid char
-        // boundary once `at` is; skip offsets inside a multi-byte char.
+    while at + 7 <= bytes.len() {
         if !body.is_char_boundary(at) {
             at += 1;
             continue;
         }
-        let rest = &body[at..];
-        let len = if rest.len() >= 8 && rest[..8].eq_ignore_ascii_case("https://") {
+        let rest = &bytes[at..];
+        let len = if rest.len() >= 8 && rest[..8].eq_ignore_ascii_case(b"https://") {
             8
-        } else if rest.len() >= 7 && rest[..7].eq_ignore_ascii_case("http://") {
+        } else if rest[..7].eq_ignore_ascii_case(b"http://") {
             7
         } else {
             at += 1;
@@ -106,7 +109,9 @@ fn scan_urls(body: &str) -> Vec<(String, usize, usize)> {
             url = trimmed;
         }
         url_end = scheme_at + url.len();
-        let has_host = url.len() > url.find("://").map_or(8, |p| p + 3);
+        // The scan only yields URLs that start with the scheme, so `find`
+        // always succeeds; the host is whatever follows `://`.
+        let has_host = url.len() > url.find("://").expect("url starts with scheme") + 3;
         if has_host && url.len() <= MAX_URL_LEN {
             found.push((url, scheme_at, url_end));
             search_from = url_end;
@@ -307,6 +312,32 @@ mod tests {
             "a",
             "2026-01-01T00:00:00Z",
             "see https://example.com/x café und noch mehr text danach",
+        )]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].url, "https://example.com/x");
+    }
+
+    #[test]
+    fn multibyte_char_straddling_probe_width_no_panic() {
+        // '九' is 3 bytes: byte 8 of the probe window lands mid-character.
+        let out = extract_links(&[msg(
+            1,
+            "a",
+            "2026-01-01T00:00:00Z",
+            "a九九九九 https://example.com/x",
+        )]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].url, "https://example.com/x");
+    }
+
+    #[test]
+    fn emoji_straddling_probe_width_no_panic() {
+        // '😀' is 4 bytes: byte 7 of the probe window lands mid-character.
+        let out = extract_links(&[msg(
+            1,
+            "a",
+            "2026-01-01T00:00:00Z",
+            "😀😀😀 https://example.com/x",
         )]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].url, "https://example.com/x");
