@@ -410,21 +410,93 @@ describe("reading pane", () => {
     expect(el.querySelectorAll("li.thread-row").length).toBe(1);
   });
 
-  it("actions are wired: copy, copy link, export, close, open neighbor", () => {
+  it("actions are wired: copy, copy link, export, export chat, close, open neighbor", () => {
     const calls: string[] = [];
     const el = render({
       onCopy: () => calls.push("copy"),
       onCopyLink: () => calls.push("link"),
       onExport: () => calls.push("export"),
+      onExportChat: () => calls.push("export-chat"),
       onClose: () => calls.push("close"),
       onOpenMessage: (id) => calls.push(`open:${id}`),
     });
     (el.querySelector("button.copy-btn") as HTMLElement).click();
     (el.querySelector("button.copy-link-btn") as HTMLElement).click();
     (el.querySelector("button.export-selection-btn") as HTMLElement).click();
+    (el.querySelector("button.export-chat-btn") as HTMLElement).click();
     (el.querySelector("button.close-btn") as HTMLElement).click();
     (el.querySelector("li.thread-row.link") as HTMLElement).click();
-    expect(calls).toEqual(["copy", "link", "export", "close", "open:1"]);
+    expect(calls).toEqual(["copy", "link", "export", "export-chat", "close", "open:1"]);
+  });
+
+  it("header utilities are icon-only buttons named by aria-label", () => {
+    const el = render();
+    const actions = el.querySelector(".header-actions") as HTMLElement;
+    const named = (selector: string) => {
+      const button = actions.querySelector(selector) as HTMLElement;
+      expect(button.textContent).toBe(""); // icon only, no text label
+      expect(button.getAttribute("aria-label")).toBeTruthy();
+      expect(button.title).toBeTruthy();
+      return button;
+    };
+    named("button.copy-btn");
+    named("button.copy-link-btn");
+    named("button.close-btn");
+    // Back to results is gone from the header: the swap layouts own it in
+    // the reading toolbar, and the wide pane gets a plain Close instead.
+    expect(actions.textContent).not.toContain("Back to results");
+    // Three icon utilities + the Export… disclosure: nothing else.
+    expect([...actions.children].map((c) => c.tagName)).toEqual([
+      "BUTTON",
+      "BUTTON",
+      "DETAILS",
+      "BUTTON",
+    ]);
+  });
+
+  it("Export… opens a picker with this message and the conversation", () => {
+    const el = render();
+    const picker = el.querySelector("details.reading-export") as HTMLDetailsElement;
+    expect(picker.open).toBe(false);
+    const summary = picker.querySelector("summary") as HTMLElement;
+    expect(summary.getAttribute("aria-label")).toBe("Export");
+    const rows = [...picker.querySelectorAll(".export-row")];
+    expect(rows.length).toBe(2);
+    expect(rows[0].textContent).toContain("This message");
+    const messageFormat = rows[0].querySelector("select") as HTMLSelectElement;
+    expect([...messageFormat.options].map((o) => o.value)).toEqual(["text", "json"]);
+    expect(rows[1].textContent).toContain("Conversation");
+    const chatFormat = rows[1].querySelector("select") as HTMLSelectElement;
+    expect([...chatFormat.options].map((o) => o.value)).toEqual(["csv", "json", "mbox"]);
+  });
+
+  it("a re-render keeps the chosen formats and the picker's open state", () => {
+    const el = render();
+    const picker = el.querySelector("details.reading-export") as HTMLDetailsElement;
+    picker.open = true;
+    (el.querySelector("#message-format") as HTMLSelectElement).value = "json";
+    (el.querySelector("#chat-format") as HTMLSelectElement).value = "mbox";
+    // Same message (a context page load / background refresh):
+    renderDetail2(el, {
+      ctx,
+      entries: contextEntries(ctx),
+      queryText: "vault",
+      hasMoreBefore: true,
+      hasMoreAfter: true,
+      onOpenMessage: () => {},
+      onLoadEarlier: () => {},
+      onLoadLater: () => {},
+      onCopy: () => {},
+      onCopyLink: () => {},
+      onExport: () => {},
+      onExportChat: () => {},
+      onExportMedia: () => {},
+      onOpenExternalMedia: () => {},
+      onClose: () => {},
+    });
+    expect((el.querySelector("details.reading-export") as HTMLDetailsElement).open).toBe(true);
+    expect((el.querySelector("#message-format") as HTMLSelectElement).value).toBe("json");
+    expect((el.querySelector("#chat-format") as HTMLSelectElement).value).toBe("mbox");
   });
 
   it("raw JSON stays collapsed behind Technical details", () => {

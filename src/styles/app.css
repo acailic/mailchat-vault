@@ -766,16 +766,64 @@ mark.hit {
 }
 #detail:not(.open) { display: none; }
 
-.detail-card header { display: flex; justify-content: space-between; align-items: baseline; gap: var(--sp-2); }
-.detail-card header .header-actions { display: flex; gap: 6px; }
+.detail-card header { display: flex; justify-content: space-between; align-items: center; gap: var(--sp-2); }
+.detail-card header .header-actions { display: flex; gap: 6px; align-items: center; }
 .detail-card h2 { font-size: var(--text-section); margin: 0 0 var(--sp-2); }
 .detail-card .body { max-width: 78ch; }
-.export-chat-btn, .close-btn {
-  font-size: var(--text-meta);
+
+/* Icon-only utility actions (reading header): quiet squares that name
+ * their action through aria-label/title; the keyboard focus ring comes
+ * from the global :focus-visible rule. */
+.icon-btn {
   display: inline-flex;
   align-items: center;
-  gap: var(--sp-1);
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-s);
 }
+.icon-btn:hover:not(:disabled) {
+  background: var(--panel-2);
+  border-color: var(--border);
+}
+summary.icon-btn {
+  list-style: none;
+  cursor: pointer;
+}
+summary.icon-btn::-webkit-details-marker { display: none; }
+
+/* The reading header's Export… picker: an anchored popover under the
+ * summary (absolute, so opening it never reflows the pane). */
+.reading-export { position: relative; }
+.reading-export[open] > summary.icon-btn {
+  background: var(--selection);
+  border-color: var(--border-strong);
+}
+.export-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: min(34ch, 84vw);
+  padding: var(--sp-3);
+  background: var(--panel);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow);
+}
+.export-row {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+  flex-wrap: wrap;
+}
+.export-row .meta { flex: 0 0 auto; }
 .meta-table {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -1014,6 +1062,9 @@ mark.hit {
 
   #reading-toolbar { display: flex; }
   #detail:not(.open) { display: none; }
+  /* The toolbar owns "‹ Back to results" in the swap layouts; the wide
+   * layout's icon Close would be a second way out — hide it here. */
+  .detail-card .close-btn { display: none; }
 }
 
 /* --- Compact layout (<800px): one column, navigation drawer --------------- */

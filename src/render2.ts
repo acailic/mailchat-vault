@@ -12,7 +12,7 @@ import {
   timeConfidenceDetail,
   timeConfidenceLabel,
 } from "./format";
-import { icon } from "./icons";
+import { type IconName, icon, iconEl } from "./icons";
 import {
   appendSegments,
 } from "./render";
@@ -324,6 +324,134 @@ function contextRow(
   return row;
 }
 
+/** A quiet icon-only action for the reading header. The icon is
+ * decorative; the accessible name is the explicit aria-label and the
+ * tooltip (title) carries the longer explanation. */
+function iconButton(
+  name: IconName,
+  cls: string,
+  label: string,
+  title: string,
+  onClick: () => void,
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `icon-btn ${cls}`;
+  button.setAttribute("aria-label", label);
+  button.title = title;
+  button.append(iconEl(name));
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+/** One format <select> for the reading header's Export picker. */
+function formatSelect(
+  id: string,
+  label: string,
+  options: Array<[value: string, text: string]>,
+  selected: string | null,
+): HTMLSelectElement {
+  const select = document.createElement("select");
+  select.id = id;
+  select.setAttribute("aria-label", label);
+  select.title = label;
+  for (const [value, text] of options) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = text;
+    select.append(option);
+  }
+  // A re-render (opening a neighbour, loading more context) keeps the
+  // format the user already chose instead of snapping back to the default.
+  if (selected !== null && options.some(([value]) => value === selected)) {
+    select.value = selected;
+  }
+  return select;
+}
+
+/** The reading header's single Export… action: a native disclosure whose
+ * picker offers this message (text/JSON) and the whole conversation
+ * (CSV/JSON Lines/MBOX). Chat export lives here as the picker's second
+ * section rather than in a separate overflow menu. */
+function exportPicker(el: HTMLElement, opts: Detail2Options): HTMLDetailsElement {
+  const previous = (id: string) =>
+    el.querySelector<HTMLSelectElement>(`#${id}`)?.value ?? null;
+  // The picker stays open across a re-render of the SAME message (a
+  // background refresh must not snap it shut mid-choice); opening another
+  // message starts with it closed.
+  const previousCard = el.querySelector<HTMLElement>("article.detail-card");
+  const wasOpen =
+    previousCard?.dataset.messageId === String(opts.ctx.anchor.id) &&
+    (previousCard.querySelector<HTMLDetailsElement>("details.reading-export")?.open ?? false);
+
+  const picker = document.createElement("details");
+  picker.className = "reading-export";
+  picker.open = wasOpen;
+  const summary = document.createElement("summary");
+  summary.className = "icon-btn";
+  summary.setAttribute("aria-label", "Export");
+  summary.title = "Export this message or the whole conversation";
+  summary.append(iconEl("export"));
+
+  const row = (caption: string, select: HTMLSelectElement, action: HTMLButtonElement) => {
+    const line = document.createElement("div");
+    line.className = "export-row";
+    const label = document.createElement("span");
+    label.className = "meta";
+    label.textContent = caption;
+    line.append(label, select, action);
+    return line;
+  };
+
+  const exportButton = document.createElement("button");
+  exportButton.type = "button";
+  exportButton.className = "export-selection-btn";
+  exportButton.textContent = "Export message…";
+  exportButton.title = "Export this message as text or JSON";
+  exportButton.addEventListener("click", opts.onExport);
+
+  const exportChatButton = document.createElement("button");
+  exportChatButton.type = "button";
+  exportChatButton.className = "export-chat-btn";
+  exportChatButton.textContent = "Export chat…";
+  exportChatButton.title = "Export the whole conversation thread";
+  exportChatButton.addEventListener("click", opts.onExportChat);
+
+  const body = document.createElement("div");
+  body.className = "export-popover";
+  body.append(
+    row(
+      "This message",
+      formatSelect(
+        "message-format",
+        "Message export format",
+        [
+          ["text", "Text"],
+          ["json", "JSON"],
+        ],
+        previous("message-format"),
+      ),
+      exportButton,
+    ),
+    row(
+      "Conversation",
+      formatSelect(
+        "chat-format",
+        "Chat export format",
+        [
+          ["csv", "CSV"],
+          ["json", "JSON Lines"],
+          ["mbox", "MBOX (email rows)"],
+        ],
+        previous("chat-format"),
+      ),
+      exportChatButton,
+    ),
+  );
+  picker.append(summary, body);
+  return picker;
+}
+
 /** Render the v2 reading pane: detail card + context thread + actions. */
 export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
   const { ctx, entries } = opts;
@@ -332,42 +460,36 @@ export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
 
   const card = document.createElement("article");
   card.className = "detail-card";
+  card.dataset.messageId = String(detail.id);
 
   const header = document.createElement("header");
   const title = document.createElement("h2");
   title.textContent = detail.author || "unknown";
   const actions = document.createElement("div");
   actions.className = "header-actions";
-  const copyButton = document.createElement("button");
-  copyButton.type = "button";
-  copyButton.className = "copy-btn";
-  copyButton.textContent = "Copy";
-  copyButton.title = "Copy the message text with provenance";
-  copyButton.addEventListener("click", opts.onCopy);
-  const linkButton = document.createElement("button");
-  linkButton.type = "button";
-  linkButton.className = "copy-link-btn";
-  linkButton.textContent = "Copy link";
-  linkButton.title = `Copy the internal locator (${messageLink(detail.id)})`;
-  linkButton.addEventListener("click", opts.onCopyLink);
-  const exportButton = document.createElement("button");
-  exportButton.type = "button";
-  exportButton.className = "export-selection-btn";
-  exportButton.textContent = "Export…";
-  exportButton.title = "Export this message as text or JSON";
-  exportButton.addEventListener("click", opts.onExport);
-  const exportChatButton = document.createElement("button");
-  exportChatButton.type = "button";
-  exportChatButton.className = "export-chat-btn";
-  exportChatButton.textContent = "Export chat…";
-  exportChatButton.title = "Export the whole conversation thread";
-  exportChatButton.addEventListener("click", opts.onExportChat);
-  const closeButton = document.createElement("button");
-  closeButton.type = "button";
-  closeButton.className = "close-btn";
-  closeButton.textContent = "Back to results";
-  closeButton.addEventListener("click", opts.onClose);
-  actions.append(copyButton, linkButton, exportButton, exportChatButton, closeButton);
+  // Utility actions are icon-only and equal in weight; Export… opens the
+  // picker. "Back to results" is not here: the swap layouts
+  // (medium/compact) own it in the reading toolbar, and the wide layout —
+  // where the results sit beside the pane — gets a plain Close instead
+  // (hidden by CSS whenever the toolbar's Back is showing).
+  actions.append(
+    iconButton(
+      "copy",
+      "copy-btn",
+      "Copy message",
+      "Copy the message text with provenance",
+      opts.onCopy,
+    ),
+    iconButton(
+      "link",
+      "copy-link-btn",
+      "Copy link",
+      `Copy the internal locator (${messageLink(detail.id)})`,
+      opts.onCopyLink,
+    ),
+    exportPicker(el, opts),
+    iconButton("close", "close-btn", "Close", "Close the reading pane (Esc)", opts.onClose),
+  );
   header.append(title, actions);
 
   const meta = document.createElement("dl");

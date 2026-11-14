@@ -1222,12 +1222,15 @@ function copyLink(): void {
   if (state.detail) void copyText(messageLink(state.detail.anchor.id), "Message link");
 }
 
-async function exportSelection(ids: number[]): Promise<void> {
+async function exportSelection(ids: number[], formatOverride?: string): Promise<void> {
   if (ids.length === 0) {
     selectionStatus.textContent = "Check result rows first, then export them.";
     return;
   }
-  const format = selectionFormatSelect.value === "json" ? "json" : "text";
+  // The reading pane's picker passes its own format; the results picker
+  // reads the #selection-format select beside the checked-rows button.
+  const format =
+    formatOverride ?? (selectionFormatSelect.value === "json" ? "json" : "text");
   const ext = format === "json" ? "json" : "txt";
   const path = await save({
     title: "Export selection",
@@ -1262,7 +1265,11 @@ function exportSelectionFromResults(): void {
 }
 
 function exportSingleMessage(): void {
-  if (state.detail) void exportSelection([state.detail.anchor.id]);
+  if (!state.detail) return;
+  // The message picker lives inside the re-rendered detail card, so the
+  // select is read at click time, never cached.
+  const pickerFormat = document.querySelector<HTMLSelectElement>("#message-format")?.value;
+  void exportSelection([state.detail.anchor.id], pickerFormat === "json" ? "json" : "text");
 }
 
 // Back-to-results (medium/compact): the results area is restored with its
@@ -2394,7 +2401,10 @@ async function exportChat(): Promise<void> {
   const detail = state.detail;
   if (!detail) return;
   exportStatus.textContent = "";
-  const format = exportFormatSelect.value;
+  // The chat-format select lives in the reading header's Export picker
+  // (re-rendered with the card), so it is read at click time.
+  const chatFormat = document.querySelector<HTMLSelectElement>("#chat-format")?.value;
+  const format = chatFormat === "json" || chatFormat === "mbox" ? chatFormat : "csv";
   const path = await pickExportPath(format);
   if (path === null) return; // cancelled
   exportStatus.textContent = "Exporting chat…";
