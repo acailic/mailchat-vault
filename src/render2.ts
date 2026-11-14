@@ -22,6 +22,7 @@ import {
 } from "./searchstate";
 import {
   highlightSegments,
+  htmlOf,
   parseSnippet,
   splitTerms,
 } from "./viewmodel";
@@ -407,10 +408,60 @@ export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
   bodyHeading.textContent = "Message";
   const bodyText = document.createElement("div");
   bodyText.className = "body";
-  appendSegments(bodyText, highlightSegments(detail.body, terms));
-  body.append(bodyHeading, bodyText);
+  const html = htmlOf(detail.raw_json);
+  if (html === null) {
+    appendSegments(bodyText, highlightSegments(detail.body, terms));
+    body.append(bodyHeading, bodyText);
+  } else {
+    // Rendered/Raw toggle. The stored HTML is presentation from an
+    // untrusted sender: it is only ever placed into a sandboxed
+    // iframe's srcdoc (no scripts, unique origin, no navigation, and
+    // a CSP that blocks every remote subresource — tracking pixels
+    // included). Raw is today's highlighted plain text.
+    const toggle = document.createElement("div");
+    toggle.className = "mode-toggle";
+    toggle.setAttribute("role", "group");
+    toggle.setAttribute("aria-label", "Message view mode");
+    const renderedBtn = document.createElement("button");
+    renderedBtn.type = "button";
+    renderedBtn.className = "mode-btn";
+    renderedBtn.textContent = "Rendered";
+    const rawBtn = document.createElement("button");
+    rawBtn.type = "button";
+    rawBtn.className = "mode-btn";
+    rawBtn.textContent = "Raw";
+    const show = (asRendered: boolean) => {
+      bodyText.replaceChildren();
+      body.querySelector("iframe.rendered-frame")?.remove();
+      if (asRendered) {
+        const frame = document.createElement("iframe");
+        frame.className = "rendered-frame";
+        frame.title = "Rendered message body";
+        frame.setAttribute("sandbox", "");
+        frame.setAttribute(
+          "srcdoc",
+          '<!doctype html><meta http-equiv="Content-Security-Policy" ' +
+            'content="default-src \'none\'; style-src \'unsafe-inline\'; ' +
+            'img-src data:">' +
+            html,
+        );
+        // Sibling of .body, never inside it: the serialized markup of
+        // .detail-card .body stays free of sender HTML entirely.
+        body.append(frame);
+      } else {
+        appendSegments(bodyText, highlightSegments(detail.body, terms));
+      }
+      renderedBtn.setAttribute("aria-pressed", String(asRendered));
+      rawBtn.setAttribute("aria-pressed", String(!asRendered));
+    };
+    renderedBtn.addEventListener("click", () => show(true));
+    rawBtn.addEventListener("click", () => show(false));
+    toggle.append(renderedBtn, rawBtn);
+    body.append(bodyHeading, toggle, bodyText);
+    show(true);
+  }
 
-  const sections: HTMLElement[] = [header, meta];
+  const sections: HTMLElement[] = [header, meta, body];
 
   if (ctx.unverified_conversation) {
     const note = document.createElement("p");
