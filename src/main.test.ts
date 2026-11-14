@@ -2715,6 +2715,7 @@ describe("IMAP sync auth mode", () => {
       source_id: "inst-imap-failed",
       kind: "imap",
       label: "imap:127.0.0.1:59993:first@h.invalid",
+      medium: "mail",
       imap: {
         host: "127.0.0.1",
         port: 59993,
@@ -4547,6 +4548,7 @@ const IMAP_ACCOUNT = {
   source_id: "inst-imap-1",
   kind: "imap",
   label: "imap:imap.gmail.com:993:ana@gmail.com",
+  medium: "mail",
   imap: {
     host: "imap.gmail.com",
     port: 993,
@@ -4569,6 +4571,7 @@ const IMPORT_ACCOUNT = {
   source_id: "inst-import-1",
   kind: "import",
   label: "mbox:archive.mbox",
+  medium: "mail",
   imap: null,
   message_count: 6,
   failed_items: 0,
@@ -4818,6 +4821,7 @@ describe("accounts panel", () => {
         source_id: "inst-mail",
         kind: "imap",
         label: "imap:imap.gmail.com:993:ana@gmail.com",
+        medium: "mail",
         imap: {
           host: "imap.gmail.com", port: 993, username: "ana@gmail.com",
           folders: ["INBOX"], has_password: true, has_oauth: false,

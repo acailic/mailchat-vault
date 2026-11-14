@@ -4,7 +4,7 @@
 /// snapshots in render.test.ts.
 
 import { authorDisplayName, formatSentAt, humanSize, snippet as truncateBody } from "./format";
-import { icon } from "./icons";
+import { icon, iconEl } from "./icons";
 import type { SourceChipRow } from "./accountsview";
 import type {
   ArchiveStats,
@@ -148,7 +148,9 @@ export interface SourceChipsOptions {
 }
 
 /** Toggle chips for the source filter (none selected = all sources).
- * Selection keys are stable source-instance ids. */
+ * Selection keys are stable source-instance ids. Each chip leads with
+ * its source's taxonomy icon (mail/chat/file — decorative, aria-hidden;
+ * the label stays the accessible text, so `textContent` is unchanged). */
 export function renderSourceChips(el: HTMLElement, opts: SourceChipsOptions): void {
   const chips = opts.rows.map((row) => {
     const chip = document.createElement("button");
@@ -156,8 +158,10 @@ export function renderSourceChips(el: HTMLElement, opts: SourceChipsOptions): vo
     chip.className = "chip" + (opts.selected.includes(row.id) ? " on" : "");
     chip.dataset.source = row.id;
     chip.setAttribute("aria-pressed", opts.selected.includes(row.id) ? "true" : "false");
-    chip.textContent =
+    const label = document.createElement("span");
+    label.textContent =
       row.count === null ? row.label : `${row.label} (${row.count.toLocaleString()})`;
+    chip.append(iconEl(row.icon), label);
     chip.addEventListener("click", () => opts.onToggle(row.id));
     return chip;
   });

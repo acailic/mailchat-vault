@@ -550,7 +550,13 @@
     <!-- Icon sprite: stroke-only symbols, 24×24 grid, 1.5px round strokes.
          Referenced via <use href="#i-…">; presentation (color/size/stroke)
          comes from the .icon classes in app.css. Keep symbols free of
-         fill/stroke attributes so currentColor inheritance works. -->
+         fill/stroke attributes so currentColor inheritance works.
+
+         Source taxonomy (mail vs chat — the product's own axis): IMAP
+         accounts and mail-file imports render i-mail / i-file, chat
+         exports (WhatsApp/Telegram/Signal/Discord/Messenger) render
+         i-chat; the choice comes from the backend's per-source
+         `medium` (accountsview.ts `sourceIcon`), never the label. -->
     <svg xmlns="http://www.w3.org/2000/svg" hidden>
       <symbol id="i-archive" viewBox="0 0 24 24">
         <rect x="3.5" y="4.5" width="17" height="5" rx="1.2"/>
@@ -620,6 +626,10 @@
         <path d="M6 3.5h7.5L18.5 8.5V19a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 19V5A1.5 1.5 0 0 1 6 3.5Z"/>
         <path d="M13.5 3.5V8.5h5"/><path d="M8.5 12.5h7"/><path d="M8.5 16h7"/>
       </symbol>
+      <!-- Reserved: no managed/enterprise source kind exists in the data
+           model yet (source kinds are "imap" | "import" | "legacy").
+           Drawn and kept for the day one arrives; do not force it onto
+           ordinary sources. -->
       <symbol id="i-server" viewBox="0 0 24 24">
         <rect x="4" y="4.5" width="16" height="6" rx="1.5"/>
         <rect x="4" y="13.5" width="16" height="6" rx="1.5"/>
