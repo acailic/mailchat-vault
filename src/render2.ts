@@ -98,13 +98,22 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
   const meta = document.createElement("div");
   meta.className = "meta";
   const displayAuthor = authorDisplayName(hit.author) || "unknown";
-  const parts = [
-    displayAuthor,
-    timeLabel(hit),
-    hit.source_label,
-  ];
-  if (hit.conversation_label) parts.push(hit.conversation_label);
-  meta.textContent = parts.join(" · ");
+  // The time sits in its own span so a marked-uncertain time can
+  // explain itself on hover: "(assumed)" no longer waits for the
+  // detail pane to say what it means (A04 honesty). The wording is
+  // the detail pane's own one-sentence explanation, so both surfaces
+  // say the same thing.
+  const time = document.createElement("span");
+  time.className = "time";
+  time.textContent = timeLabel(hit);
+  if (
+    hit.time_confidence === "legacy_assumed" ||
+    hit.time_confidence === "unresolved"
+  ) {
+    time.title = timeConfidenceDetail(hit.time_confidence);
+  }
+  meta.append(displayAuthor, " · ", time, " · ", hit.source_label);
+  if (hit.conversation_label) meta.append(" · ", hit.conversation_label);
   // The full "Name <address>" form stays one hover away.
   if (displayAuthor !== (hit.author || "unknown")) meta.title = hit.author;
   if (hit.attachment_count > 0) {

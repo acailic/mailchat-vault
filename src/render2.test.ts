@@ -142,6 +142,37 @@ describe("flat results", () => {
     expect(timeLabel(hit({ time_confidence: "explicit_offset" }))).not.toContain("(");
   });
 
+  it("a marked-uncertain time explains itself on the row, not just in the detail pane", () => {
+    const el = document.createElement("div");
+    renderFlatResults(el, {
+      hits: [
+        hit(),
+        hit({ time_confidence: "explicit_offset" }),
+        hit({ time_confidence: "unresolved" }),
+      ],
+      activeIndex: -1,
+      selectedId: null,
+      selection: new Set(),
+      terms: [],
+      onOpen: () => {},
+      onToggleSelect: () => {},
+    });
+    const times = [...el.querySelectorAll(".hit-main .meta span.time")] as HTMLElement[];
+    expect(times.length).toBe(3);
+    // The meta line still reads the same (the span changes no text).
+    expect(times[0].textContent).toContain("(assumed)");
+    // Assumed: the hover title is the detail pane's own explanation, so
+    // both surfaces say the same thing.
+    expect(times[0].title).toBe(
+      "The time was assumed during import and may be off — the source did not state it directly.",
+    );
+    expect(times[2].title).toBe(
+      "The message's time could not be read; no instant was fabricated.",
+    );
+    // Exact times carry no marker, so they carry no tooltip noise either.
+    expect(times[1].title).toBe("");
+  });
+
   it("row selection checkboxes reflect and drive the selection", () => {
     const el = document.createElement("div");
     const toggled: number[] = [];
