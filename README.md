@@ -6,7 +6,7 @@ Everything stays on the machine. The only outbound traffic is optional [AI-assis
 
 ## What it does
 
-- Imports `.mbox` files and WhatsApp, Telegram, Signal, and Discord exports — single files, folders, or `.zip`
+- Imports `.mbox`/`.eml` mail and WhatsApp, Telegram, Signal, Discord, and Messenger exports — single files, folders, or `.zip`
 - Bounded import preview before anything is stored; referenced media goes into a content-addressed store
 - Incremental IMAP sync — Gmail (Google sign-in or app password) or any server
 - Opt-in folder watching, scheduled auto-sync, and new-mail desktop notifications

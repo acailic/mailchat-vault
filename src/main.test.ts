@@ -1371,6 +1371,38 @@ describe("import picker → preview → confirm (U03)", () => {
     );
   });
 
+  it("an eml preview dispatches to import_mbox, not the chat-export path", async () => {
+    await boot();
+    dialog.open.mockResolvedValue("/tmp/mail.eml");
+    tauri.handlers.set("preview_import", () =>
+      Promise.resolve({
+        ...TELEGRAM_PREVIEW,
+        kind: "eml",
+        source: "mbox",
+        messages_seen: 1,
+        media_referenced: 0,
+        media_missing: 0,
+      }),
+    );
+    tauri.handlers.set("import_mbox", () =>
+      Promise.resolve({
+        summary: { source: "mbox", seen: 1, inserted: 1, skipped: 0, failed: 0 },
+        import_id: "mbox-import-eml789",
+      }),
+    );
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($(".preview-title").textContent).toBe("Email messages (.eml)"));
+    $("#preview-import-btn").click();
+    await vi.waitFor(() => expect(importCalls("import_mbox")).toHaveLength(1));
+    expect(importCalls("import_mbox")[0].args).toEqual({ path: "/tmp/mail.eml" });
+    expect(importCalls("import_chat_export")).toHaveLength(0);
+    await vi.waitFor(() =>
+      expect($("#import-status").textContent).toBe(
+        "Imported 1 new, 0 already present (of 1 in mbox).",
+      ),
+    );
+  });
+
   it("a cancelled picker previews nothing; cancelling the preview stores nothing", async () => {
     await boot();
     dialog.open.mockResolvedValue(null);

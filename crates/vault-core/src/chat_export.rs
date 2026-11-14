@@ -19,6 +19,10 @@ use crate::discord::{
 use crate::import_bounds::{expand_zip_bounded, ImportBounds};
 use crate::ingest::IngestSummary;
 use crate::media::MediaSummary;
+use crate::messenger::{
+    is_messenger_export, is_messenger_export_dir, is_messenger_export_reader,
+    messenger_export_root, MessengerSource,
+};
 use crate::signal::{is_signal_export, is_signal_export_reader, SignalSource};
 use crate::telegram::{is_telegram_export, is_telegram_export_reader, TelegramSource};
 use crate::whatsapp::{is_whatsapp_export, is_whatsapp_export_reader, WhatsappSource};
@@ -31,6 +35,7 @@ pub enum ChatFormat {
     Telegram,
     Signal,
     Discord,
+    Messenger,
 }
 
 /// Detect which chat export format `bytes` hold, if any.
@@ -38,13 +43,19 @@ pub enum ChatFormat {
 /// Discord wins when the JSON carries a `messages` array plus a
 /// `channel`/`guild` object (Telegram exports also have a top-level
 /// `messages` array, so the Discord shapes must be checked first);
-/// a top-level JSON array of Signal Desktop message objects is a
-/// Signal conversation export; otherwise a Telegram `messages` array
+/// a Messenger export (a `participants` array plus a `messages` array
+/// whose first element carries `sender_name`/`timestamp_ms`) is
+/// checked next, before the Telegram probe can claim it; a top-level
+/// JSON array of Signal Desktop message objects is a Signal
+/// conversation export; otherwise a Telegram `messages` array
 /// decides, then a WhatsApp header within the first lines. Anything
 /// else returns `None`.
 pub fn detect_chat_format(bytes: &[u8]) -> Option<ChatFormat> {
     if is_discord_export(bytes) {
         return Some(ChatFormat::Discord);
+    }
+    if is_messenger_export(bytes) {
+        return Some(ChatFormat::Messenger);
     }
     if is_telegram_export(bytes) {
         return Some(ChatFormat::Telegram);
@@ -68,6 +79,10 @@ pub fn detect_chat_format_reader(path: &Path) -> Result<Option<ChatFormat>> {
     use std::io::Seek as _;
     if is_discord_export_reader(&mut file) {
         return Ok(Some(ChatFormat::Discord));
+    }
+    file.rewind()?;
+    if is_messenger_export_reader(&mut file) {
+        return Ok(Some(ChatFormat::Messenger));
     }
     file.rewind()?;
     if is_telegram_export_reader(&mut file) {
@@ -108,13 +123,15 @@ impl From<BoundedOutcome> for ChatImportOutcome {
 
 /// Resolve the picked path to the export file: `result.json` inside a
 /// picked directory, the picked directory itself when it is a Discord
-/// Data Package, or the picked file itself. A directory whose immediate
-/// entries hold no export may descend a single subdirectory chain
-/// (exports are commonly wrapped — `ChatExport…/result.json` inside a
-/// Telegram ZIP), and a directory holding exactly one recognizable
-/// export file next to media folders resolves to that file (a WhatsApp
-/// ZIP: the `.txt` plus `photos/`…). Hidden entries (`.`-prefixed,
-/// `__MACOSX/`, AppleDouble `._*`) never count.
+/// Data Package or a Messenger DYI tree (the export root, `messages/`,
+/// `messages/inbox/`, or a thread folder — its `message_*.json` parts
+/// merge into one thread), or the picked file itself. A directory whose
+/// immediate entries hold no export may descend a single subdirectory
+/// chain (exports are commonly wrapped — `ChatExport…/result.json`
+/// inside a Telegram ZIP), and a directory holding exactly one
+/// recognizable export file next to media folders resolves to that file
+/// (a WhatsApp ZIP: the `.txt` plus `photos/`…). Hidden entries
+/// (`.`-prefixed, `__MACOSX/`, AppleDouble `._*`) never count.
 fn resolve_export_file(picked: &Path) -> Result<PathBuf> {
     if picked.is_dir() {
         let mut dir = picked.to_path_buf();
@@ -128,6 +145,9 @@ fn resolve_export_file(picked: &Path) -> Result<PathBuf> {
             if is_discord_export_dir(&dir) {
                 return Ok(dir);
             }
+            if is_messenger_export_dir(&dir) {
+                return Ok(dir);
+            }
             let Ok(entries) = fs::read_dir(&dir) else {
                 return Err(Error::ChatImport(format!(
                     "unreadable chat export directory: {}",
@@ -135,7 +155,7 @@ fn resolve_export_file(picked: &Path) -> Result<PathBuf> {
                 )));
             };
             let mut subdirs = Vec::new();
-            let mut export_files = Vec::new();
+            let mut export_files: Vec<(PathBuf, ChatFormat)> = Vec::new();
             let mut other_files = 0usize;
             for entry in entries.flatten() {
                 let Ok(file_type) = entry.file_type() else {
@@ -149,7 +169,7 @@ fn resolve_export_file(picked: &Path) -> Result<PathBuf> {
                     subdirs.push(entry.path());
                 } else if file_type.is_file() {
                     match detect_chat_format_reader(&entry.path()) {
-                        Ok(Some(_)) => export_files.push(entry.path()),
+                        Ok(Some(format)) => export_files.push((entry.path(), format)),
                         _ => other_files += 1,
                     }
                 }
@@ -157,7 +177,16 @@ fn resolve_export_file(picked: &Path) -> Result<PathBuf> {
             // A single detectable export file wins (its sibling folders
             // are media, not competing exports).
             if export_files.len() == 1 {
-                return Ok(export_files.remove(0));
+                return Ok(export_files.remove(0).0);
+            }
+            // Several Messenger message files are one thread's parts —
+            // the pick is the thread folder itself.
+            if !export_files.is_empty()
+                && export_files
+                    .iter()
+                    .all(|(_, f)| *f == ChatFormat::Messenger)
+            {
+                return Ok(dir);
             }
             if export_files.len() > 1 {
                 return Err(Error::ChatImport(format!(
@@ -172,7 +201,7 @@ fn resolve_export_file(picked: &Path) -> Result<PathBuf> {
                 continue;
             }
             return Err(Error::ChatImport(format!(
-                "unrecognized chat export format: {} (expected a directory containing a Telegram result.json, a Discord Data Package, or a single export file)",
+                "unrecognized chat export format: {} (expected a directory containing a Telegram result.json, a Discord Data Package, a Messenger message_*.json, or a single export file)",
                 picked.display()
             )));
         }
@@ -186,19 +215,23 @@ fn resolve_export_file(picked: &Path) -> Result<PathBuf> {
 
 /// Resolve a picked path to its format and its **streaming** source (the
 /// bounded counterpart of `import`'s detection step). A directory pick is
-/// a Discord Data Package by this point (`resolve_export_file` returns
-/// the dir itself only in that case).
+/// a Discord Data Package or a Messenger DYI tree by this point
+/// (`resolve_export_file` returns the dir itself only in those cases).
 pub fn resolve_stream_source(
     picked: &Path,
 ) -> Result<(ChatFormat, PathBuf, Box<dyn StreamSource + Send>)> {
     let file = resolve_export_file(picked)?;
     if file.is_dir() {
-        let source = DiscordSource::new(file.clone());
-        return Ok((ChatFormat::Discord, file, Box::new(source)));
+        if is_discord_export_dir(&file) {
+            let source = DiscordSource::new(file.clone());
+            return Ok((ChatFormat::Discord, file, Box::new(source)));
+        }
+        let source = MessengerSource::new(file.clone());
+        return Ok((ChatFormat::Messenger, file, Box::new(source)));
     }
     let format = detect_chat_format_reader(&file)?.ok_or_else(|| {
         Error::ChatImport(format!(
-            "unrecognized chat export format: {} (expected a WhatsApp .txt export, a Telegram result.json, a Signal conversation .json, or a Discord messages.json)",
+            "unrecognized chat export format: {} (expected a WhatsApp .txt export, a Telegram result.json, a Messenger message_*.json, a Signal conversation .json, or a Discord messages.json)",
             file.display()
         ))
     })?;
@@ -207,6 +240,7 @@ pub fn resolve_stream_source(
         ChatFormat::Signal => Box::new(SignalSource::new(&file)),
         ChatFormat::WhatsApp => Box::new(WhatsappSource::new(&file)),
         ChatFormat::Discord => Box::new(DiscordSource::new(&file)),
+        ChatFormat::Messenger => Box::new(MessengerSource::new(&file)),
     };
     Ok((format, file, source))
 }
@@ -220,7 +254,11 @@ pub fn resolve_stream_source(
 ///
 /// Media extraction runs per batch on the caller's thread (file copies
 /// stay outside every storage lock); Signal and Discord record
-/// attachments in `raw_json` only, as in [`import`].
+/// attachments in `raw_json` only, as in [`import`]. A Messenger tree
+/// pick (directory or `.zip`) configures its media pass at the DYI
+/// export root, so message-referenced files resolve, store, and link
+/// from `raw_json`; a single-file Messenger pick says nothing about
+/// the tree around it, so its references stay in `raw_json` only.
 ///
 /// A picked `.zip` (M4.1) is expanded first — through the shared
 /// traversal/symlink/capacity fence ([`expand_zip_bounded`]) into an
@@ -266,6 +304,9 @@ pub fn import_bounded(
     // Media-pass path comparisons (consumed paths, the walked tree) are
     // canonical; the export file itself must be in that same form.
     let export_file = file.canonicalize()?;
+    // The DYI root a Messenger tree pick resolves media against (its
+    // uris are `messages/…`-rooted); the other kinds never read it.
+    let messenger_root = messenger_export_root(&file);
     let mut run = BoundedRun::new(import_id_for("chat-import", &file));
     let export_root = file
         .parent()
@@ -275,19 +316,39 @@ pub fn import_bounded(
         if let Some(data_dir) = data_dir {
             // Signal and Discord attachments stay recorded in `raw_json`
             // only — media extraction is not implemented for them yet.
+            // Messenger joins the media kinds only for a tree pick: a
+            // single-file pick says nothing about the tree around it, so
+            // its references stay in `raw_json` only (spec decision).
             let kind = match format {
                 ChatFormat::Telegram => Some(MediaKind::Telegram),
                 ChatFormat::WhatsApp => Some(MediaKind::WhatsApp),
-                ChatFormat::Signal | ChatFormat::Discord => None,
+                ChatFormat::Messenger if file.is_dir() => Some(MediaKind::Messenger),
+                ChatFormat::Signal | ChatFormat::Discord | ChatFormat::Messenger => None,
             };
             if let Some(kind) = kind {
-                run.media = Some(MediaPass {
-                    kind,
-                    export_root: export_root.as_path(),
-                    export_file: Some(export_file.as_path()),
-                    data_dir,
-                    unlinked: tree_pick,
-                });
+                let pass = if kind == MediaKind::Messenger {
+                    MediaPass {
+                        kind,
+                        export_root: messenger_root.as_path(),
+                        export_file: None,
+                        data_dir,
+                        // Only a pick of the DYI root itself sweeps
+                        // unreferenced files — a thread-folder or
+                        // `messages/` pick must not swallow the tree
+                        // around it. Both sides derive from the same
+                        // pick, so the plain comparison is exact.
+                        unlinked: tree_pick && messenger_root.as_path() == effective.as_ref(),
+                    }
+                } else {
+                    MediaPass {
+                        kind,
+                        export_root: export_root.as_path(),
+                        export_file: Some(export_file.as_path()),
+                        data_dir,
+                        unlinked: tree_pick,
+                    }
+                };
+                run.media = Some(pass);
             }
         }
     }
@@ -367,6 +428,67 @@ mod tests {
             Some(ChatFormat::Telegram)
         );
         assert_eq!(detect_chat_format(br#"{"channel": {}}"#), None);
+    }
+
+    #[test]
+    fn messenger_thread_json_is_not_telegram() {
+        // The Telegram probe is "has a messages array"; Messenger must be
+        // checked first or a DYI file would be imported as Telegram.
+        let messenger = br#"{"participants": [{"name": "Ana"}], "messages": [{"sender_name": "Ana", "timestamp_ms": 1, "content": "hi"}]}"#;
+        assert_eq!(detect_chat_format(messenger), Some(ChatFormat::Messenger));
+    }
+
+    #[test]
+    fn messenger_dir_resolves_over_the_export_files_error() {
+        // A thread folder holds multiple message_*.json files; as generic
+        // export files that errors ("pick one file") — for Messenger it
+        // is one thread pick.
+        let dir = tempfile::tempdir().unwrap();
+        let thread = dir.path().join("ana_1111");
+        std::fs::create_dir_all(&thread).unwrap();
+        std::fs::write(
+            thread.join("message_1.json"),
+            r#"{"participants": [{"name": "Ana"}], "messages": [{"sender_name": "Ana", "timestamp_ms": 1, "content": "x"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            thread.join("message_2.json"),
+            r#"{"participants": [{"name": "Ana"}], "messages": [{"sender_name": "Ana", "timestamp_ms": 2, "content": "y"}]}"#,
+        )
+        .unwrap();
+        let (format, file, _source) = resolve_stream_source(&thread).unwrap();
+        assert_eq!(format, ChatFormat::Messenger);
+        assert!(file.is_dir());
+    }
+
+    #[test]
+    fn renamed_messenger_parts_resolve_to_their_folder() {
+        // Parts that lost their `message_N` names are still recognized
+        // by content: an all-Messenger set resolves to the folder, not
+        // to the "pick one file" error.
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["prvi.json", "drugi.json"] {
+            std::fs::write(
+                dir.path().join(name),
+                r#"{"participants": [{"name": "Ana"}], "messages": [{"sender_name": "Ana", "timestamp_ms": 1, "content": "x"}]}"#,
+            )
+            .unwrap();
+        }
+        assert_eq!(resolve_export_file(dir.path()).unwrap(), dir.path());
+    }
+
+    #[test]
+    fn mixed_format_directory_still_asks_for_one_file() {
+        // The genuine multi-format case keeps its error text (a Discord
+        // json does not qualify — any dir holding one is a Discord pick).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("chat.txt"), WHATSAPP_BYTES).unwrap();
+        std::fs::write(dir.path().join("result_telegram.json"), telegram_bytes()).unwrap();
+        let err = resolve_export_file(dir.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("directory holds 2 export files; pick one file explicitly"),
+            "{err}"
+        );
     }
 
     #[test]

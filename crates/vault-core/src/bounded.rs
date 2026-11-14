@@ -272,6 +272,10 @@ pub enum MediaKind {
     /// [`NewMessage::attachments`]; the pass stages their bytes into the
     /// object store and records `media` entries before the batch commits.
     Mail,
+    /// Facebook Messenger (DYI tree): media uris in `raw_json`
+    /// (`photos`/`videos`/… arrays, the single-object `sticker`) are
+    /// root-relative and resolve against the DYI export root.
+    Messenger,
 }
 
 /// The media pass configuration of one bounded run (M4.2): which
@@ -633,6 +637,14 @@ impl RunState<'_, '_> {
                         summary.deduped += mail_media.deduped;
                         summary.missing += mail_media.missing;
                     }
+                    MediaKind::Messenger => crate::media::extract_messenger(
+                        &mut self.batch,
+                        pass.export_root,
+                        pass.data_dir,
+                        summary,
+                        &mut self.media_budget,
+                        &mut self.consumed_paths,
+                    )?,
                 }
             }
         }

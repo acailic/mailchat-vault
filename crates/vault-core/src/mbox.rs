@@ -4,15 +4,19 @@
 //! Supports the common `mboxo`/`mboxrd` shape: messages separated by a line
 //! starting with `From ` (sender + date), with bodies escaping embedded
 //! `From ` lines as `>From ` (the escaped form does not split a message).
+//! A file that does not lead with `From ` is a bare RFC 5322 message
+//! (`.eml`): the whole file is one message.
 
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::bounded::{EntryOutcome, Flow, StreamItem, StreamSource};
+use crate::import_bounds::{expand_zip_bounded, ImportBounds};
 use crate::ingest::{Collected, Source};
 use crate::mail::parse_raw_mail;
-use crate::Result;
+use crate::message::NewMessage;
+use crate::{Error, Result};
 
 /// Source name and dedup namespace for mbox imports.
 pub const MBOX_SOURCE: &str = "mbox";
@@ -70,6 +74,202 @@ impl StreamSource for MboxSource {
     }
 }
 
+/// A picked directory of `.eml` files (e.g. messages dragged out of
+/// Outlook): every `*.eml` imports as one mail, sorted by file name.
+/// Unreadable or unparseable files count as failed; the run continues.
+#[derive(Debug, Clone)]
+pub struct EmlDirSource {
+    path: PathBuf,
+}
+
+/// A regular file with the `.eml` extension (case-insensitive).
+fn is_eml_file(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("eml"))
+}
+
+impl EmlDirSource {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// The `*.eml` files of the directory, sorted by name (single level —
+    /// the same flat-listing contract as the Discord channel files).
+    fn files(&self) -> Result<Vec<PathBuf>> {
+        let mut files = Vec::new();
+        for entry in fs::read_dir(&self.path)? {
+            let path = entry?.path();
+            if is_eml_file(&path) {
+                files.push(path);
+            }
+        }
+        files.sort();
+        Ok(files)
+    }
+}
+
+/// Parse one `.eml` file's bytes. The RFC 5322 parser is lenient — it
+/// tolerates a headerless blob as "a mail with nothing in it" — so a
+/// result with no recognizable mail content at all (no author, no
+/// subject, no body: binary junk wearing the `.eml` extension) counts
+/// as failed, exactly like a hard parse error.
+fn parse_eml(bytes: &[u8]) -> Option<NewMessage> {
+    parse_raw_mail(bytes, MBOX_SOURCE, "")
+        .filter(|msg| !msg.author.is_empty() || !msg.body.is_empty())
+}
+
+/// The shared nothing-to-import error of the collect and stream arms:
+/// a directory whose listing holds no `.eml` file is a bad pick, not a
+/// silent zero-message import.
+fn no_eml_error(path: &Path) -> Error {
+    Error::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!(
+            "no .eml files found under {} — pick the folder that holds them",
+            path.display()
+        ),
+    ))
+}
+
+impl Source for EmlDirSource {
+    fn name(&self) -> &str {
+        MBOX_SOURCE
+    }
+
+    fn collect(&self) -> Result<Collected> {
+        let mut messages = Vec::new();
+        let mut failed: u64 = 0;
+        for file in self.files()? {
+            let bytes = fs::read(&file)?;
+            match parse_eml(&bytes) {
+                Some(msg) => messages.push(msg),
+                None => failed += 1,
+            }
+        }
+        if messages.is_empty() && failed == 0 {
+            return Err(no_eml_error(&self.path));
+        }
+        Ok(Collected { messages, failed })
+    }
+}
+
+/// The bounded streaming path: files are read one at a time (sorted, as
+/// the collect path is), one file's bytes alive at a time. An unreadable
+/// or unparseable file is a `Failed` item naming the file; the run
+/// continues with the next one.
+impl StreamSource for EmlDirSource {
+    fn name(&self) -> &str {
+        MBOX_SOURCE
+    }
+
+    fn stream(&self, skip: u64, emit: &mut dyn FnMut(StreamItem) -> Result<Flow>) -> Result<()> {
+        let files = self.files()?;
+        if files.is_empty() {
+            // The same bad-pick error the collect arm raises — a
+            // streaming pick must not silently import nothing either.
+            return Err(no_eml_error(&self.path));
+        }
+        let mut failure: Option<crate::Error> = None;
+        {
+            let mut state = crate::bounded::ConsumerState {
+                skip,
+                emit,
+                stopped: false,
+                failure: &mut failure,
+            };
+            for file in &files {
+                let outcome = match fs::read(file) {
+                    Ok(bytes) => match parse_eml(&bytes) {
+                        Some(msg) => EntryOutcome::Message(msg),
+                        None => EntryOutcome::Failed {
+                            external_ref: String::new(),
+                            reason: "mail part failed to parse".to_string(),
+                        },
+                    },
+                    Err(e) => EntryOutcome::Failed {
+                        external_ref: file.display().to_string(),
+                        reason: format!("unreadable file: {e}"),
+                    },
+                };
+                if !state.offer(outcome) {
+                    break;
+                }
+            }
+        }
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        Ok(())
+    }
+}
+
+/// Descend the wrapped-folder shape: while a directory holds no direct
+/// `.eml` file and exactly one plain subdirectory (hidden/`__MACOSX`/
+/// `._*` entries excluded — the same fence rules the chat resolver and
+/// the zip expander apply), step into that subdirectory. This is the
+/// shape the default "right-click folder → compress" produces
+/// (`mail/1.eml` inside the zip); a small cap keeps a pathological
+/// self-nesting tree finite, like the chat resolver's descent.
+pub(crate) fn descend_wrapped_eml_dir(mut dir: PathBuf) -> PathBuf {
+    for _ in 0..4 {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return dir;
+        };
+        let mut subdirs = Vec::new();
+        let mut has_eml = false;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') || name == "__MACOSX" || name.starts_with("._") {
+                continue; // hidden / macOS archive junk
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if file_type.is_dir() {
+                subdirs.push(path);
+            } else if is_eml_file(&path) {
+                has_eml = true;
+            }
+        }
+        if has_eml || subdirs.len() != 1 {
+            return dir;
+        }
+        dir = subdirs.remove(0);
+    }
+    dir
+}
+
+/// Resolve a mail-import pick to its streaming source: a directory is an
+/// `.eml` folder (descending the wrapped-folder shape first — see
+/// [`descend_wrapped_eml_dir`]), a `.zip` expands through the shared
+/// import fence into a temp tree (the returned guard keeps it alive for
+/// the whole run) that imports the same way, anything else is a single
+/// mbox/.eml file.
+pub fn mail_source_for_pick(
+    path: &Path,
+) -> Result<(Box<dyn StreamSource + Send>, Option<tempfile::TempDir>)> {
+    if path.is_dir() {
+        let dir = descend_wrapped_eml_dir(path.to_path_buf());
+        return Ok((Box::new(EmlDirSource::new(dir)), None));
+    }
+    if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+    {
+        let extracted = tempfile::tempdir().map_err(Error::from)?;
+        expand_zip_bounded(path, extracted.path(), &ImportBounds::default())?;
+        let root = descend_wrapped_eml_dir(extracted.path().to_path_buf());
+        Ok((Box::new(EmlDirSource::new(root)), Some(extracted)))
+    } else {
+        Ok((Box::new(MboxSource::new(path)), None))
+    }
+}
+
 /// Parse raw `.mbox` file contents into messages.
 ///
 /// `chat_id` groups the messages (typically the file name stem). Message
@@ -90,11 +290,14 @@ pub fn parse_mbox(bytes: &[u8], chat_id: &str) -> Result<Collected> {
 }
 
 /// The shared streaming engine behind the whole-file parser and the
-/// streaming source: `From ` separator lines split the stream into
-/// messages (escaped `>From ` lines do not), one message buffered at a
-/// time. Parts before the first separator are dropped, and a separator
-/// line with no content is skipped silently — exactly the whole-file
-/// splitter's semantics, item for item.
+/// streaming source. A file leading with a `From ` separator line is
+/// mbox: separator lines split the stream into messages (escaped
+/// `>From ` lines do not), one message buffered at a time; parts
+/// before the first separator and separator lines with no content are
+/// skipped silently — exactly the whole-file splitter's semantics,
+/// item for item. Any other file is a bare RFC 5322 message (.eml):
+/// the whole file is one message, `From ` lines in its body included
+/// as body text, not separators.
 pub fn stream_mbox<R: BufRead>(
     reader: R,
     chat_id: &str,
@@ -108,15 +311,59 @@ pub fn stream_mbox<R: BufRead>(
     let mut failure: Option<crate::Error> = None;
     let mut stopped = false;
     let mut line = Vec::new();
+    // Pre-read the first line: a file that does not lead with a `From `
+    // separator line is a bare RFC 5322 message (.eml) — the whole file
+    // is one message, and `From ` lines inside its body are body text,
+    // not separators (legal unescaped in .eml; an .mbox always leads
+    // with `From `).
+    let mut first: Vec<u8> = Vec::new();
+    if reader.read_until(b'\n', &mut first)? == 0 {
+        return Ok(()); // empty file: nothing to import
+    }
+    if !first.starts_with(b"From ") {
+        let mut whole = first;
+        loop {
+            line.clear();
+            if reader.read_until(b'\n', &mut line)? == 0 {
+                break;
+            }
+            whole.extend_from_slice(&line);
+        }
+        offer_part(
+            &whole,
+            chat_id,
+            &mut skip,
+            emit,
+            &mut failure,
+            &mut stopped,
+            false,
+        );
+        if let Some(e) = failure {
+            return Err(e);
+        }
+        return Ok(());
+    }
+    let mut pending = Some(first);
     loop {
         line.clear();
-        let read = reader.read_until(b'\n', &mut line)?;
-        if read == 0 {
+        if let Some(first) = pending.take() {
+            line = first;
+        } else if reader.read_until(b'\n', &mut line)? == 0 {
             break;
         }
         let at_line_start = part.is_empty() || *part.last().unwrap() == b'\n';
         if at_line_start && line.starts_with(b"From ") {
-            if started && !offer_part(&part, chat_id, &mut skip, emit, &mut failure, &mut stopped) {
+            if started
+                && !offer_part(
+                    &part,
+                    chat_id,
+                    &mut skip,
+                    emit,
+                    &mut failure,
+                    &mut stopped,
+                    true,
+                )
+            {
                 break;
             }
             started = true;
@@ -130,7 +377,15 @@ pub fn stream_mbox<R: BufRead>(
         // whole-file splitter never emitted them either).
     }
     if started && failure.is_none() && !stopped {
-        offer_part(&part, chat_id, &mut skip, emit, &mut failure, &mut stopped);
+        offer_part(
+            &part,
+            chat_id,
+            &mut skip,
+            emit,
+            &mut failure,
+            &mut stopped,
+            true,
+        );
     }
     if let Some(e) = failure {
         return Err(e);
@@ -147,11 +402,17 @@ fn offer_part(
     emit: &mut dyn FnMut(StreamItem) -> Result<Flow>,
     failure: &mut Option<crate::Error>,
     stopped: &mut bool,
+    separator: bool,
 ) -> bool {
-    // Drop the leading "From sender date" separator line before parsing.
-    let raw = match part.iter().position(|&b| b == b'\n') {
-        Some(nl) => &part[nl + 1..],
-        None => return true, // separator line with no content: skipped
+    // A `From sender date` separator line heads the part; drop it. A
+    // bare .eml part (no separator) parses whole.
+    let raw = if separator {
+        match part.iter().position(|&b| b == b'\n') {
+            Some(nl) => &part[nl + 1..],
+            None => return true, // separator line with no content: skipped
+        }
+    } else {
+        part
     };
     if raw.is_empty() {
         return true;
@@ -218,5 +479,214 @@ mod tests {
         assert_eq!(collected.failed, 0);
         assert_eq!(collected.messages.len(), 1);
         assert_eq!(collected.messages[0].body, "hi");
+    }
+
+    const EML: &[u8] = b"From: ana@example.com\nTo: bane@example.com\nSubject: Zdravo\nMessage-ID: <eml-1@example.com>\nDate: Fri, 13 Nov 2026 10:00:00 +0100\n\nPozdrav iz .eml datoteke.\n";
+
+    #[test]
+    fn bare_rfc822_message_parses_as_one_email() {
+        // No leading `From ` separator: the file is a single .eml.
+        let collected = parse_mbox(EML, "outlook").unwrap();
+        assert_eq!(collected.failed, 0);
+        assert_eq!(collected.messages.len(), 1);
+        assert!(collected.messages[0].body.contains("Pozdrav iz"));
+        assert!(collected.messages[0].author.contains("ana@example.com"));
+    }
+
+    #[test]
+    fn unescaped_from_line_in_bare_message_is_body_text() {
+        // In .eml a body line may start with `From ` — it must not split
+        // the message.
+        let mail = b"Subject: eml\nMessage-ID: <e2@example.com>\n\nline one\nFrom the desk of Ana\nline two\n";
+        let collected = parse_mbox(mail, "f").unwrap();
+        assert_eq!(collected.messages.len(), 1);
+        assert!(collected.messages[0].body.contains("From the desk of Ana"));
+        assert!(collected.messages[0].body.contains("line two"));
+    }
+
+    #[test]
+    fn eml_dir_imports_each_file_as_one_message() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("b.eml"),
+            b"Subject: drugi\nMessage-ID: <b@x>\n\nBody B\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("a.eml"),
+            b"Subject: prvi\nMessage-ID: <a@x>\n\nBody A\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"ignored").unwrap();
+
+        let source = EmlDirSource::new(dir.path());
+        let collected = source.collect().unwrap();
+        // Both `Source` and `StreamSource` are in scope here; pin the
+        // collect-side name.
+        assert_eq!(Source::name(&source), MBOX_SOURCE);
+        assert_eq!(collected.messages.len(), 2);
+        assert_eq!(collected.failed, 0);
+        // Sorted by file name: a.eml first.
+        assert!(collected.messages[0].body.contains("Body A"));
+        assert!(collected.messages[1].body.contains("Body B"));
+    }
+
+    #[test]
+    fn eml_dir_counts_broken_files_and_continues() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("good.eml"),
+            b"Subject: ok\nMessage-ID: <g@x>\n\nOK\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("bad.eml"), b"\x80\x81 not a mail").unwrap();
+        let collected = EmlDirSource::new(dir.path()).collect().unwrap();
+        assert_eq!(collected.messages.len(), 1);
+        assert_eq!(collected.failed, 1);
+    }
+
+    #[test]
+    fn eml_dir_without_eml_files_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(EmlDirSource::new(dir.path()).collect().is_err());
+    }
+
+    #[test]
+    fn eml_dir_stream_without_eml_files_errors_too_not_silent_nothing() {
+        // The streaming arm must not report a clean zero-message run for
+        // the same bad pick the collect arm rejects.
+        let dir = tempfile::tempdir().unwrap();
+        let source = EmlDirSource::new(dir.path());
+        let err = source
+            .stream(0, &mut |_item: StreamItem| Ok(Flow::Continue))
+            .unwrap_err();
+        assert!(err.to_string().contains("no .eml files found"), "{err}");
+    }
+
+    /// Stream one source to completion, returning `(messages, failures)`.
+    fn count_streamed(source: &(dyn StreamSource + Send)) -> (u64, u64) {
+        let mut messages = 0;
+        let mut failures = 0;
+        source
+            .stream(0, &mut |item| {
+                match item {
+                    StreamItem::Message(_) => messages += 1,
+                    StreamItem::Failed { .. } => failures += 1,
+                }
+                Ok(Flow::Continue)
+            })
+            .unwrap();
+        (messages, failures)
+    }
+
+    #[test]
+    fn mail_source_for_pick_dir_streams_the_eml_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("1.eml"),
+            b"Subject: a\nMessage-ID: <1@x>\n\nA\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("2.eml"),
+            b"Subject: b\nMessage-ID: <2@x>\n\nB\n",
+        )
+        .unwrap();
+        let (source, guard) = mail_source_for_pick(dir.path()).unwrap();
+        assert!(guard.is_none(), "a directory pick needs no temp tree");
+        assert_eq!(count_streamed(source.as_ref()), (2, 0));
+    }
+
+    #[test]
+    fn mail_source_for_pick_zip_expands_and_streams_the_eml_files() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("emls.zip");
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        for (name, bytes) in [
+            (
+                "1.eml",
+                b"Subject: a\nMessage-ID: <1@x>\n\nA\n".as_slice().to_vec(),
+            ),
+            (
+                "2.eml",
+                b"Subject: b\nMessage-ID: <2@x>\n\nB\n".as_slice().to_vec(),
+            ),
+        ] {
+            zip.start_file(name, zip::write::FileOptions::<()>::default())
+                .unwrap();
+            zip.write_all(&bytes).unwrap();
+        }
+        zip.finish().unwrap();
+
+        let (source, guard) = mail_source_for_pick(&zip_path).unwrap();
+        let extracted = guard.expect("a .zip pick returns its temp-tree guard");
+        assert_eq!(count_streamed(source.as_ref()), (2, 0));
+        // The guard kept the extracted tree alive for the whole stream.
+        assert!(extracted.path().join("2.eml").is_file());
+    }
+
+    #[test]
+    fn mail_source_for_pick_descends_the_wrapped_folder_zip() {
+        use std::io::Write as _;
+        // The default "right-click folder → compress" shape: the zip's
+        // root holds one wrapper directory, the `.eml` files inside it.
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("mail.zip");
+        let file = std::fs::File::create(&zip_path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        for (name, bytes) in [
+            (
+                "mail/1.eml",
+                b"Subject: a\nMessage-ID: <1@x>\n\nA\n".as_slice().to_vec(),
+            ),
+            (
+                "mail/2.eml",
+                b"Subject: b\nMessage-ID: <2@x>\n\nB\n".as_slice().to_vec(),
+            ),
+        ] {
+            zip.start_file(name, zip::write::FileOptions::<()>::default())
+                .unwrap();
+            zip.write_all(&bytes).unwrap();
+        }
+        zip.finish().unwrap();
+
+        let (source, guard) = mail_source_for_pick(&zip_path).unwrap();
+        let extracted = guard.expect("a .zip pick returns its temp-tree guard");
+        assert_eq!(count_streamed(source.as_ref()), (2, 0));
+        assert!(extracted.path().join("mail/2.eml").is_file());
+    }
+
+    #[test]
+    fn mail_source_for_pick_descends_a_wrapped_directory_pick() {
+        let dir = tempfile::tempdir().unwrap();
+        let inner = dir.path().join("mail");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("1.eml"), b"Subject: a\nMessage-ID: <1@x>\n\nA\n").unwrap();
+        std::fs::write(inner.join("2.eml"), b"Subject: b\nMessage-ID: <2@x>\n\nB\n").unwrap();
+        // macOS compress siblings are fence-excluded, not descent blockers.
+        std::fs::create_dir_all(dir.path().join("__MACOSX/mail")).unwrap();
+
+        let (source, guard) = mail_source_for_pick(dir.path()).unwrap();
+        assert!(guard.is_none(), "a directory pick needs no temp tree");
+        assert_eq!(count_streamed(source.as_ref()), (2, 0));
+    }
+
+    #[test]
+    fn mail_source_for_pick_mbox_file_streams_the_mbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive.mbox");
+        std::fs::write(
+            &path,
+            b"From a@example.com Sun Nov  1 10:00:00 2026\n\
+              From: A <a@example.com>\nSubject: one\nMessage-ID: <m1@x>\n\nBody one.\n\
+              From b@example.com Sun Nov  1 11:00:00 2026\n\
+              From: B <b@example.com>\nSubject: two\nMessage-ID: <m2@x>\n\nBody two.\n",
+        )
+        .unwrap();
+        let (source, guard) = mail_source_for_pick(&path).unwrap();
+        assert!(guard.is_none(), "a plain file pick needs no temp tree");
+        assert_eq!(count_streamed(source.as_ref()), (2, 0));
     }
 }

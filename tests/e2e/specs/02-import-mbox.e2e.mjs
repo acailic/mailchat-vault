@@ -1,6 +1,9 @@
-// Path: import an .mbox fixture and confirm it landed in the database.
+// Path: import an .mbox fixture and a bare .eml mail, and confirm they
+// landed in the database.
 
 export const name = "import-mbox";
+
+import path from "node:path";
 
 export async function run(ctx) {
   const { withSession, assert, ui, vaultDbPath } = ctx;
@@ -93,5 +96,48 @@ export async function run(ctx) {
       `${8 + demoCount} messages (mbox: 8, demo: ${demoCount})`,
       "stats label counts both sources",
     );
+
+    // --- a bare .eml pick imports through the same mail path ----------
+    // (the preview card labels it "Email messages (.eml)" — formatLabel's
+    // eml arm — and the confirm step dispatches the same import_mbox the
+    // card's button invokes; the mail joins the shared "mbox" namespace
+    // with the .eml file stem as its chat.)
+    const emlPath = path.join(ui.fixturesDir, "outlook.eml");
+    const emlPreview = await ui.invokeCommand(browser, "preview_import", {
+      path: emlPath,
+    });
+    assert.equal(emlPreview.kind, "eml", "preview kind");
+    assert.equal(emlPreview.messages_seen, 1, "one mail in the .eml pick");
+    const emlSummary = await ui.importMbox(browser, emlPath);
+    assert.deepEqual(
+      emlSummary,
+      { source: "mbox", seen: 1, inserted: 1, skipped: 0, failed: 0 },
+      ".eml import summary (one new mail in the mbox namespace)",
+    );
+    assert.equal(
+      await (await browser.$("#stats")).getText(),
+      `${9 + demoCount} messages (mbox: 9, demo: ${demoCount})`,
+      "stats label counts the .eml mail under mbox",
+    );
+
+    // The dragged-out mail is searchable like any archived message.
+    const emlStatus = await ui.search(browser, "quokka");
+    assert.equal(ui.totalFromStatus(emlStatus, "filtered"), 1, "one quokka hit");
+    if (ctx.sqlite) {
+      const emlRow = await ctx.sqlite.query(
+        db,
+        "SELECT chat_id FROM archive_messages WHERE external_id = 'e2e-eml-1@archive.local'",
+      );
+      assert.equal(emlRow[0].chat_id, "outlook", "chat_id is the .eml file stem");
+      const emlFts = await ctx.sqlite.query(
+        db,
+        "SELECT COUNT(*) AS n FROM archive_fts WHERE archive_fts MATCH 'quokka'",
+      );
+      assert.equal(
+        emlFts[0].n,
+        1,
+        "the .eml body (with its subject prefix) is full-text indexed",
+      );
+    }
   });
 }

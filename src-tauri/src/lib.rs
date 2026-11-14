@@ -1313,7 +1313,9 @@ fn embed_status(state: State<AppState>) -> Result<EmbeddingStatus, String> {
 }
 
 /// Import every message of an `.mbox` file (idempotent; re-importing
-/// skips already-stored messages). M2.2: the import streams — the file is
+/// skips already-stored messages). An `.eml` folder pick — or a `.zip`
+/// of `.eml` files, expanded through the shared import fence — imports
+/// one mail per file. M2.2: the import streams — the file is
 /// parsed one message at a time on this blocking task, and batches commit
 /// atomically through the pool's write queue with checkpoint advancement,
 /// so arbitrarily large files import under a bounded memory budget.
@@ -1334,12 +1336,14 @@ async fn import_mbox(
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let pool = Arc::clone(&state.pool);
     tauri::async_runtime::spawn_blocking(move || {
-        let source = MboxSource::new(&path);
-        let mut run = BoundedRun::new(import_id_for("mbox-import", Path::new(&path)));
+        let path = Path::new(&path);
+        let (source, _zip_guard) =
+            vault_core::mbox::mail_source_for_pick(path).map_err(|e| e.to_string())?;
+        let mut run = BoundedRun::new(import_id_for("mbox-import", path));
         run.media = Some(MediaPass::mail(&data_dir));
         let mut sink = PoolSink(&pool);
         let mut no_progress = |_: u64, _: u64, _: &str| {};
-        run.run(&source, &mut sink, &|| false, &mut no_progress)
+        run.run(source.as_ref(), &mut sink, &|| false, &mut no_progress)
             .map(ChatImportOutcome::from)
             .map_err(|e: Error| e.to_string())
     })

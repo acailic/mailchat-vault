@@ -613,7 +613,7 @@ fn directory_without_result_json_and_unknown_files_error() {
     .unwrap_err();
     assert!(
         err.to_string().contains(
-            "expected a directory containing a Telegram result.json, a Discord Data Package, or a single export file"
+            "expected a directory containing a Telegram result.json, a Discord Data Package, a Messenger message_*.json, or a single export file"
         ),
         "{err}"
     );
@@ -971,6 +971,15 @@ fn tg_message(id: &str, obj: serde_json::Value) -> vault_core::message::NewMessa
     msg
 }
 
+/// A `NewMessage` whose `raw_json` is the given Messenger (DYI) message
+/// object.
+fn msgr_message(id: &str, obj: serde_json::Value) -> vault_core::message::NewMessage {
+    let mut msg =
+        vault_core::message::NewMessage::new("messenger", id, "A", "2025-11-12T21:00:00Z", "");
+    msg.raw_json = obj.to_string();
+    msg
+}
+
 /// Every `media` entry of a message's `raw_json`, parsed.
 fn media_entries_of(raw_json: &str) -> Vec<serde_json::Value> {
     let raw: serde_json::Value = serde_json::from_str(raw_json).unwrap();
@@ -981,7 +990,9 @@ fn media_entries_of(raw_json: &str) -> Vec<serde_json::Value> {
 fn budget_exhaustion_records_budget_exceeded_missing_entries_all_passes() {
     use std::collections::HashSet;
 
-    use vault_core::media::{extract_telegram, extract_whatsapp, MailMedia, MediaSummary};
+    use vault_core::media::{
+        extract_messenger, extract_telegram, extract_whatsapp, MailMedia, MediaSummary,
+    };
     use vault_core::object_store::Capacity;
 
     // Telegram: a real export tree whose files exist, but the media
@@ -1057,6 +1068,37 @@ fn budget_exhaustion_records_budget_exceeded_missing_entries_all_passes() {
     let entries = media_entries_of(&messages[0].raw_json);
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["name"], "IMG-1.jpg");
+    assert_eq!(entries[0]["missing"], true);
+    assert_eq!(entries[0]["reason"], "budget-exceeded");
+
+    // Messenger (DYI): the referenced file exists in the export tree,
+    // but the budget refuses — the same honest marker, with the uri's
+    // basename as the recorded name.
+    let sb = Sandbox::new("budget-msgr");
+    sb.put("messages/inbox/ana_1111/photos/ana.jpg", "photo.jpg");
+    let mut messages = vec![msgr_message(
+        "1",
+        serde_json::json!({
+            "sender_name": "Ana", "timestamp_ms": 1762981200000i64, "content": "slika",
+            "photos": [{"uri": "messages/inbox/ana_1111/photos/ana.jpg"}]
+        }),
+    )];
+    let mut summary = MediaSummary::default();
+    extract_messenger(
+        &mut messages,
+        &sb.export_dir(),
+        &sb.data_dir(),
+        &mut summary,
+        &mut Capacity::new(0, 0),
+        &mut HashSet::new(),
+    )
+    .unwrap();
+    assert_eq!(summary.referenced, 1);
+    assert_eq!(summary.missing, 1);
+    assert_eq!(summary.stored + summary.deduped, 0);
+    let entries = media_entries_of(&messages[0].raw_json);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["name"], "ana.jpg");
     assert_eq!(entries[0]["missing"], true);
     assert_eq!(entries[0]["reason"], "budget-exceeded");
 

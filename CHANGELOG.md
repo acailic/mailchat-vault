@@ -11,6 +11,24 @@ and viewable in the app, AI answers run only behind your explicit
 consent, new mail can notify you, and the Linux packages install as
 real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
 
+### Added (.eml & Messenger import)
+
+- **`.eml` mail import** — single `.eml` messages (dragged out of any
+  mail app), a folder of them, or a `.zip` of them import directly,
+  attachments and all. All mail picks share the mbox identity
+  namespace, so the same message in a Google Takeout `.mbox` and a
+  loose `.eml` stores exactly once.
+- **Messenger (Facebook) import** — "Download Your Information"
+  exports with Format set to JSON: a single thread file, a thread
+  folder, the whole `messages/` tree, or a `.zip`. One thread's
+  `message_1.json` … `message_N.json` parts merge in numeric order;
+  media (photos and other referenced files) is extracted for
+  whole-tree picks, single-file picks keep their references recorded.
+  The HTML export flavor is out of scope.
+- **Preview knows the new formats** — the import preview detects and
+  labels `.eml` picks ("Email messages (.eml)") and Messenger exports
+  ("Messenger (Facebook) export"), with a how-to-export hint for each.
+
 ### Added (first-sync failure loop — resilience)
 
 - **A failed first sync keeps the account** — connecting an email account

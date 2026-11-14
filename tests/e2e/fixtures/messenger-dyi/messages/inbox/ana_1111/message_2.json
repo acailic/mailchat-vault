@@ -1,0 +1,19 @@
+{
+  "participants": [{ "name": "Ana Peric" }, { "name": "Marko Horvat" }],
+  "title": "Ana Peric",
+  "is_still_participant": true,
+  "thread_type": "Regular",
+  "thread_path": "inbox/ana_1111",
+  "messages": [
+    {
+      "sender_name": "Marko Horvat",
+      "timestamp_ms": 1762984800000,
+      "content": "Sastanak je odgojen, javi kad ti odgovara."
+    },
+    {
+      "sender_name": "Ana Peric",
+      "timestamp_ms": 1762984860000,
+      "content": "Dogovoreno, čujemo se u petak."
+    }
+  ]
+}

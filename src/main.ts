@@ -1334,7 +1334,7 @@ function friendlyImportError(e: unknown, path: string): string {
     return `Could not read ${path} — the file may have moved or been deleted. Pick it again.`;
   }
   if (/unrecognized|unsupported/i.test(text)) {
-    return `${text} Supported inputs: an .mbox email archive, a WhatsApp .txt, a Telegram result.json, a Signal .json, a Discord messages.json, or a folder/.zip containing these.`;
+    return `${text} Supported inputs: an .mbox email archive, a bare .eml (or a folder/zip of them), a WhatsApp .txt, a Telegram result.json, a Signal .json, a Discord messages.json, a Messenger message_*.json (or its export folder/.zip), or a folder/.zip containing these.`;
   }
   return `Import failed: ${text}`;
 }
@@ -1358,8 +1358,8 @@ async function pickImportInput(directory: boolean): Promise<void> {
             title: "Import a file",
             filters: [
               {
-                name: "Email or chat export (.mbox, WhatsApp .txt, Telegram/Signal/Discord .json, or a .zip)",
-                extensions: ["mbox", "txt", "json", "zip"],
+                name: "Email or chat export (.mbox, .eml, WhatsApp .txt, Telegram/Signal/Discord/Messenger .json, or a .zip)",
+                extensions: ["mbox", "eml", "txt", "json", "zip"],
               },
             ],
           },
@@ -1417,13 +1417,15 @@ async function confirmImport(): Promise<void> {
   hideImportPreview(importPreviewEl);
   importStatus.textContent =
     `Importing ${target.path}` +
-    (target.kind !== "mbox" && extractMedia ? " (extracting media)" : "") +
+    (target.kind !== "mbox" && target.kind !== "eml" && extractMedia
+      ? " (extracting media)"
+      : "") +
     "…";
   try {
     let summary: IngestSummary;
     let importId: string;
     let mediaSummary: MediaSummary | null = null;
-    if (target.kind === "mbox") {
+    if (target.kind === "mbox" || target.kind === "eml") {
       const outcome = await ipc.importMbox(target.path);
       summary = outcome.summary;
       importId = outcome.import_id;
