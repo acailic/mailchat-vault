@@ -90,9 +90,9 @@ Discord → Messenger → Telegram → Signal → WhatsApp.
 | `timestamp_ms` (UTC ms) | `sent_at` (RFC 3339 UTC, ms truncated), `time_confidence = "explicit_offset"`, `timezone = "UTC"` |
 | `content` | `body` |
 | whole message object | `raw_json` (verbatim, Telegram pattern) |
-| (none — FB carries no ids) | `external_id` = synthetic hash, pattern from `whatsapp.rs` (thread key + timestamp + sender + body) |
+| (none — FB carries no ids) | `external_id` = synthetic hash, pattern from `whatsapp.rs` (thread key + timestamp + sender + body). Pick-scope caveat: the occurrence counter spans one pick's thread, so importing a lone `message_2.json` before the whole thread re-numbers byte-identical repeats — the later whole-thread import stores them again |
 | `title` | conversation label |
-| `thread_path` / folder name suffix `…_<digits>` | `conversation_key = "messenger:thread:<digits>"`; fallback `"messenger:chat:sha256:…"` (WhatsApp pattern) when no stable id |
+| `thread_path` / folder name suffix `…_<digits>` | `conversation_key = "messenger:thread:<digits>"`; no numeric suffix → empty conversation key (legacy chat_id grouping), matching the implementation |
 
 Messages with neither body nor media references are skipped (Telegram
 service-entry pattern).
