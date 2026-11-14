@@ -1192,6 +1192,8 @@ fn settings_save(
             keep_running_in_background: payload.keep_running_in_background,
             start_at_login: payload.start_at_login,
         },
+        // Not yet editable through the UI; Task 4 wires the payload field.
+        env_overrides: settings::EnvOverrides::default(),
     };
     settings.normalize();
     settings.validate().map_err(|e| e.to_string())?;
