@@ -4,12 +4,14 @@
 // The native GTK file chooser behind "Import chat export…" cannot be
 // automated over WebDriver (and `window.__TAURI_INTERNALS__` is
 // non-configurable, so the dialog IPC cannot be intercepted), so this
-// spec invokes the very same `import_chat_export` backend command the
-// button handler invokes, with a real file, then reloads the app so the
-// normal boot path renders the stats label and source chips from the
-// freshly imported archive. Everything downstream — stats, chips, search,
-// highlights, detail view, dedup, and the loud failure on an unrecognized
-// file — runs through the real product.
+// spec submits the very same `import_chat_export` job the button
+// handler submits (`job_submit` — the UI's confirm path, with
+// progress, cooperative cancel, and the terminal-event panel refresh)
+// for a real file, then reloads the app so the normal boot path
+// renders the stats label and source chips from the freshly imported
+// archive. Everything downstream — stats, chips, search, highlights,
+// detail view, dedup, and the loud failure on an unrecognized file —
+// runs through the real product.
 export const name = "signal-import";
 
 import { copyFile, writeFile } from "node:fs/promises";
@@ -44,9 +46,9 @@ export async function run(ctx) {
   await withSession({}, async (browser, { dataDir }) => {
     await ui.waitForApp(browser);
 
-    // --- import via the real backend command ------------------------------
-    const summary = await invoke(browser, "import_chat_export", { path: signalFixture });
-    assert.ok(summary.ok, `import command succeeded: ${summary.error ?? ""}`);
+    // --- import via the UI's confirm path (job_submit) --------------------
+    const summary = await ui.importChatExport(browser, signalFixture);
+    assert.ok(summary.ok, `import job succeeded: ${summary.error ?? ""}`);
     const s = summary.value.summary;
     assert.ok(s.source === "signal" && s.seen === 7 && s.inserted === 5 && s.skipped === 0 && s.failed === 2,
       "import summary: 5 archived, 2 broken entries counted, service entries skipped " +
@@ -124,8 +126,8 @@ export async function run(ctx) {
     await browser.execute(() => document.activeElement?.blur());
     await browser.keys("Escape");
     // --- re-import dedups --------------------------------------------------
-    const reimport = await invoke(browser, "import_chat_export", { path: signalFixture });
-    assert.ok(reimport.ok, `re-import command succeeded: ${reimport.error ?? ""}`);
+    const reimport = await ui.importChatExport(browser, signalFixture);
+    assert.ok(reimport.ok, `re-import job succeeded: ${reimport.error ?? ""}`);
     assert.ok(
       reimport.value.summary.inserted === 0 &&
         reimport.value.summary.skipped === 5 &&
@@ -137,8 +139,8 @@ export async function run(ctx) {
     // --- renamed re-export dedups by conversation uuid ---------------------
     const renamed = path.join(dataDir, "Renamed chat.json");
     await copyFile(signalFixture, renamed);
-    const renamedSummary = await invoke(browser, "import_chat_export", { path: renamed });
-    assert.ok(renamedSummary.ok, `renamed import command succeeded: ${renamedSummary.error ?? ""}`);
+    const renamedSummary = await ui.importChatExport(browser, renamed);
+    assert.ok(renamedSummary.ok, `renamed import job succeeded: ${renamedSummary.error ?? ""}`);
     assert.ok(
       renamedSummary.value.summary.inserted === 0 && renamedSummary.value.summary.skipped === 5,
       "renamed re-export dedups by conversation uuid " +
@@ -148,8 +150,8 @@ export async function run(ctx) {
     // --- unrecognized file fails loudly, stores nothing --------------------
     const garbage = path.join(dataDir, "not-a-chat-export.json");
     await writeFile(garbage, '{"foo": 1}');
-    const garbageResult = await invoke(browser, "import_chat_export", { path: garbage });
-    assert.ok(!garbageResult.ok, "unrecognized file must fail the import command");
+    const garbageResult = await ui.importChatExport(browser, garbage);
+    assert.ok(!garbageResult.ok, "unrecognized file must fail the import job");
     assert.includes(garbageResult.error, "unrecognized chat export format");
     assert.includes(garbageResult.error, "Signal conversation .json",
       "error mentions the Signal format explicitly");
