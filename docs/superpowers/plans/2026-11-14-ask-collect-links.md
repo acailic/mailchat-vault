@@ -740,13 +740,36 @@ Add to `mod tests` in `llm.rs` (and fix the mechanical compile breakage: every e
     }
 
     #[test]
-    fn ask_collects_links_only_when_planned() {
-        // "collect" question with an LLM that plans extraction; the mock
-        // storage-less path is covered by llm_ask tests — here we assert
-        // the flag logic through the pure step composition instead.
-        let msgs = vec![link_msg(1, "ana", "https://example.com/a")];
-        assert_eq!(extract_links(&msgs).len(), 1);
-        assert!(extract_links(&[]).is_empty());
+    fn ask_collects_links_only_when_the_plan_extracts() {
+        use crate::storage::Storage;
+        use crate::vector::HashEmbedder;
+        let storage = Storage::open_in_memory().unwrap();
+        storage
+            .insert_message(&crate::message::NewMessage::new(
+                "test",
+                "l1",
+                "ana",
+                "2026-10-01T00:00:00Z",
+                "see https://example.com/a about deploys",
+            ))
+            .unwrap();
+        let embedder = HashEmbedder;
+        // Local mode (no LLM): the plain plan never extracts.
+        let local =
+            ask(&storage, None, &embedder, "collect links about deploys", 50, 8, today()).unwrap();
+        assert!(local.collected.is_empty());
+        // An LLM that plans extraction: the link is collected and the
+        // summary prompt carries the collected-links section.
+        let llm = MockLlm::with_replies([
+            "{\"match\": \"deploys\", \"has_link\": true, \"extract_links\": true}".to_string(),
+            "one link collected [1].".to_string(),
+        ]);
+        let out =
+            ask(&storage, Some(&llm), &embedder, "collect links about deploys", 50, 8, today())
+                .unwrap();
+        assert_eq!(out.collected.len(), 1);
+        assert_eq!(out.collected[0].url, "https://example.com/a");
+        assert!(llm.prompts()[1].1.contains("Collected links"), "{}", llm.prompts()[1].1);
     }
 ```
 
