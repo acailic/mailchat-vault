@@ -29,11 +29,11 @@ fn migrations_apply_and_are_idempotent() {
     let db = dir.path().join("vault.db");
 
     let s = Storage::open(&db).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 15);
+    assert_eq!(s.schema_version().unwrap(), 16);
 
     // Reopening the same file applies nothing new and keeps the data.
     let s2 = Storage::open(&db).unwrap();
-    assert_eq!(s2.schema_version().unwrap(), 15);
+    assert_eq!(s2.schema_version().unwrap(), 16);
     s.insert_message(&msg("a", "x", "hello vault")).unwrap();
     assert_eq!(s2.stats().unwrap().total, 1);
 }
@@ -427,4 +427,66 @@ fn date_bounds_are_canonicalized_before_text_comparison() {
     assert!(s
         .search_filtered("\"vault\"", None, Some("9999-12-30"), None, false, 10)
         .is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// Finished-jobs ledger (migration 16)
+// ---------------------------------------------------------------------------
+
+fn ledger_entry(n: u64, kind: &str, state: &str, summary: &str) -> vault_core::storage::JobLedgerEntry {
+    vault_core::storage::JobLedgerEntry {
+        job_id: n,
+        kind: kind.into(),
+        submitted_at: format!("2026-11-0{}/1T10:00:00Z", (n % 9) + 1),
+        finished_at: format!("2026-11-0{}/1T10:01:00Z", (n % 9) + 1),
+        state: state.into(),
+        summary: summary.into(),
+        payload: format!("{{\"state\":\"{state}\",\"result\":{{\"inserted\":{n}}}}}"),
+    }
+}
+
+#[test]
+fn job_ledger_roundtrips_newest_first() {
+    let s = storage();
+    s.record_job_ledger(&ledger_entry(1, "import_mbox", "succeeded", "10 new"))
+        .unwrap();
+    s.record_job_ledger(&ledger_entry(2, "imap_sync", "failed", "connection refused"))
+        .unwrap();
+    s.record_job_ledger(&ledger_entry(3, "seed_demo", "cancelled", ""))
+        .unwrap();
+
+    let rows = s.job_ledger_recent(10).unwrap();
+    assert_eq!(
+        rows.iter().map(|r| r.job_id).collect::<Vec<_>>(),
+        vec![3, 2, 1],
+        "newest first"
+    );
+    assert_eq!(rows[0].state, "cancelled");
+    assert_eq!(rows[1].kind, "imap_sync");
+    assert_eq!(rows[1].summary, "connection refused");
+    assert!(rows[2].payload.contains("\"inserted\":1"));
+
+    // The limit caps the read, never the stored history.
+    assert_eq!(s.job_ledger_recent(2).unwrap().len(), 2);
+    assert!(s.job_ledger_recent(0).unwrap().is_empty());
+
+    // The state CHECK keeps the ledger terminal-only.
+    assert!(s
+        .record_job_ledger(&ledger_entry(4, "x", "running", ""))
+        .is_err());
+}
+
+#[test]
+fn job_ledger_prunes_to_the_newest_fifty_on_write() {
+    let s = storage();
+    let keep = vault_core::storage::JOB_LEDGER_KEEP;
+    for n in 0..(keep + 7) as u64 {
+        s.record_job_ledger(&ledger_entry(n, "import_mbox", "succeeded", "n"))
+            .unwrap();
+    }
+    let rows = s.job_ledger_recent(u32::MAX).unwrap();
+    assert_eq!(rows.len(), keep, "the ledger stays bounded");
+    // The pruned tail is the oldest: survivors are the newest `keep`.
+    assert_eq!(rows.first().unwrap().job_id, (keep + 6) as u64);
+    assert_eq!(rows.last().unwrap().job_id, 7);
 }

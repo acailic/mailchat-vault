@@ -214,6 +214,52 @@ describe("jobsStatusText", () => {
     );
     expect(jobsStatusText(tracker)).toBe("No active jobs (1 finished).");
   });
+
+  it("counts restored ledger rows as 'earlier', never as this session's", () => {
+    // Boot after a restart: the snapshot carries two restored rows and
+    // one job this session finished.
+    const tracker = newJobsTracker();
+    applyJobsPage(
+      tracker,
+      page({
+        latest_seq: 3,
+        jobs: [
+          record({ id: 42, state: { state: "succeeded", result: { inserted: 5505 } } }),
+          record({
+            id: 999_999_999_998,
+            kind: "import_mbox",
+            state: { state: "succeeded", result: { inserted: 5505, skipped: 3 } },
+            restored: true,
+          }),
+          record({
+            id: 999_999_999_999,
+            kind: "imap_sync",
+            state: { state: "cancelled" },
+            restored: true,
+          }),
+        ],
+      }),
+    );
+    expect(jobsStatusText(tracker)).toBe("No active jobs (1 finished · 2 earlier).");
+
+    // Restored-only history does not claim session work either.
+    const fresh = newJobsTracker();
+    applyJobsPage(
+      fresh,
+      page({
+        latest_seq: 0,
+        jobs: [
+          record({
+            id: 999_999_999_999,
+            kind: "import_mbox",
+            state: { state: "succeeded", result: { inserted: 5505 } },
+            restored: true,
+          }),
+        ],
+      }),
+    );
+    expect(jobsStatusText(fresh)).toBe("No active jobs (1 earlier).");
+  });
 });
 
 describe("hasActiveJob", () => {
@@ -293,5 +339,53 @@ describe("renderJobsList", () => {
     expect(items[0].className).toBe("job succeeded");
     // Newest (highest id) first.
     expect(items.map((li) => li.textContent!.startsWith("IMAP sync")).every(Boolean)).toBe(true);
+  });
+
+  it("renders restored ledger rows below this session's, through the same line", () => {
+    document.body.innerHTML = '<ul id="jobs"></ul>';
+    const el = document.querySelector<HTMLElement>("#jobs")!;
+    const tracker = newJobsTracker();
+    // Live ids sit above the restored band, exactly like the wire.
+    applyJobsPage(
+      tracker,
+      page({
+        latest_seq: 1,
+        jobs: [
+          record({
+            id: 1_000_000_000_001,
+            kind: "embed_messages",
+            state: { state: "succeeded", result: { embedded: 8 } },
+          }),
+          record({
+            id: 999_999_999_998,
+            kind: "import_mbox",
+            state: { state: "succeeded", result: { summary: { inserted: 5505, skipped: 3 } } },
+            restored: true,
+          }),
+          record({
+            id: 999_999_999_999,
+            kind: "imap_sync",
+            state: {
+              state: "failed",
+              error: { kind: "network", message: "connection refused" },
+            },
+            restored: true,
+          }),
+        ],
+      }),
+    );
+    renderJobsList(el, tracker);
+    const items = [...el.querySelectorAll("li")];
+    expect(items).toHaveLength(3);
+    // Live record first (its id sits above the restored band), then the
+    // restored rows newest-first (the newest carries the higher id) — all
+    // through describeJobState, so a restored import reads exactly like
+    // one this session ran.
+    expect(items[0].textContent).toBe("local embeddings — done (8 embedded)");
+    expect(items[0].className).toBe("job succeeded");
+    expect(items[1].textContent).toBe("IMAP sync — failed: connection refused");
+    expect(items[1].className).toBe("job failed");
+    expect(items[2].textContent).toBe(".mbox import — done (5505 new, 3 present)");
+    expect(items[2].className).toBe("job succeeded");
   });
 });

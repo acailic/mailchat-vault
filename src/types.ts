@@ -240,6 +240,10 @@ export interface JobRecord {
   started_at: string | null;
   finished_at: string | null;
   progress: JobProgress | null;
+  /** True only on read-only historical rows restored from the finished-
+   * jobs ledger after a restart: listed for context, never cancellable,
+   * never counted among this session's jobs. Absent on live records. */
+  restored?: boolean;
 }
 
 /** One job state change, stamped with a global monotonic `seq`. */

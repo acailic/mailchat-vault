@@ -37,7 +37,7 @@ export async function run(ctx) {
     await ui.waitForText(
       browser,
       "#jobs-status",
-      "No background jobs yet. Imports, IMAP syncs and embedding run here.",
+      "No background jobs yet. Imports, IMAP syncs and building the local search index run here.",
     );
     await saveScreenshot(browser, "12-jobs-panel-empty.png");
 

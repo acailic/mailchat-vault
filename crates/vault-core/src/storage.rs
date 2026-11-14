@@ -710,6 +710,37 @@ const MIGRATIONS: &[(i64, &str)] = &[
             ON archive_messages (source_instance_id, channel);
         "#,
     ),
+    (
+        16,
+        // The finished-job ledger (critique 2, P1: "Activity forgets
+        // finished jobs after restart"). The M2.1 job registry is
+        // deliberately in-memory (job ids, seq numbers, and cancel flags
+        // are process-local), so a restart left Activity empty over a
+        // vault that had just imported thousands of messages. This table
+        // is the modest durable half: every terminal job transition
+        // (succeeded/failed/cancelled) appends one row — kind, times,
+        // state, a one-line result summary, and the serialized terminal
+        // state so a restored row renders through the same describeJobState
+        // path as a live one. Rows are append-only history, never queried
+        // by id and never resurrected as runnable jobs; a write prunes to
+        // the newest [`JOB_LEDGER_KEEP`] rows, so the ledger stays a
+        // bounded "recent activity" tail, not a second registry.
+        // `job_id` is the finished run's process-local id, kept for
+        // provenance only — restored rows surface under synthetic ids
+        // (see jobs.rs) precisely because these ids are not stable.
+        r#"
+        CREATE TABLE job_ledger (
+            id           INTEGER PRIMARY KEY,
+            job_id       INTEGER NOT NULL,
+            kind         TEXT    NOT NULL,
+            submitted_at TEXT    NOT NULL,
+            finished_at  TEXT    NOT NULL,
+            state        TEXT    NOT NULL CHECK (state IN ('succeeded', 'failed', 'cancelled')),
+            summary      TEXT    NOT NULL DEFAULT '',
+            payload      TEXT    NOT NULL DEFAULT ''
+        );
+        "#,
+    ),
 ];
 
 /// Rust halves of migrations, for backfill logic that SQL alone cannot
@@ -1053,6 +1084,64 @@ impl Storage {
             |row| row.get(0),
         )?;
         Ok(count.max(0) as u64)
+    }
+
+    // ------------------------------------------------------------------
+    // Finished-jobs ledger (migration 16)
+    // ------------------------------------------------------------------
+
+    /// Append one terminal job to the ledger and prune to the newest
+    /// [`JOB_LEDGER_KEEP`] rows — both inside one transaction, so the
+    /// ledger never grows past its bound on disk.
+    pub fn record_job_ledger(&self, entry: &JobLedgerEntry) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO job_ledger (job_id, kind, submitted_at, finished_at, state, summary, payload)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                entry.job_id,
+                entry.kind,
+                entry.submitted_at,
+                entry.finished_at,
+                entry.state,
+                entry.summary,
+                entry.payload,
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM job_ledger WHERE id NOT IN \
+             (SELECT id FROM job_ledger ORDER BY id DESC LIMIT ?1)",
+            params![JOB_LEDGER_KEEP as i64],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The newest finished-job ledger rows, newest first (at most
+    /// `limit`). Boot recovery turns these into the read-only historical
+    /// records the Activity panel lists under this session's live jobs.
+    pub fn job_ledger_recent(&self, limit: u32) -> Result<Vec<JobLedgerRow>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id, kind, submitted_at, finished_at, state, summary, payload
+             FROM job_ledger
+             ORDER BY id DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(JobLedgerRow {
+                job_id: row.get::<_, i64>(0)?.max(0) as u64,
+                kind: row.get(1)?,
+                submitted_at: row.get(2)?,
+                finished_at: row.get(3)?,
+                state: row.get(4)?,
+                summary: row.get(5)?,
+                payload: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     // ------------------------------------------------------------------
@@ -3576,6 +3665,44 @@ pub struct ImportBatchCounts {
     /// Messages whose media links were written or backfilled (inserts
     /// carrying a `media` array plus duplicates that gained entries).
     pub media_linked: u64,
+}
+
+/// How many finished jobs the ledger keeps (migration 16). A write prunes
+/// to this many newest rows; the panel renders at most its top 20 anyway.
+pub const JOB_LEDGER_KEEP: usize = 50;
+
+/// One terminal job to append to the finished-jobs ledger (see
+/// [`Storage::record_job_ledger`]). Owned: the entry crosses thread
+/// boundaries into the write queue, away from the registry it came from.
+#[derive(Debug, Clone)]
+pub struct JobLedgerEntry {
+    /// The finished run's process-local job id, provenance only.
+    pub job_id: u64,
+    pub kind: String,
+    pub submitted_at: String,
+    pub finished_at: String,
+    /// `"succeeded"`, `"failed"`, or `"cancelled"`.
+    pub state: String,
+    /// One-line human summary of the result (the same result part the
+    /// UI's describeJobState renders).
+    pub summary: String,
+    /// The serialized terminal [`crate::jobs::JobState`] JSON, so a
+    /// restored row reconstructs the exact state it finished in.
+    pub payload: String,
+}
+
+/// One stored ledger row, as returned by [`Storage::job_ledger_recent`]
+/// (newest first).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobLedgerRow {
+    pub job_id: u64,
+    pub kind: String,
+    pub submitted_at: String,
+    pub finished_at: String,
+    /// `"succeeded"`, `"failed"`, or `"cancelled"`.
+    pub state: String,
+    pub summary: String,
+    pub payload: String,
 }
 
 /// One row of the `media_objects` registry (M4.2): an object stored
