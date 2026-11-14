@@ -3893,7 +3893,7 @@ mod tests {
         pool.submit_write(move |s| {
             s.insert_message(&vault_core::message::NewMessage::new(
                 "test",
-                "links".into(),
+                String::from("links"),
                 "Author 00",
                 "2026-10-01T12:00:00Z",
                 "consent marker 42 about vault topics and https://example.com/a".to_string(),
