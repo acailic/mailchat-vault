@@ -185,9 +185,9 @@ pub(crate) fn parse_raw_mail_canonical(
         .unwrap_or_default();
 
     // Rendered-preview HTML: the decoded text/html part(s), kept only
-    // when present and within the size bound. It never enters `body`
+    // when non-empty and within the size bound. It never enters `body`
     // (FTS stays plain text) or the revision hash (presentation only).
-    let html = extract_html(&mail).filter(|h| h.len() <= MAX_HTML_BYTES);
+    let html = extract_html(&mail).filter(|h| !h.trim().is_empty() && h.len() <= MAX_HTML_BYTES);
 
     let to = mail.headers.get_first_value("To").unwrap_or_default();
 
@@ -748,6 +748,31 @@ Content-Transfer-Encoding: quoted-printable\n\n<p>telo</p>\n\
     #[test]
     fn plain_only_mail_has_no_html_key() {
         let mail = b"From: a@b.c\nSubject: s\n\nsamo tekst\n";
+        let parsed = parse_raw_mail_canonical(mail, "mbox", "f").unwrap();
+        let raw: serde_json::Value = serde_json::from_str(&parsed.message.raw_json).unwrap();
+        assert!(raw.get("html").is_none());
+    }
+
+    #[test]
+    fn html_only_mail_keeps_body_fallback_and_html_key() {
+        let mail =
+            b"From: a@b.c\nSubject: s\nMIME-Version: 1.0\nContent-Type: text/html\n\n<p>samo html</p>\n";
+        let parsed = parse_raw_mail_canonical(mail, "mbox", "f").unwrap();
+        // No text/plain leaf: today's fallback decodes the top-level
+        // body (the html itself), subject-prefixed for FTS.
+        assert_eq!(parsed.message.body, "s\n\n<p>samo html</p>");
+        let raw: serde_json::Value = serde_json::from_str(&parsed.message.raw_json).unwrap();
+        assert_eq!(raw["html"], "<p>samo html</p>");
+    }
+
+    #[test]
+    fn empty_html_part_is_not_stored() {
+        // A text/html leaf that decodes to nothing must not produce an
+        // empty `html` key — the spec omits the key entirely.
+        let mail = b"From: a@b.c\nSubject: s\nMIME-Version: 1.0\n\
+Content-Type: multipart/alternative; boundary=\"bb\"\n\n\
+--bb\nContent-Type: text/plain\n\nkratko\n\
+--bb\nContent-Type: text/html\n\n\n--bb--\n";
         let parsed = parse_raw_mail_canonical(mail, "mbox", "f").unwrap();
         let raw: serde_json::Value = serde_json::from_str(&parsed.message.raw_json).unwrap();
         assert!(raw.get("html").is_none());
