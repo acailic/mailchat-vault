@@ -10,7 +10,7 @@ default-members = ["crates/vault-core"]
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
-license = "UNLICENSED"
+license = "GPL-3.0-only"
 repository = "https://github.com/acailic/mailchat-vault"
 
 [workspace.dependencies]
