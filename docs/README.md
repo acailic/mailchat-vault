@@ -25,8 +25,6 @@ Hands-on guides sit alongside the specification set:
 | [Product review](product-review.md) | Strengths, observed UX defects, adoption risks, alternatives, and positioning hypotheses at the inspected 2026-11-06 baseline | Product owner |
 | [User success plan](user-success-plan.md) | Prioritized outcomes, work packages mapped to existing milestones, pilot metrics, and proceed/narrow/stop decisions | Product owner |
 | [User research playbook](user-research-playbook.md) | Recruitment criteria, interview and usability scripts, comparative retrieval study, and pilot readout templates | Product/research owner |
-| [Go-public plan](go-public-plan.md) | Reviewed launch plan: user-return priorities, candidate evidence, licensing/signing decisions, staged distribution, pilot gates and paid-support experiment; D13–D15 remain proposed | Product owner |
-| [Go-public review evidence](evidence/go-public-review-2026-11-13.md) | Repository findings and primary-source checks correcting licensing, signing, package-manager, Gmail and privacy assumptions | Maintainer / product owner |
 | [Project assessment](project-assessment.md) | Current implementation, evidence, limitations, and ranked gaps | Engineer changing the assessed subsystem |
 | [Product plan](product-plan.md) | Users, outcomes, release boundaries, and success criteria | Product owner |
 | [UX specification](ux-specification.md) | Workspace, journeys, visual direction, and interaction states | Designer and frontend implementer |
@@ -37,6 +35,8 @@ Hands-on guides sit alongside the specification set:
 | [Decisions](decisions.md) | Numbered decisions and their tradeoffs | Engineer revising a decision |
 
 For product decisions, start with the product review and user success plan. For implementation, start with the project assessment and product plan, then read the roadmap entry and linked UX and contract sections. Mark a slice complete only with recorded validation evidence.
+
+**Launch-strategy and monetization material (the go-public plan, the app-landscape research, the go-public review, and anything payment- or pricing-related) deliberately does not live in this repository.** It is kept outside the git tree by decision (2026-11-14) so the repository can later be made public without leaking business strategy; `.gitignore` blocks `docs/private/` as a guard.
 
 ## Authority and status
 
