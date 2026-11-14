@@ -42,6 +42,12 @@ fn find_scheme(body: &str, from: usize) -> Option<(usize, usize)> {
     let bytes = body.as_bytes();
     let mut at = from;
     while at + 8 <= bytes.len() {
+        // The scheme is pure ASCII, so `at + len` is always a valid char
+        // boundary once `at` is; skip offsets inside a multi-byte char.
+        if !body.is_char_boundary(at) {
+            at += 1;
+            continue;
+        }
         let rest = &body[at..];
         let len = if rest.len() >= 8 && rest[..8].eq_ignore_ascii_case("https://") {
             8
@@ -280,5 +286,29 @@ mod tests {
         )]);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].url, "https://x");
+    }
+
+    #[test]
+    fn multibyte_char_before_url_does_not_panic() {
+        let out = extract_links(&[msg(
+            1,
+            "a",
+            "2026-01-01T00:00:00Z",
+            "Café vrati https://example.com/x pdf",
+        )]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].url, "https://example.com/x");
+    }
+
+    #[test]
+    fn multibyte_char_after_url_does_not_panic() {
+        let out = extract_links(&[msg(
+            1,
+            "a",
+            "2026-01-01T00:00:00Z",
+            "see https://example.com/x café und noch mehr text danach",
+        )]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].url, "https://example.com/x");
     }
 }
