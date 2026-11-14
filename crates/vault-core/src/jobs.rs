@@ -47,6 +47,21 @@
 //! asked about were already dropped from the bounded ring — the client
 //! then reconciles from the snapshot instead of the timeline.
 //!
+//! # Finished-jobs ledger (restart persistence)
+//!
+//! The registry itself is in-memory by design (job ids, seq numbers, and
+//! cancel flags are process-local), so a restart would leave Activity
+//! blank over a vault that just imported thousands of messages. Every
+//! terminal transition therefore also appends one row to the
+//! `job_ledger` table (migration 16, capped at the newest
+//! [`JOB_LEDGER_KEEP`][crate::storage::JOB_LEDGER_KEEP] rows): kind,
+//! times, state, a one-line result summary, and the serialized terminal
+//! state. On spawn the ledger is loaded into the registry as read-only
+//! historical records under synthetic ids ([`RESTORED_JOB_ID_BASE`]) —
+//! they ride along in every snapshot and render through the same
+//! describeJobState path as live rows, but they are never cancellable
+//! and never counted as this session's jobs.
+//!
 //! This module has no UI dependencies; the Tauri shell maps the pool onto
 //! `job_*` IPC commands and `job-event` window events.
 
@@ -64,8 +79,9 @@ use crate::bounded::IngestSink;
 use crate::imap::{ImapConfig, SyncFailure, SyncStorage};
 use crate::message::NewMessage;
 use crate::storage::{
-    BatchFailure, ConnectorIdentity, ImportBatchCounts, ImportIssueRecord, MailBatchItem,
-    MailBatchOutcome, NewSourceInstance, Occurrence, Storage,
+    BatchFailure, ConnectorIdentity, ImportBatchCounts, ImportIssueRecord, JobLedgerEntry,
+    JobLedgerRow, JOB_LEDGER_KEEP, MailBatchItem, MailBatchOutcome, NewSourceInstance, Occurrence,
+    Storage,
 };
 use crate::{Error, Result};
 
@@ -234,7 +250,21 @@ pub struct JobRecord {
     pub finished_at: Option<String>,
     /// Last reported progress of a running job (kept on terminal states).
     pub progress: Option<JobProgress>,
+    /// True only for the read-only historical rows boot recovery loads
+    /// from the finished-jobs ledger (migration 16): a previous session's
+    /// job, listed for context, never cancellable and never confused with
+    /// this session's counters. Off the wire for every live record.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restored: bool,
 }
+
+/// Restored ledger rows surface under synthetic ids based here: far above
+/// any process-local id this session can allocate (so live and historical
+/// records never collide in an id-keyed client map), and far below
+/// JavaScript's 2^53 safe-integer boundary. Within the restored set the
+/// newest row gets the highest id, so "order by id descending" keeps
+/// listing newest first across the live/historical seam.
+pub const RESTORED_JOB_ID_BASE: u64 = 1_000_000_000_000;
 
 /// One state change of one job, stamped with a global sequence number.
 ///
@@ -292,7 +322,10 @@ pub struct JobEventsPage {
     /// Whether events between the caller's cursor and `oldest_kept` were
     /// dropped before this poll (ring capacity exceeded).
     pub trimmed: bool,
-    /// Current records: active jobs plus recently finished ones.
+    /// Current records: active jobs plus recently finished ones, plus —
+    /// after a restart — the ledger's restored history (marked
+    /// `restored`, newest last in the vector, ordered below every live
+    /// id).
     pub jobs: Vec<JobRecord>,
 }
 
@@ -304,6 +337,11 @@ struct JobRegistry {
     next_id: u64,
     next_seq: u64,
     records: Vec<JobRecord>,
+    /// Read-only historical rows loaded from the finished-jobs ledger at
+    /// spawn (newest first, synthetic ids below every live id). They are
+    /// never mutated, never cancelled, and ride along in every snapshot
+    /// the client polls — see [`DbPool::spawn`].
+    restored: Vec<JobRecord>,
     events: VecDeque<JobEvent>,
     cancels: HashMap<JobId, Arc<AtomicBool>>,
     finished_order: Vec<JobId>,
@@ -312,11 +350,21 @@ struct JobRegistry {
 }
 
 impl JobRegistry {
-    fn new(config: &PoolConfig) -> Self {
+    /// A registry seeded with the ledger's finished rows (newest first).
+    /// Live ids start above the restored band, so id-descending order
+    /// lists this session's jobs first and the history below them, and no
+    /// live record can ever collide with a restored one.
+    fn with_restored(config: &PoolConfig, restored: Vec<JobRecord>) -> Self {
+        let next_id = if restored.is_empty() {
+            1
+        } else {
+            RESTORED_JOB_ID_BASE + 1
+        };
         Self {
-            next_id: 1,
+            next_id,
             next_seq: 1,
             records: Vec::new(),
+            restored,
             events: VecDeque::new(),
             cancels: HashMap::new(),
             finished_order: Vec::new(),
@@ -353,6 +401,7 @@ impl JobRegistry {
             started_at: None,
             finished_at: None,
             progress: None,
+            restored: false,
         });
         self.cancels.insert(id, Arc::new(AtomicBool::new(false)));
         (id, self.push_event(event))
@@ -421,29 +470,65 @@ impl JobRegistry {
         }))
     }
 
-    fn finish(&mut self, id: JobId, state: JobState, detail: JobEventDetail) -> Option<JobEvent> {
+    /// Move a job to its terminal state. On the first (winning) terminal
+    /// transition this also returns the ledger entry to persist — the
+    /// caller records it in the finished-jobs table so Activity survives
+    /// restarts (migration 16). A raced second transition returns `None`
+    /// and writes nothing.
+    fn finish(
+        &mut self,
+        id: JobId,
+        state: JobState,
+        detail: JobEventDetail,
+    ) -> Option<(JobEvent, JobLedgerEntry)> {
         let at = Self::now();
-        let record = self.record_mut(id)?;
-        if record.state.is_terminal() {
-            // A cancel raced the job's own finish: the first terminal
-            // state wins, and no second terminal event is emitted.
-            return None;
-        }
-        record.state = state;
-        record.finished_at = Some(at.clone());
+        let (kind, submitted_at, state) = {
+            let record = self.record_mut(id)?;
+            if record.state.is_terminal() {
+                // A cancel raced the job's own finish: the first terminal
+                // state wins, and no second terminal event is emitted.
+                return None;
+            }
+            record.state = state;
+            record.finished_at = Some(at.clone());
+            (
+                record.kind.clone(),
+                record.submitted_at.clone(),
+                record.state.clone(),
+            )
+        };
         self.cancels.remove(&id);
         self.finished_order.push(id);
         while self.finished_order.len() > self.finished_keep {
             let evict = self.finished_order.remove(0);
             self.records.retain(|r| r.id != evict);
         }
+        let entry = JobLedgerEntry {
+            job_id: id.0,
+            kind,
+            submitted_at,
+            finished_at: at.clone(),
+            state: ledger_state_token(&state).to_string(),
+            summary: job_result_summary(&state),
+            payload: serde_json::to_string(&state).unwrap_or_default(),
+        };
         let seq = self.next_seq();
-        Some(self.push_event(JobEvent {
+        let event = self.push_event(JobEvent {
             seq,
             at,
             job: id,
             detail,
-        }))
+        });
+        Some((event, entry))
+    }
+
+    /// Live records plus the restored history, live first — the snapshot
+    /// clients reconcile from. Ids already order the merge correctly
+    /// (every live id sits above every restored id).
+    fn snapshot(&self) -> Vec<JobRecord> {
+        let mut jobs = self.records.clone();
+        jobs.extend(self.restored.iter().cloned());
+        jobs
     }
 
     fn events_since(&self, cursor: u64) -> JobEventsPage {
@@ -460,7 +545,7 @@ impl JobRegistry {
             latest_seq,
             oldest_kept,
             trimmed: cursor + 1 < oldest_kept,
-            jobs: self.records.clone(),
+            jobs: self.snapshot(),
         }
     }
 }
@@ -527,9 +612,20 @@ impl DbPool {
         on_event: impl Fn(&JobEvent) + Send + Sync + 'static,
     ) -> Result<Arc<Self>> {
         // Writer first: it owns migration duty. Sequential opens, so a
-        // pending migration is applied exactly once before readers see
-        // the file.
+        // pending migration is applied exactly once before readers see the
+        // file.
         let writer_storage = Storage::open(path.as_ref())?;
+        // Finished-jobs ledger (migration 16): the previous sessions'
+        // terminal jobs become read-only history in the registry, loaded
+        // here — before the threads start, so no live job can be submitted
+        // first and the restored ids stay below every id this session
+        // allocates.
+        let restored: Vec<JobRecord> = writer_storage
+            .job_ledger_recent(JOB_LEDGER_KEEP as u32)?
+            .iter()
+            .enumerate()
+            .map(|(offset, row)| restored_record(row, offset as u64))
+            .collect();
         let reader_a = Storage::open(path.as_ref())?;
         let reader_b = Storage::open(path.as_ref())?;
         let (write_tx, write_rx) =
@@ -540,7 +636,7 @@ impl DbPool {
             readers: [Mutex::new(reader_a), Mutex::new(reader_b)],
             write_tx,
             job_tx,
-            jobs: Mutex::new(JobRegistry::new(&config)),
+            jobs: Mutex::new(JobRegistry::with_restored(&config, restored)),
             on_event: Box::new(on_event),
             writer: Mutex::new(None),
             runner: Mutex::new(None),
@@ -680,7 +776,7 @@ impl DbPool {
     /// client waits on a queued job that cannot start.
     fn fail_submission(&self, id: JobId, error: JobError) -> JobError {
         let error = error.clone();
-        if let Some(event) = self.with_jobs_mut(|reg| {
+        if let Some((event, entry)) = self.with_jobs_mut(|reg| {
             let detail_error = error.clone();
             reg.finish(
                 id,
@@ -692,6 +788,7 @@ impl DbPool {
                 },
             )
         }) {
+            persist_ledger_entry(self, entry);
             (self.on_event)(&event);
         }
         error
@@ -720,9 +817,10 @@ impl DbPool {
         self.with_jobs_mut(|reg| reg.records.iter().find(|r| r.id == id).cloned())
     }
 
-    /// All current records: active jobs plus recently finished ones.
+    /// All current records: active jobs plus recently finished ones, plus
+    /// the restored history a restart inherited.
     pub fn jobs(&self) -> Vec<JobRecord> {
-        self.with_jobs_mut(|reg| reg.records.clone())
+        self.with_jobs_mut(|reg| reg.snapshot())
     }
 
     /// The polling-recovery page for a cursor (see the
@@ -873,13 +971,108 @@ fn run_job(pool: &Arc<DbPool>, id: JobId, op: JobOp) {
 }
 
 fn finish_job(pool: &DbPool, id: JobId, state: JobState, detail: JobEventDetail) {
-    if let Some(event) = pool.with_jobs_mut(|reg| reg.finish(id, state, detail)) {
+    if let Some((event, entry)) = pool.with_jobs_mut(|reg| reg.finish(id, state, detail)) {
+        persist_ledger_entry(pool, entry);
         (pool.on_event)(&event);
     }
 }
 
 fn spawn_error(e: std::io::Error) -> Error {
     Error::Io(std::io::Error::other(e.to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// Finished-jobs ledger (migration 16)
+// ---------------------------------------------------------------------------
+
+/// The ledger's state token for a terminal state (`"succeeded"`,
+/// `"failed"`, `"cancelled"`); non-terminal states never reach the ledger.
+fn ledger_state_token(state: &JobState) -> &'static str {
+    match state {
+        JobState::Succeeded { .. } => "succeeded",
+        JobState::Failed { .. } => "failed",
+        JobState::Cancelled => "cancelled",
+        JobState::Queued | JobState::Running => "running",
+    }
+}
+
+/// The one-line result summary stored beside a finished job — the same
+/// result part the UI's `describeJobState` renders after "done" for
+/// succeeded jobs ("5,505 new, 3 present", "8 embedded"), the error
+/// message for failed ones, empty for cancelled. Mirrors
+/// `describeResult` in src/jobsview.ts; keep the two in step.
+fn job_result_summary(state: &JobState) -> String {
+    match state {
+        JobState::Succeeded { result } => {
+            let Some(object) = result.as_object() else {
+                return String::new();
+            };
+            // Imports that run a media pass return { summary, media } —
+            // the ingest counts live one level down; flat results (embed
+            // jobs) read directly.
+            let counts = object
+                .get("summary")
+                .and_then(|s| s.as_object())
+                .unwrap_or(object);
+            let mut bits: Vec<String> = Vec::new();
+            if let Some(inserted) = counts.get("inserted").and_then(Value::as_u64) {
+                bits.push(format!("{inserted} new"));
+                if let Some(skipped) = counts.get("skipped").and_then(Value::as_u64) {
+                    if skipped > 0 {
+                        bits.push(format!("{skipped} present"));
+                    }
+                }
+            }
+            if let Some(embedded) = object.get("embedded").and_then(Value::as_u64) {
+                if embedded > 0 {
+                    bits.push(format!("{embedded} embedded"));
+                }
+            }
+            bits.join(", ")
+        }
+        JobState::Failed { error } => error.to_string(),
+        JobState::Cancelled | JobState::Queued | JobState::Running => String::new(),
+    }
+}
+
+/// Map one ledger row back to the read-only record the panel renders
+/// (newest-first rows get descending synthetic ids from
+/// [`RESTORED_JOB_ID_BASE`], so they sort below every live id). The
+/// stored payload is the serialized terminal state; if it cannot be
+/// parsed (a future format change, say), the row degrades to the stored
+/// summary instead of vanishing.
+fn restored_record(row: &JobLedgerRow, offset: u64) -> JobRecord {
+    let state = serde_json::from_str::<JobState>(&row.payload).unwrap_or_else(|_| {
+        match row.state.as_str() {
+            "failed" => JobState::Failed {
+                error: JobError::Internal {
+                    message: row.summary.clone(),
+                },
+            },
+            "cancelled" => JobState::Cancelled,
+            _ => JobState::Succeeded {
+                result: Value::String(row.summary.clone()),
+            },
+        }
+    });
+    JobRecord {
+        id: JobId(RESTORED_JOB_ID_BASE - offset),
+        kind: row.kind.clone(),
+        state,
+        submitted_at: row.submitted_at.clone(),
+        started_at: None,
+        finished_at: Some(row.finished_at.clone()),
+        progress: None,
+        restored: true,
+    }
+}
+
+/// Best-effort ledger append: the write goes through the bounded queue
+/// like every other write (never under the registry lock). A ledger
+/// failure must never mask the job's own terminal event — it is dropped
+/// on the floor, and the in-session panel is unaffected either way.
+fn persist_ledger_entry(pool: &DbPool, entry: JobLedgerEntry) {
+    let _ = pool.submit_write(move |s| s.record_job_ledger(&entry));
 }
 
 fn writer_stopped() -> Error {

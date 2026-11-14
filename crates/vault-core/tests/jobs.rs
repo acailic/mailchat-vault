@@ -823,3 +823,79 @@ fn job_event_serializes_flat_for_the_frontend() {
         "detail must be flattened onto the event object, not nested: {wire}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Finished-jobs ledger (migration 16): Activity survives a restart
+// ---------------------------------------------------------------------------
+
+#[test]
+fn finished_jobs_survive_a_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    {
+        let pool = pool(&tmp);
+        let ok = pool
+            .submit_job("import_mbox", |_ctx| {
+                Ok(json!({ "summary": { "inserted": 5505, "skipped": 3 } }))
+            })
+            .unwrap();
+        let bad = pool
+            .submit_job("imap_sync", |_ctx| {
+                Err(JobError::Network {
+                    message: "connection refused".into(),
+                })
+            })
+            .unwrap();
+        wait_terminal(&pool, ok);
+        wait_terminal(&pool, bad);
+        pool.shutdown();
+    }
+
+    // Restart over the same file: the ledger rows come back as read-only
+    // history — the exact terminal states, listed newest first.
+    {
+        let pool = pool(&tmp);
+        let page = pool.events_since(0);
+        let history: Vec<vault_core::jobs::JobRecord> =
+            page.jobs.iter().filter(|r| r.restored).cloned().collect();
+        assert_eq!(history.len(), 2, "both finished jobs restored: {history:?}");
+        assert_eq!(history[0].kind, "imap_sync");
+        assert_eq!(
+            history[0].state,
+            JobState::Failed {
+                error: JobError::Network {
+                    message: "connection refused".into()
+                }
+            }
+        );
+        assert_eq!(history[1].kind, "import_mbox");
+        assert!(matches!(history[1].state, JobState::Succeeded { .. }));
+        assert!(history
+            .iter()
+            .all(|r| r.id.0 <= vault_core::jobs::RESTORED_JOB_ID_BASE));
+
+        // A live job submitted in the new session allocates above the
+        // restored band, so it lists first and can never collide with a
+        // restored id (the client keys its record map by id).
+        let live = pool.submit_job("seed_demo", |_ctx| Ok(Value::Null)).unwrap();
+        assert!(live.0 > vault_core::jobs::RESTORED_JOB_ID_BASE);
+        wait_terminal(&pool, live);
+        let jobs = pool.jobs();
+        assert_eq!(jobs.len(), 3);
+        assert_eq!(jobs[0].kind, "seed_demo");
+        assert!(!jobs[0].restored);
+        assert!(
+            jobs[0].id.0 > jobs[1].id.0,
+            "the live record sorts above every restored one"
+        );
+        pool.shutdown();
+    }
+
+    // And the ledger itself is bounded across sessions: the restart added
+    // its own terminal row, all through the same pruning write.
+    {
+        let s = Storage::open(tmp.path().join("vault.db")).unwrap();
+        let rows = s.job_ledger_recent(u32::MAX).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].kind, "seed_demo", "newest first");
+    }
+}

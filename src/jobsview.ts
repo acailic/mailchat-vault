@@ -130,17 +130,24 @@ export function activeJobCount(tracker: JobsTrackerState): number {
   ).length;
 }
 
-/** One-line status over the tracker for the panel header. */
+/** One-line status over the tracker for the panel header. Restored
+ * ledger rows count honestly but separately: "2 finished · 12 earlier"
+ * never claims this session ran what a previous one did. */
 export function jobsStatusText(tracker: JobsTrackerState): string {
   const records = orderedRecords(tracker);
   const active = records.filter(
     (r) => r.state.state === "queued" || r.state.state === "running",
   );
   if (records.length === 0) {
-    return "No background jobs yet. Imports, IMAP syncs and embedding run here.";
+    return "No background jobs yet. Imports, IMAP syncs and building the local search index run here.";
   }
   if (active.length === 0) {
-    return `No active jobs (${records.length} finished).`;
+    const finished = records.filter((r) => !r.restored).length;
+    const earlier = records.length - finished;
+    const parts: string[] = [];
+    if (finished > 0) parts.push(`${finished} finished`);
+    if (earlier > 0) parts.push(`${earlier} earlier`);
+    return `No active jobs (${parts.join(" · ")}).`;
   }
   const running = active.filter((r) => r.state.state === "running");
   const queued = active.length - running.length;
