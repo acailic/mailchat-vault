@@ -4034,6 +4034,75 @@ describe("workspace shell", () => {
   });
 });
 
+describe("workspace tabs (Search / Ask) and the hideable sidebar", () => {
+  function app(): HTMLElement {
+    return $("#app");
+  }
+
+  function setViewportWidth(width: number): void {
+    win.innerWidth = width;
+    win.dispatchEvent(new win.Event("resize"));
+  }
+
+  it("switches panels via the tab strip; both panels stay mounted", async () => {
+    await boot();
+    expect(app().dataset.workspaceSection).toBe("search");
+    const searchTab = $("#tab-search") as HTMLElement;
+    const askTab = $("#tab-ask") as HTMLElement;
+    expect(askTab.getAttribute("aria-selected")).toBe("false");
+    askTab.click();
+    expect(app().dataset.workspaceSection).toBe("ask");
+    expect(askTab.getAttribute("aria-selected")).toBe("true");
+    expect(searchTab.getAttribute("aria-selected")).toBe("false");
+    // The tabpanels point at each other and both stay in the DOM.
+    expect(askTab.getAttribute("aria-controls")).toBe("ask-section");
+    expect($("#search-section")).toBeTruthy();
+    expect($("#ask-section")).toBeTruthy();
+    searchTab.click();
+    expect(app().dataset.workspaceSection).toBe("search");
+  });
+
+  it("leaving and returning keeps the active tab; Ctrl+K lands on Search", async () => {
+    await boot();
+    ($("#tab-ask") as HTMLElement).click();
+    expect(app().dataset.workspaceSection).toBe("ask");
+    $(".nav-view-btn[data-view-target='settings']").click();
+    expect(app().dataset.view).toBe("settings");
+    $(".nav-view-btn[data-view-target='workspace']").click();
+    expect(app().dataset.workspaceSection).toBe("ask"); // preserved
+    win.document.dispatchEvent(
+      new win.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true }),
+    );
+    expect(app().dataset.workspaceSection).toBe("search");
+    expect(win.document.activeElement?.id).toBe("search");
+  });
+
+  it("desktop: the hamburger collapses the nav column and persists the choice", async () => {
+    await boot();
+    setViewportWidth(1280);
+    const toggle = $("#nav-toggle") as HTMLButtonElement;
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    toggle.click();
+    expect(app().dataset.navCollapsed).toBe("true");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(win.localStorage.getItem("mcv.navCollapsed")).toBe("1");
+    toggle.click();
+    expect(app().dataset.navCollapsed).toBe("false");
+    expect(win.localStorage.getItem("mcv.navCollapsed")).toBe("0");
+  });
+
+  it("compact: the hamburger keeps working the drawer, not the desktop collapse", async () => {
+    await boot();
+    setViewportWidth(640);
+    const toggle = $("#nav-toggle") as HTMLButtonElement;
+    toggle.click();
+    expect(app().dataset.nav).toBe("open");
+    expect(app().dataset.navCollapsed).toBe("false"); // untouched
+    toggle.click();
+    expect(app().dataset.nav).toBe("closed");
+  });
+});
+
 describe("sources view sub-sections", () => {
   it("renders five sub-sections and defaults to home", async () => {
     await boot();

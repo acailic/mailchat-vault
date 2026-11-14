@@ -93,6 +93,10 @@ export type SourcesSection = "home" | "add" | "import" | "email" | "automatic";
 /** The pages inside the Settings view. */
 export type SettingsSection = "general" | "storage" | "ai";
 
+/** The tabs inside the workspace (Archive) view: querying the index and
+ * asking the archive share the results column but not the same moment. */
+export type WorkspaceSection = "search" | "ask";
+
 /** State of the message-reading pane (drives the medium/compact swap and
  * the wide empty state). */
 export interface ReadingState {
@@ -106,8 +110,13 @@ export interface WorkspaceState {
   reading: ReadingState;
   /** Compact navigation drawer. */
   navOpen: boolean;
+  /** Desktop sidebar hidden (the wide/medium counterpart of the compact
+   * drawer: the nav column is removed instead of overlaid). */
+  navCollapsed: boolean;
   /** The visible Sources page (drives the sources sub-sections). */
   sourcesSection: SourcesSection;
+  /** The visible workspace tab (Search / Ask). */
+  workspaceSection: WorkspaceSection;
   /** The visible Settings page (drives the settings sub-sections). */
   settingsSection: SettingsSection;
 }
@@ -126,8 +135,10 @@ export class WorkspaceStore {
       layout: "wide",
       reading: { open: false },
       navOpen: false,
+      navCollapsed: false,
       sourcesSection: "home",
       settingsSection: "general",
+      workspaceSection: "search",
       ...initial,
     };
   }
@@ -150,13 +161,24 @@ export class WorkspaceStore {
     // Leaving the workspace does not close the reading pane; returning
     // restores it (the reading pane is part of the workspace view). Nav
     // destinations land on their home section; the section setters below
-    // are the deep links (Add source, first-run, reconnect, …).
+    // are the deep links (Add source, first-run, reconnect, …). The
+    // workspace tab (Search/Ask) is deliberately kept, like the reading
+    // pane: returning lands on the tab you left.
     this.#set({
       view,
       navOpen: false,
       sourcesSection: "home",
       settingsSection: "general",
     });
+  }
+
+  /** Deep-link into a workspace tab (navigates to the workspace view). */
+  setWorkspaceSection(section: WorkspaceSection): void {
+    if (
+      this.#state.view === "workspace" &&
+      this.#state.workspaceSection === section
+    ) return;
+    this.#set({ view: "workspace", workspaceSection: section, navOpen: false });
   }
 
   /** Deep-link into a Sources page (navigates to the sources view). */
@@ -184,6 +206,12 @@ export class WorkspaceStore {
   setNavOpen(navOpen: boolean): void {
     if (navOpen === this.#state.navOpen) return;
     this.#set({ navOpen });
+  }
+
+  /** Hide/show the desktop sidebar (no effect on the compact drawer). */
+  setNavCollapsed(navCollapsed: boolean): void {
+    if (navCollapsed === this.#state.navCollapsed) return;
+    this.#set({ navCollapsed });
   }
 }
 
