@@ -33,7 +33,7 @@ A mismatched key/endpoint pairing (for example `ANTHROPIC_API_KEY` without `ANTH
 
 ## Privacy
 
-The product promise is “nothing leaves the machine”; LLM mode is opt-in and strictly scoped: only your question (for translation) and the top-8 matching messages, truncated (for the summary), are sent to the configured provider — and only after the explicit AI consent described above. No other rows, no database dumps, no embeddings, no key at rest. The summary step is skipped entirely when there are no results.
+Nothing leaves the machine without the explicit AI consent above; LLM mode is opt-in and strictly scoped: only your question (for translation) and the top-8 matching messages, truncated (for the summary), are sent to the configured provider. No other rows, no database dumps, no embeddings, no key at rest. The summary step is skipped entirely when there are no results.
 
 ## Fallback
 

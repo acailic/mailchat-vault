@@ -2,7 +2,7 @@
 
 Mailchat Vault is a local email and chat archive — a Tauri 2 desktop app (Rust backend, TypeScript frontend) with SQLite FTS5 full-text search over your own messages.
 
-Everything stays on the machine. The only outbound traffic is optional [AI-assisted search](docs/ai-search.md): the query and the top matching rows, sent to a configured provider only after an explicit consent prompt.
+The archive and search stay on your machine, and search works fully offline. Network use is separate and explicit: connecting an account contacts your mail provider (Google sign-in contacts Google; IMAP sync is read-only), and optional [AI-assisted search](docs/ai-search.md) sends the query and the top matching rows to a configured provider only after an explicit consent prompt. The app does not encrypt the archive or backups itself — at rest they rely on your OS account and disk protection.
 
 ## What it does
 
