@@ -2055,7 +2055,8 @@ describe("export", () => {
 
     dialog.savedPath = "/tmp/thread.jsonl";
     tauri.handlers.set("export_chat", () => ({ format: "json", written: 5, skipped: 0 }));
-    $<HTMLSelectElement>("#export-format").value = "json";
+    // The chat format select lives in the reading header's Export picker.
+    $<HTMLSelectElement>("#chat-format").value = "json";
     ($(".export-chat-btn") as HTMLElement).click();
     await vi.waitFor(() =>
       expect($("#export-status").textContent).toBe("Exported 5 messages to /tmp/thread.jsonl."),
