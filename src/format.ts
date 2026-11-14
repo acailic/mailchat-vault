@@ -14,6 +14,34 @@ export function formatSentAt(iso: string): string {
   );
 }
 
+/** Render a timestamp as a short local day label ("Nov 1, 2026"). Empty
+ *  for an absent or unparsable timestamp, so callers can omit the part
+ *  instead of printing a fabricated day. */
+export function formatDayLabel(iso: string): string {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+/** The human label of one import scope for the filter's option list:
+ *  the run's first-observed day plus its message count ("Imported
+ *  Nov 1, 2026 — 6 messages"), or the count alone when no timestamp was
+ *  recorded. The raw import id never leads the label — callers keep it
+ *  one hover away in the option's title. */
+export function importScopeLabel(scope: {
+  messages: number;
+  first_observed_at: string;
+}): string {
+  const count = `${scope.messages} ${scope.messages === 1 ? "message" : "messages"}`;
+  const day = formatDayLabel(scope.first_observed_at);
+  return day ? `Imported ${day} — ${count}` : count;
+}
+
 /** The user-facing label of one time-confidence token: a short word
  *  (or two) that says how much to trust the shown time — the token
  *  itself never reaches the reading pane, the copy text, or exports
