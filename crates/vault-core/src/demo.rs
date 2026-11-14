@@ -104,9 +104,16 @@ mod tests {
                 ..SearchArchiveRequest::default()
             })
             .unwrap();
-        assert_eq!(page.hits.len(), 1, "only the quarterly-report message matches");
+        assert_eq!(
+            page.hits.len(),
+            1,
+            "only the quarterly-report message matches"
+        );
         let hit = &page.hits[0];
-        assert_eq!(hit.author, "Ana Sender <ana@example.com>", "the demo-2 message");
+        assert_eq!(
+            hit.author, "Ana Sender <ana@example.com>",
+            "the demo-2 message"
+        );
         assert!(
             hit.attachment_count >= 1,
             "badge data: the message that promises a report carries a reference"
@@ -124,7 +131,11 @@ mod tests {
                 ..SearchArchiveRequest::default()
             })
             .unwrap();
-        assert_eq!(filtered.hits.len(), 1, "exactly one demo message references a file");
+        assert_eq!(
+            filtered.hits.len(),
+            1,
+            "exactly one demo message references a file"
+        );
         assert_eq!(
             filtered.hits[0].author, "Ana Sender <ana@example.com>",
             "the attachment filter matches the quarterly-report reference"
