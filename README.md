@@ -6,7 +6,7 @@ The archive and search stay on your machine, and search works fully offline. Net
 
 ## What it does
 
-- Imports `.mbox`/`.eml` mail and WhatsApp, Telegram, Signal, Discord, and Messenger exports — single files, folders, or `.zip`
+- Imports `.mbox`/`.eml` mail and WhatsApp, Telegram, Signal, Discord, and Messenger exports — single files, folders, or `.zip` — picked with the import buttons or dropped onto the window
 - Bounded import preview before anything is stored; referenced media goes into a content-addressed store
 - Incremental IMAP sync — Gmail (Google sign-in or app password) or any server
 - Opt-in folder watching, scheduled auto-sync, and new-mail desktop notifications

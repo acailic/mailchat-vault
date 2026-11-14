@@ -156,6 +156,12 @@
                     <button id="first-run-import-btn" class="primary" type="button">Import files…</button>
                     <button id="first-run-account-btn" type="button">Connect email…</button>
                   </div>
+                  <!-- Whole-window drag-drop import: static copy whose only
+                       dynamic behavior is the highlight class the Tauri
+                       drag-drop events toggle (src/main.ts). -->
+                  <div id="first-run-drop" class="drop-zone">
+                    Drop archives here — .mbox · .eml · .json · .txt
+                  </div>
                   <p class="meta">
                     Not ready with your own data?
                     <button id="first-run-demo-btn" class="link-btn" type="button">Try a sample archive</button>
@@ -328,6 +334,12 @@
                 or a .zip of any of these. You will see a preview before anything is stored;
                 re-importing never duplicates.
               </p>
+              <!-- The same drop surface as the first-run card: dropping on
+                   any part of the window routes through this section's
+                   preview → confirm flow. -->
+              <div id="import-drop" class="drop-zone">
+                Drop archives here — .mbox · .eml · .json · .txt
+              </div>
               <div id="import-preview" hidden></div>
               <!-- This flow's import job, followed inline: stage, counts,
                    bar, Cancel (Activity stays the aggregate over all jobs). -->
