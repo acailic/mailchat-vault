@@ -404,11 +404,15 @@ function contextRow(
   meta.textContent = `${entry.author || "unknown"} · ${formatSentAt(entry.sentAt ?? "")}`;
   const body = document.createElement("div");
   body.className = "body";
-  if (entry.current) {
-    appendSegments(body, highlightSegments(entry.body, terms));
-  } else {
-    body.textContent = truncateBody(entry.body, 140);
-  }
+  // Neighbors show truncated text, the current row the full body; both
+  // mark the active query terms with the same bounded highlight.
+  appendSegments(
+    body,
+    highlightSegments(
+      entry.current ? entry.body : truncateBody(entry.body, 140),
+      terms,
+    ),
+  );
   row.append(meta, body);
   if (!entry.current) {
     row.classList.add("link");
