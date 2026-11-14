@@ -66,6 +66,8 @@ export async function run(ctx) {
     assert.equal(ui.totalFromStatus(relevanceStatus, "filtered"), 4, "same count, both sorts");
 
     // --- attachment filter: the fixture carries no preserved media ------
+    // The attachment/import controls live behind the Filters fold.
+    await ui.openFilters(browser);
     // Empty text + the attachment filter = a filtered browse.
     const searchBox = await browser.$("#search");
     await searchBox.click();

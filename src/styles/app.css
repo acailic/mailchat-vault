@@ -429,15 +429,44 @@ kbd {
   color: var(--muted);
 }
 
-/* Filters */
-#filters {
-  margin-top: var(--sp-2);
+/* Filters: one quiet toolbar row (search + Filters + sort + Clear). The
+ * advanced filters live behind the Filters fold (native details/summary,
+ * the same pattern as the IMAP form's Advanced fold); opened, the fold
+ * claims its own wrapped line below the row. The summary reads as one
+ * more quiet control in the row (the .chip recipe, kept separate so
+ * ".chip" stays the removable-chip contract) and carries the
+ * active-filter count. */
+#filters > summary {
+  /* Default list-item display keeps the native disclosure marker — the
+   * same affordance as the IMAP form's Advanced fold. */
+  cursor: pointer;
+  padding: 3px 10px;
+  font-size: var(--text-meta);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: inherit;
+  width: fit-content;
+}
+#filters > summary:hover { background: var(--panel-2); }
+#filters > summary.on {
+  background: var(--selection);
+  border-color: var(--accent);
+}
+#filters[open] { flex-basis: 100%; }
+#filters .filter-fields {
   display: flex;
   gap: var(--sp-2);
   flex-wrap: wrap;
   align-items: center;
+  padding-top: var(--sp-2);
 }
-#filters .spacer, .row .spacer { flex: 1; }
+#filters .filter-fields label {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+.row .spacer { flex: 1; }
 
 .chip {
   padding: 3px 10px;

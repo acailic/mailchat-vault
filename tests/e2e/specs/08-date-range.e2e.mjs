@@ -40,6 +40,7 @@ export async function run(ctx) {
 
     await ui.importMbox(browser, ui.archiveMbox);
     await ui.openView(browser, "workspace"); // search controls are view-scoped
+    await ui.openFilters(browser); // the date inputs live behind the Filters fold
 
     // Empty text + date filter = browse under that filter.
     const searchInput = await browser.$("#search");

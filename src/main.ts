@@ -8,7 +8,13 @@ import "./styles/tokens.css";
 import "./styles/app.css";
 
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { folderSummaryLine, formatSentAt, humanSize, snippet } from "./format";
+import {
+  folderSummaryLine,
+  formatSentAt,
+  humanSize,
+  importScopeLabel,
+  snippet,
+} from "./format";
 import {
   objectNameOf,
   renderMediaUsage,
@@ -153,6 +159,7 @@ const toDateInput = document.querySelector<HTMLInputElement>("#to-date")!;
 const sortOrderSelect = document.querySelector<HTMLSelectElement>("#sort-order")!;
 const hasAttachmentSelect = document.querySelector<HTMLSelectElement>("#has-attachment")!;
 const importScopeSelect = document.querySelector<HTMLSelectElement>("#import-scope")!;
+const filtersSummary = document.querySelector<HTMLElement>("#filters-summary")!;
 const activeFilterChips = document.querySelector<HTMLElement>("#active-filter-chips")!;
 const refreshNotice = document.querySelector<HTMLElement>("#refresh-notice")!;
 const selectionFormatSelect = document.querySelector<HTMLSelectElement>("#selection-format")!;
@@ -486,6 +493,14 @@ async function runAsk(): Promise<void> {
   await doAsk(question, network !== null && aiConsentGranted);
 }
 
+/** The Filters fold's summary line: the label plus how many filters are
+ * on (the same count the chips bar below shows as removable chips —
+ * the summary is the glanceable state while the fold is closed). */
+function renderFiltersSummary(count: number): void {
+  filtersSummary.textContent = count > 0 ? `Filters · ${count} on` : "Filters";
+  filtersSummary.classList.toggle("on", count > 0);
+}
+
 function renderAll(): void {
   const terms = splitTerms(state.filters.text);
   renderFlatResults(resultsList, {
@@ -505,15 +520,21 @@ function renderAll(): void {
     onPrev: () => void runSearch(state.offset - PAGE_SIZE),
     onNext: () => void runSearch(state.offset + PAGE_SIZE),
   });
+  const chips = filterChips(state.filters, {
+    source: (id) =>
+      sourceChipLabels.get(id) ?? sourceInstances.find((s) => s.id === id)?.label ?? id,
+    // The chip echoes the scope select's human label, not the raw id.
+    import: (id) => {
+      const scope = importScopes.find((s) => s.import_id === id);
+      return scope ? importScopeLabel(scope) : id;
+    },
+  });
   renderFilterChips(activeFilterChips, {
-    chips: filterChips(state.filters, {
-      source: (id) =>
-        sourceChipLabels.get(id) ?? sourceInstances.find((s) => s.id === id)?.label ?? id,
-      import: (id) => importScopes.find((s) => s.import_id === id)?.import_id ?? id,
-    }),
+    chips,
     onRemove: (chip) => removeFilterChip(chip),
     onClear: clearFilters,
   });
+  renderFiltersSummary(chips.length);
   renderRefreshNotice(refreshNotice, state.refreshNeeded, () => void runSearch(0));
   if (state.detail) {
     renderDetail2(detailPanel, {
@@ -1475,11 +1496,14 @@ function showImportFollowup(importId: string | undefined, inserted: number): voi
   view.addEventListener("click", () => {
     // The scope select may not list this run yet (its refresh is async
     // or returned nothing): add the option so the filter actually
-    // selects this import, not silently "any import".
+    // selects this import, not silently "any import". No first-observed
+    // timestamp is at hand here, so the label is the count alone and the
+    // raw id stays in the option's title.
     if (![...importScopeSelect.options].some((o) => o.value === importId)) {
       const option = document.createElement("option");
       option.value = importId;
-      option.textContent = `${importId} (${inserted} messages)`;
+      option.textContent = importScopeLabel({ messages: inserted, first_observed_at: "" });
+      option.title = importId;
       importScopeSelect.append(option);
     }
     importScopeSelect.value = importId;
