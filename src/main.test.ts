@@ -2054,6 +2054,45 @@ describe("ask and local embeddings", () => {
     expect($("#ask-notes").hidden).toBe(true);
   });
 
+  it("renders collected links with cited hits and exports them", async () => {
+    await boot();
+    tauri.handlers.set("llm_ask", () => ({
+      plan: { match_expr: "example", date_from: null, date_to: null, from: "ana@", has_link: true, extract_links: true },
+      plan_source: "llm",
+      ranking: "fts_only",
+      results: [],
+      answer: "here is what I found",
+      notes: [],
+      collected: [
+        {
+          url: "https://example.com/a",
+          hits: [
+            { message_id: 7, author: "ana", sent_at: "2026-10-01T00:00:00Z", context: "see the link" },
+          ],
+        },
+      ],
+    }));
+    tauri.handlers.set("conversation_context_v2", () => ({}));
+    input("#ask").value = "collect links from ana";
+    pressKey(input("#ask"), "Enter");
+    await vi.waitFor(() => expect($("#ask-collected").hidden).toBe(false));
+    expect($("#ask-collected-count").textContent).toBe("1 link from 1 message");
+    expect($("#ask-collected-list summary").textContent).toContain("https://example.com/a");
+    // A hit opens its citing message in thread context.
+    ($("#ask-collected-list .ask-source") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(tauri.calls.some((c) => c.cmd === "conversation_context_v2" && (c.args as { id: number }).id === 7)).toBe(true),
+    );
+    // Export goes through the save dialog and save_text.
+    dialog.savedPath = "/tmp/links.txt";
+    ($("#ask-collected-export") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(tauri.calls.some((c) => c.cmd === "save_text")).toBe(true),
+    );
+    const call = tauri.calls.find((c) => c.cmd === "save_text")!;
+    expect((call.args as { contents: string }).contents).toContain("https://example.com/a");
+  });
+
   it("an empty question asks nothing", async () => {
     await boot();
     input("#ask").value = "   ";
