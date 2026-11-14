@@ -11,6 +11,16 @@ and viewable in the app, AI answers run only behind your explicit
 consent, new mail can notify you, and the Linux packages install as
 real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
 
+### Fixed (navigation review)
+
+- Exporting search results preserves source-instance selection, attachment and
+  import filters, date/timezone bounds, and sort order across every page.
+  Older export callers keep their existing source-name contract.
+- Activity attention survives missed-event recovery and stays dismissed when an
+  acknowledged failure event is replayed.
+- Corrected two native E2E calls that aborted the source-selection and Add source
+  chooser scenarios before their assertions ran.
+
 ### Added (.eml & Messenger import)
 
 - **`.eml` mail import** — single `.eml` messages (dragged out of any

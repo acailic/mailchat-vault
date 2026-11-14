@@ -63,6 +63,28 @@ const page = (over: Partial<JobEventsPage>): JobEventsPage => ({
 });
 
 describe("jobs tracker (v2 protocol client)", () => {
+  it("recovers a missed failure from the snapshot without flagging it again on later polls", () => {
+    const tracker = newJobsTracker();
+    applyJobEvent(tracker, submitted(1, 1));
+    applyJobEvent(tracker, submitted(4, 2)); // missed job 1's failure
+    const failed = record({
+      id: 1, state: { state: "failed", error: { kind: "network", message: "down" } },
+    });
+    applyJobsPage(tracker, page({ latest_seq: 4, jobs: [failed] }));
+    expect(tracker.latestFailureSeq).toBe(4);
+    applyJobsPage(tracker, page({ latest_seq: 5, jobs: [failed] }));
+    expect(tracker.latestFailureSeq).toBe(4);
+  });
+
+  it("recovers failures when the event ring has been trimmed", () => {
+    const tracker = newJobsTracker();
+    applyJobsPage(tracker, page({
+      trimmed: true, oldest_kept: 41, latest_seq: 60,
+      jobs: [record({ state: { state: "failed", error: { kind: "io", message: "full" } } })],
+    }));
+    expect(tracker.latestFailureSeq).toBe(60);
+  });
+
   it("applies a contiguous event stream and tracks the cursor", () => {
     const tracker = newJobsTracker();
     // A fresh tracker wants one boot poll; an empty page satisfies it.

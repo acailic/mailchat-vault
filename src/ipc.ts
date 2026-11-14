@@ -390,6 +390,15 @@ export function exportSearch(args: {
   return invoke<ExportSummary>("export_search", args);
 }
 
+/** Export the complete executed v2 search, including instance-id scope. */
+export function exportSearchV2(args: {
+  request: SearchArchiveRequest;
+  format: string;
+  path: string;
+}): Promise<ExportSummary> {
+  return invoke<ExportSummary>("export_search_v2", args);
+}
+
 export function exportChat(args: {
   id: number;
   format: string;

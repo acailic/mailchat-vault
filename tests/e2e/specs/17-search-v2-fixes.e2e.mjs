@@ -266,7 +266,7 @@ export async function run(ctx) {
     const idA = idByTls.get("implicit-tls");
     const idB = idByTls.get("starttls");
     assert.ok(idA && idB, "both twin instances listed with distinct stable ids");
-    assert.notEqual(idA, idB, "the twins resolve to distinct ids");
+    assert.ok(idA !== idB, "the twins resolve to distinct ids");
 
     // Boot the chips from the freshly seeded rows.
     await browser.execute(() => location.reload());
