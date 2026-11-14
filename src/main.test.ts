@@ -937,6 +937,27 @@ describe("v2 filters", () => {
     expect(win.document.querySelectorAll("#active-filter-chips .filter-chip").length).toBe(1);
   });
 
+  it("the Filters fold's summary counts the applied filters", async () => {
+    await boot();
+    // No filters: the fold is the plain "Filters" label, not pressed.
+    expect($("#filters-summary").textContent).toBe("Filters");
+    expect($("#filters-summary").classList.contains("on")).toBe(false);
+    searchRespondsWith(() => pageOf(HITS.slice(0, 1), 1));
+    input("#author").value = "ana";
+    pressKey(input("#author"), "Enter");
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    const attachment = $<HTMLSelectElement>("#has-attachment");
+    attachment.value = "with";
+    fireChange(attachment);
+    await vi.waitFor(() => expect(searchCalls().length).toBe(2));
+    expect($("#filters-summary").textContent).toBe("Filters · 2 on");
+    expect($("#filters-summary").classList.contains("on")).toBe(true);
+    // Clear resets the filters and the count together.
+    $("#clear-filters").click();
+    await vi.waitFor(() => expect($("#filters-summary").textContent).toBe("Filters"));
+    expect($("#filters-summary").classList.contains("on")).toBe(false);
+  });
+
   it("reversed date bounds are rejected inline before any invocation", async () => {
     await boot();
     input("#from-date").value = "2026-02-02";

@@ -78,37 +78,47 @@
               </div>
               <section>
                 <h2 class="visually-hidden">Search</h2>
+                <!-- One quiet toolbar row: search + Filters fold + sort + Clear.
+                     The advanced filters (author, dates, files, import scope)
+                     live behind the Filters disclosure; the applied state
+                     stays visible as removable chips below. -->
                 <div class="row">
                   <label class="visually-hidden" for="search">Search messages</label>
                   <input id="search" type="text" placeholder="Search messages…" autofocus />
                   <button id="search-btn" class="primary" type="button">
                     <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-search"></use></svg><span>Search</span>
                   </button>
-                </div>
-                <div id="filters">
-                  <label class="meta">author
-                    <input id="author" class="short" type="text" placeholder="contains… (Enter)" />
-                  </label>
-                  <label class="meta">from <input id="from-date" type="date" /></label>
-                  <label class="meta">to <input id="to-date" type="date" /></label>
-                  <label class="meta" title="Restrict to messages that reference attachments (available or missing) or to messages without any">files
-                    <select id="has-attachment" style="max-width: 9em">
-                      <option value="" selected>any</option>
-                      <option value="with">has attachment</option>
-                      <option value="without">no attachment</option>
-                    </select>
-                  </label>
-                  <label class="meta" title="Restrict to messages first observed by one import run">import
-                    <select id="import-scope" style="max-width: 14em">
-                      <option value="" selected>any import</option>
-                    </select>
-                  </label>
-                  <label class="meta" title="Result order: relevance (text matches) or newest first (the default for empty browse)">sort
-                    <select id="sort-order" style="max-width: 9em">
-                      <option value="relevance" selected>Relevance</option>
-                      <option value="newest">Newest</option>
-                    </select>
-                  </label>
+                  <details id="filters">
+                    <summary id="filters-summary" title="Narrow by author, dates, attachments, or one import run">Filters</summary>
+                    <div class="filter-fields">
+                      <label class="meta" for="author">Author
+                        <input id="author" class="short" type="text" placeholder="contains… (Enter)" />
+                      </label>
+                      <label class="meta" for="from-date">From date
+                        <input id="from-date" type="date" />
+                      </label>
+                      <label class="meta" for="to-date">To date
+                        <input id="to-date" type="date" />
+                      </label>
+                      <label class="meta" for="has-attachment" title="Restrict to messages that reference attachments (available or missing) or to messages without any">Has files
+                        <select id="has-attachment" style="max-width: 9em">
+                          <option value="" selected>any</option>
+                          <option value="with">has attachment</option>
+                          <option value="without">no attachment</option>
+                        </select>
+                      </label>
+                      <label class="meta" for="import-scope" title="Restrict to messages first observed by one import run">Import
+                        <select id="import-scope" style="max-width: 14em">
+                          <option value="" selected>any import</option>
+                        </select>
+                      </label>
+                    </div>
+                  </details>
+                  <label class="visually-hidden" for="sort-order">Result order</label>
+                  <select id="sort-order" style="max-width: 9em" title="Result order: relevance (text matches) or newest first (the default for empty browse)">
+                    <option value="relevance" selected>Relevance</option>
+                    <option value="newest">Newest</option>
+                  </select>
                   <div class="spacer"></div>
                   <button id="clear-filters" type="button" title="Reset all filters">Clear</button>
                 </div>

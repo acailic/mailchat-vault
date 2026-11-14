@@ -63,6 +63,27 @@ export async function openView(browser, view) {
 }
 
 /**
+ * Open the Filters fold in the workspace toolbar (the user's path: a
+ * click on the summary). The advanced filter controls — author, dates,
+ * attachment presence, import scope — live inside a closed <details>
+ * disclosure, and WebKit cannot interact with controls a closed fold
+ * hides, so every spec that drives one opens the fold first. Idempotent:
+ * opening an already-open fold would toggle it shut.
+ */
+export async function openFilters(browser) {
+  await openView(browser, "workspace"); // the toolbar is view-scoped
+  const isOpen = async () =>
+    (await browser.execute(() => document.querySelector("#filters")?.open ?? false));
+  if (!(await isOpen())) {
+    await (await browser.$("#filters-summary")).click();
+    await browser.waitUntil(isOpen, {
+      timeout: 5_000,
+      timeoutMsg: "the Filters fold never opened",
+    });
+  }
+}
+
+/**
  * Open a Sources page (home | add | import | email | automatic) through
  * the real buttons — the chooser round trip for add/import/email, the
  * home link for automatic — and wait for data-sources-section to settle.
