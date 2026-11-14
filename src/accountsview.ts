@@ -12,6 +12,7 @@
 
 import type { AccountView, SourceCount, SourceInstance } from "./types";
 import type { ImapAuthMode } from "./ipc";
+import { friendlySourceLabel } from "./format";
 import { iconEl, type IconName } from "./icons";
 
 /** The arguments of one `sync_imap` invocation for a stored account. */
@@ -63,15 +64,16 @@ export function sourceIcon(account: Pick<AccountView, "kind" | "medium">): IconN
 }
 
 /** The account's headline label — the identity the user knows the
- * account by, never the exposed implementation token. An IMAP account
- * is known by its address and server (`ana@gmail.com · imap.gmail.com`),
- * not by the stored `imap:host:port:user` connector label; an import
- * keeps its label (the source name, already user-facing). */
+ *  account by, never the exposed implementation token. An IMAP account
+ *  is known by its address and server (`ana@gmail.com · imap.gmail.com`),
+ *  not by the stored `imap:host:port:user` connector label; an import
+ *  keeps its label in plain words (`friendlySourceLabel` rewrites the
+ *  raw `mbox` namespace to "Mail import"). */
 export function accountTitle(account: AccountView): string {
   if (account.kind === "imap" && account.imap) {
     return `${account.imap.username} · ${account.imap.host}`;
   }
-  return account.label;
+  return friendlySourceLabel(account.label);
 }
 
 /** The tooltip of the account title: the full stored label (the
@@ -217,7 +219,7 @@ export function sourceChipRows(
     if (!duplicated) {
       return {
         id: s.id,
-        label: s.label,
+        label: friendlySourceLabel(s.label),
         count: countByLabel.get(s.label) ?? null,
         icon: iconOf(s.id),
       };
@@ -231,15 +233,16 @@ export function sourceChipRows(
     let label: string;
     if (s.kind === "imap") {
       const identity = account && account.imap
-        ? `${s.label} · ${account.imap.username} · ${account.imap.host}`
-        : s.label;
+        ? `${friendlySourceLabel(s.label)} · ${account.imap.username} · ${account.imap.host}`
+        : friendlySourceLabel(s.label);
       const n = (imapSeen.get(identity) ?? 0) + 1;
       imapSeen.set(identity, n);
       label = n === 1 ? identity : `${identity} · imap ${n}`;
     } else {
-      const n = (importSeen.get(s.label) ?? 0) + 1;
-      importSeen.set(s.label, n);
-      label = n === 1 ? `${s.label} · import` : `${s.label} · import ${n}`;
+      const base = friendlySourceLabel(s.label);
+      const n = (importSeen.get(base) ?? 0) + 1;
+      importSeen.set(base, n);
+      label = n === 1 ? `${base} · import` : `${base} · import ${n}`;
     }
     return { id: s.id, label, count: null, icon: iconOf(s.id) };
   });

@@ -21,7 +21,7 @@ const snapshot = (over: Partial<WatchSnapshot>): WatchSnapshot => ({
 describe("watchStatusText", () => {
   it("describes the empty state", () => {
     expect(watchStatusText(EMPTY)).toBe(
-      "No folders watched yet — add one to import exports automatically.",
+      "No folders watched yet — pick one to import exports automatically.",
     );
   });
 

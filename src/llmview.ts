@@ -89,7 +89,7 @@ export function privacyNoteFor(item: ProviderMenuItem, summarizeTop: number): st
   if (!item.available || item.id === LOCAL_ID) {
     return (
       "LLM assist is off for this ask — it runs fully locally as a plain local " +
-      "full-text search plus local hybrid vector ranking once embeddings are " +
+      "full-text search, with smarter ranking once the local search index is " +
       "built; nothing leaves this machine. Configure a provider in Settings (z.ai GLM, Anthropic, or a " +
       "custom endpoint), or set ZAI_API_KEY / GLM_API_KEY or ANTHROPIC_API_KEY + " +
       "ANTHROPIC_BASE_URL in the environment."
@@ -104,8 +104,8 @@ export function privacyNoteFor(item: ProviderMenuItem, summarizeTop: number): st
     `to the provider to translate it into a search, and afterwards only the top ` +
     `${summarizeTop} result messages (bodies truncated to 500 chars) are sent ` +
     `for the summary, plus the collected link list (URLs, senders and dates, capped at 50) ` +
-    `when your question asks to collect links. Nothing else leaves this machine; embeddings for hybrid ` +
-    `ranking are computed locally and never sent; ${keySentence}.`
+    `when your question asks to collect links. Nothing else leaves this machine; the local ` +
+    `search index used for ranking is computed on this machine and never sent; ${keySentence}.`
   );
 }
 

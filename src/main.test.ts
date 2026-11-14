@@ -376,12 +376,12 @@ const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 describe("search box", () => {
   it("boots with stats, chips, and the initial newest-first browse", async () => {
     await boot();
-    expect($("#stats").textContent).toBe("9 messages (mbox: 6, demo: 3)");
+    expect($("#stats").textContent).toBe("9 messages (Mail import: 6, demo: 3)");
     // U04: boot ends in a browse, not a dead prompt.
     expect($("#status").textContent).toBe("0 results");
     expect($("#status").classList.contains("error")).toBe(false);
     expect([...win.document.querySelectorAll(".chip")].map((c) => c.textContent)).toEqual([
-      "mbox (6)",
+      "Mail import (6)",
       "demo (3)",
     ]);
     expect($("#results").children.length).toBe(0);
@@ -618,8 +618,8 @@ describe("filters", () => {
     // The shared label is disambiguated and loses the (ambiguous) count;
     // the unique label keeps its count.
     expect(chips.map((c) => c.textContent)).toEqual([
-      "mbox · import",
-      "mbox",
+      "Mail import · import",
+      "Mail import",
       "demo (3)",
     ]);
     searchRespondsWith(() => pageOf(HITS.slice(0, 1), 6));
@@ -682,8 +682,8 @@ describe("filters", () => {
     // One applied filter chip per instance id, labeled distinctly.
     const chips = [...win.document.querySelectorAll("#active-filter-chips .filter-chip")];
     expect(chips.map((c) => c.textContent?.trim())).toEqual([
-      "mbox ×",
-      "mbox · import ×",
+      "Mail import ×",
+      "Mail import · import ×",
     ]);
     // Removing one leaves the other instance's filter in place.
     (chips[0] as unknown as HTMLElement).click();
@@ -2028,7 +2028,7 @@ describe("first-run state and the isolated sample archive (U02)", () => {
     $("#demo-leave-btn").click();
     await vi.waitFor(() => expect(demoCalls).toEqual(["enter", "leave"]));
     await vi.waitFor(() =>
-      expect($("#stats").textContent).toBe("9 messages (mbox: 6, demo: 3)"),
+      expect($("#stats").textContent).toBe("9 messages (Mail import: 6, demo: 3)"),
     );
     await vi.waitFor(() => expect($("#demo-banner").getAttribute("hidden")).not.toBeNull());
     await vi.waitFor(() => expect($("#status").textContent).toBe("1–9 of 9"));
@@ -2382,7 +2382,7 @@ describe("ask and local embeddings", () => {
   it("boots with the embedding coverage line", async () => {
     tauri.handlers.set("embed_status", () => EMBED_STATUS);
     await boot();
-    await vi.waitFor(() => expect($("#embed-status").textContent).toContain("3/4"));
+    await vi.waitFor(() => expect($("#embed-status").textContent).toContain("3 of 4"));
     expect($("#embed-status").textContent).toContain("1 pending");
     expect($("#embed-status").textContent).toContain("hash-ngram-v1");
   });
@@ -2428,7 +2428,7 @@ describe("ask and local embeddings", () => {
     );
     // The button is busy while the job runs (no v1 result awaited).
     expect($<HTMLButtonElement>("#embed-btn").disabled).toBe(true);
-    expect($("#embed-status").textContent).toContain("Embedding…");
+    expect($("#embed-status").textContent).toContain("Building the local search index");
 
     // The jobs panel renders the job lifecycle from its events.
     const emit = (payload: unknown) =>
@@ -2444,10 +2444,10 @@ describe("ask and local embeddings", () => {
       total: 4,
       message: "embedding",
     });
-    expect($("#jobs-list").textContent).toContain("local embeddings — 2/4 (50%)");
+    expect($("#jobs-list").textContent).toContain("local search index — 2/4 (50%)");
     emit({ seq: 4, at: "t", job: 9, type: "succeeded", result: { embedded: 4 } });
     await vi.waitFor(() =>
-      expect($("#jobs-list").textContent).toContain("local embeddings — done (4 embedded)"),
+      expect($("#jobs-list").textContent).toContain("local search index — done (4 indexed)"),
     );
     // Finished: the button re-enables.
     expect($<HTMLButtonElement>("#embed-btn").disabled).toBe(false);
@@ -2459,7 +2459,9 @@ describe("ask and local embeddings", () => {
     tauri.handlers.set("job_submit", () => Promise.reject("queue is full"));
     $("#embed-btn").click();
     await vi.waitFor(() =>
-      expect($("#embed-status").textContent).toBe("Embedding job failed to start: queue is full"),
+      expect($("#embed-status").textContent).toBe(
+        "Could not start building the local search index: queue is full",
+      ),
     );
     expect($<HTMLButtonElement>("#embed-btn").disabled).toBe(false);
   });
@@ -2712,7 +2714,7 @@ describe("folder watching", () => {
     await boot();
     pressKey(input("#watch-path"), "Enter");
     await vi.waitFor(() =>
-      expect($("#watch-status").textContent).toContain("Type a folder path first"),
+      expect($("#watch-status").textContent).toContain("Pick a folder above"),
     );
     expect(watchCalls().some((c) => c.cmd === "watch_add_folder")).toBe(false);
   });

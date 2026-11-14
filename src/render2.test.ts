@@ -63,6 +63,8 @@ describe("flat results", () => {
     expect(rows[1].classList.contains("active")).toBe(true);
     expect(rows[0].textContent).toContain("Ana");
     expect(rows[1].textContent).toContain("Bo");
+    // The raw `mbox` source label reads as plain words on the row.
+    expect(rows[0].textContent).toContain("Mail import");
     // Flat: no group headers between rows.
     expect(el.querySelector(".group")).toBeNull();
   });
@@ -146,6 +148,11 @@ describe("flat results", () => {
     renderFlatResults(el, {
       hits: [
         hit({ attachment_count: 2, available_attachment_count: 1 }),
+        hit({
+          attachment_count: 1,
+          available_attachment_count: 0,
+        }),
+        hit({ attachment_count: 2, available_attachment_count: 2 }),
         hit({ has_conflicting_revision: true }),
       ],
       activeIndex: -1,
@@ -156,9 +163,14 @@ describe("flat results", () => {
       onToggleSelect: () => {},
     });
     const badges = el.querySelectorAll(".badge.attachments");
-    expect(badges[0].textContent).toBe("1/2");
+    // The visible words carry their units ("files kept"); the exact
+    // counts and the references-vs-preserved split stay in title/aria.
+    expect(badges[0].textContent).toBe("1 of 2 files kept");
     expect(badges[0].getAttribute("aria-label")).toBe("attachments: 1 of 2");
     expect(badges[0].innerHTML).toContain("#i-paperclip");
+    expect(badges[1].textContent).toBe("0 of 1 files kept");
+    expect(badges[1].getAttribute("aria-label")).toBe("attachments: 0 of 1");
+    expect(badges[2].textContent).toBe("2 files");
     expect(el.querySelector(".badge.conflict")?.textContent).toBe("revisions");
   });
 
@@ -529,7 +541,13 @@ describe("reading pane", () => {
     const card = el.querySelector(".detail-card") as HTMLElement;
     expect(card.querySelector("h2")?.textContent).toBe("Ana");
     const table = card.querySelector(".meta-table")?.textContent ?? "";
-    expect(table).toContain("mbox");
+    // The raw `mbox` label reads as "Mail import"; the stored label
+    // stays one hover away on the source row.
+    expect(table).toContain("Mail import");
+    const sourceCell = [...card.querySelectorAll(".meta-table dd")].find((dd) =>
+      dd.textContent === "Mail import",
+    ) as HTMLElement;
+    expect(sourceCell.title).toBe("Stored source: mbox");
     expect(table).toContain("e2e-m-3");
     expect(table).toContain("Delivery date");
     // F08: confidence reads as a word, never the raw store token, and

@@ -359,7 +359,9 @@ describe("copy text", () => {
   it("renders readable text with metadata and provenance", () => {
     const text = messageToText(detail);
     expect(text).toContain("=== Message 7 ===");
-    expect(text).toContain("Source: mbox (uuid-1)");
+    // The source line reads the plain-word label; the stored one and the
+    // id ride along as provenance in the parens.
+    expect(text).toContain("Source: Mail import (mbox) (uuid-1)");
     expect(text).toContain("From: Ana <ana@example.com>");
     expect(text).toContain("Subject: Delivery date");
     // Confidence reaches the reader as words, never the store's raw

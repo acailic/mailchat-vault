@@ -38,6 +38,9 @@ export async function run(ctx) {
     await writeFile(path.join(watched, "notes.txt"), "just a shopping list\n");
 
     // --- watch the folder by typed path -----------------------------------
+    // The typed path sits behind the "Type a path instead" fold (the
+    // folder picker is the primary control) — open it first.
+    await (await browser.$("#watch-typed-fold summary")).click();
     const input = await browser.$("#watch-path");
     await input.setValue(watched);
     await (await browser.$("#watch-btn")).click();
@@ -46,7 +49,7 @@ export async function run(ctx) {
     });
 
     // --- initial scan: both mbox messages imported, notes.txt skipped -----
-    await ui.waitForText(browser, "#stats", "2 messages (mbox: 2)", {
+    await ui.waitForText(browser, "#stats", "2 messages (Mail import: 2)", {
       timeout: 30_000,
       timeoutMsg: "initial scan never imported the mbox",
     });
@@ -59,14 +62,14 @@ export async function run(ctx) {
 
     // --- a new file appearing later is imported too ------------------------
     await writeFile(path.join(watched, "second.mbox"), mail("w3", "Three"));
-    await ui.waitForText(browser, "#stats", "3 messages (mbox: 3)", {
+    await ui.waitForText(browser, "#stats", "3 messages (Mail import: 3)", {
       timeout: 30_000,
       timeoutMsg: "new file never imported",
     });
 
     // --- re-writing a file imports only what is new (dedup contract) ------
     await writeFile(path.join(watched, "second.mbox"), mail("w3", "Three") + mail("w4", "Four"));
-    await ui.waitForText(browser, "#stats", "4 messages (mbox: 4)", {
+    await ui.waitForText(browser, "#stats", "4 messages (Mail import: 4)", {
       timeout: 30_000,
       timeoutMsg: "modified file never re-imported",
     });
@@ -74,7 +77,7 @@ export async function run(ctx) {
     await new Promise((r) => setTimeout(r, 4000));
     assert.equal(
       await (await browser.$("#stats")).getText(),
-      "4 messages (mbox: 4)",
+      "4 messages (Mail import: 4)",
       "no duplicates after re-settling",
     );
 
@@ -103,7 +106,7 @@ export async function run(ctx) {
     await new Promise((r) => setTimeout(r, 4000));
     assert.equal(
       await (await browser.$("#stats")).getText(),
-      "4 messages (mbox: 4)",
+      "4 messages (Mail import: 4)",
       "file after removal was not imported",
     );
   });

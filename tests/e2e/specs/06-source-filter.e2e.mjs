@@ -19,7 +19,7 @@ export async function run(ctx) {
     const statsText = await (await browser.$("#stats")).getText();
     assert.matches(
       statsText,
-      /^(\d+) messages \(mbox: 8, demo: (\d+)\)$/,
+      /^(\d+) messages \(Mail import: 8, demo: (\d+)\)$/,
       "stats show both sources after import + seed",
     );
     const demoCount = Number(/demo: (\d+)\)$/.exec(statsText)[1]);
@@ -37,7 +37,13 @@ export async function run(ctx) {
       browser.$(`#source-chips button.chip[data-source="${idByLabel.get(source)}"]`);
     assert.ok(await (await chip("mbox")).isExisting(), "mbox chip rendered");
     assert.ok(await (await chip("demo")).isExisting(), "demo chip rendered");
-    assert.includes(await (await chip("mbox")).getText(), "mbox (8)", "chip shows source and count");
+    // The chip reads the plain-word label; the stored "mbox" identity
+    // still resolves the id through sources_list above.
+    assert.includes(
+      await (await chip("mbox")).getText(),
+      "Mail import (8)",
+      "chip shows source and count",
+    );
     assert.includes(
       await (await chip("demo")).getText(),
       `demo (${demoCount})`,
