@@ -15,6 +15,7 @@ import {
   timeLabel,
 } from "./render2";
 import { contextEntries } from "./searchstate";
+import { HIGHLIGHT_MAX_MARKS } from "./viewmodel";
 import type { ConversationContext, MessageSummary } from "./v2types";
 
 // Timestamps render timezone-independently (formatSentAt is covered by
@@ -589,6 +590,47 @@ describe("reading pane", () => {
     // The conversation row itself says why in user terms.
     expect(el.textContent).toContain("thread-a (unverified grouping)");
     expect(el.querySelectorAll("li.thread-row").length).toBe(1);
+  });
+
+  it("conversation-context neighbor rows mark the query terms", () => {
+    const neighborCtx: ConversationContext = {
+      ...ctx,
+      before: [{ ...ctx.before[0], body: "earlier vault message" }],
+      after: [{ ...ctx.after[0], body: "later vault message" }],
+    };
+    const el = render({ ctx: neighborCtx, entries: contextEntries(neighborCtx) });
+    const beforeRow = el.querySelector('li.thread-row[data-id="1"]') as HTMLElement;
+    const afterRow = el.querySelector('li.thread-row[data-id="4"]') as HTMLElement;
+    expect(beforeRow.querySelector("mark.hit")?.textContent).toBe("vault");
+    expect(afterRow.querySelectorAll("mark.hit").length).toBe(1);
+    // Marks never change the rendered text.
+    expect(beforeRow.querySelector(".body")?.textContent).toBe("earlier vault message");
+  });
+
+  it("browse mode (no query text) renders no marks anywhere in the pane", () => {
+    const neighborCtx: ConversationContext = {
+      ...ctx,
+      before: [{ ...ctx.before[0], body: "earlier vault message" }],
+      after: [{ ...ctx.after[0], body: "later vault message" }],
+    };
+    const el = render({
+      ctx: neighborCtx,
+      entries: contextEntries(neighborCtx),
+      queryText: "",
+    });
+    expect(el.querySelectorAll("mark.hit").length).toBe(0);
+  });
+
+  it("the anchor body marks at most the shared cap, text unchanged", () => {
+    const body = `${"see vault ".repeat(HIGHLIGHT_MAX_MARKS + 5)}end`;
+    const cappedCtx: ConversationContext = {
+      ...ctx,
+      anchor: { ...ctx.anchor, body },
+    };
+    const el = render({ ctx: cappedCtx, entries: contextEntries(cappedCtx) });
+    const bodyEl = el.querySelector(".detail-body .body") as HTMLElement;
+    expect(bodyEl.querySelectorAll("mark.hit").length).toBe(HIGHLIGHT_MAX_MARKS);
+    expect(bodyEl.textContent).toBe(body);
   });
 
   it("actions are wired: copy, copy link, export, export chat, close, open neighbor", () => {

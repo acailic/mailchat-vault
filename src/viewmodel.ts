@@ -44,11 +44,23 @@ function escapeRegExp(text: string): string {
 }
 
 /**
+ * How many matched runs one text may mark before the rest renders plain:
+ * term-dense bodies stay readable instead of becoming a wall of amber.
+ */
+export const HIGHLIGHT_MAX_MARKS = 50;
+
+/**
  * Highlight whole-word, case-insensitive occurrences of `terms` in arbitrary
  * text (used for full bodies and thread neighbors in the detail view, where
- * the backend supplies no snippet).
+ * the backend supplies no snippet). At most `maxMarks` matched runs become
+ * hit segments; any remaining text (later matches included) is one plain
+ * tail, so the combined text content never changes.
  */
-export function highlightSegments(text: string, terms: string[]): Segment[] {
+export function highlightSegments(
+  text: string,
+  terms: string[],
+  maxMarks: number = HIGHLIGHT_MAX_MARKS,
+): Segment[] {
   const needles = terms.filter((t) => t.length > 0);
   if (needles.length === 0) return text.length ? [{ text, hit: false }] : [];
   const pattern = needles
@@ -58,11 +70,14 @@ export function highlightSegments(text: string, terms: string[]): Segment[] {
   const re = new RegExp(pattern, "giu");
   const segments: Segment[] = [];
   let start = 0;
+  let marks = 0;
   for (const match of text.matchAll(re)) {
+    if (marks >= maxMarks) break;
     const at = match.index ?? 0;
     if (at > start) segments.push({ text: text.slice(start, at), hit: false });
     segments.push({ text: match[0], hit: true });
     start = at + match[0].length;
+    marks++;
   }
   if (start < text.length) segments.push({ text: text.slice(start), hit: false });
   return segments;
