@@ -71,12 +71,19 @@
           <!-- Workspace: results area + reading pane. -->
           <section id="view-workspace" class="view" aria-label="Search and results">
             <div id="results-col">
+              <!-- Search / Ask: two modes over the same archive, one column.
+                   Panels stay mounted; data-workspace-section picks the
+                   visible one (CSS), so results and answers survive switches. -->
+              <div id="workspace-tabs" class="row" role="tablist" aria-label="Workspace sections">
+                <button type="button" id="tab-search" class="workspace-tab-btn" data-workspace-tab="search" role="tab" aria-selected="true" aria-controls="search-section">Search</button>
+                <button type="button" id="tab-ask" class="workspace-tab-btn" data-workspace-tab="ask" role="tab" aria-selected="false" aria-controls="ask-section">Ask</button>
+              </div>
               <!-- U02: shown while the isolated sample archive is open. -->
               <div id="demo-banner" class="row banner" hidden>
                 <span class="meta grow">Sample archive — an isolated demo. Nothing you see here is saved to your vault.</span>
                 <button id="demo-leave-btn" type="button">Leave sample</button>
               </div>
-              <section>
+              <section id="search-section" role="tabpanel" aria-labelledby="tab-search">
                 <h2 class="visually-hidden">Search</h2>
                 <div class="row">
                   <label class="visually-hidden" for="search">Search messages</label>
@@ -165,7 +172,7 @@
                 </p>
               </section>
 
-              <section id="ask-section" aria-label="Ask the archive">
+              <section id="ask-section" role="tabpanel" aria-labelledby="tab-ask" aria-label="Ask the archive">
                 <h2>Ask the archive (natural language)</h2>
                 <div class="row">
                   <label class="visually-hidden" for="ask-provider">LLM provider for this ask</label>

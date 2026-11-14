@@ -561,7 +561,7 @@ function renderSourceChipsNow(): void {
         ? state.sources.filter((s) => s !== id)
         : [...state.sources, id];
       // Source scoping is a search action: show the results it produced.
-      workspace.store.setView("workspace");
+      workspace.store.setWorkspaceSection("search");
       renderSourceChipsNow();
       void runSearch(0);
     },
@@ -1483,7 +1483,7 @@ function showImportFollowup(importId: string | undefined, inserted: number): voi
       importScopeSelect.append(option);
     }
     importScopeSelect.value = importId;
-    workspace.store.setView("workspace");
+    workspace.store.setWorkspaceSection("search");
     void runSearch(0);
   });
   importFollowup.append(view);
@@ -1544,7 +1544,7 @@ async function enterDemo(): Promise<void> {
   try {
     await ipc.demoEnter();
     demoActive = true;
-    workspace.store.setView("workspace");
+    workspace.store.setWorkspaceSection("search");
     await refreshAfterVaultSwitch();
   } catch (e) {
     setStatus(`Could not open the sample archive: ${e}`, true);
@@ -1924,7 +1924,7 @@ function viewSourceMessages(account: AccountView): void {
   state.sources = [account.source_id];
   renderSourceChipsNow();
   void runSearch(0);
-  workspace.store.setView("workspace");
+  workspace.store.setWorkspaceSection("search");
   searchInput.focus();
 }
 

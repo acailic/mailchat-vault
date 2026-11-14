@@ -179,6 +179,78 @@ export async function run(ctx) {
     );
     await fixtureShot(browser, "16-wide.png");
 
+    // --- workspace tabs: Search and Ask share the results column ---------
+    const tabs = await browser.execute(() => ({
+      section: document.querySelector("#app").dataset.workspaceSection,
+      tablist: !!document.querySelector('#workspace-tabs[role="tablist"]'),
+      searchSelected: document.querySelector("#tab-search")?.getAttribute("aria-selected"),
+      askControls: document.querySelector("#tab-ask")?.getAttribute("aria-controls"),
+      panels: [
+        !!document.querySelector("#search-section"),
+        !!document.querySelector("#ask-section"),
+      ],
+    }));
+    assert.equal(tabs.section, "search", "workspace boots on the Search tab");
+    assert.ok(tabs.tablist, "the workspace tab strip is a tablist");
+    assert.equal(tabs.searchSelected, "true", "Search tab starts selected");
+    assert.equal(tabs.askControls, "ask-section", "the Ask tab controls its panel");
+    assert.ok(tabs.panels[0] && tabs.panels[1], "both tabpanels stay mounted");
+
+    await (await browser.$("#tab-ask")).click();
+    await browser.waitUntil(
+      async () =>
+        (await (await browser.$("#app")).getAttribute("data-workspace-section")) === "ask",
+      { timeout: 5_000, timeoutMsg: "the Ask tab never switched the workspace section" },
+    );
+    assert.ok(
+      await (await browser.$("#ask-section")).isDisplayed(),
+      "Ask panel visible after the switch",
+    );
+    assert.equal(
+      await (await browser.$("#search-section")).isDisplayed(),
+      false,
+      "Search panel hidden while Ask is active",
+    );
+    await fixtureShot(browser, "16-ask-tab.png");
+    await (await browser.$("#tab-search")).click();
+    await browser.waitUntil(
+      async () =>
+        (await (await browser.$("#app")).getAttribute("data-workspace-section")) === "search",
+      { timeout: 5_000, timeoutMsg: "the Search tab never switched back" },
+    );
+
+    // --- desktop sidebar collapse (the hamburger removes the nav column) --
+    assert.ok(
+      await (await browser.$("#nav")).isDisplayed(),
+      "navigation column visible by default in wide",
+    );
+    assert.equal(
+      await (await browser.$("#nav-toggle")).getAttribute("aria-expanded"),
+      "true",
+      "toggle announces the nav as shown",
+    );
+    await (await browser.$("#nav-toggle")).click();
+    await browser.waitUntil(
+      async () => (await (await browser.$("#nav")).isDisplayed()) === false,
+      { timeout: 5_000, timeoutMsg: "the hamburger never hid the nav column" },
+    );
+    assert.equal(
+      await (await browser.$("#nav-toggle")).getAttribute("aria-expanded"),
+      "false",
+      "toggle announces the nav as hidden",
+    );
+    assert.ok(
+      await (await browser.$("#content")).isDisplayed(),
+      "content stays visible with the nav collapsed",
+    );
+    assert.ok(await noHorizontalClip(browser), "collapsed nav never clips horizontally");
+    await fixtureShot(browser, "16-nav-collapsed.png");
+    await (await browser.$("#nav-toggle")).click();
+    await browser.waitUntil(
+      async () => (await (await browser.$("#nav"))).isDisplayed() === true,
+      { timeout: 5_000, timeoutMsg: "the hamburger never restored the nav column" },
+    );
+
     // --- medium (800–1099px): reading replaces the results area -----------
     await ui.setViewport(browser, 900, 700);
     assert.equal(await ui.layoutMode(browser), "medium", "900px is the medium layout");

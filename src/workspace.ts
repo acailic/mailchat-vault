@@ -8,6 +8,7 @@ import {
   VIEW_TITLES,
   WorkspaceStore,
   resolveLayout,
+  type WorkspaceSection,
   type WorkspaceView,
 } from "./state";
 
@@ -40,6 +41,26 @@ function isEditable(target: EventTarget | null): boolean {
   );
 }
 
+/** The collapsed-desktop-sidebar choice persists across launches. Guarded:
+ * storage is absent in some test/restricted-webview environments. */
+const NAV_COLLAPSED_KEY = "mcv.navCollapsed";
+
+function readNavCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(NAV_COLLAPSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistNavCollapsed(collapsed: boolean): void {
+  try {
+    window.localStorage.setItem(NAV_COLLAPSED_KEY, collapsed ? "1" : "0");
+  } catch {
+    // best effort only
+  }
+}
+
 export function initWorkspace(): WorkspaceController {
   const app = document.querySelector<HTMLElement>("#app")!;
   const navToggle = document.querySelector<HTMLButtonElement>("#nav-toggle")!;
@@ -47,10 +68,12 @@ export function initWorkspace(): WorkspaceController {
   const topbarTitle = document.querySelector<HTMLElement>("#topbar-title")!;
   const backToResults = document.querySelector<HTMLButtonElement>("#back-to-results")!;
   const viewButtons = [...document.querySelectorAll<HTMLButtonElement>(".nav-view-btn")];
+  const tabButtons = [...document.querySelectorAll<HTMLButtonElement>(".workspace-tab-btn")];
   const searchInput = document.querySelector<HTMLInputElement>("#search")!;
 
   const store = new WorkspaceStore({
     layout: resolveLayout(typeof window !== "undefined" ? window.innerWidth : 1280),
+    navCollapsed: readNavCollapsed(),
   });
 
   // The element that opened the reading pane — restored on Back/close.
@@ -61,19 +84,29 @@ export function initWorkspace(): WorkspaceController {
   // -----------------------------------------------------------------
 
   function render(): void {
-    const { view, layout, reading, navOpen, sourcesSection, settingsSection } = store.get();
+    const { view, layout, reading, navOpen, navCollapsed, sourcesSection, settingsSection, workspaceSection } =
+      store.get();
     app.dataset.view = view;
     app.dataset.layout = layout;
     app.dataset.reading = reading.open ? "open" : "closed";
     app.dataset.nav = navOpen ? "open" : "closed";
+    app.dataset.navCollapsed = String(navCollapsed);
     app.dataset.sourcesSection = sourcesSection;
     app.dataset.settingsSection = settingsSection;
+    app.dataset.workspaceSection = workspaceSection;
     for (const button of viewButtons) {
       const target = button.dataset.viewTarget as WorkspaceView | undefined;
       if (target === view) button.setAttribute("aria-current", "page");
       else button.removeAttribute("aria-current");
     }
-    navToggle.setAttribute("aria-expanded", navOpen ? "true" : "false");
+    for (const button of tabButtons) {
+      const tab = button.dataset.workspaceTab as WorkspaceSection | undefined;
+      button.setAttribute("aria-selected", tab === workspaceSection ? "true" : "false");
+    }
+    // The hamburger shows the nav when expanded: on compact that is the
+    // drawer, on wide/medium the (possibly collapsed) nav column.
+    const navVisible = layout === "compact" ? navOpen : !navCollapsed;
+    navToggle.setAttribute("aria-expanded", navVisible ? "true" : "false");
     topbarTitle.textContent = VIEW_TITLES[view];
   }
 
@@ -113,7 +146,24 @@ export function initWorkspace(): WorkspaceController {
     });
   }
 
-  navToggle.addEventListener("click", () => store.setNavOpen(!store.get().navOpen));
+  for (const button of tabButtons) {
+    button.addEventListener("click", () => {
+      const tab = button.dataset.workspaceTab as WorkspaceSection | undefined;
+      if (tab) store.setWorkspaceSection(tab);
+    });
+  }
+
+  navToggle.addEventListener("click", () => {
+    const { layout, navOpen, navCollapsed } = store.get();
+    // Compact: the drawer overlays. Wide/medium: the nav column collapses
+    // out of the grid (and the choice is remembered for next launch).
+    if (layout === "compact") {
+      store.setNavOpen(!navOpen);
+    } else {
+      store.setNavCollapsed(!navCollapsed);
+      persistNavCollapsed(!navCollapsed);
+    }
+  });
   navScrim.addEventListener("click", () => store.setNavOpen(false));
 
   // -----------------------------------------------------------------
@@ -124,18 +174,21 @@ export function initWorkspace(): WorkspaceController {
   backToResults.addEventListener("click", () => backHandler?.());
 
   // -----------------------------------------------------------------
-  // Global shortcuts: Ctrl/Cmd+K or `/` focus the search box
+  // Global shortcuts: Ctrl/Cmd+K or `/` focus the search box (landing on
+  // the Search tab first — the box lives in that panel)
   // -----------------------------------------------------------------
 
   document.addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && (event.key === "k" || event.key === "K")) {
       event.preventDefault();
+      store.setWorkspaceSection("search");
       searchInput.focus();
       searchInput.select();
       return;
     }
     if (event.key === "/" && !isEditable(event.target)) {
       event.preventDefault();
+      store.setWorkspaceSection("search");
       searchInput.focus();
       searchInput.select();
     }
