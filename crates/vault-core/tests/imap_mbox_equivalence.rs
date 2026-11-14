@@ -96,6 +96,8 @@ fn message_by_id(
             &build_match_query(&unique_term(storage, external_id)),
             None,
             None,
+            None,
+            false,
             50,
         )
         .unwrap();
@@ -187,7 +189,14 @@ fn mbox_fixture_and_imap_sync_produce_equivalent_archives() {
     // dedups on re-ingest within its own namespace.
     let generated = |storage: &Storage| {
         storage
-            .search_filtered(&build_match_query("Sorry I missed"), None, None, 10)
+            .search_filtered(
+                &build_match_query("Sorry I missed"),
+                None,
+                None,
+                None,
+                false,
+                10,
+            )
             .unwrap()
             .into_iter()
             .find(|m| m.external_id != "kickoff-123@example.com")
@@ -211,14 +220,14 @@ fn mbox_fixture_and_imap_sync_produce_equivalent_archives() {
     for term in ["kickoff", "FTS notes", "base64"] {
         assert!(
             !mbox_storage
-                .search_filtered(&build_match_query(term), None, None, 10)
+                .search_filtered(&build_match_query(term), None, None, None, false, 10)
                 .unwrap()
                 .is_empty(),
             "mbox: no hits for {term}"
         );
         assert!(
             !imap_storage
-                .search_filtered(&build_match_query(term), None, None, 10)
+                .search_filtered(&build_match_query(term), None, None, None, false, 10)
                 .unwrap()
                 .is_empty(),
             "imap: no hits for {term}"

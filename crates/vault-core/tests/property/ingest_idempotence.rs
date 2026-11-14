@@ -54,7 +54,7 @@ proptest! {
         assert_stored_set(&storage, &model);
         prop_assert!(
             storage
-                .search_filtered(&fixtures::quoted_term("mutated-variant"), None, None, 1000)
+                .search_filtered(&fixtures::quoted_term("mutated-variant"), None, None, None, false, 1000)
                 .unwrap()
                 .is_empty()
         );
@@ -129,7 +129,14 @@ fn assert_stored_set(storage: &Storage, model: &HashMap<(String, String), &NewMe
         };
         token_bearing += 1;
         let hits = storage
-            .search_filtered(&fixtures::quoted_term(&token), None, None, 10_000)
+            .search_filtered(
+                &fixtures::quoted_term(&token),
+                None,
+                None,
+                None,
+                false,
+                10_000,
+            )
             .unwrap();
         let hit = hits
             .iter()

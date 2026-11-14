@@ -342,14 +342,14 @@ fn imported_chat_is_full_text_searchable() {
 
     for term in ["arhiva", "odgovor", "jelena", "marko"] {
         let hits = storage
-            .search_filtered(&build_match_query(term), None, None, 10)
+            .search_filtered(&build_match_query(term), None, None, None, false, 10)
             .unwrap();
         assert!(!hits.is_empty(), "no hits for {term:?}");
     }
     // System entries are not searchable (they were never stored).
     for term in ["pinned", "joined"] {
         assert!(storage
-            .search_filtered(&build_match_query(term), None, None, 10)
+            .search_filtered(&build_match_query(term), None, None, None, false, 10)
             .unwrap()
             .is_empty());
     }
@@ -437,7 +437,14 @@ fn directory_import_walks_all_channel_files() {
 
     // The nameless DM grouped under its index path, not under an id.
     let dm_hits = storage
-        .search_filtered(&build_match_query("needle-zzz"), None, None, 10)
+        .search_filtered(
+            &build_match_query("needle-zzz"),
+            None,
+            None,
+            None,
+            false,
+            10,
+        )
         .unwrap();
     assert_eq!(dm_hits.len(), 1);
     assert_eq!(dm_hits[0].chat_id, "Direct Messages/@ana");
@@ -471,7 +478,14 @@ fn single_dm_channel_file_uses_sibling_index() {
     let storage = Storage::open_in_memory().unwrap();
     ingest(&storage, &DiscordSource::new(&file)).unwrap();
     let hits = storage
-        .search_filtered(&build_match_query("needle-zzz"), None, None, 10)
+        .search_filtered(
+            &build_match_query("needle-zzz"),
+            None,
+            None,
+            None,
+            false,
+            10,
+        )
         .unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].chat_id, "Direct Messages/@ana");
@@ -496,11 +510,18 @@ fn large_package_imports_and_reimports() {
 
     // Search still finds a needle among thousands and hits every author.
     let needle = storage
-        .search_filtered(&build_match_query("needle-zzz"), None, None, 10)
+        .search_filtered(
+            &build_match_query("needle-zzz"),
+            None,
+            None,
+            None,
+            false,
+            10,
+        )
         .unwrap();
     assert_eq!(needle.len(), 1);
     let author = storage
-        .search_filtered(&build_match_query("član 3"), None, None, 5)
+        .search_filtered(&build_match_query("član 3"), None, None, None, false, 5)
         .unwrap();
     assert!(!author.is_empty());
 }

@@ -975,6 +975,14 @@ async fn export_messages_v2(
     .map_err(|e| AppError::internal(format!("export task failed: {e}")))?
 }
 
+/// Write a UTF-8 text file to an absolute path the frontend picked with
+/// its save dialog (used by the collected-links export; no dialog logic
+/// lives here).
+#[tauri::command]
+fn save_text(path: String, contents: String) -> Result<(), String> {
+    std::fs::write(&path, contents.as_bytes()).map_err(|e| format!("write {path}: {e}"))
+}
+
 /// Natural-language search: translate the question into an FTS5 plan
 /// (MATCH expression + optional date range), run it locally, fuse the FTS
 /// ranking with the local vector leg when embeddings exist, then summarize
@@ -1107,9 +1115,15 @@ fn run_ask(
             .map_err(|e| e.to_string())?;
         (hybrid.results, hybrid.ranking)
     };
+    let collected = if planned.plan.extract_links {
+        vault_core::extract::extract_links(&results)
+    } else {
+        Vec::new()
+    };
     let (answer, summary_notes) = match &backend {
         Some(backend) => {
-            let summarized = llm::summarize_results(backend, question, &results, summarize_top);
+            let summarized =
+                llm::summarize_results(backend, question, &results, summarize_top, &collected);
             (summarized.answer, summarized.notes)
         }
         None => (None, Vec::new()),
@@ -1122,6 +1136,7 @@ fn run_ask(
         ranking,
         results,
         answer,
+        collected,
         notes,
     })
 }
@@ -3349,6 +3364,7 @@ pub fn run() {
             conversation_context_v2,
             list_import_scopes_v2,
             export_messages_v2,
+            save_text,
             media_reconcile,
             media_usage,
             media_export,
@@ -3932,6 +3948,57 @@ mod tests {
         // The results are source-linked evidence: every message carries its
         // archive row id, so the UI can open each source in thread context.
         assert!(outcome.results.iter().all(|m| m.id > 0));
+        pool.shutdown();
+    }
+
+    #[test]
+    fn run_ask_collects_links_when_the_plan_extracts() {
+        let (_tmp, pool) = ask_pool(2);
+        // One message must carry a URL for the extractor to find; the plan's
+        // has_link filter keeps only that row.
+        pool.submit_write(move |s| {
+            s.insert_message(&vault_core::message::NewMessage::new(
+                "test",
+                String::from("links"),
+                "Author 00",
+                "2026-10-01T12:00:00Z",
+                "consent marker 42 about vault topics and https://example.com/a".to_string(),
+            ))?;
+            Ok(())
+        })
+        .unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (base_url, server) = spawn_llm_recorder(
+            vec![
+                "{\"match\": \"consent\", \"has_link\": true, \"extract_links\": true}".into(),
+                "collected one link [1].".into(),
+            ],
+            Arc::clone(&stop),
+        );
+
+        let outcome = run_ask(
+            &ActiveVault::Pool(Arc::clone(&pool)),
+            &HashEmbedder::new(),
+            recorder_selection(base_url),
+            true,
+            "collect all consent links",
+            50,
+            8,
+            ask_today(),
+            true,
+        )
+        .unwrap();
+
+        assert!(outcome.plan.extract_links);
+        assert_eq!(outcome.collected.len(), 1, "{:?}", outcome.collected);
+        assert_eq!(outcome.collected[0].url, "https://example.com/a");
+        assert_eq!(outcome.collected[0].hits[0].author, "Author 00");
+
+        stop.store(true, Ordering::SeqCst);
+        let bodies = server.join().expect("recorder thread");
+        assert_eq!(bodies.len(), 2, "translate + summarize round trips");
+        // The summarize round trip carries the collected-links section.
+        assert!(bodies[1].contains("Collected links"), "{}", bodies[1]);
         pool.shutdown();
     }
 
