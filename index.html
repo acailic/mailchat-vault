@@ -114,6 +114,27 @@
                           <option value="without">no attachment</option>
                         </select>
                       </label>
+                      <label class="meta" for="time-assumed" title="Restrict to messages whose dates were assumed or to messages with confirmed dates">Dates
+                        <select id="time-assumed" style="max-width: 9em">
+                          <option value="" selected>any</option>
+                          <option value="assumed">assumed</option>
+                          <option value="confirmed">confirmed</option>
+                        </select>
+                      </label>
+                      <label class="meta" for="grouping-unverified" title="Restrict to messages grouped into unverified conversations or to verified ones">Grouping
+                        <select id="grouping-unverified" style="max-width: 9em">
+                          <option value="" selected>any</option>
+                          <option value="unverified">unverified</option>
+                          <option value="verified">verified</option>
+                        </select>
+                      </label>
+                      <label class="meta" for="files-missing" title="Restrict to messages that reference files without preserved bytes or to messages whose files are preserved">Files
+                        <select id="files-missing" style="max-width: 9em">
+                          <option value="" selected>any</option>
+                          <option value="missing">missing</option>
+                          <option value="preserved">preserved</option>
+                        </select>
+                      </label>
                       <label class="meta" for="import-scope" title="Restrict to messages first observed by one import run">Import
                         <select id="import-scope" style="max-width: 14em">
                           <option value="" selected>any import</option>

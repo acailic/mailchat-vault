@@ -908,6 +908,98 @@ describe("v2 filters", () => {
     expect(searchCalls()[1].args).toMatchObject({ request: { has_attachment: false } });
   });
 
+  it("the honesty date filter sends time_assumed on change (true, false, off)", async () => {
+    await boot();
+    searchRespondsWith(() => pageOf(HITS.slice(0, 1), 1));
+    const select = $<HTMLSelectElement>("#time-assumed");
+    select.value = "assumed";
+    fireChange(select);
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    expect(searchCalls()[0].args).toMatchObject({ request: { time_assumed: true } });
+
+    select.value = "confirmed";
+    fireChange(select);
+    await vi.waitFor(() => expect(searchCalls().length).toBe(2));
+    expect(searchCalls()[1].args).toMatchObject({ request: { time_assumed: false } });
+
+    select.value = "";
+    fireChange(select);
+    await vi.waitFor(() => expect(searchCalls().length).toBe(3));
+    expect(searchCalls()[2].args).toMatchObject({ request: { time_assumed: null } });
+  });
+
+  it("the grouping filter sends grouping_unverified on change (true, false, off)", async () => {
+    await boot();
+    searchRespondsWith(() => pageOf(HITS.slice(0, 1), 1));
+    const select = $<HTMLSelectElement>("#grouping-unverified");
+    select.value = "unverified";
+    fireChange(select);
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    expect(searchCalls()[0].args).toMatchObject({ request: { grouping_unverified: true } });
+
+    select.value = "verified";
+    fireChange(select);
+    await vi.waitFor(() => expect(searchCalls().length).toBe(2));
+    expect(searchCalls()[1].args).toMatchObject({ request: { grouping_unverified: false } });
+
+    select.value = "";
+    fireChange(select);
+    await vi.waitFor(() => expect(searchCalls().length).toBe(3));
+    expect(searchCalls()[2].args).toMatchObject({ request: { grouping_unverified: null } });
+  });
+
+  it("the files filter sends files_missing on change (true, false, off)", async () => {
+    await boot();
+    searchRespondsWith(() => pageOf(HITS.slice(0, 1), 1));
+    const select = $<HTMLSelectElement>("#files-missing");
+    select.value = "missing";
+    fireChange(select);
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    expect(searchCalls()[0].args).toMatchObject({ request: { files_missing: true } });
+
+    select.value = "preserved";
+    fireChange(select);
+    await vi.waitFor(() => expect(searchCalls().length).toBe(2));
+    expect(searchCalls()[1].args).toMatchObject({ request: { files_missing: false } });
+
+    select.value = "";
+    fireChange(select);
+    await vi.waitFor(() => expect(searchCalls().length).toBe(3));
+    expect(searchCalls()[2].args).toMatchObject({ request: { files_missing: null } });
+  });
+
+  it("applied honesty filters render as chips; Clear resets the selects and the fold count", async () => {
+    await boot();
+    searchRespondsWith(() => pageOf(HITS.slice(0, 1), 1));
+    const time = $<HTMLSelectElement>("#time-assumed");
+    time.value = "assumed";
+    fireChange(time);
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    const grouping = $<HTMLSelectElement>("#grouping-unverified");
+    grouping.value = "verified";
+    fireChange(grouping);
+    await vi.waitFor(() => expect(searchCalls().length).toBe(2));
+    const files = $<HTMLSelectElement>("#files-missing");
+    files.value = "missing";
+    fireChange(files);
+    await vi.waitFor(() => expect(searchCalls().length).toBe(3));
+
+    const chips = [...win.document.querySelectorAll("#active-filter-chips .filter-chip")];
+    expect(chips.map((c) => c.textContent?.trim())).toEqual([
+      "dates assumed ×",
+      "grouping verified ×",
+      "files missing ×",
+    ]);
+    expect($("#filters-summary").textContent).toBe("Filters · 3 on");
+
+    $("#clear-filters").click();
+    await vi.waitFor(() => expect($("#filters-summary").textContent).toBe("Filters"));
+    expect(time.value).toBe("");
+    expect(grouping.value).toBe("");
+    expect(files.value).toBe("");
+    expect(win.document.querySelectorAll("#active-filter-chips .filter-chip").length).toBe(0);
+  });
+
   it("the import-scope filter lists scopes and filters by the chosen run", async () => {
     await boot();
     await vi.waitFor(() => {
