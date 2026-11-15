@@ -2507,6 +2507,21 @@ describe("stats and chips", () => {
     expect(win.document.querySelectorAll(".chip").length).toBe(0);
   });
 
+  it("groups thousands in the nav line like the chips beside it", async () => {
+    tauri.handlers.set("stats", () => ({
+      total: 5505,
+      by_source: [{ source: "mbox", count: 5505 }],
+    }));
+    await boot();
+    await vi.waitFor(() =>
+      expect($("#stats").textContent).toBe("5,505 messages (Mail import: 5,505)"),
+    );
+    // The same count renders the same in the chip just below the line.
+    expect([...win.document.querySelectorAll(".chip")].map((c) => c.textContent)).toEqual([
+      "Mail import (5,505)",
+    ]);
+  });
+
   it("a stats failure clears the label but leaves search usable", async () => {
     tauri.handlers.set("stats", () => Promise.reject("db locked"));
     await boot();
