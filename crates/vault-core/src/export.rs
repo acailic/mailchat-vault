@@ -369,6 +369,7 @@ mod tests {
         Message {
             id: 1,
             source: "mbox".into(),
+            source_key: String::new(),
             external_id: "a@b.c".into(),
             channel: "email".into(),
             chat_id: "".into(),

@@ -60,6 +60,14 @@ pub struct NewMessage {
     /// empty.
     #[serde(default)]
     pub attachments: Vec<NewAttachment>,
+    /// Display label for the source instance the dedup `source`
+    /// namespace resolves to: the JSON Lines importer sets it when a row
+    /// carries a portable source-identity key, so the destination
+    /// instance keeps the exporting vault's human label while the
+    /// machine key stays the identity ("names follow identity"). Empty
+    /// everywhere else — the namespace itself is the label.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source_label: String,
 }
 
 impl NewMessage {
@@ -87,6 +95,7 @@ impl NewMessage {
             timezone: String::new(),
             time_confidence: String::new(),
             attachments: Vec::new(),
+            source_label: String::new(),
         }
     }
 }
@@ -111,6 +120,15 @@ pub struct NewAttachment {
 pub struct Message {
     pub id: i64,
     pub source: String,
+    /// Portable, label-independent source identity of the row's source
+    /// instance — the dedup namespace [`crate::jsonl`] imports under.
+    /// Machine-composed: connector-owned instances compose
+    /// `instance:<kind>:<connector_key>`, legacy instances reuse their
+    /// legacy namespace. Populated only by the two JSON export streams;
+    /// every other construction site leaves it empty, and it serializes
+    /// only when non-empty so those rows stay byte-identical.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source_key: String,
     pub external_id: String,
     pub channel: String,
     pub chat_id: String,

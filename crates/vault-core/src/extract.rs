@@ -157,6 +157,7 @@ mod tests {
         Message {
             id,
             source: "test".into(),
+            source_key: String::new(),
             external_id: format!("e{id}"),
             channel: "email".into(),
             chat_id: String::new(),
