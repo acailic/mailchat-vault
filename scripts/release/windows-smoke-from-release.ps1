@@ -46,6 +46,10 @@
     Passthrough consent for scripts/windows-smoke.ps1 to wipe
     %APPDATA%\com.acailic.mailchatvault (it refuses to start without it
     if a vault.db is already there).
+
+.PARAMETER Tester
+    Name recorded in the run's machine-readable evidence (summary.json).
+    Default: $env:MC_SMOKE_TESTER, then git user.name, then $env:USERNAME.
 #>
 [CmdletBinding()]
 param(
@@ -54,6 +58,7 @@ param(
     [string] $BundlesDir = '',
     [string] $InspectExe = '',
     [string] $FixtureDb = '',
+    [string] $Tester = '',
     [switch] $BuildInspect,
     [switch] $AllowDataWipe
 )
@@ -79,6 +84,12 @@ $newMsi = Get-ChildItem "$BundlesDir\*_x64_en-US.msi" | Select-Object -First 1 -
 $newExe = Get-ChildItem "$BundlesDir\*_x64-setup.exe" | Select-Object -First 1 -ExpandProperty FullName
 if (-not $newMsi -or -not $newExe) {
     throw "release $Tag did not provide both an msi and a setup exe under $BundlesDir"
+}
+# Bind this run to the exact downloaded bytes (the underlying smoke
+# repeats this in its evidence JSON).
+foreach ($a in @($newMsi, $newExe)) {
+    Write-Host ("artifact: {0} sha256={1}" -f (Split-Path $a -Leaf),
+        (Get-FileHash -Algorithm SHA256 $a).Hash.ToLower())
 }
 
 $oldMsi = ''; $oldExe = ''
@@ -110,6 +121,7 @@ $smokeArgs = @{
     OldMsi = $oldMsi;  OldExe = $oldExe
     InspectExe = $InspectExe
     FixtureDb = $FixtureDb
+    Tester = $Tester
     LogDir = (Join-Path $BundlesDir 'windows-smoke-logs')
 }
 if ($AllowDataWipe) { $smokeArgs.AllowDataWipe = $true }

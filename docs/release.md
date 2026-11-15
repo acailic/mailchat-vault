@@ -267,7 +267,12 @@ A second, complementary gate covers the *published* artifact end-to-end:
 `scripts/release/smoke-macos.sh --release v0.1.0` (or `--dir <dir-with-dmg>`)
 mounts the published dmg, checks bundle id/version/universal slices/ad-hoc
 signature, copies the app out, clears quarantine and requires the app to
-stay alive — see the macOS step of the install smoke test below.
+stay alive — see the macOS step of the install smoke test below. Every
+run also writes a machine-readable JSON evidence record (result, host,
+tester, UTC timestamps, commit, and the SHA-256 of every artifact
+smoked; pass `--tester "Your Name"`), which is what the
+[native verification runbook](native-verification.md) and its A14
+templates consume.
 
 Walk the [UI checklist](#ui-checklist-any-platform-2-minutes) manually
 once per release on top of that.
@@ -361,14 +366,18 @@ and the WebView2 runtime, the same gate runs against the *published*
 installers in one command:
 
 ```pwsh
-pwsh scripts/release/windows-smoke-from-release.ps1 -Tag v0.1.0 -AllowDataWipe
+pwsh scripts/release/windows-smoke-from-release.ps1 -Tag v0.1.0 -AllowDataWipe -Tester "Your Name"
 # upgrade phases (needs cargo for the digest tool):
-pwsh scripts/release/windows-smoke-from-release.ps1 -Tag v0.1.1 -OldTag v0.1.0 -BuildInspect -AllowDataWipe
+pwsh scripts/release/windows-smoke-from-release.ps1 -Tag v0.1.1 -OldTag v0.1.0 -BuildInspect -AllowDataWipe -Tester "Your Name"
 ```
 
 It downloads the release's `.msi`/`.exe` and drives
 `scripts/windows-smoke.ps1` (fresh install → launch → vault.db → uninstall
-carries the archive) against exactly the bytes users download.
+carries the archive) against exactly the bytes users download. Each run
+writes `summary.txt` and a machine-readable `summary.json` (result, host,
+tester, UTC timestamps, commit, per-phase results, and the SHA-256 of
+every installer smoked) next to the logs — the evidence the
+[native verification runbook](native-verification.md) binds G1 runs to.
 
 ## Preparing a release (local draft — nothing published)
 
@@ -489,8 +498,11 @@ executed gates are recorded.
 5. **Smoke against the published artifacts, or label honestly.** After
    publishing: `release-verify.sh v0.2.0 --smoke` (Linux),
    `pwsh scripts/release/windows-smoke-from-release.ps1 -Tag v0.2.0
-   -OldTag v0.1.0 -BuildInspect -AllowDataWipe` (Windows), and
-   `scripts/release/smoke-macos.sh --release v0.2.0` (macOS, needs a Mac).
+   -OldTag v0.1.0 -BuildInspect -AllowDataWipe -Tester "Name"` (Windows),
+   and `scripts/release/smoke-macos.sh --release v0.2.0 --tester "Name"`
+   (macOS, needs a Mac) — the full native procedure, evidence binding
+   and templates are in the
+   [native verification runbook](native-verification.md).
    If any of these gates cannot run against the published artifacts,
    either hold the publish or explicitly label the release a **development
    build** in its title/notes — under D11 an executed gate or an honest
@@ -648,7 +660,10 @@ Automated gates — two complementary scripts, run on a macOS machine:
   slices, ad-hoc signature present), copies it out the way a user does,
   clears the quarantine attribute (`xattr -cr` — the documented Gatekeeper
   path), launches it and requires it to stay alive. Honest record: not yet
-  executed — no macOS host this round.
+  executed — no macOS host this round. The exact native procedure —
+  commands, evidence binding, and the template the run fills — is the
+  [native verification runbook](native-verification.md); a green run on a
+  real Mac (or a hosted runner once #80 is unblocked) is what retires it.
 
 Manual route: open the `.dmg`, drag the app to `/Applications`, clear the
 quarantine attribute (`xattr -cr` above, or right-click → *Open* once), then
