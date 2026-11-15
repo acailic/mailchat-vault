@@ -1194,6 +1194,7 @@ mod tests {
         let msg = Message {
             id: 1,
             source: "s".into(),
+            source_key: String::new(),
             external_id: "e".into(),
             channel: "email".into(),
             chat_id: String::new(),
@@ -1244,6 +1245,7 @@ mod tests {
         Message {
             id,
             source: "test".into(),
+            source_key: String::new(),
             external_id: format!("l{id}"),
             channel: "email".into(),
             chat_id: String::new(),
@@ -1259,6 +1261,7 @@ mod tests {
         Message {
             id: rank as i64,
             source: "test".into(),
+            source_key: String::new(),
             external_id: format!("lim{rank}"),
             channel: "email".into(),
             chat_id: String::new(),

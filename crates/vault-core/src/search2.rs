@@ -823,9 +823,40 @@ fn browse_snippet(body: &str) -> String {
 /// contribute is a newline rather than a space, so paragraph-ish structure
 /// survives into the (single-line, whitespace-collapsed) snippet text.
 const SNIPPET_BLOCK_TAGS: &[&str] = &[
-    "address", "article", "aside", "blockquote", "br", "div", "dd", "dl", "dt", "fieldset",
-    "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header",
-    "hr", "li", "main", "nav", "ol", "p", "pre", "section", "table", "td", "th", "tr", "ul",
+    "address",
+    "article",
+    "aside",
+    "blockquote",
+    "br",
+    "div",
+    "dd",
+    "dl",
+    "dt",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "footer",
+    "form",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "header",
+    "hr",
+    "li",
+    "main",
+    "nav",
+    "ol",
+    "p",
+    "pre",
+    "section",
+    "table",
+    "td",
+    "th",
+    "tr",
+    "ul",
 ];
 
 /// The named entities snippets decode (plus the numeric forms handled
@@ -923,18 +954,16 @@ fn html_to_snippet_text(input: &str) -> String {
                     .is_some_and(|n| SNIPPET_BLOCK_TAGS.contains(&n));
                 out.push(if block { '\n' } else { ' ' });
             }
-            b'&' => {
-                match decode_entity(&bytes[i..]) {
-                    Some((ch, len)) => {
-                        out.push(ch);
-                        i += len;
-                    }
-                    None => {
-                        out.push('&');
-                        i += 1;
-                    }
+            b'&' => match decode_entity(&bytes[i..]) {
+                Some((ch, len)) => {
+                    out.push(ch);
+                    i += len;
                 }
-            }
+                None => {
+                    out.push('&');
+                    i += 1;
+                }
+            },
             _ => {
                 // Copy one UTF-8 scalar: '<'/'&' are ASCII, so any other
                 // start byte begins a multi-byte sequence that cannot
@@ -1005,7 +1034,8 @@ fn find_subslice_ci(hay: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || hay.len() < needle.len() {
         return None;
     }
-    hay.windows(needle.len()).position(|w| starts_with_ci(w, needle))
+    hay.windows(needle.len())
+        .position(|w| starts_with_ci(w, needle))
 }
 
 /// Decode the entity at the start of `bytes` (which begins `&`). Returns
@@ -1302,7 +1332,10 @@ impl Storage {
                     let raw: String = row.get(11)?;
                     summary_from_row(
                         row,
-                        Some(truncate_chars(&html_to_snippet_text(&raw), MAX_SNIPPET_CHARS)),
+                        Some(truncate_chars(
+                            &html_to_snippet_text(&raw),
+                            MAX_SNIPPET_CHARS,
+                        )),
                     )
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1338,7 +1371,10 @@ impl Storage {
                     let raw: String = row.get(11)?;
                     summary_from_row(
                         row,
-                        Some(truncate_chars(&html_to_snippet_text(&raw), MAX_SNIPPET_CHARS)),
+                        Some(truncate_chars(
+                            &html_to_snippet_text(&raw),
+                            MAX_SNIPPET_CHARS,
+                        )),
                     )
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1369,9 +1405,12 @@ impl Storage {
         let req = request.normalize()?;
         let filters = V2Filters::build(&req)?;
         let order = archive_order(&req);
-        let columns = "m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
-                       m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
-                       m.body, m.raw_json";
+        let columns = format!(
+            "m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
+             m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
+             m.body, m.raw_json, {}",
+            crate::storage::SOURCE_KEY_COLUMN
+        );
         let (from, predicate, mut bind) = if req.text.is_empty() {
             (SUMMARY_JOINS, "1=1", Vec::new())
         } else {
@@ -1393,7 +1432,7 @@ impl Storage {
         let mut rows = stmt.query(rusqlite::params_from_iter(bind))?;
         let mut count = 0;
         while let Some(row) = rows.next()? {
-            sink(&crate::storage::message_from_row(row)?)?;
+            sink(&crate::storage::export_message_from_row(row)?)?;
             count += 1;
         }
         Ok(count)
@@ -1996,13 +2035,22 @@ mod tests {
         );
         assert_eq!(html_to_snippet_text("&#65;&#x42;&#x1F;"), "AB\u{1F}");
         // A decoded '&lt;' is literal text, never re-parsed as a tag.
-        assert_eq!(html_to_snippet_text("&lt;b&gt;bold&lt;/b&gt;"), "<b>bold</b>");
+        assert_eq!(
+            html_to_snippet_text("&lt;b&gt;bold&lt;/b&gt;"),
+            "<b>bold</b>"
+        );
         // Unknown or unterminated entities stay literal.
-        assert_eq!(html_to_snippet_text("fish & chips &nosuch; &#;"), "fish & chips &nosuch; &#;");
+        assert_eq!(
+            html_to_snippet_text("fish & chips &nosuch; &#;"),
+            "fish & chips &nosuch; &#;"
+        );
 
         // No-html fast path: only whitespace collapsing runs (CRLF and
         // runs collapse to one space; ends trim).
-        assert_eq!(html_to_snippet_text("  one\r\ntwo\t\tthree  "), "one two three");
+        assert_eq!(
+            html_to_snippet_text("  one\r\ntwo\t\tthree  "),
+            "one two three"
+        );
 
         // Truncated markup at the edge (the browse path feeds a prefix)
         // is dropped, never leaked as text.
@@ -2071,7 +2119,10 @@ mod tests {
             "snippet is extracted text, got {snippet:?}"
         );
         for leaked in ["<", ">", "&nbsp;", "&amp;", "DOCTYPE", "tracker", "style"] {
-            assert!(!snippet.contains(leaked), "leaked {leaked:?} in {snippet:?}");
+            assert!(
+                !snippet.contains(leaked),
+                "leaked {leaked:?} in {snippet:?}"
+            );
         }
     }
 
@@ -2107,7 +2158,10 @@ mod tests {
             )),
             "marked match in {snippet:?}"
         );
-        assert!(snippet.contains("vault meeting"), "decoded text in {snippet:?}");
+        assert!(
+            snippet.contains("vault meeting"),
+            "decoded text in {snippet:?}"
+        );
         assert!(!snippet.contains("<"), "no markup in {snippet:?}");
     }
 
