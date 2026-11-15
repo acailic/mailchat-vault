@@ -741,6 +741,72 @@ describe("filters", () => {
     });
   });
 
+  // The date-range e2e's near-midnight case as a unit-level replay: the
+  // same fixture mails straddling UTC midnight, the same driving (empty
+  // text + from/to change events), a backend-faithful mock (browse rows
+  // newest-first with the stored "subject\n\nbody" snippet, whole UTC
+  // days, unresolved instants excluded). Pins that the settled browse's
+  // rendered row carries the identifying text the e2e asserts on
+  // ("before midnight"), independent of the WebDriver text read.
+  it("a near-midnight day bound shows the before-midnight mail's row", async () => {
+    const midnightMail = (id: number, sent: string, subject: string, text: string): MessageSummary =>
+      ({
+        id,
+        source_id: "inst-mbox",
+        source_label: "mbox",
+        conversation_id: null,
+        conversation_label: null,
+        author: "fixture",
+        subject,
+        sent_at: sent,
+        time_confidence: "confirmed",
+        // The backend's browse snippet: whitespace-collapsed prefix of the
+        // stored subject-prefixed body.
+        snippet: `${subject}\n\n${text}`.replace(/\s+/g, " ").trim(),
+        attachment_count: 0,
+        available_attachment_count: 0,
+        has_conflicting_revision: false,
+      }) as MessageSummary;
+    const mails = [
+      midnightMail(1, "2025-10-30T10:00:00Z", "Vault kickoff", "The plan starts next week."),
+      midnightMail(
+        2,
+        "2025-10-31T23:59:30Z",
+        "Vault check-in before midnight",
+        "Vault status right before midnight on Halloween: all green.",
+      ),
+      midnightMail(
+        3,
+        "2025-11-01T00:00:30Z",
+        "Vault check-in after midnight",
+        "Vault status thirty seconds after midnight: still green.",
+      ),
+    ];
+    const utcDayStart = (day: string) => Date.parse(`${day}T00:00:00Z`);
+    tauri.handlers.set("search_archive_v2", (raw) => {
+      const { from_date, to_date } = (raw as { request: { from_date: string | null; to_date: string | null } }).request;
+      const from = from_date ? utcDayStart(from_date) : null;
+      const to = to_date ? utcDayStart(to_date) + 24 * 3600 * 1000 : null;
+      const hits = mails
+        .filter((m) => {
+          const t = m.sent_at ? Date.parse(m.sent_at) : null;
+          return t !== null && (from === null || t >= from) && (to === null || t < to);
+        })
+        .sort((a, b) => Date.parse(b.sent_at!) - Date.parse(a.sent_at!));
+      return pageOf(hits, hits.length);
+    });
+    await boot();
+    input("#search").value = "";
+    input("#from-date").value = "2025-10-31";
+    fireChange(input("#from-date"));
+    input("#to-date").value = "2025-10-31";
+    fireChange(input("#to-date"));
+    await vi.waitFor(() => expect($("#status").textContent).toBe("1–1 of 1"));
+    const rows = [...win.document.querySelectorAll("#results li")];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].textContent).toContain("before midnight");
+  });
+
   it("Clear resets every filter and re-browses unfiltered", async () => {
     await boot();
     await vi.waitFor(() => expect(win.document.querySelectorAll(".chip").length).toBe(2));
