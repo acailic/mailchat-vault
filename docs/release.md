@@ -27,13 +27,26 @@ are also attached as workflow-run artifacts (`linux-bundles`,
 Version bump flow: raise `version` in `src-tauri/tauri.conf.json` and the
 workspace `Cargo.toml`, commit, tag `v<version>`, push the tag.
 
-> **Actions are currently disabled by decision** (pushes skip CI), so the
-> workflow above is the documented path *for when workflows are re-enabled*;
-> the operative route today is the local one: build per platform
-> (`scripts/release/build-linux.sh` on Linux; `npm run tauri build --
-> --bundles app,dmg` on macOS; `npm run tauri build -- --bundles msi,nsis` on
-> Windows), publish with `gh release create/upload`, and gate the publish on
-> the local smoke suites + checksums below.
+> **Honest status (2026-11-15, per D11 — tags and workflow YAML are not
+> evidence):** route (c) was decided on 2026-11-14 (PR #85): CI and Release
+> workflows are **enabled** again, and the `v0.2.0` tag (commit `71ac2d4`,
+> on `main`) was pushed to build all three platforms onto a draft release.
+> The Release run on that tag
+> ([43538226337](https://github.com/acailic/mailchat-vault/actions/runs/43538226337))
+> failed in seconds — **GitHub-hosted runners cannot start because recent
+> account payments failed or the spending limit needs increasing** (see
+> Billing & plans in the account settings), and every CI and Retrieval run
+> since re-enabling fails the same way. **No v0.2.0 release or draft
+> exists**, so `SHA256SUMS` at publish time and smoke gates against
+> published artifacts have not happened. Publishing waits on the billing
+> fix — the exact handoff is the
+> [v0.2.0 publish checklist](#v020-publish-handoff-maintainer-checklist)
+> below. Until then the workflow above is again the documented path, and
+> the local route (build per platform: `scripts/release/build-linux.sh` on
+> Linux; `npm run tauri build -- --bundles app,dmg` on macOS;
+> `npm run tauri build -- --bundles msi,nsis` on Windows; publish with
+> `gh release create/upload`, gated on the local smoke suites + checksums)
+> remains the fallback a maintainer can run without Actions.
 
 The same packaging can be built locally without any host toolchain
 (besides docker) with:
@@ -310,10 +323,67 @@ publishing stays a separate human decision by design. `--skip-matrix`
 and `--skip-bundles` exist for iteration only — a candidate is never
 certified from a run that used them.
 
-Version bump flow: raise `version` in `src-tauri/tauri.conf.json` and
-the workspace `Cargo.toml` (both crates and `Cargo.lock` follow),
+Version bump flow: raise `version` in `src-tauri/tauri.conf.json` and the
+workspace `Cargo.toml` (both crates and `Cargo.lock` follow),
 matching `package.json`, add the `CHANGELOG.md` section, then run the
 prep script; tag `v<version>` and push only at the publish gate.
+
+## v0.2.0 publish handoff (maintainer checklist)
+
+The tag exists; the release does not. Recorded state, verified 2026-11-15:
+tag `v0.2.0` at commit `71ac2d4` (on `main`, documented route (c) in PR
+#85); Release run
+[43538226337](https://github.com/acailic/mailchat-vault/actions/runs/43538226337)
+on that tag failed because hosted runners cannot start (account payments /
+spending limit); every CI and Retrieval run since re-enabling fails the
+same way; no v0.2.0 release or draft exists. Per D11, none of this counts
+as release evidence — the steps below finish it once hosted runners are
+unblocked. Publishing waits on them; do not tag or re-tag anything else in
+the meantime.
+
+1. **Unblock hosted runners (account owner action, not a repo setting).**
+   GitHub account → *Settings* → *Billing & plans*: fix the failed payment
+   method and/or raise the spending limit so Actions can start jobs again.
+   Verify with any workflow run (e.g. the CI run on `main`): it must get
+   past job start instead of failing in seconds with the payments
+   annotation.
+2. **Re-run the failed Release run on the tag** — Actions → *Release* →
+   run 43538226337 → *Re-run all jobs* (the `create-release` job is
+   idempotent; it drafts the release if none exists). If re-run is not
+   available, delete and re-push the tag at the same commit:
+   `git push origin :refs/tags/v0.2.0 && git tag v0.2.0 71ac2d4 && git
+   push origin v0.2.0`. The tag currently points at `71ac2d4`; moving it
+   to a newer `main` commit is a maintainer decision that must be recorded
+   here if taken.
+3. **Verify the draft.** `gh release view v0.2.0` shows a **draft** with
+   all six assets (Linux AppImage + `.deb`, macOS universal `.dmg` +
+   `.app.tar.gz`, Windows `.msi` + NSIS `.exe`); the in-workflow gates are
+   green: `smoke-linux` on clean 22.04 **and** 24.04, and the dmg smoke
+   that runs before the dmg is attached. Run the manually dispatched
+   **Windows smoke** workflow (Actions → *Windows smoke* → *Run workflow*)
+   on the tag being released and require green — it covers install,
+   launch, uninstall-keeps-data, and the in-place upgrade from v0.1.0.
+4. **Attach `SHA256SUMS` at publish time.** From a checkout of the tag:
+   `scripts/release/release-verify.sh v0.2.0 --attach --smoke` — it
+   downloads the draft's assets, verifies each against GitHub's
+   server-side asset digests, uploads `SHA256SUMS` (idempotent), and can
+   chain the Linux smoke against the published bytes. Publishing rule: no
+   release is complete without its `SHA256SUMS` asset (v0.1.0 shipped
+   without one; it was attached retroactively — do not repeat that).
+5. **Smoke against the published artifacts, or label honestly.** After
+   publishing: `release-verify.sh v0.2.0 --smoke` (Linux),
+   `pwsh scripts/release/windows-smoke-from-release.ps1 -Tag v0.2.0
+   -OldTag v0.1.0 -BuildInspect -AllowDataWipe` (Windows), and
+   `scripts/release/smoke-macos.sh --release v0.2.0` (macOS, needs a Mac).
+   If any of these gates cannot run against the published artifacts,
+   either hold the publish or explicitly label the release a **development
+   build** in its title/notes — under D11 an executed gate or an honest
+   label are the only acceptable states.
+6. **Close the loop in docs.** Update the [download page](download.md)
+   release-status section, the [support matrix](support-matrix.md) row for
+   the execution route (#80), and the M6 record in the
+   [implementation roadmap](implementation-roadmap.md) with the published
+   evidence; the v0.2.0 CHANGELOG section already reflects route (c).
 
 ## App icon
 

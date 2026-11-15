@@ -28,6 +28,7 @@ The archive and search stay on your machine, and search works fully offline. Net
 | [IMAP sync](docs/imap-sync.md) | Gmail and generic IMAP setup, credential storage |
 | [Testing](docs/testing.md) | Test suites, performance budgets, fuzzing, CI |
 | [Specification set](docs/README.md) | Product plan, UX spec, architecture, contracts, roadmap, decisions |
+| [Download & install](docs/download.md) | Installer matrix, minimum requirements, checksum verification, limitations, upgrades |
 | [Releases](docs/release.md) | Installers, smoke tests, checksums, publishing |
 
 ## Quickstart
@@ -66,9 +67,9 @@ src/                 # frontend (vanilla TS): workspace shell, search, sources, 
 
 Annotated layout: [feature reference](docs/features.md#annotated-repository-layout).
 
-## Releases
+## Download
 
-Tagged versions (`v*`) build Linux, macOS, and Windows installers as draft GitHub Releases with `SHA256SUMS` checksums; artifacts are unsigned and smoke-tested before publishing. Build and publish procedure: [docs/release.md](docs/release.md).
+Prebuilt installers for Linux (AppImage/`.deb`), macOS (universal `.dmg`), and Windows (`.msi`/`.exe`) — with the version × OS × architecture matrix, minimum requirements, checksum verification, stated limitations, and the manual upgrade path — are on the [download page](docs/download.md). Artifacts are unsigned. Maintainer build and publish procedure: [docs/release.md](docs/release.md).
 
 ## License
 
