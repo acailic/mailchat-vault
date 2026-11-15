@@ -28,6 +28,10 @@ export async function run(ctx) {
 
     // U02: an empty archive presents the first-source journey, not a
     // dead search prompt. A blank query keeps that state honestly.
+    // The card and the search box live in the Search tabpanel; the
+    // openAsk step above left the Ask tab selected, and WebKit cannot
+    // read or click controls a hidden panel hides.
+    await ui.activateWorkspaceSection(browser, "search");
     const firstRun = await browser.$("#first-run");
     assert.ok(await firstRun.isDisplayed(), "the first-run card is visible on an empty archive");
     const input = await browser.$("#search");
