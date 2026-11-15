@@ -5,7 +5,8 @@
 # What this script does (and deliberately does not do):
 #
 #   DOES   - verify the version is bumped consistently everywhere and that
-#            no v<version> tag exists yet (preparation must precede tagging)
+#            no v<version> tag exists yet (preparation must precede tagging,
+#            unless --tag-exists-ok is passed for post-tag local assembly)
 #          - optionally run the full release validation matrix for this
 #            host's platform (the release-verify plan, M6.4)
 #          - build the Linux release bundles (docker-pinned toolchain)
@@ -13,8 +14,8 @@
 #          - render RELEASE-NOTES.md from the version's CHANGELOG.md
 #            section plus the standing unsigned-artifacts disclosure
 #          - write PUBLISH-CHECKLIST.md — the exact remaining steps,
-#            gated on the captain's open (a)/(b)/(c) host/Actions decision
-#            (docs/validation-and-release.md, "Release validation matrix")
+#            following the release execution-route decision (#80;
+#            docs/release.md, "Release execution route")
 #
 #   DOES NOT - create or push any git tag
 #            - call `gh release` (create/publish/upload) in any form
@@ -28,8 +29,14 @@
 #
 # Usage:
 #   scripts/release/prepare-release.sh [--version X.Y.Z]
+#                                      [--tag-exists-ok]
 #                                      [--skip-matrix] [--skip-bundles]
 #
+#   --tag-exists-ok  allow assembling a candidate for a version whose tag
+#                    already exists — the local execution route on an
+#                    already-tagged release (e.g. v0.2.0, whose tag was
+#                    pushed for the hosted route that billing blocked);
+#                    the normal flow still prepares before tagging
 #   --skip-matrix    do not run the validation matrix (iteration only —
 #                    a release candidate is never certified without it)
 #   --skip-bundles   do not build bundles; assemble notes/checksums from
@@ -44,15 +51,17 @@ here="$(cd "$(dirname "$BASH_SOURCE")" && pwd)"
 repo="$(git -C "$here" rev-parse --show-toplevel)"
 
 VERSION=""
+TAG_EXISTS_OK=0
 SKIP_MATRIX=0
 SKIP_BUNDLES=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --version)      VERSION="$2"; shift 2 ;;
-    --skip-matrix)  SKIP_MATRIX=1; shift ;;
-    --skip-bundles) SKIP_BUNDLES=1; shift ;;
-    *) echo "usage: $0 [--version X.Y.Z] [--skip-matrix] [--skip-bundles]" >&2; exit 2 ;;
+    --version)       VERSION="$2"; shift 2 ;;
+    --tag-exists-ok) TAG_EXISTS_OK=1; shift ;;
+    --skip-matrix)   SKIP_MATRIX=1; shift ;;
+    --skip-bundles)  SKIP_BUNDLES=1; shift ;;
+    *) echo "usage: $0 [--version X.Y.Z] [--tag-exists-ok] [--skip-matrix] [--skip-bundles]" >&2; exit 2 ;;
   esac
 done
 
@@ -112,11 +121,16 @@ verify_stage() {
     || fail "CHANGELOG.md has no '## [$VERSION]' section"
   echo "  CHANGELOG.md carries a [$VERSION] section"
 
-  echo "== verify: no tag yet =="
+  echo "== verify: tag state =="
   if git -C "$repo" rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
-    fail "tag v$VERSION already exists — preparation must precede tagging; bump to the next version or delete the tag deliberately"
+    if [[ "$TAG_EXISTS_OK" == 1 ]]; then
+      echo "  tag v$VERSION already exists (--tag-exists-ok: post-tag local assembly under the local execution route)"
+    else
+      fail "tag v$VERSION already exists — preparation must precede tagging; bump to the next version, or pass --tag-exists-ok for post-tag local assembly (the local execution route on an already-tagged release)"
+    fi
+  else
+    echo "  no v$VERSION tag exists (correct: tagging is a separate, gated step)"
   fi
-  echo "  no v$VERSION tag exists (correct: tagging is a separate, gated step)"
 }
 
 matrix_stage() {
@@ -199,32 +213,32 @@ Checksums for every asset are in `SHA256SUMS`.
 NOTES
   echo "  wrote RELEASE-NOTES.md"
 
-  # 4. the publish checklist — every remaining step, all gated on the
-  #    captain's (a)/(b)/(c) decision; nothing in it runs from here
+  # 4. the publish checklist — every remaining step, following the
+  #    release execution-route decision (#80); nothing in it runs from here
   cat > "$DRAFT_DIR/PUBLISH-CHECKLIST.md" <<CHECKLIST
 # v$VERSION publish checklist — NOT EXECUTED by prepare-release.sh
 
 This candidate was assembled locally. Nothing has been tagged,
 published, or uploaded, and no Actions workflow was enabled or
-dispatched. Publishing requires the maintainer decision recorded in
-\`docs/validation-and-release.md\` ("Release validation matrix"):
+dispatched. Publishing follows the authorized execution route
+(docs/release.md, "Release execution route", #80):
 
-- **(a) defer** — keep the current published release; this local
-  candidate stays warm until Actions return. Nothing to run.
-- **(b) real hosts** — run \`scripts/release/matrix-macos.sh\` on a real
-  macOS host and \`pwsh scripts/release/matrix-windows.ps1\` on a real
-  Windows host; the macOS bundle leg produces the dmg under
-  \`target/universal-apple-darwin/release/bundle/\`, the Windows leg the
-  msi/exe under \`target/release/bundle/\`. This script scans every
-  \`target/*/release/bundle/\` root, so re-running it on each host (or
-  copying the bundles here) makes every asset land in this directory
-  with one combined \`SHA256SUMS\`.
-- **(c) temporary Actions** — with release tags approved, pushing the
-  tag triggers \`.github/workflows/release.yml\`, which drafts the
-  release and builds all six assets itself; then dispatch the Windows
-  smoke workflow on the tag.
+- **Local native route — authorized while GitHub-hosted runners cannot
+  start (account billing).** Build and gate each OS on its native host
+  (the one-command matrix columns: \`matrix-linux.sh\` on any docker
+  machine, \`matrix-macos.sh\` on a real Mac, \`matrix-windows.ps1\` on a
+  real Windows host); assemble with this script on each host (or copy
+  the bundles to one host — the draft dir keeps assets across re-runs;
+  pass \`--tag-exists-ok\` when the tag already exists); draft and
+  upload with \`gh release create --draft\` / \`gh release upload\`.
+- **Hosted route — the default once Actions billing is restored.**
+  Pushing the tag triggers \`.github/workflows/release.yml\`, which
+  drafts the release and builds all six assets itself; then dispatch
+  the Windows smoke workflow on the tag.
 
-Whichever path is chosen, the gate order below is the same.
+A release may mix routes per OS, provided each OS's assets carry that
+OS's executed gates. Whichever route is chosen, the gate order below is
+the same.
 
 ## Gate order (execute by hand, in order)
 
@@ -234,17 +248,18 @@ Whichever path is chosen, the gate order below is the same.
    so RELEASE-NOTES.md carries it.
 2. **Confirm the matrix** — the matrix run's per-leg logs live in the
    \`target/release/matrix-logs/\` directory the matrix script prints
-   when it finishes; under (b), both additional platform columns
-   must be green before their assets ship; under (c), the workflow's
-   own smoke jobs (macOS dmg smoke, Linux smoke) must be green on the
-   tag.
-3. **Tag** (only after the go decision):
+   when it finishes; under the local route, every platform column whose
+   assets ship must be green before those assets ship; under the hosted
+   route, the workflow's own smoke jobs (macOS dmg smoke, Linux smoke)
+   must be green on the tag.
+3. **Tag** (only after the go decision; skip when the tag already
+   exists — then assemble with \`--tag-exists-ok\` instead):
    \`\`\`sh
    git tag -a v$VERSION -m "Mailchat Vault v$VERSION"
-   git push origin v$VERSION        # under (c) this triggers release.yml
+   git push origin v$VERSION        # hosted route: this triggers release.yml
    \`\`\`
-4. **Draft the release** (under (a)/(b); under (c) the workflow already
-   did it):
+4. **Draft the release** (local route; the hosted workflow drafts its
+   own):
    \`\`\`sh
    gh release create v$VERSION --draft \\
      --title "Mailchat Vault v$VERSION" \\
@@ -256,7 +271,7 @@ Whichever path is chosen, the gate order below is the same.
    download from the draft, verify against \`SHA256SUMS\`, and run the
    platform gates (\`smoke-linux.sh\` against the published artifacts;
    \`scripts/dmg-smoke-test.sh <downloaded dmg> $VERSION\`; the Windows
-   smoke workflow against the tag).
+   smoke gates against the tag or via \`windows-smoke-from-release.ps1\`).
 6. **Publish** — \`gh release edit v$VERSION --draft=false\` — only when
    every gate above is green, with the unsigned-artifacts disclosure
    left in the notes.
@@ -274,5 +289,5 @@ echo "Draft-release candidate for v$VERSION assembled locally:"
 ls -1 "$DRAFT_DIR"
 echo
 echo "NOT tagged, NOT published, no Actions touched — the remaining"
-echo "steps live in $DRAFT_DIR/PUBLISH-CHECKLIST.md and wait on the"
-echo "captain's (a)/(b)/(c) host/Actions decision."
+echo "steps live in $DRAFT_DIR/PUBLISH-CHECKLIST.md and follow the"
+echo "release execution-route decision (#80; docs/release.md)."

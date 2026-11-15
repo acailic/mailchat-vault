@@ -391,6 +391,11 @@ export async function run(ctx) {
     const text = await readFile(exportFile, "utf8");
     assert.includes(text, "bulk vault 01", "the page-1 check is in the export");
     assert.includes(text, "bulk vault 51", "the page-2 check is in the export");
+    // Candidate-proof evidence line (GP04): the cross-page selection counts.
+    log(
+      `      [evidence] cross-page selection: total=60 pages=2 checked=2` +
+        ` exported=${exported.value.written} missing=${exported.value.missing}`,
+    );
 
     // A07 reading + Back: same-snapshot count, selection, and scroll.
     await readDom(browser, () => {

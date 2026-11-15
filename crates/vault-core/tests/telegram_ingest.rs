@@ -1,7 +1,9 @@
 use vault_core::ingest::{ingest, IngestSummary, Source};
 use vault_core::search::build_match_query;
 use vault_core::storage::Storage;
-use vault_core::telegram::{parse_telegram, TelegramSource, TELEGRAM_SOURCE};
+use vault_core::telegram::{
+    parse_telegram, parse_telegram_confirmed, TelegramSource, TELEGRAM_SOURCE,
+};
 
 // Realistic Telegram Desktop export: unix timestamps (UTC) alongside naive
 // local dates, string and array texts with entities, an attachment, a
@@ -68,6 +70,25 @@ const RESULT_JSON: &str = r#"{
     "nije objekt"
   ]
 }"#;
+
+#[test]
+fn confirmed_zone_resolves_the_naive_date_fallback_but_not_exact_unixtime() {
+    // GP03: with a user-confirmed zone, the naive `date` fallback
+    // resolves in it (`user_confirmed`); `date_unixtime` stays exact
+    // (`explicit_offset`) — confirmation never rewrites exact stamps.
+    let json = r#"{"name":"C","id":7,"messages":[
+        {"id":1,"type":"message","date":"2026-11-01T10:00:00","date_unixtime":"1793527200","from":"A","text":"exact"},
+        {"id":2,"type":"message","date":"2026-11-01T11:00:00","from":"B","text":"naive"}
+    ]}"#;
+    let collected = parse_telegram_confirmed(json.as_bytes(), "f", Some("Europe/Berlin")).unwrap();
+    let exact = &collected.messages[0];
+    assert_eq!(exact.time_confidence, "explicit_offset");
+    let naive = &collected.messages[1];
+    assert_eq!(naive.sent_at, "2026-11-01T10:00:00Z"); // CET = UTC+1
+    assert_eq!(naive.time_confidence, "user_confirmed");
+    assert_eq!(naive.timezone, "Europe/Berlin");
+    assert_eq!(naive.original_timestamp, "2026-11-01T11:00:00");
+}
 
 #[test]
 fn parses_fields_from_result_json() {

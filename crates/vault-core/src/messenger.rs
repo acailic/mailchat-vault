@@ -16,6 +16,14 @@
 //! time). Detection ([`is_messenger_export`]) runs ahead of the
 //! Telegram importer's probe, whose format test is merely "has a
 //! `messages` array" — [`crate::chat_export`] pins the detection order.
+//!
+//! A part file that cannot be read or parsed never kills the pick: it
+//! becomes one [`crate::bounded::StreamItem::Failed`] item naming the
+//! file and the walk continues with the next part — the same
+//! skip-and-record rule a broken `.eml` gets in an email folder (see
+//! [`crate::mbox::EmlDirSource`]). Only structural refusals (a pick
+//! with no thread folders, an unreadable directory) fail the pick, and
+//! those errors name the offending path.
 
 use std::collections::HashMap;
 use std::fs;
@@ -149,20 +157,37 @@ impl Source for MessengerSource {
     }
 
     fn collect(&self) -> Result<Collected> {
-        if self.path.is_file() {
-            let bytes = fs::read(&self.path)?;
-            return parse_messenger(&bytes, &parent_folder_name(&self.path));
-        }
-        // A directory pick: threads in path order, each thread's parts
-        // merged under one context and occurrence map.
-        let threads = thread_pick(&self.path)?;
+        // The whole-archive convenience view of the same streaming walk
+        // the bounded driver runs (one code path, so `collect` and
+        // `stream` cannot drift apart — including on broken parts).
         let mut messages = Vec::new();
         let mut failed = 0u64;
-        for thread in &threads {
-            let files = thread_files(thread)?;
-            let collected = collect_thread(&files, &thread_folder_name(thread))?;
-            messages.extend(collected.messages);
-            failed += collected.failed;
+        let mut failure = None;
+        {
+            let mut state = crate::bounded::ConsumerState {
+                skip: 0,
+                emit: &mut |item: StreamItem| {
+                    match item {
+                        StreamItem::Message(msg) => messages.push(msg),
+                        StreamItem::Failed { .. } => failed += 1,
+                    }
+                    Ok(Flow::Continue)
+                },
+                stopped: false,
+                failure: &mut failure,
+            };
+            if self.path.is_file() {
+                stream_thread(
+                    std::slice::from_ref(&self.path),
+                    &parent_folder_name(&self.path),
+                    &mut state,
+                )?;
+            } else {
+                stream_tree(&self.path, &mut state)?;
+            }
+        }
+        if let Some(e) = failure {
+            return Err(e);
         }
         Ok(Collected { messages, failed })
     }
@@ -174,10 +199,14 @@ impl Source for MessengerSource {
 /// by token through zero-sized `IgnoredAny`s), pass 2 walks the
 /// `messages` array one element at a time. A single-file pick runs both
 /// passes over the file; a directory pick runs the header pass once per
-/// thread (on the numerically first part — one context covers the whole
-/// thread) and the messages pass over every part, threads in path
-/// order. Peak memory is one message entry plus the small header and
-/// the per-thread occurrence counter, whatever the tree's size.
+/// thread (on the numerically first part that parses — one context
+/// covers the whole thread) and the messages pass over every part,
+/// threads in path order. Peak memory is one message entry plus the
+/// small header and the per-thread occurrence counter, whatever the
+/// tree's size. A part that cannot be read or parsed yields one
+/// `Failed` item naming the file and the walk continues (see
+/// [`stream_thread`]); a recorded failure is a committed item, so the
+/// bounded checkpoint can always advance past a corrupt part.
 impl StreamSource for MessengerSource {
     fn name(&self) -> &str {
         MESSENGER_SOURCE
@@ -239,7 +268,7 @@ fn message_number(path: &Path) -> u64 {
 fn thread_dirs(root: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<()> {
     let mut has_own = false;
     let mut subdirs = Vec::new();
-    for entry in fs::read_dir(root)? {
+    for entry in fs::read_dir(root).map_err(|e| read_failed(root, e))? {
         let path = entry?.path();
         let name = path
             .file_name()
@@ -272,7 +301,7 @@ fn thread_dirs(root: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<()> 
 /// `message_10`).
 fn thread_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    for entry in fs::read_dir(dir)? {
+    for entry in fs::read_dir(dir).map_err(|e| read_failed(dir, e))? {
         let path = entry?.path();
         if path.is_file() && is_message_file(&path) {
             files.push(path);
@@ -331,34 +360,15 @@ fn thread_folder_name(dir: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Parse one thread's part files (in numeric order) into messages: the
-/// context comes from the first part's header, and the occurrence map
-/// spans every part, so byte-identical repeats across parts still get
-/// distinct ids.
-fn collect_thread(files: &[PathBuf], folder_stem: &str) -> Result<Collected> {
-    let mut ctx: Option<ThreadContext> = None;
-    let mut occurrence: HashMap<u64, u32> = HashMap::new();
-    let mut messages = Vec::new();
-    let mut failed = 0u64;
-    for file in files {
-        let bytes = fs::read(file)?;
-        let export: MessengerExport = serde_json::from_slice(&bytes)?;
-        let ctx = ctx
-            .get_or_insert_with(|| ThreadContext::from_header(&header_view(&export), folder_stem));
-        for entry in &export.messages {
-            match messenger_entry(entry, ctx, &mut occurrence) {
-                EntryOutcome::Message(msg) => messages.push(msg),
-                EntryOutcome::Failed { .. } => failed += 1,
-                EntryOutcome::Skip => {}
-            }
-        }
-    }
-    Ok(Collected { messages, failed })
+/// An unreadable directory aborts the walk; the error names the path so
+/// the bad pick can be found (the Discord `read_failed` spelling).
+fn read_failed(path: &Path, e: io::Error) -> io::Error {
+    io::Error::new(e.kind(), format!("{}: {e}", path.display()))
 }
 
 /// Stream a directory pick: every thread in path order, each thread's
 /// parts in numeric order, one shared occurrence map per thread (the
-/// collect path's exact iteration, mirrored for the bounded driver). A
+/// single code path both `collect` and the bounded driver run). A
 /// consumer stop or failure ends the whole pick — the occurrence count
 /// must not resume mid-thread on a later part.
 fn stream_tree(root: &Path, state: &mut crate::bounded::ConsumerState<'_>) -> Result<()> {
@@ -374,9 +384,18 @@ fn stream_tree(root: &Path, state: &mut crate::bounded::ConsumerState<'_>) -> Re
 }
 
 /// Stream one thread (a single picked file, or one thread's parts in
-/// numeric order): the header pass runs once, on the first part — its
-/// context covers every part — and each file's `messages` array is then
-/// walked element by element with the thread's shared occurrence map.
+/// numeric order) with the `.eml` folder's skip-and-record rule: a part
+/// file that cannot be read or parsed is one `Failed` item whose
+/// `external_ref` is the file path and whose reason carries the
+/// underlying error; the walk continues with the next file. Messages
+/// already emitted from a part that fails mid-array stay emitted,
+/// before that part's failure item — the same bytes always yield the
+/// same item sequence, so skip-based resume replays identically.
+///
+/// The header pass reads parts in numeric order until one parses, so a
+/// broken first part costs its thread one failure item, not the
+/// thread's context; a thread with no parseable part at all is one
+/// `Failed` item naming the first part.
 fn stream_thread(
     files: &[PathBuf],
     folder_stem: &str,
@@ -385,10 +404,32 @@ fn stream_thread(
     let Some(first) = files.first() else {
         return Ok(());
     };
-    // Pass 1 (first part only): the header, streamed — the messages
-    // array costs no memory (IgnoredAny elements are zero-sized).
-    let header: MessengerHeader = serde_json::from_reader(BufReader::new(fs::File::open(first)?))?;
-    let ctx = ThreadContext::from_header(&header, folder_stem);
+    // Pass 1 (parts in numeric order until one parses): the header,
+    // streamed — the messages array costs no memory (IgnoredAny
+    // elements are zero-sized).
+    let mut ctx: Option<ThreadContext> = None;
+    let mut first_reason: Option<String> = None;
+    for file in files {
+        match read_thread_header(file) {
+            Ok(header) => {
+                ctx = Some(ThreadContext::from_header(&header, folder_stem));
+                break;
+            }
+            Err(reason) => {
+                first_reason.get_or_insert(reason);
+            }
+        }
+    }
+    let Some(ctx) = ctx else {
+        // No part parses at all: the thread is one failure naming its
+        // first part — there is no context to walk, so no per-file
+        // breakdown to report.
+        let _ = state.offer(EntryOutcome::Failed {
+            external_ref: first.display().to_string(),
+            reason: first_reason.unwrap_or_else(|| "unreadable or unparseable part".to_string()),
+        });
+        return Ok(());
+    };
     let mut occ: HashMap<u64, u32> = HashMap::new();
     for file in files {
         // Pass 2: the messages array, one element at a time. The
@@ -400,9 +441,13 @@ fn stream_thread(
                 occ: &mut occ,
                 state,
             };
-            let mut de =
-                serde_json::Deserializer::from_reader(BufReader::new(fs::File::open(file)?));
-            de.deserialize_map(visitor)
+            match fs::File::open(file) {
+                Ok(open) => serde_json::Deserializer::from_reader(BufReader::new(open))
+                    .deserialize_map(visitor),
+                // The same one-failure-per-part treatment an unparseable
+                // part gets (the reason names the underlying error).
+                Err(e) => Err(serde_json::Error::io(e)),
+            }
         };
         if let Some(e) = state.failure.take() {
             return Err(e);
@@ -412,10 +457,30 @@ fn stream_thread(
             Err(e) if state.stopped && crate::bounded::ConsumerState::is_stop_sentinel(&e) => {
                 return Ok(())
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                // The part's own failure item, offered through the
+                // shared state so a resumed run's skip counter replays
+                // the same sequence.
+                if !state.offer(EntryOutcome::Failed {
+                    external_ref: file.display().to_string(),
+                    reason: format!("unreadable or unparseable part: {e}"),
+                }) {
+                    if let Some(e) = state.failure.take() {
+                        return Err(e);
+                    }
+                    return Ok(());
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// Pass 1 of one part: its header, streamed. The error string names the
+/// underlying read or parse error for the failure-item path.
+fn read_thread_header(file: &Path) -> std::result::Result<MessengerHeader, String> {
+    let opened = fs::File::open(file).map_err(|e| format!("unreadable part: {e}"))?;
+    serde_json::from_reader(BufReader::new(opened)).map_err(|e| format!("unparseable part: {e}"))
 }
 
 /// The header view of one thread file: `title`/`thread_path`/
@@ -686,62 +751,6 @@ impl<'de, 'a, 'c> serde::de::Visitor<'de> for MessagesSeed<'a, 'c> {
     }
 }
 
-/// The export top level for the whole-file parser; every message object
-/// is kept verbatim so nothing in it is lost. Participants stay raw
-/// values (their entries are only ever read for `name`).
-#[derive(Debug, Deserialize)]
-struct MessengerExport {
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    thread_path: Option<String>,
-    #[serde(default)]
-    participants: Vec<Value>,
-    #[serde(default)]
-    messages: Vec<Value>,
-}
-
-/// The header view of a parsed export — the same small shape the
-/// streaming pass reads directly, so both paths share one context
-/// construction and cannot drift apart.
-fn header_view(export: &MessengerExport) -> MessengerHeader {
-    MessengerHeader {
-        title: export.title.clone(),
-        thread_path: export.thread_path.clone(),
-        participants: export
-            .participants
-            .iter()
-            .map(|p| ParticipantName {
-                name: p.get("name").and_then(Value::as_str).map(str::to_string),
-            })
-            .collect(),
-        messages: Vec::new(),
-    }
-}
-
-/// Parse one Messenger thread file into messages.
-///
-/// `folder_stem` (the parent directory's name) is the fallback for
-/// `chat_id` and for the thread id when the header's `thread_path`
-/// carries no numeric suffix. Entries that are not objects, or that
-/// have neither `sender_name` nor `timestamp_ms`, count as failed;
-/// entries with neither `content` nor any media field are skipped.
-fn parse_messenger(bytes: &[u8], folder_stem: &str) -> Result<Collected> {
-    let export: MessengerExport = serde_json::from_slice(bytes)?;
-    let ctx = ThreadContext::from_header(&header_view(&export), folder_stem);
-    let mut occurrence: HashMap<u64, u32> = HashMap::new();
-    let mut messages = Vec::new();
-    let mut failed: u64 = 0;
-    for entry in &export.messages {
-        match messenger_entry(entry, &ctx, &mut occurrence) {
-            EntryOutcome::Message(msg) => messages.push(msg),
-            EntryOutcome::Failed { .. } => failed += 1,
-            EntryOutcome::Skip => {}
-        }
-    }
-    Ok(Collected { messages, failed })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -838,10 +847,9 @@ mod tests {
         // A duplicated top-level `messages` key in a later part file:
         // pass 1 reads only the numerically first part, so nothing
         // fails the pick, and the guard makes pass 2 stream just the
-        // first array — before the guard, both arrays streamed. The
-        // whole-file parser keeps standard serde duplicate-key
-        // handling, so the paths intentionally diverge on this
-        // pathological shape; no parity assertion.
+        // first array — before the guard, both arrays streamed. There
+        // is no whole-file parser anymore (`collect` runs this same
+        // visitor), so no divergence note is needed on this shape.
         let dir = tempfile::tempdir().unwrap();
         let thread = dir.path().join("ana_1111");
         std::fs::create_dir_all(&thread).unwrap();
@@ -941,10 +949,100 @@ mod tests {
     }
 
     #[test]
-    fn broken_json_reports_error() {
+    fn broken_json_is_one_failed_item_naming_the_file() {
+        // Skip-and-record: an unparseable part — even the only file of
+        // the pick — is one `Failed` item naming it, never a fatal
+        // error (the `.eml` folder rule). `collect` runs the same walk,
+        // so the paths agree.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("message_1.json");
         std::fs::write(&path, b"{not json").unwrap();
-        assert!(MessengerSource::new(&path).collect().is_err());
+        let collected = MessengerSource::new(&path).collect().unwrap();
+        assert_eq!(collected.messages.len(), 0);
+        assert_eq!(collected.failed, 1);
+        let mut streamed = Vec::new();
+        MessengerSource::new(&path)
+            .stream(0, &mut |item| {
+                streamed.push(item);
+                Ok(Flow::Continue)
+            })
+            .unwrap();
+        match &streamed[..] {
+            [StreamItem::Failed {
+                external_ref,
+                reason,
+            }] => {
+                assert!(external_ref.ends_with("message_1.json"), "{external_ref}");
+                assert!(!reason.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn thread_with_no_parseable_part_is_one_failed_item_naming_the_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let thread = dir.path().join("ana_1111");
+        std::fs::create_dir_all(&thread).unwrap();
+        std::fs::write(thread.join("message_1.json"), b"{not json").unwrap();
+        std::fs::write(thread.join("message_2.json"), b"also broken").unwrap();
+        let mut streamed = Vec::new();
+        MessengerSource::new(&thread)
+            .stream(0, &mut |item| {
+                streamed.push(item);
+                Ok(Flow::Continue)
+            })
+            .unwrap();
+        // One item for the whole thread, naming the numerically first
+        // part (its own underlying error in the reason).
+        match &streamed[..] {
+            [StreamItem::Failed {
+                external_ref,
+                reason,
+            }] => {
+                assert!(external_ref.ends_with("message_1.json"), "{external_ref}");
+                assert!(reason.contains("unparseable part"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let collected = MessengerSource::new(&thread).collect().unwrap();
+        assert_eq!(collected.messages.len(), 0);
+        assert_eq!(collected.failed, 1);
+    }
+
+    #[test]
+    fn mid_array_failure_keeps_emitted_messages_then_records_the_part() {
+        // A part truncated mid-array (the header comes from the valid
+        // first part): the entries before the cut stay emitted,
+        // followed by the broken part's one failure item —
+        // deterministic for the same bytes, so skip-based resume
+        // replays identically.
+        let dir = tempfile::tempdir().unwrap();
+        let thread = dir.path().join("ana_1111");
+        std::fs::create_dir_all(&thread).unwrap();
+        std::fs::write(
+            thread.join("message_1.json"),
+            br#"{"participants": [{"name": "Ana"}], "title": "Ana", "thread_path": "inbox/ana_1111"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            thread.join("message_2.json"),
+            br#"{"participants": [{"name": "Ana"}], "messages": [{"sender_name": "Ana", "timestamp_ms": 1762981200000, "content": "cela"}, {"sender_name": "Ana", "timestamp_ms""#,
+        )
+        .unwrap();
+        let mut streamed = Vec::new();
+        MessengerSource::new(&thread)
+            .stream(0, &mut |item| {
+                streamed.push(item);
+                Ok(Flow::Continue)
+            })
+            .unwrap();
+        match &streamed[..] {
+            [StreamItem::Message(m), StreamItem::Failed { external_ref, .. }] => {
+                assert_eq!(m.body, "cela");
+                assert!(external_ref.ends_with("message_2.json"), "{external_ref}");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

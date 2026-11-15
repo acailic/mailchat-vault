@@ -741,6 +741,72 @@ describe("filters", () => {
     });
   });
 
+  // The date-range e2e's near-midnight case as a unit-level replay: the
+  // same fixture mails straddling UTC midnight, the same driving (empty
+  // text + from/to change events), a backend-faithful mock (browse rows
+  // newest-first with the stored "subject\n\nbody" snippet, whole UTC
+  // days, unresolved instants excluded). Pins that the settled browse's
+  // rendered row carries the identifying text the e2e asserts on
+  // ("before midnight"), independent of the WebDriver text read.
+  it("a near-midnight day bound shows the before-midnight mail's row", async () => {
+    const midnightMail = (id: number, sent: string, subject: string, text: string): MessageSummary =>
+      ({
+        id,
+        source_id: "inst-mbox",
+        source_label: "mbox",
+        conversation_id: null,
+        conversation_label: null,
+        author: "fixture",
+        subject,
+        sent_at: sent,
+        time_confidence: "confirmed",
+        // The backend's browse snippet: whitespace-collapsed prefix of the
+        // stored subject-prefixed body.
+        snippet: `${subject}\n\n${text}`.replace(/\s+/g, " ").trim(),
+        attachment_count: 0,
+        available_attachment_count: 0,
+        has_conflicting_revision: false,
+      }) as MessageSummary;
+    const mails = [
+      midnightMail(1, "2025-10-30T10:00:00Z", "Vault kickoff", "The plan starts next week."),
+      midnightMail(
+        2,
+        "2025-10-31T23:59:30Z",
+        "Vault check-in before midnight",
+        "Vault status right before midnight on Halloween: all green.",
+      ),
+      midnightMail(
+        3,
+        "2025-11-01T00:00:30Z",
+        "Vault check-in after midnight",
+        "Vault status thirty seconds after midnight: still green.",
+      ),
+    ];
+    const utcDayStart = (day: string) => Date.parse(`${day}T00:00:00Z`);
+    tauri.handlers.set("search_archive_v2", (raw) => {
+      const { from_date, to_date } = (raw as { request: { from_date: string | null; to_date: string | null } }).request;
+      const from = from_date ? utcDayStart(from_date) : null;
+      const to = to_date ? utcDayStart(to_date) + 24 * 3600 * 1000 : null;
+      const hits = mails
+        .filter((m) => {
+          const t = m.sent_at ? Date.parse(m.sent_at) : null;
+          return t !== null && (from === null || t >= from) && (to === null || t < to);
+        })
+        .sort((a, b) => Date.parse(b.sent_at!) - Date.parse(a.sent_at!));
+      return pageOf(hits, hits.length);
+    });
+    await boot();
+    input("#search").value = "";
+    input("#from-date").value = "2025-10-31";
+    fireChange(input("#from-date"));
+    input("#to-date").value = "2025-10-31";
+    fireChange(input("#to-date"));
+    await vi.waitFor(() => expect($("#status").textContent).toBe("1–1 of 1"));
+    const rows = [...win.document.querySelectorAll("#results li")];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].textContent).toContain("before midnight");
+  });
+
   it("Clear resets every filter and re-browses unfiltered", async () => {
     await boot();
     await vi.waitFor(() => expect(win.document.querySelectorAll(".chip").length).toBe(2));
@@ -1557,12 +1623,17 @@ describe("import picker → preview → confirm (U03)", () => {
     expect($(".preview-path").textContent).toBe("/tmp/tg-export/result.json");
     expect($("#import-preview").textContent).toContain("4 messages found");
 
-    // Confirm submits the import job with the checked media toggle.
+    // Confirm submits the import job with the checked media toggle and
+    // the resolved destination source (the derived name, GP03).
     $("#preview-import-btn").click();
     await vi.waitFor(() => expect(jobSubmits()).toHaveLength(1));
     expect(jobSubmits()[0].args).toEqual({
       kind: "import_chat_export",
-      params: { path: "/tmp/tg-export/result.json", extract_media: true },
+      params: {
+        path: "/tmp/tg-export/result.json",
+        extract_media: true,
+        source: "telegram",
+      },
     });
 
     // The inline card owns the run: queued before the first event, with
@@ -1781,6 +1852,107 @@ describe("import picker → preview → confirm (U03)", () => {
     $("#import-progress-dismiss").click();
     expect($("#import-progress").getAttribute("hidden")).not.toBeNull();
     expect($("#import-progress").children.length).toBe(0);
+  });
+
+  it("confirming a naive-timestamp preview carries the corrected zone and chosen source (GP03)", async () => {
+    await boot();
+    dialog.open.mockResolvedValue("/tmp/chat.txt");
+    tauri.handlers.set("preview_import", () =>
+      Promise.resolve({
+        ...TELEGRAM_PREVIEW,
+        naive_timestamps: 4,
+        assumed_zone: "Europe/Belgrade",
+      }),
+    );
+    tauri.handlers.set("job_submit", () => ({ id: 41 }));
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($("#preview-zone-input")).toBeTruthy());
+    // The card states the assumption and its DST honesty up front.
+    expect($("#import-preview").textContent).toContain(
+      "4 messages carry clock times without a timezone",
+    );
+    expect($("#import-preview").textContent).toContain("assumed Europe/Belgrade");
+    // Correct the zone once and rename the destination source.
+    input("#preview-zone-input").value = "Europe/Berlin";
+    input("#preview-source-input").value = "Family chats";
+    $("#preview-import-btn").click();
+    await vi.waitFor(() => expect(jobSubmits()).toHaveLength(1));
+    expect(jobSubmits()[0].args).toEqual({
+      kind: "import_chat_export",
+      params: {
+        path: "/tmp/chat.txt",
+        extract_media: true,
+        source: "Family chats",
+        confirmed_timezone: "Europe/Berlin",
+      },
+    });
+  });
+
+  it("a failed import's Retry re-submits the same path and options (GP03)", async () => {
+    await boot();
+    dialog.open.mockResolvedValue("/tmp/chat.txt");
+    tauri.handlers.set("preview_import", () =>
+      Promise.resolve({
+        ...TELEGRAM_PREVIEW,
+        naive_timestamps: 2,
+        assumed_zone: "Europe/Belgrade",
+      }),
+    );
+    let nextId = 42;
+    tauri.handlers.set("job_submit", () => ({ id: nextId++ }));
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($("#preview-zone-input")).toBeTruthy());
+    input("#preview-zone-input").value = "Europe/Berlin";
+    $("#preview-import-btn").click();
+    await vi.waitFor(() => expect(jobSubmits()).toHaveLength(1));
+    emitJob({ seq: 1, at: "t", job: 42, type: "submitted", kind: "import_chat_export" });
+    emitJob({ seq: 2, at: "t", job: 42, type: "failed", error: { kind: "import", message: "x" } });
+
+    // The failed card offers the in-place retry.
+    await vi.waitFor(() => expect($("#import-retry-btn")).toBeTruthy());
+    $("#import-retry-btn").click();
+    await vi.waitFor(() => expect(jobSubmits()).toHaveLength(2));
+    // Verbatim re-submission: same path and options, nothing re-asked.
+    expect(jobSubmits()[1].args).toEqual(jobSubmits()[0].args);
+    // The new run's card replaces the failure (follows the fresh job id).
+    await vi.waitFor(() =>
+      expect(win.document.querySelector(".import-progress-card.failed")).toBeNull(),
+    );
+    expect(win.document.querySelector(".import-progress-card.queued")).toBeTruthy();
+  });
+
+  it("a completed import links its non-zero counts to recovery actions (GP03)", async () => {
+    await boot();
+    dialog.open.mockResolvedValue("/tmp/chat.txt");
+    tauri.handlers.set("preview_import", () => Promise.resolve(TELEGRAM_PREVIEW));
+    tauri.handlers.set("job_submit", () => ({ id: 45 }));
+    tauri.handlers.set("list_import_scopes_v2", () => []);
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
+    $("#preview-import-btn").click();
+    emitJob({ seq: 1, at: "t", job: 45, type: "submitted", kind: "import_chat_export" });
+    emitJob({
+      seq: 2,
+      at: "t",
+      job: 45,
+      type: "succeeded",
+      result: jobResult(
+        { source: "telegram", seen: 4, inserted: 3, skipped: 0, failed: 1 },
+        "chat-import-abc",
+        { referenced: 2, stored: 1, deduped: 0, missing: 1, linked: 1, unlinked: 0, unlinked_deduped: 0 },
+      ),
+    });
+    await vi.waitFor(() => expect($("#import-status").textContent).toContain("1 failed to parse"));
+    // Each non-zero count gets its recovery action: the parse failure
+    // opens Activity's explanation; the missing media file names the
+    // re-export-with-media path.
+    const failures = $("#import-failures-btn");
+    expect(failures.textContent).toContain("failed to parse");
+    expect($("#import-missing-media").textContent).toContain(
+      "1 media file missing from the export",
+    );
+    failures.click();
+    await vi.waitFor(() => expect($("#app").dataset.view).toBe("activity"));
   });
 
   it("Cancel stops this flow's job with no confirm dialog, then the section resets", async () => {
