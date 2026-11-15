@@ -12,7 +12,7 @@ fn zone() -> (chrono::FixedOffset, &'static str) {
 
 fn parse(bytes: &[u8], chat_id: &str) -> vault_core::ingest::Collected {
     let (tz, label) = zone();
-    parse_whatsapp_tz(bytes, chat_id, &tz, label).unwrap()
+    parse_whatsapp_tz(bytes, chat_id, &tz, label, false).unwrap()
 }
 
 // Croatian-style export: dd.mm.yyyy with a trailing year dot, 24h clock,

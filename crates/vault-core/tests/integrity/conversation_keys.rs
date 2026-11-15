@@ -371,7 +371,8 @@ fn whatsapp_renamed_legacy_imports_merge_and_reimport_dedups() {
     // The money proof: re-importing the export through the M1.3 path
     // dedups against the re-keyed identities instead of duplicating.
     let tz = FixedOffset::east_opt(0).unwrap();
-    let collected = parse_whatsapp_tz(WA_EXPORT.as_bytes(), "Ana (najnovije)", &tz, "UTC").unwrap();
+    let collected =
+        parse_whatsapp_tz(WA_EXPORT.as_bytes(), "Ana (najnovije)", &tz, "UTC", false).unwrap();
     let summary = vault_core::ingest::ingest_collected(
         &s,
         vault_core::whatsapp::WHATSAPP_SOURCE,
@@ -604,8 +605,14 @@ fn whatsapp_rekey_hash_matches_live_import_on_non_utc_zone() {
                   [1.7.2026., 09:00:05] Ana: zdravo ekipo\n\
                   [1.7.2026., 09:01:00] Ana: kako ste?\n";
     let tz = FixedOffset::east_opt(2 * 3600).unwrap();
-    let collected =
-        parse_whatsapp_tz(export.as_bytes(), "Ana (najnovije)", &tz, "Europe/Paris").unwrap();
+    let collected = parse_whatsapp_tz(
+        export.as_bytes(),
+        "Ana (najnovije)",
+        &tz,
+        "Europe/Paris",
+        false,
+    )
+    .unwrap();
     assert_eq!(collected.messages.len(), 3);
     assert_eq!(
         collected.messages[1].sent_at, "2026-07-01T07:00:05Z",

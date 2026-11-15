@@ -268,7 +268,7 @@ fn whatsapp_export_without_authors_falls_back_to_legacy_grouping() {
     let export = "[1.11.2026., 09:00:00] Poruke i pozivi šifrirani.\n";
     let collected = {
         let tz = FixedOffset::east_opt(0).unwrap();
-        parse_whatsapp_tz(export.as_bytes(), "chat", &tz, "UTC").unwrap()
+        parse_whatsapp_tz(export.as_bytes(), "chat", &tz, "UTC", false).unwrap()
     };
     assert!(collected.messages[0].conversation_key.is_empty());
     ingest_collected(&storage, collected);
@@ -369,6 +369,7 @@ fn whatsapp_stamps_interpret_dst_aware_in_explicit_zone() {
         "Ana",
         &SummerWinter,
         "Europe/Bergrade-test",
+        false,
     )
     .unwrap();
     let by_body = |needle: &str| {
