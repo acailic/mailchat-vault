@@ -82,8 +82,84 @@ export interface PreviewOptions {
   freeBytes: number | null;
   /** Import is disabled while another import runs. */
   busy: boolean;
-  onImport: () => void;
+  /** Existing import source names the destination may join (the
+   * confirm card's source chooser offers them; empty for a fresh
+   * vault). */
+  existingSources: string[];
+  /** Confirmed: the import runs with the (possibly corrected) zone
+   * shown in the card and the chosen destination source (the derived
+   * name when the chooser was left alone). `zone` is null when the
+   * preview saw no naive timestamps — nothing was assumed, nothing to
+   * confirm. */
+  onImport: (confirmed: { zone: string | null; source: string }) => void;
   onCancel: () => void;
+}
+
+/**
+ * The timezone confirmation block (GP03): naive clock times are assumed
+ * to be in one zone — preselected from the operating system, corrected
+ * here once per run. Importing with the shown value is the
+ * confirmation; affected messages store the user-confirmed time label.
+ * DST folds keep the first occurrence and gaps stay unresolved — the
+ * block says both instead of hiding them.
+ */
+function confirmZoneBlock(naiveCount: number, assumedZone: string): HTMLElement {
+  const block = document.createElement("div");
+  block.className = "preview-confirm-zone";
+  const label = document.createElement("label");
+  label.className = "meta";
+  label.textContent =
+    `${naiveCount} message${naiveCount === 1 ? "" : "s"} carry clock time${naiveCount === 1 ? "" : "s"} ` +
+    `without a timezone — assumed ${assumedZone} (this machine's zone). Confirm or correct it:`;
+  const input = document.createElement("input");
+  input.id = "preview-zone-input";
+  input.type = "text";
+  input.value = assumedZone;
+  input.setAttribute("list", "iana-zone-list");
+  input.setAttribute("aria-label", "Timezone for clock times without a timezone");
+  input.spellcheck = false;
+  label.append(input);
+  const note = document.createElement("p");
+  note.className = "meta";
+  note.textContent =
+    "Confirmed once per run: every naive time in this import is resolved in this zone. " +
+    "A repeated clock time (DST fold) keeps its first occurrence; a removed one (DST gap) stays unresolved with its original text.";
+  block.append(label, note);
+  return block;
+}
+
+/**
+ * The destination-source chooser (GP03): the import stores under a
+ * dedup namespace (its "source"). The derived name is the default — a
+ * fresh vault needs no step here — and an existing import source (or a
+ * new name) can be typed instead.
+ */
+function sourceChoiceBlock(derivedSource: string, existing: string[]): HTMLElement {
+  const block = document.createElement("div");
+  block.className = "preview-source-choice";
+  const label = document.createElement("label");
+  label.className = "meta";
+  label.textContent =
+    `Import into source "${derivedSource}" — preselected (the name this file derives). ` +
+    "Type a new name or pick an existing import source; re-importing the same content into the same source never duplicates.";
+  const input = document.createElement("input");
+  input.id = "preview-source-input";
+  input.type = "text";
+  input.value = derivedSource;
+  input.setAttribute("aria-label", "Destination source name");
+  input.spellcheck = false;
+  const list = document.createElement("datalist");
+  list.id = "preview-source-list";
+  for (const name of existing) {
+    if (name === derivedSource) continue;
+    const option = document.createElement("option");
+    option.value = name;
+    list.append(option);
+  }
+  if (list.childNodes.length > 0) input.setAttribute("list", "preview-source-list");
+  label.append(input);
+  block.append(label, list);
+  return block;
 }
 
 /**
@@ -150,6 +226,14 @@ export function renderImportPreview(el: HTMLElement, preview: ImportPreview, opt
     card.append(hintEl);
   }
 
+  if (preview.naive_timestamps > 0 && preview.assumed_zone !== null) {
+    card.append(
+      confirmZoneBlock(preview.naive_timestamps, preview.assumed_zone),
+    );
+  }
+
+  card.append(sourceChoiceBlock(preview.source, opts.existingSources));
+
   if (preview.samples.length > 0) {
     const list = document.createElement("ul");
     list.className = "preview-samples";
@@ -192,7 +276,14 @@ export function renderImportPreview(el: HTMLElement, preview: ImportPreview, opt
   } else if (nothing) {
     confirm.title = "Nothing importable was found in this file";
   }
-  confirm.addEventListener("click", opts.onImport);
+  confirm.addEventListener("click", () => {
+    const zoneInput = el.querySelector<HTMLInputElement>("#preview-zone-input");
+    const sourceInput = el.querySelector<HTMLInputElement>("#preview-source-input");
+    opts.onImport({
+      zone: zoneInput === null ? null : zoneInput.value.trim(),
+      source: sourceInput === null ? preview.source : sourceInput.value.trim(),
+    });
+  });
   const cancel = document.createElement("button");
   cancel.type = "button";
   cancel.id = "preview-cancel-btn";
@@ -231,6 +322,9 @@ export interface ImportProgressOptions {
   onCancel: () => void;
   /** Dismiss a failed import's card. */
   onDismiss: () => void;
+  /** Retry the failed import with the same path and options (GP03):
+   * interrupted imports resume without duplicating. */
+  onRetry?: () => void;
 }
 
 /**
@@ -328,6 +422,17 @@ export function renderImportProgress(
   }
 
   if (state === "failed") {
+    // GP03: in-place retry — re-submit the same path and options; the
+    // run resumes from its committed checkpoint without duplicating.
+    if (opts.onRetry) {
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.id = "import-retry-btn";
+      retry.className = "primary";
+      retry.textContent = "Retry import";
+      retry.addEventListener("click", opts.onRetry);
+      card.append(retry);
+    }
     // Recovery in the app's own words: interrupted imports commit in
     // batches and re-importing skips what already landed.
     const note = document.createElement("p");

@@ -1621,6 +1621,11 @@ import {
 
 /** The pick currently awaiting confirmation, if any. */
 let pendingImport: { path: string; kind: string } | null = null;
+/** This flow's last submission (kind + params + path), kept for the
+ * failed card's Retry: the same path and options, re-submitted (GP03 —
+ * re-import resumes from the committed checkpoint, nothing duplicates). */
+let lastImportRequest: { kind: string; params: Record<string, unknown>; path: string } | null =
+  null;
 /** An import is running (guards double-clicks): true while this flow's
  * import job is being submitted, queued, or running. */
 let importBusy = false;
@@ -1739,6 +1744,13 @@ async function pickImportInput(directory: boolean): Promise<void> {
   }
 }
 
+/** The import source names the destination chooser can offer: the
+ * archive's existing sources (stats), so a second export of the same
+ * chat can join its source's dedup namespace. */
+function importSourceNames(): string[] {
+  return (lastStats?.by_source ?? []).map((s) => s.source);
+}
+
 /** Preview a picked path: bounded scan, nothing stored. */
 async function showPreview(path: string): Promise<void> {
   importStatus.textContent = `Reading ${path}…`;
@@ -1750,7 +1762,8 @@ async function showPreview(path: string): Promise<void> {
       path,
       freeBytes: preview.free_bytes,
       busy: importBusy,
-      onImport: () => void confirmImport(),
+      existingSources: importSourceNames(),
+      onImport: (confirmed) => void confirmImport(confirmed),
       onCancel: cancelPreview,
     });
     importStatus.textContent =
@@ -1778,7 +1791,7 @@ function cancelPreview(): void {
  * stream in the inline progress card. Success lands the summary line
  * and the "View imported messages" follow-up scoped to exactly this run;
  * failures stay in the card until dismissed or the next import. */
-async function confirmImport(): Promise<void> {
+async function confirmImport(confirmed: { zone: string | null; source: string }): Promise<void> {
   const target = pendingImport;
   if (!target || importBusy) return;
   importBusy = true;
@@ -1789,13 +1802,31 @@ async function confirmImport(): Promise<void> {
   importStatus.textContent = "";
   const kind =
     target.kind === "mbox" || target.kind === "eml" ? "import_mbox" : "import_chat_export";
-  const params =
+  const params: Record<string, unknown> =
     kind === "import_mbox"
       ? { path: target.path }
       : { path: target.path, extract_media: extractMedia };
+  if (kind === "import_chat_export") {
+    // GP03: the run's destination source (the derived name is the
+    // preselected default) and the confirmed timezone for naive
+    // timestamps (absent when the preview saw none — nothing assumed).
+    if (confirmed.source) params.source = confirmed.source;
+    if (confirmed.zone !== null) params.confirmed_timezone = confirmed.zone;
+  }
+  await submitImportJob(kind, params, target.path);
+}
+
+/** Submit an import job and hand the flow to its inline card. Shared by
+ * Confirm and Retry (Retry re-submits the recorded request verbatim). */
+async function submitImportJob(
+  kind: string,
+  params: Record<string, unknown>,
+  path: string,
+): Promise<void> {
+  lastImportRequest = { kind, params, path };
   try {
     const handle = await ipc.jobSubmit(kind, params);
-    importJob = { id: handle.id, kind, path: target.path };
+    importJob = { id: handle.id, kind, path };
     importCancelRequested = false; // a fresh run: its Cancel is live
     renderImportProgressCard(); // queued card — events take over from here
   } catch (e) {
@@ -1803,8 +1834,19 @@ async function confirmImport(): Promise<void> {
     // file): no card, the friendly line says what to do.
     importBusy = false;
     pumpDropQueue(); // the refusal freed the flow: the next dropped path previews
-    importStatus.textContent = friendlyImportError(e, target.path);
+    importStatus.textContent = friendlyImportError(e, path);
   }
+}
+
+/** Retry the failed import with the same path and options (GP03): the
+ * run resumes from its committed checkpoint; nothing duplicates. */
+async function retryImport(): Promise<void> {
+  const last = lastImportRequest;
+  if (!last || importBusy) return;
+  importBusy = true;
+  importJob = null;
+  importStatus.textContent = "";
+  await submitImportJob(last.kind, last.params, last.path);
 }
 
 /** The synthetic queued record for the gap between `job_submit`
@@ -1837,6 +1879,7 @@ function renderImportProgressCard(): void {
     path: importJob?.path ?? undefined,
     onCancel: () => void cancelImportJob(),
     onDismiss: dismissImportFailure,
+    onRetry: () => void retryImport(),
   });
   // A `progress` event after Cancel re-renders the card (the tracker
   // changed) and would rebuild the button enabled; while the cancel
@@ -1928,6 +1971,7 @@ function feedImportJobEvent(event: JobEvent): void {
     if (outcome) {
       importStatus.textContent = importSummaryLine(outcome);
       showImportFollowup(outcome.import_id, outcome.summary.inserted);
+      showImportRecoveryActions(outcome);
       // The archive view is live from here on — but the counts must
       // land first: runSearch reads archiveTotal, which refreshStats
       // owns. Browsing before that refresh resolves reads a stale
@@ -1965,6 +2009,33 @@ function feedImportJobEvent(event: JobEvent): void {
     importBusy = false;
     importCancelRequested = false;
     pumpDropQueue(); // the run ended: the next dropped path previews
+  }
+}
+
+/** GP03 completion state: each non-zero count links to its recovery
+ * action — parse failures open Activity's failure explanation, missing
+ * media name the re-export-with-media path, and both note that
+ * re-importing resumes without duplicating. */
+function showImportRecoveryActions(outcome: ChatImportOutcome): void {
+  const failed = outcome.summary.failed;
+  const missing = outcome.media?.missing ?? 0;
+  if (failed === 0 && missing === 0) return;
+  importFollowup.hidden = false;
+  if (failed > 0) {
+    const view = document.createElement("button");
+    view.type = "button";
+    view.id = "import-failures-btn";
+    view.textContent = `View the ${failed} entr${failed === 1 ? "y" : "ies"} that failed to parse`;
+    view.title = "Activity keeps every recorded issue with its explanation";
+    view.addEventListener("click", () => workspace.store.setView("activity"));
+    importFollowup.append(view);
+  }
+  if (missing > 0) {
+    const line = document.createElement("span");
+    line.className = "meta";
+    line.id = "import-missing-media";
+    line.textContent = `${missing} media file${missing === 1 ? "" : "s"} missing from the export — re-export from the app with media included and import again; re-importing never duplicates.`;
+    importFollowup.append(line);
   }
 }
 

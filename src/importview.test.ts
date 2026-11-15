@@ -35,6 +35,8 @@ const PREVIEW: ImportPreview = {
   media_referenced: 1,
   media_missing: 0,
   warnings: [],
+  naive_timestamps: 0,
+  assumed_zone: null,
   free_bytes: 1024 * 1024 * 1024,
 };
 
@@ -45,6 +47,7 @@ function render(preview: ImportPreview, freeBytes: number | null = 1 << 30): voi
     path: "/tmp/result.json",
     freeBytes,
     busy: false,
+    existingSources: [],
     onImport: () => {},
     onCancel: () => {},
   });
@@ -121,6 +124,82 @@ describe("renderImportPreview", () => {
 
     render({ ...PREVIEW, messages_seen: 0, media_referenced: 0 }, 1 << 30);
     expect(el.querySelector<HTMLButtonElement>("#preview-import-btn")!.disabled).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GP03: the confirmation card — timezone confirmation for naive stamps
+// and the destination-source chooser.
+// ---------------------------------------------------------------------------
+
+describe("renderImportPreview confirmation card (GP03)", () => {
+  it("states the naive-stamp count, preselects the assumed zone, and hands the confirmed zone to Import", () => {
+    let confirmed: { zone: string | null; source: string } | null = null;
+    renderImportPreview(el, { ...PREVIEW, naive_timestamps: 3, assumed_zone: "Europe/Belgrade" }, {
+      path: "/tmp/chat.txt",
+      freeBytes: 1 << 30,
+      busy: false,
+      existingSources: [],
+      onImport: (c) => (confirmed = c),
+      onCancel: () => {},
+    });
+    expect(el.textContent).toContain(
+      "3 messages carry clock times without a timezone — assumed Europe/Belgrade",
+    );
+    expect(el.textContent).toContain("first occurrence");
+    expect(el.textContent).toContain("stays unresolved");
+    const zone = el.querySelector<HTMLInputElement>("#preview-zone-input")!;
+    expect(zone.value).toBe("Europe/Belgrade");
+    zone.value = "Europe/Berlin"; // corrected once, before confirming
+    el.querySelector<HTMLButtonElement>("#preview-import-btn")!.click();
+    expect(confirmed).toEqual({ zone: "Europe/Berlin", source: "telegram" });
+  });
+
+  it("renders no zone block when the preview saw no naive timestamps", () => {
+    render(PREVIEW);
+    expect(el.querySelector("#preview-zone-input")).toBeNull();
+    let confirmed: { zone: string | null; source: string } | null = null;
+    renderImportPreview(el, PREVIEW, {
+      path: "/tmp/result.json",
+      freeBytes: 1 << 30,
+      busy: false,
+      existingSources: [],
+      onImport: (c) => (confirmed = c),
+      onCancel: () => {},
+    });
+    el.querySelector<HTMLButtonElement>("#preview-import-btn")!.click();
+    expect(confirmed!.zone).toBeNull(); // nothing was assumed, nothing to confirm
+  });
+
+  it("names the derived source, preselects it, and offers existing import sources", () => {
+    renderImportPreview(el, PREVIEW, {
+      path: "/tmp/result.json",
+      freeBytes: 1 << 30,
+      busy: false,
+      existingSources: ["telegram", "whatsapp"],
+      onImport: () => {},
+      onCancel: () => {},
+    });
+    expect(el.textContent).toContain('Import into source "telegram"');
+    const source = el.querySelector<HTMLInputElement>("#preview-source-input")!;
+    expect(source.value).toBe("telegram"); // the derived default — no required step
+    const options = [...el.querySelectorAll("#preview-source-list option")].map((o) =>
+      (o as HTMLOptionElement).value,
+    );
+    expect(options).toEqual(["whatsapp"]); // the derived name is not repeated
+    let confirmed: { zone: string | null; source: string } | null = null;
+    renderImportPreview(el, PREVIEW, {
+      path: "/tmp/result.json",
+      freeBytes: 1 << 30,
+      busy: false,
+      existingSources: [],
+      onImport: (c) => (confirmed = c),
+      onCancel: () => {},
+    });
+    const input = el.querySelector<HTMLInputElement>("#preview-source-input")!;
+    input.value = "Family chats"; // a new name
+    el.querySelector<HTMLButtonElement>("#preview-import-btn")!.click();
+    expect(confirmed!.source).toBe("Family chats");
   });
 });
 
@@ -233,6 +312,24 @@ describe("renderImportProgress", () => {
     el.querySelector<HTMLButtonElement>("#import-progress-dismiss")!.click();
     expect(onDismiss).toHaveBeenCalledTimes(1);
     expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("a failed job with a Retry affordance re-submits through onRetry (GP03)", () => {
+    const onRetry = vi.fn();
+    renderImportProgress(
+      el,
+      job({ state: { state: "failed", error: { kind: "import", message: "interrupted" } } }),
+      { onCancel: () => {}, onDismiss: () => {}, onRetry },
+    );
+    const retry = el.querySelector<HTMLButtonElement>("#import-retry-btn")!;
+    expect(retry.textContent).toBe("Retry import");
+    retry.click();
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed job without a retry callback renders no dead Retry button", () => {
+    renderJob(job({ state: { state: "failed", error: { kind: "import", message: "x" } } }));
+    expect(el.querySelector("#import-retry-btn")).toBeNull();
   });
 
   it("succeeded and cancelled render nothing — their hand-offs live elsewhere", () => {
