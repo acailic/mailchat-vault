@@ -235,14 +235,14 @@ fn csv_round_trip_preserves_every_field() {
 #[test]
 fn csv_prefixed_cells_that_need_quoting_are_valid_rfc4180() {
     let bodies = [
-        "- hello, world",                  // the reported reproduction
+        "- hello, world", // the reported reproduction
         "= comma, after the prefix",
         "+ \"quote\" after the prefix",
         "- newline\nafter the prefix",
         "@ CRLF\r\nafter the prefix",
         "= unicode čćžšđ 👋 中文, prefix",
         "+ comma, \"quote\"\nand newline after the prefix",
-        "@ lone @ prefix, no quotes",      // prefixed but unquotable
+        "@ lone @ prefix, no quotes", // prefixed but unquotable
         "plain unprefixed, control",
         "plain \"quoted\" unprefixed control",
         "plain\nunprefixed newline control",
@@ -274,10 +274,7 @@ fn csv_prefixed_cells_that_need_quoting_are_valid_rfc4180() {
 
     let mut reader = csv::ReaderBuilder::new().from_reader(bytes.as_slice());
     let headers = reader.headers().expect("header record parses").clone();
-    assert_eq!(
-        headers,
-        vault_core::export::CSV_COLUMNS.iter().copied().collect::<Vec<_>>()
-    );
+    assert_eq!(headers, vault_core::export::CSV_COLUMNS.to_vec());
 
     let mut parsed = Vec::new();
     for (i, record) in reader.records().enumerate() {
@@ -285,7 +282,7 @@ fn csv_prefixed_cells_that_need_quoting_are_valid_rfc4180() {
         assert_eq!(record.len(), 8, "record {i} must keep exactly 8 columns");
         parsed.push(record);
     }
-    assert_eq!(parsed.len(), bodies.len(), "header + one record per message");
+    assert_eq!(parsed.len(), bodies.len(), "one record per message");
 
     // Every body cell carries the mitigation apostrophe and the original
     // text, matched by the row's external_id (order-independent).
