@@ -139,7 +139,7 @@ submits its work through this protocol.
 
 ## Export
 
-The **Export results…** control writes the current search results — every row matching the active text + source/author/date filters, across all pages, in the order the UI lists them — to a file you choose. **Export chat…** (in the message detail panel) writes the whole chat thread of the open message, oldest → newest; a message with no thread exports as a single row. Formats:
+The **Export results…** control writes the current search results — every row matching the active text + source/author/date filters, across all pages, in the order the UI lists them — to a file you choose. **Export chat…** (in the message detail panel) writes the whole conversation of the open message, oldest → newest — resolved by identity (provider key, reply chain or legacy chat group), so a renamed chat exports wholly and same-named chats never mix; a message with no conversation exports as a single row. Formats:
 
 - **CSV** — RFC 4180 (`source,external_id,channel,chat_id,author,sent_at,body,raw_json`), UTF-8, fields quoted only when needed; cells beginning with `=`, `+`, `-` or `@` get an apostrophe prefix so spreadsheet apps cannot execute them as formulas.
 - **JSON Lines** — one complete message object per line (`.jsonl`); the exact shape the app stores, and the shape the app imports back: picking a `.jsonl` runs it through the ordinary bounded import, every row keeping its original source and external id, so exported subsets move between vaults and re-imports never duplicate (malformed lines become per-item issue records; media references in `raw_json` stay references — media bytes are not transferred, the backup container remains the whole-vault tool).
