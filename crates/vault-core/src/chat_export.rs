@@ -232,6 +232,7 @@ fn resolve_export_file(picked: &Path) -> Result<PathBuf> {
 /// (`resolve_export_file` returns the dir itself only in those cases).
 pub fn resolve_stream_source(
     picked: &Path,
+    confirmed_zone: Option<&str>,
 ) -> Result<(ChatFormat, PathBuf, Box<dyn StreamSource + Send>)> {
     let file = resolve_export_file(picked)?;
     if file.is_dir() {
@@ -248,15 +249,48 @@ pub fn resolve_stream_source(
             file.display()
         ))
     })?;
+    // GP03: the naive-stamp formats take the run's confirmed zone
+    // (None keeps the documented default assumption).
+    let zone = confirmed_zone.map(str::to_string);
     let source: Box<dyn StreamSource + Send> = match format {
-        ChatFormat::Telegram => Box::new(TelegramSource::new(&file)),
+        ChatFormat::Telegram => {
+            let mut s = TelegramSource::new(&file);
+            if let Some(z) = zone.as_deref() {
+                s = s.with_confirmed_zone(z);
+            }
+            Box::new(s)
+        }
         ChatFormat::Signal => Box::new(SignalSource::new(&file)),
-        ChatFormat::WhatsApp => Box::new(WhatsappSource::new(&file)),
+        ChatFormat::WhatsApp => {
+            let mut s = WhatsappSource::new(&file);
+            if let Some(z) = zone.as_deref() {
+                s = s.with_confirmed_zone(z);
+            }
+            Box::new(s)
+        }
         ChatFormat::Discord => Box::new(DiscordSource::new(&file)),
         ChatFormat::Messenger => Box::new(MessengerSource::new(&file)),
         ChatFormat::Jsonl => Box::new(JsonlSource::new(&file)),
     };
     Ok((format, file, source))
+}
+
+/// The run's destination source (GP03): the same stream under a
+/// user-chosen name, so the whole run stores (and dedups) in that
+/// namespace instead of the derived one.
+struct NamedStreamSource {
+    inner: Box<dyn StreamSource + Send>,
+    name: String,
+}
+
+impl StreamSource for NamedStreamSource {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn stream(&self, skip: u64, emit: &mut dyn FnMut(StreamItem) -> Result<Flow>) -> Result<()> {
+        self.inner.stream(skip, emit)
+    }
 }
 
 /// The bounded production import (M2.2): same formats, same detection,
@@ -289,6 +323,32 @@ pub fn import_bounded(
     is_cancelled: &dyn Fn() -> bool,
     progress: &mut dyn FnMut(u64, u64, &str),
 ) -> Result<BoundedOutcome> {
+    import_bounded_with(
+        sink,
+        picked,
+        extract_media,
+        data_dir,
+        None,
+        None,
+        is_cancelled,
+        progress,
+    )
+}
+
+/// GP03: [`import_bounded`] with the run's confirmed timezone (naive
+/// stamps resolve in it and record `user_confirmed`) and the explicitly
+/// chosen destination source — the run's dedup namespace (the derived
+/// name stays the default, so the plain flow gains no required step).
+pub fn import_bounded_with(
+    sink: &mut dyn IngestSink,
+    picked: &Path,
+    extract_media: bool,
+    data_dir: Option<&Path>,
+    confirmed_zone: Option<&str>,
+    destination_source: Option<&str>,
+    is_cancelled: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(u64, u64, &str),
+) -> Result<BoundedOutcome> {
     // A ZIP pick expands to a temp tree; the guard keeps it alive for
     // the whole run (batches read media files out of it) and cleans it
     // up — including on error — when the run ends.
@@ -316,7 +376,17 @@ pub fn import_bounded(
             && picked
                 .extension()
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("zip")));
-    let (format, file, source) = resolve_stream_source(&effective)?;
+    let (format, file, source) = resolve_stream_source(&effective, confirmed_zone)?;
+    // GP03: an explicitly chosen destination source names this run's
+    // dedup namespace (the derived name stays the default).
+    let source: Box<dyn StreamSource + Send> =
+        match destination_source.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(name) => Box::new(NamedStreamSource {
+                inner: source,
+                name: name.to_string(),
+            }),
+            None => source,
+        };
     // Media-pass path comparisons (consumed paths, the walked tree) are
     // canonical; the export file itself must be in that same form.
     let export_file = file.canonicalize()?;
@@ -377,6 +447,21 @@ pub fn import_bounded(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn destination_source_names_the_run_namespace() {
+        // GP03: the chosen destination source is the name the run (and
+        // its dedup) keys under — the derived name stays the default.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result.json");
+        std::fs::write(&path, r#"{"name":"C","id":7,"messages":[]}"#).unwrap();
+        let (_format, _file, source) = super::resolve_stream_source(&path, None).unwrap();
+        let named = super::NamedStreamSource {
+            inner: source,
+            name: "Family chats".into(),
+        };
+        assert_eq!(named.name(), "Family chats");
+    }
+
     use super::*;
 
     const WHATSAPP_BYTES: &[u8] = b"[1.11.2026., 09:00:05] Marko: Zdravo ekipa!\n";
@@ -507,7 +592,7 @@ mod tests {
             r#"{"participants": [{"name": "Ana"}], "messages": [{"sender_name": "Ana", "timestamp_ms": 2, "content": "y"}]}"#,
         )
         .unwrap();
-        let (format, file, _source) = resolve_stream_source(&thread).unwrap();
+        let (format, file, _source) = resolve_stream_source(&thread, None).unwrap();
         assert_eq!(format, ChatFormat::Messenger);
         assert!(file.is_dir());
     }

@@ -166,7 +166,8 @@ fn other_chat_shapes_still_win_over_jsonl() {
 #[test]
 fn resolve_stream_source_builds_the_jsonl_source() {
     let (_dir, path) = write_jsonl("subset.jsonl", MIXED_JSONL);
-    let (format, file, source) = vault_core::chat_export::resolve_stream_source(&path).unwrap();
+    let (format, file, source) =
+        vault_core::chat_export::resolve_stream_source(&path, None).unwrap();
     assert_eq!(format, ChatFormat::Jsonl);
     assert_eq!(file, path);
     assert_eq!(source.name(), JSONL_SOURCE);
