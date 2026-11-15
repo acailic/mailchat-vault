@@ -554,6 +554,207 @@ pub fn messenger_entry_names(obj: &Map<String, Value>) -> Vec<String> {
     names
 }
 
+/// File-name lookup maps for the named-attachment passes (WhatsApp,
+/// Signal): one bounded walk (M4.1) under the shared
+/// traversal/symlink/capacity fence, keeping every candidate file whose
+/// lowercased name — then lowercased stem — is wanted. The walk only
+/// runs when the export actually references named files, and is bounded
+/// so a bare export file picked from a huge directory cannot scan the
+/// world; a tree that crosses a bound is refused instead of quietly
+/// missing media. The maps hold the first hit per key, and a `.bak`
+/// twin never shadows because a disk file's stem is never compared
+/// against a reference's full name (see [`lookup_attachment`]).
+fn name_lookup_maps(
+    export_root: &Path,
+    wanted: &[String],
+) -> Result<(HashMap<String, PathBuf>, HashMap<String, PathBuf>)> {
+    let mut by_name: HashMap<String, PathBuf> = HashMap::new();
+    let mut by_stem: HashMap<String, PathBuf> = HashMap::new();
+    if wanted.is_empty() {
+        return Ok((by_name, by_stem));
+    }
+    let mut lower_wanted: Vec<String> = wanted.iter().map(|w| w.to_lowercase()).collect();
+    lower_wanted.sort();
+    lower_wanted.dedup();
+    let mut lower_wanted_stems: Vec<String> =
+        wanted.iter().map(|w| stem_of(w).to_lowercase()).collect();
+    lower_wanted_stems.sort();
+    lower_wanted_stems.dedup();
+    for file in walk_bounded(export_root, &ImportBounds::default())? {
+        let Some(name) = file
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+        else {
+            continue;
+        };
+        let lower = name.to_lowercase();
+        if lower_wanted.binary_search(&lower).is_ok() {
+            by_name.entry(lower).or_insert(file.path.clone());
+        }
+        let lower_stem = stem_of(&name).to_lowercase();
+        if lower_wanted_stems.binary_search(&lower_stem).is_ok() {
+            by_stem.entry(lower_stem).or_insert(file.path);
+        }
+    }
+    Ok((by_name, by_stem))
+}
+
+/// Extract media for a Signal export: the attachment entries a
+/// message's top-level `attachments` array carries are named files —
+/// Signal Desktop's raw objects hold `fileName`/`contentType` with no
+/// path, and the export tree holds the bytes somewhere under it (the
+/// exporter tooling decides where) — so each name is matched against a
+/// bounded walk of the tree by full name (ASCII-case-insensitively),
+/// then by stem (the same two-step rule as WhatsApp's named
+/// attachments, so a re-encoded `photo.jpeg` answers for a
+/// `photo.jpg`). A reference whose file is absent is recorded as a
+/// missing entry, never dropped. An entry without a `fileName` (an
+/// unnamed voice note) names nothing a tree file could answer for and
+/// is not a resolvable reference.
+///
+/// `export_root` is the export file's parent directory; a quote's
+/// nested `attachments` array belongs to the quoted message and is
+/// never read. The whole original message object stays in `raw_json`
+/// with only the `media` array added. `consumed` collects the absolute
+/// paths this pass stored, so the unlinked pass can tell export files
+/// that belong to a message from files that belong to no message.
+pub fn extract_signal(
+    messages: &mut [NewMessage],
+    export_root: &Path,
+    data_dir: &Path,
+    summary: &mut MediaSummary,
+    budget: &mut Capacity,
+    consumed: &mut HashSet<PathBuf>,
+) -> Result<()> {
+    let wanted: Vec<String> = messages
+        .iter()
+        .filter_map(|m| serde_json::from_str::<Value>(&m.raw_json).ok())
+        .filter_map(|raw| raw.as_object().map(signal_entry_names))
+        .flatten()
+        .collect();
+    let (by_name, by_stem) = name_lookup_maps(export_root, &wanted)?;
+
+    for msg in messages.iter_mut() {
+        let Ok(mut raw) = serde_json::from_str::<Value>(&msg.raw_json) else {
+            continue;
+        };
+        let refs = raw.as_object().map(signal_refs).unwrap_or_default();
+        if refs.is_empty() {
+            continue;
+        }
+        summary.referenced += 1;
+        let mut entries: Vec<Value> = Vec::new();
+        for (name, content_type) in refs {
+            let kind = signal_kind(content_type.as_deref(), &name);
+            match lookup_attachment(&by_name, &by_stem, &name).cloned() {
+                Some(src) => match store(data_dir, &src, &name, &kind, budget) {
+                    Ok((entry, written)) => {
+                        if written {
+                            summary.stored += 1;
+                        } else {
+                            summary.deduped += 1;
+                        }
+                        consumed.insert(src);
+                        entries.push(serde_json::to_value(&entry)?);
+                    }
+                    // Unreadable file: keep importing, record why.
+                    Err(e) => {
+                        summary.missing += 1;
+                        entries.push(missing_entry_value(&name, &kind, missing_reason(&e)));
+                    }
+                },
+                None => {
+                    summary.missing += 1;
+                    entries.push(missing_entry_value(
+                        &name,
+                        &kind,
+                        MissingReason::NotInExport,
+                    ));
+                }
+            }
+        }
+        if !entries.is_empty() {
+            let Some(obj) = raw.as_object_mut() else {
+                continue;
+            };
+            obj.insert("media".to_string(), Value::Array(entries));
+            msg.raw_json = raw.to_string();
+        }
+    }
+    Ok(())
+}
+
+/// The resolvable attachment entries of one Signal message object, in
+/// array order: `(fileName, contentType)` of every top-level
+/// `attachments` entry carrying a non-empty `fileName`. Name-less
+/// entries (unnamed voice notes) match no file by construction, and a
+/// quote's nested `attachments` array belongs to the quoted message —
+/// neither is a reference this pass can resolve.
+fn signal_refs(obj: &Map<String, Value>) -> Vec<(String, Option<String>)> {
+    let Some(Value::Array(entries)) = obj.get("attachments") else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(Value::as_object)
+        .filter_map(|entry| {
+            entry
+                .get("fileName")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .map(|name| {
+                    (
+                        name.to_string(),
+                        entry
+                            .get("contentType")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    )
+                })
+        })
+        .collect()
+}
+
+/// Every display name a stored Signal media entry can carry for this
+/// message object: the attachment `fileName`s — the single rule both
+/// the writer ([`extract_signal`], via [`signal_refs`]) and the reader
+/// (`attachment_summaries`) must agree on, the same M4.2 F2/R3F1 seam
+/// as [`telegram_entry_names`] and [`messenger_entry_names`]. A stored
+/// entry's name is always in this list, so the read side can suppress
+/// an unavailable "phantom" row by checking this list against the entry
+/// names — by construction, not by keeping a second copy of the rule in
+/// sync.
+pub fn signal_entry_names(obj: &Map<String, Value>) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for (name, _) in signal_refs(obj) {
+        // Duplicates add nothing.
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// The honest row of the first Signal attachment reference (used by the
+/// read side when no stored `media` entry accounts for the array):
+/// its display name and coarse kind.
+pub fn signal_first_ref(obj: &Map<String, Value>) -> Option<(String, String)> {
+    let (name, content_type) = signal_refs(obj).into_iter().next()?;
+    Some((name.clone(), signal_kind(content_type.as_deref(), &name)))
+}
+
+/// Kind of one Signal attachment: the MIME type's first segment when it
+/// is one of the known coarse kinds (`image/…`, `video/…`, `audio/…`),
+/// deferring to the file name's extension otherwise (the shared
+/// [`media_kind`] fallback).
+fn signal_kind(content_type: Option<&str>, name: &str) -> String {
+    let coarse = content_type
+        .and_then(|ct| ct.split('/').next())
+        .filter(|first| matches!(*first, "image" | "video" | "audio"));
+    media_kind(coarse, name)
+}
+
 /// Extract media for a WhatsApp export: attachment names parsed from
 /// `(file attached)` placeholders are matched against files next to the
 /// export `.txt` (recursively, since some exports nest media folders).
@@ -583,37 +784,7 @@ pub fn extract_whatsapp(
                 .map(str::to_string)
         })
         .collect();
-    let mut by_name: HashMap<String, PathBuf> = HashMap::new();
-    let mut by_stem: HashMap<String, PathBuf> = HashMap::new();
-    if !wanted.is_empty() {
-        let mut lower_wanted: Vec<String> = wanted.iter().map(|w| w.to_lowercase()).collect();
-        lower_wanted.sort();
-        lower_wanted.dedup();
-        let mut lower_wanted_stems: Vec<String> =
-            wanted.iter().map(|w| stem_of(w).to_lowercase()).collect();
-        lower_wanted_stems.sort();
-        lower_wanted_stems.dedup();
-        // One bounded walk (M4.1) collects every candidate file under
-        // the shared traversal/symlink/capacity fence; the lookup maps
-        // keep only the wanted names and stems.
-        for file in walk_bounded(export_root, &ImportBounds::default())? {
-            let Some(name) = file
-                .path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-            else {
-                continue;
-            };
-            let lower = name.to_lowercase();
-            if lower_wanted.binary_search(&lower).is_ok() {
-                by_name.entry(lower).or_insert(file.path.clone());
-            }
-            let lower_stem = stem_of(&name).to_lowercase();
-            if lower_wanted_stems.binary_search(&lower_stem).is_ok() {
-                by_stem.entry(lower_stem).or_insert(file.path);
-            }
-        }
-    }
+    let (by_name, by_stem) = name_lookup_maps(export_root, &wanted)?;
 
     for msg in messages.iter_mut() {
         let mut raw: Value = serde_json::from_str(&msg.raw_json)?;
@@ -1136,5 +1307,58 @@ mod tests {
             ["x.jpg".to_string(), "s.webp".to_string()]
         );
         assert!(messenger_entry_names(&Map::new()).is_empty());
+    }
+
+    #[test]
+    fn signal_refs_read_named_top_level_attachments_only() {
+        // Signal Desktop's shape: a top-level `attachments` array of
+        // camelCase entries. Name-less entries (voice notes) are not
+        // resolvable, duplicates of the same name are separate
+        // references, and a quote's nested `attachments` array belongs
+        // to the quoted message — never read.
+        let obj = serde_json::json!({
+            "attachments": [
+                {"fileName": "signal-2023-11-01-110050.jpg", "contentType": "image/jpeg"},
+                {"contentType": "audio/ogg"},
+                {"fileName": ""},
+                {"fileName": "signal-2023-11-01-110050.jpg"},
+                "not an object"
+            ],
+            "quote": {"attachments": [{"fileName": "quoted.jpg"}]}
+        });
+        let refs = signal_refs(obj.as_object().unwrap());
+        assert_eq!(
+            refs,
+            [
+                (
+                    "signal-2023-11-01-110050.jpg".to_string(),
+                    Some("image/jpeg".to_string())
+                ),
+                ("signal-2023-11-01-110050.jpg".to_string(), None)
+            ]
+        );
+        assert_eq!(
+            signal_entry_names(obj.as_object().unwrap()),
+            ["signal-2023-11-01-110050.jpg".to_string()]
+        );
+        assert_eq!(
+            signal_first_ref(obj.as_object().unwrap()),
+            Some((
+                "signal-2023-11-01-110050.jpg".to_string(),
+                "image".to_string()
+            ))
+        );
+        assert!(signal_refs(&Map::new()).is_empty());
+    }
+
+    #[test]
+    fn signal_kinds_come_from_content_type_then_extension() {
+        assert_eq!(signal_kind(Some("image/jpeg"), "photo.jpg"), "image");
+        assert_eq!(signal_kind(Some("video/mp4"), "clip.mov"), "video");
+        assert_eq!(signal_kind(Some("audio/ogg"), "note"), "audio");
+        // Unknown MIME families defer to the file name's extension.
+        assert_eq!(signal_kind(Some("application/pdf"), "plan.pdf"), "document");
+        assert_eq!(signal_kind(None, "plan.pdf"), "document");
+        assert_eq!(signal_kind(Some("text/plain"), "notes.txt"), "document");
     }
 }

@@ -655,6 +655,161 @@ fn media_files_never_match_the_export_text_or_json_by_accident() {
 }
 
 // ---------------------------------------------------------------------
+// Signal: named attachments matched against the export tree
+// ---------------------------------------------------------------------
+
+/// A Signal conversation export (as written by `sigtop export-messages
+/// -f json`): raw message objects in a top-level array, attachments as
+/// camelCase entries named by `fileName`. Covers a text message, a
+/// photo, a document plus a name-less voice-note entry (no `fileName`),
+/// a reference with no file in the tree, and a quote whose nested
+/// attachments belong to the quoted message.
+const SIGNAL_JSON: &str = r#"[
+  { "id": "m1", "type": "incoming", "conversationId": "conv-1",
+    "source": "+385912345678.2", "sent_at": 1698832800000, "body": "zdravo" },
+  { "id": "m2", "type": "incoming", "conversationId": "conv-1",
+    "source": "+385912345678.2", "sent_at": 1698832900000, "body": "",
+    "attachments": [
+      { "fileName": "signal-2023-11-01-110050.jpg", "contentType": "image/jpeg", "size": 284119 }
+    ] },
+  { "id": "m3", "type": "outgoing", "conversationId": "conv-1",
+    "sent_at": 1698833000000, "body": "",
+    "attachments": [
+      { "fileName": "report-2023.pdf", "contentType": "application/pdf" },
+      { "contentType": "audio/ogg" }
+    ] },
+  { "id": "m4", "type": "incoming", "conversationId": "conv-1",
+    "source": "+385912345678.2", "sent_at": 1698833100000, "body": "vidi sliku",
+    "attachments": [ { "fileName": "gone.jpg", "contentType": "image/jpeg" } ],
+    "quote": { "text": "zdravo", "attachments": [ { "fileName": "quoted.jpg" } ] } }
+]"#;
+
+fn write_signal_export(sb: &Sandbox) {
+    // Media in a subfolder (the exporter tooling decides where the bytes
+    // land; matching is by name against a walk of the tree).
+    sb.put("attachments/signal-2023-11-01-110050.jpg", "photo.jpg");
+    sb.put("attachments/report-2023.pdf", "plan.pdf");
+    fs::write(sb.export_dir().join("Marko.json"), SIGNAL_JSON).unwrap();
+}
+
+#[test]
+fn signal_attachments_are_matched_by_name_and_linked() {
+    let sb = Sandbox::new("signal-extract");
+    write_signal_export(&sb);
+    let mut storage = Storage::open_in_memory().unwrap();
+
+    let outcome = sb.import_with_media(&mut storage);
+    assert_eq!(outcome.summary.inserted, 4);
+    assert_eq!(outcome.summary.source, "signal");
+    let media = outcome.media.expect("media pass ran");
+    // m2 (photo), m3 (pdf; the voice note is name-less — not a
+    // resolvable reference), m4 (gone.jpg): three referencing messages.
+    assert_eq!(media.referenced, 3);
+    assert_eq!(media.stored, 2);
+    assert_eq!(media.deduped, 0);
+    assert_eq!(media.missing, 1);
+    assert_eq!(media.linked, 3);
+
+    let photo_sha = sha256_hex(&fixture("photo.jpg"));
+    assert!(sb.store_dir().join(format!("{photo_sha}.jpg")).is_file());
+    assert_eq!(fs::read_dir(sb.store_dir()).unwrap().count(), 2);
+
+    // The photo message: verbatim attachment fields plus the link.
+    let raw: serde_json::Value = serde_json::from_str(&raw_json_of(&storage, "conv-1/m2")).unwrap();
+    assert_eq!(
+        raw["attachments"][0]["fileName"],
+        "signal-2023-11-01-110050.jpg"
+    );
+    let entry = &raw["media"][0];
+    assert_eq!(entry["kind"], "image");
+    assert_eq!(entry["name"], "signal-2023-11-01-110050.jpg");
+    assert_eq!(entry["sha256"], photo_sha);
+
+    // Document + voice note: only the named entry links (kind from the
+    // MIME type), the name-less one records nothing — one entry.
+    let doc: serde_json::Value = serde_json::from_str(&raw_json_of(&storage, "conv-1/m3")).unwrap();
+    assert_eq!(doc["media"].as_array().unwrap().len(), 1);
+    assert_eq!(doc["media"][0]["kind"], "document");
+    assert_eq!(doc["media"][0]["name"], "report-2023.pdf");
+
+    // The absent file is an honest missing entry; the quote's nested
+    // attachments are never read as this message's references.
+    let gone: serde_json::Value =
+        serde_json::from_str(&raw_json_of(&storage, "conv-1/m4")).unwrap();
+    assert_eq!(gone["media"][0]["name"], "gone.jpg");
+    assert_eq!(gone["media"][0]["missing"], true);
+    assert_eq!(gone["media"][0]["reason"], "not-in-export");
+    assert_eq!(gone["quote"]["attachments"][0]["fileName"], "quoted.jpg");
+
+    // The text message untouched: no media array.
+    let text: serde_json::Value =
+        serde_json::from_str(&raw_json_of(&storage, "conv-1/m1")).unwrap();
+    assert!(text.get("media").is_none());
+
+    // Re-import: dedup everywhere, nothing relinked, raw_json stable.
+    let before = raw_json_of(&storage, "conv-1/m2");
+    let outcome = sb.import_with_media(&mut storage);
+    assert_eq!(outcome.summary.skipped, 4);
+    let media = outcome.media.unwrap();
+    assert_eq!(media.stored, 0);
+    assert_eq!(media.deduped, 2);
+    assert_eq!(media.missing, 1);
+    assert_eq!(media.linked, 0);
+    assert_eq!(raw_json_of(&storage, "conv-1/m2"), before);
+}
+
+#[test]
+fn signal_zip_pick_stores_unreferenced_files_too() {
+    // A `.zip` pick is a whole-tree pick (M4.1/M4.2): the archive
+    // expands, the conversation json imports with its referenced photo
+    // stored, and the unreferenced stray file is stored and registered
+    // too. The export json itself never lands in the store.
+    let sb = Sandbox::new("signal-zip");
+    let zip_path = sb.root.join("signal-export.zip");
+    let file = fs::File::create(&zip_path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    for (name, bytes) in [
+        ("Marko.json", SIGNAL_JSON.as_bytes().to_vec()),
+        (
+            "attachments/signal-2023-11-01-110050.jpg",
+            fs::read(fixture("photo.jpg")).unwrap(),
+        ),
+        (
+            "attachments/report-2023.pdf",
+            fs::read(fixture("plan.pdf")).unwrap(),
+        ),
+        ("notes.txt", b"stray notes".to_vec()),
+    ] {
+        zip.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        std::io::Write::write_all(&mut zip, &bytes).unwrap();
+    }
+    zip.finish().unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
+
+    let outcome = sb.import_picked(&mut storage, &zip_path, true);
+    assert_eq!(outcome.summary.inserted, 4);
+    let media = outcome.media.expect("media pass ran");
+    assert_eq!(media.referenced, 3);
+    assert_eq!(media.stored, 2, "the two referenced files");
+    assert_eq!(media.missing, 1);
+    assert_eq!(media.unlinked, 1, "notes.txt: no message references it");
+    assert_eq!(media.unlinked_deduped, 0);
+    assert_eq!(fs::read_dir(sb.store_dir()).unwrap().count(), 3);
+
+    // The stray file is registered as an unlinked object.
+    let objects = storage.unlinked_media_objects().unwrap();
+    assert_eq!(objects.len(), 1);
+    assert_eq!(objects[0].name, "notes.txt");
+    let digests = storage.media_digests().unwrap();
+    assert_eq!(digests.len(), 3);
+    let report = vault_core::object_store::ObjectStore::new(&sb.data_dir())
+        .reconcile(&digests, false)
+        .unwrap();
+    assert!(report.is_clean(), "{report:?}");
+}
+
+// ---------------------------------------------------------------------
 // M4.2: missing references, re-import enrichment, unlinked files
 // ---------------------------------------------------------------------
 
@@ -991,7 +1146,8 @@ fn budget_exhaustion_records_budget_exceeded_missing_entries_all_passes() {
     use std::collections::HashSet;
 
     use vault_core::media::{
-        extract_messenger, extract_telegram, extract_whatsapp, MailMedia, MediaSummary,
+        extract_messenger, extract_signal, extract_telegram, extract_whatsapp, MailMedia,
+        MediaSummary,
     };
     use vault_core::object_store::Capacity;
 
@@ -1068,6 +1224,38 @@ fn budget_exhaustion_records_budget_exceeded_missing_entries_all_passes() {
     let entries = media_entries_of(&messages[0].raw_json);
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["name"], "IMG-1.jpg");
+    assert_eq!(entries[0]["missing"], true);
+    assert_eq!(entries[0]["reason"], "budget-exceeded");
+
+    // Signal: the named attachment's file sits in the export tree, but
+    // the budget refuses — same honest marker, named by `fileName`.
+    let sb = Sandbox::new("budget-signal");
+    sb.put("attachments/photo.jpg", "photo.jpg");
+    let mut messages = vec![{
+        let mut msg =
+            vault_core::message::NewMessage::new("signal", "1", "A", "2026-11-01T09:04:00Z", "");
+        msg.raw_json = serde_json::json!({
+            "attachments": [ { "fileName": "photo.jpg", "contentType": "image/jpeg" } ]
+        })
+        .to_string();
+        msg
+    }];
+    let mut summary = MediaSummary::default();
+    extract_signal(
+        &mut messages,
+        &sb.export_dir(),
+        &sb.data_dir(),
+        &mut summary,
+        &mut Capacity::new(0, 0),
+        &mut HashSet::new(),
+    )
+    .unwrap();
+    assert_eq!(summary.referenced, 1);
+    assert_eq!(summary.missing, 1);
+    assert_eq!(summary.stored + summary.deduped, 0);
+    let entries = media_entries_of(&messages[0].raw_json);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["name"], "photo.jpg");
     assert_eq!(entries[0]["missing"], true);
     assert_eq!(entries[0]["reason"], "budget-exceeded");
 
