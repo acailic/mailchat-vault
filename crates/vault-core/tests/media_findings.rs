@@ -13,7 +13,6 @@
 // 4. resolution is a pure read — store bytes and the archive revision
 //    are unchanged — and re-running reflects the current store state.
 
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -40,6 +39,7 @@ fn sha256_hex(path: &Path) -> String {
 /// One temp workspace per test: an `export/` tree and a `data/` app-data
 /// dir, so store writes never touch the repo.
 struct Sandbox {
+    #[allow(dead_code)] // dropped when the sandbox goes out of scope
     keeper: tempfile::TempDir,
     root: PathBuf,
 }
@@ -159,15 +159,22 @@ fn findings_classify_and_resolve_to_affected_messages() {
             .join(store.object_name(&photo_sha).unwrap()),
     )
     .unwrap();
-    let plan_path = store.store_dir().join(store.object_name(&plan_sha).unwrap());
+    let plan_path = store
+        .store_dir()
+        .join(store.object_name(&plan_sha).unwrap());
     let mut bytes = fs::read(&plan_path).unwrap();
     bytes[0] ^= 0xff;
     fs::write(&plan_path, bytes).unwrap();
     let extra = sb.root.join("extra.bin");
     fs::write(&extra, b"unreferenced bytes").unwrap();
-    let (extra_entry, _) =
-        store_media(&sb.data_dir(), &extra, "extra.bin", "document", &mut Capacity::default())
-            .unwrap();
+    let (extra_entry, _) = store_media(
+        &sb.data_dir(),
+        &extra,
+        "extra.bin",
+        "document",
+        &mut Capacity::default(),
+    )
+    .unwrap();
     let extra_sha = extra_entry.sha256.clone();
 
     // The classification: one missing, one corrupt, one orphan.
@@ -184,9 +191,7 @@ fn findings_classify_and_resolve_to_affected_messages() {
     // Missing resolves to exactly the message that referenced the photo:
     // identity (author) plus conversation/date context and the display
     // name the reference kept.
-    let missing = storage
-        .media_digest_references(&photo_sha, 0, 50)
-        .unwrap();
+    let missing = storage.media_digest_references(&photo_sha, 0, 50).unwrap();
     assert_eq!(missing.total, 1);
     assert_eq!(missing.references.len(), 1);
     let reference = &missing.references[0];
@@ -208,9 +213,7 @@ fn findings_classify_and_resolve_to_affected_messages() {
 
     // The unreferenced object is no message failure: it resolves to an
     // empty page — it never had a message.
-    let orphan = storage
-        .media_digest_references(&extra_sha, 0, 50)
-        .unwrap();
+    let orphan = storage.media_digest_references(&extra_sha, 0, 50).unwrap();
     assert_eq!(orphan.total, 0);
     assert!(orphan.references.is_empty());
 
@@ -343,9 +346,7 @@ fn a_missing_registered_unlinked_file_resolves_to_its_import_provenance() {
     .unwrap();
     let report = store.reconcile(&digests, true).unwrap();
     assert_eq!(report.missing, vec![stray_sha.clone()], "{report:?}");
-    let resolution = storage
-        .media_digest_references(&stray_sha, 0, 50)
-        .unwrap();
+    let resolution = storage.media_digest_references(&stray_sha, 0, 50).unwrap();
     assert_eq!(resolution.total, 0, "no message references it");
     assert!(resolution.references.is_empty());
 
@@ -417,10 +418,7 @@ fn resolution_is_read_only_and_reruns_reflect_the_current_store() {
     let report = store.reconcile(&digests, true).unwrap();
     assert!(report.missing.is_empty(), "{report:?}");
     assert!(
-        report
-            .corrupt
-            .iter()
-            .all(|c| !c.contains(&photo_sha)),
+        report.corrupt.iter().all(|c| !c.contains(&photo_sha)),
         "{report:?}"
     );
 }

@@ -2824,9 +2824,9 @@ impl Storage {
                 let id: i64 = row.get(0)?;
                 let raw: String = row.get(5)?;
                 // One row per message: the first matching entry names it.
-                let matches = media_entries(&raw).into_iter().find(|entry| {
-                    entry.get("sha256").and_then(|v| v.as_str()) == Some(sha256)
-                });
+                let matches = media_entries(&raw)
+                    .into_iter()
+                    .find(|entry| entry.get("sha256").and_then(|v| v.as_str()) == Some(sha256));
                 if let Some(entry) = matches {
                     all.push(MediaMessageReference {
                         message_id: id,
