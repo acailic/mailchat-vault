@@ -267,8 +267,8 @@ pub fn resolve_stream_source(
 /// next call with the same input (see [`crate::bounded`]).
 ///
 /// Media extraction runs per batch on the caller's thread (file copies
-/// stay outside every storage lock); Signal and Discord record
-/// attachments in `raw_json` only, as in [`import`], and JSON Lines
+/// stay outside every storage lock); Discord records attachments in
+/// `raw_json` only, as in [`import`], and JSON Lines
 /// rows keep their `raw_json` media references as references — media
 /// bytes are not transferred. A Messenger tree
 /// pick (directory or `.zip`) configures its media pass at the DYI
@@ -330,9 +330,9 @@ pub fn import_bounded(
         .unwrap_or_else(|| PathBuf::from("."));
     if extract_media {
         if let Some(data_dir) = data_dir {
-            // Signal and Discord attachments stay recorded in `raw_json`
-            // only — media extraction is not implemented for them yet.
-            // JSON Lines rows keep their `raw_json` media references as
+            // Discord attachments stay recorded in `raw_json` only —
+            // media extraction is not implemented for it yet. JSON
+            // Lines rows keep their `raw_json` media references as
             // references (media bytes are not transferred; the backup
             // container is the whole-vault tool). Messenger joins the
             // media kinds only for a tree pick: a single-file pick says
@@ -341,11 +341,9 @@ pub fn import_bounded(
             let kind = match format {
                 ChatFormat::Telegram => Some(MediaKind::Telegram),
                 ChatFormat::WhatsApp => Some(MediaKind::WhatsApp),
+                ChatFormat::Signal => Some(MediaKind::Signal),
                 ChatFormat::Messenger if file.is_dir() => Some(MediaKind::Messenger),
-                ChatFormat::Signal
-                | ChatFormat::Discord
-                | ChatFormat::Messenger
-                | ChatFormat::Jsonl => None,
+                ChatFormat::Discord | ChatFormat::Messenger | ChatFormat::Jsonl => None,
             };
             if let Some(kind) = kind {
                 let pass = if kind == MediaKind::Messenger {

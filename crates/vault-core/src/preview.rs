@@ -359,9 +359,9 @@ fn messenger_ref_paths(obj: &Map<String, Value>) -> Vec<&str> {
 /// carries, files provably absent from the export)`.
 ///
 /// Telegram and Messenger references resolve exactly under the export
-/// root, so absence is provable; WhatsApp attachment names match fuzzily
-/// at import time (recursive walk), so a reference is reported but
-/// absence is never claimed.
+/// root, so absence is provable; WhatsApp and Signal attachment names
+/// match fuzzily at import time (recursive walk), so a reference is
+/// reported but absence is never claimed.
 fn media_refs_of(kind: &str, raw_json: &str, export_root: Option<&Path>) -> (u64, u64) {
     let Ok(value) = serde_json::from_str::<Value>(raw_json) else {
         return (0, 0);
@@ -397,6 +397,24 @@ fn media_refs_of(kind: &str, raw_json: &str, export_root: Option<&Path>) -> (u64
             .and_then(Value::as_str)
             .is_some_and(|n| !n.is_empty());
     if whatsapp {
+        return (1, 0);
+    }
+    // Signal attachments: a named `attachments` entry is a reference
+    // (the media pass matches it fuzzily by name, so absence is never
+    // claimed); name-less entries (voice notes) resolve nothing.
+    let signal = kind == "signal"
+        && obj
+            .get("attachments")
+            .and_then(Value::as_array)
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry
+                        .get("fileName")
+                        .and_then(Value::as_str)
+                        .is_some_and(|n| !n.is_empty())
+                })
+            });
+    if signal {
         return (1, 0);
     }
     // JSON Lines rows carry their media as already-stored `media`
