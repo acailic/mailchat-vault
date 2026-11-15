@@ -21,6 +21,21 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
 - Corrected two native E2E calls that aborted the source-selection and Add source
   chooser scenarios before their assertions ran.
 
+### Fixed (parked review follow-ups)
+
+- The time-period strip collapses again after the timeline shrinks: a strip
+  expanded with "Older…" and then rendered with nothing left to hide starts
+  collapsed when the timeline grows past the cap again, instead of silently
+  re-opening expanded.
+- Export popover buttons in the reading pane render at the smaller meta text
+  size again, matching the captions and format selects beside them.
+- A failed statistics fetch at import completion no longer marks the archive
+  view live on a stale total: the honest "type something to search" line stays
+  until the next successful refresh drives the newest-first browse.
+- Schema housekeeping (migration 17): the redundant single-column
+  archive-messages index — covered by migration 15's composite — is dropped;
+  vaults upgrade in place as always.
+
 ### Added (JSON Lines import)
 
 - **JSON Lines import** — the `.jsonl` files the app exports now import

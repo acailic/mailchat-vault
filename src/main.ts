@@ -1124,11 +1124,16 @@ function addProviderRow(): void {
   providerRows.append(providerRow({ ...prefill, id }, false, false));
 }
 
-async function refreshStats(): Promise<void> {
+/** @returns whether THIS call's stats response landed and was applied —
+ * false when a newer refresh superseded it or the fetch failed, so
+ * callers that act on fresh counts (the import-completion browse) can
+ * hold off and let the next successful refresh drive them.
+ */
+async function refreshStats(): Promise<boolean> {
   const token = statsGuard.next();
   try {
     const stats = await ipc.stats();
-    if (!statsGuard.isCurrent(token)) return; // a newer refresh superseded this response
+    if (!statsGuard.isCurrent(token)) return false; // a newer refresh superseded this response
     lastStats = stats;
     archiveTotal = demoActive ? archiveTotal : stats.total;
     // Thousands-grouped like the source chips beside the line
@@ -1146,6 +1151,7 @@ async function refreshStats(): Promise<void> {
     // refresh (boot, imports, syncs, vault switches), the timeline the
     // chips strip along may have changed with them.
     void refreshEraChips();
+    return true;
   } catch {
     if (statsGuard.isCurrent(token)) {
       statsLabel.textContent = "";
@@ -1155,6 +1161,7 @@ async function refreshStats(): Promise<void> {
         setStatus("Type something to search, or set a filter to browse.");
       }
     }
+    return false;
   }
 }
 
@@ -1929,8 +1936,12 @@ function feedImportJobEvent(event: JobEvent): void {
       // flag set along the way then blocks the stats-driven browse
       // (maybeInitialBrowse) that would surface the import a moment
       // later — the workspace would stay on "Your archive is empty"
-      // until the next manual search.
-      void refreshStats().then(() => {
+      // until the next manual search. The same holds when the refresh
+      // *fails*: without fresh counts the view is not honestly live,
+      // so the honest status line from the catch stands and the next
+      // successful refresh's maybeInitialBrowse drives the browse.
+      void refreshStats().then((landed) => {
+        if (!landed) return;
         initialBrowseDone = true; // the archive view is live from here on
         void runSearch(0); // newest-first browse, ready when the user returns
       });

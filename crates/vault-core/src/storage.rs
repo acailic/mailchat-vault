@@ -741,6 +741,20 @@ const MIGRATIONS: &[(i64, &str)] = &[
         );
         "#,
     ),
+    (
+        17,
+        // Drop `idx_archive_messages_source` (created by migration 4):
+        // since migration 15 the composite
+        // `idx_archive_messages_source_channel
+        // (source_instance_id, channel)` covers its leading column, so
+        // the single-column index serves no query the composite cannot,
+        // and only costs write amplification on every insert. No query
+        // references it by name; the drop is its own append-only
+        // migration rather than an edit of migration 4.
+        r#"
+        DROP INDEX IF EXISTS idx_archive_messages_source;
+        "#,
+    ),
 ];
 
 /// Rust halves of migrations, for backfill logic that SQL alone cannot

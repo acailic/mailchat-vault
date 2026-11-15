@@ -244,7 +244,9 @@ export const ERA_CHIP_VISIBLE = 5;
  * removes the bound. Longer timelines cap the visible chips at the
  * [`ERA_CHIP_VISIBLE`] most recent, with an "Older…" toggle for the rest
  * (the expansion state lives on the strip's own data attribute, so it
- * survives re-renders). The active era never hides behind the cap —
+ * survives re-renders — and resets whenever the timeline no longer
+ * hides buckets, so a shrink-then-regrow starts collapsed instead of
+ * silently expanded). The active era never hides behind the cap —
  * hiding the pressed chip would hide the applied filter's own
  * affordance. Fewer than two buckets render nothing — no dead chrome
  * over a timeline too short to strip.
@@ -257,6 +259,13 @@ export function renderEraChips(el: HTMLElement, opts: EraChipsOptions): void {
   }
   const expanded = el.dataset.expanded === "true";
   const hidden = Math.max(0, opts.buckets.length - ERA_CHIP_VISIBLE);
+  if (hidden === 0) {
+    // Nothing to hide (at or below the cap): a stale expanded flag
+    // renders identically here, but left alone it would resurface as
+    // expanded the moment the timeline regrows past the cap. Reset it
+    // now so the regrow starts collapsed like a first render.
+    delete el.dataset.expanded;
+  }
   // Buckets ascend oldest → newest; the cap keeps the most recent, and
   // `onToggle` always reports the index into the FULL bucket array.
   let visible: number[];
