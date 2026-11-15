@@ -36,20 +36,22 @@
 //!   `body`, `raw_json`) is copied verbatim; an absent `raw_json`
 //!   defaults to `"{}"`, an absent `channel` to `"email"`, as in
 //!   [`crate::message::NewMessage::new`].
-//! - A malformed line — invalid JSON, a non-object line, or an object
-//!   without the `source`/`external_id` identity pair — becomes a
-//!   durable per-item failure record (`StreamItem::Failed`, landing in
-//!   `import_issues` like every other format's parse failures) instead
-//!   of aborting the run; blank lines are not items at all.
+//! - A malformed line — invalid JSON, a non-object line, an object
+//!   without the `source`/`external_id` identity pair, or bytes that
+//!   are not valid UTF-8 — becomes a durable per-item failure record
+//!   (`StreamItem::Failed`, landing in `import_issues` like every
+//!   other format's parse failures) instead of aborting the run or
+//!   rewriting field bytes; blank lines are not items at all.
 //! - Media references in a row's `raw_json` stay references: media
 //!   bytes are not transferred (no media pass runs for this format,
 //!   like Signal and Discord).
 //!
-//! Detection ([`is_jsonl_export_reader`]): the first non-empty line
-//! parses as a JSON object carrying a string `source` plus a string
-//! `external_id`. The chat-export probes (Discord, Messenger, Telegram,
-//! Signal, WhatsApp) all claim whole-file shapes and run first, so a
-//! one-object-per-line file can only reach this probe.
+//! Detection ([`is_jsonl_export_reader`]): the first non-empty line is
+//! valid UTF-8 and parses as a JSON object carrying a string `source`
+//! plus a string `external_id`. The chat-export probes (Discord,
+//! Messenger, Telegram, Signal, WhatsApp) all claim whole-file shapes
+//! and run first, so a one-object-per-line file can only reach this
+//! probe.
 
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -120,11 +122,11 @@ pub fn parse_jsonl(bytes: &[u8]) -> Result<Collected> {
 }
 
 /// The shared engine behind the streaming source and the whole-file
-/// parser: read one line, convert it, offer it to the consumer (through
+/// parser: read one line, decode it, offer it to the consumer (through
 /// the shared skip counter, so restart recovery fast-forwards over
-/// already-committed items). Lines are read as bytes and converted
-/// lossily, so a non-UTF-8 line is a per-item failure, never a run
-/// abort.
+/// already-committed items). Lines are decoded strictly — a line that
+/// is not valid UTF-8 is a per-item failure (its bytes are never
+/// rewritten into replacement characters), never a run abort.
 pub fn stream_jsonl<R: BufRead>(
     reader: R,
     skip: u64,
@@ -139,8 +141,15 @@ pub fn stream_jsonl<R: BufRead>(
         if read == 0 {
             return Ok(());
         }
-        let line = String::from_utf8_lossy(&buf);
-        let outcome = jsonl_line_outcome(&line);
+        let outcome = match std::str::from_utf8(&buf) {
+            Ok(line) => jsonl_line_outcome(line),
+            Err(e) => EntryOutcome::Failed {
+                // Nothing trustworthy to extract from an undecodable
+                // line; the position in the file is the durable locator.
+                external_ref: String::new(),
+                reason: format!("line is not valid UTF-8: {e}"),
+            },
+        };
         if let Flow::Stop = emit_entry(outcome, &mut skip, emit)? {
             return Ok(());
         }
@@ -222,8 +231,10 @@ fn jsonl_line_outcome(line: &str) -> EntryOutcome {
 }
 
 /// True when the bytes are a JSON Lines export: the first non-empty
-/// line parses as a JSON object carrying a string `source` plus a
-/// string `external_id` — the export's exact row shape. Bounded: only
+/// line is valid UTF-8 and parses as a JSON object carrying a string
+/// `source` plus a string `external_id` — the export's exact row shape.
+/// A first line with invalid bytes is not this format (later lines are
+/// never probed, so a bad row further in still detects). Bounded: only
 /// that first line is read.
 pub fn is_jsonl_export(bytes: &[u8]) -> bool {
     is_jsonl_export_reader(std::io::Cursor::new(bytes))
@@ -240,7 +251,9 @@ pub fn is_jsonl_export_reader<R: std::io::Read>(reader: R) -> bool {
             Ok(_) => {}
             Err(_) => return false,
         }
-        let line = String::from_utf8_lossy(&buf);
+        let Ok(line) = std::str::from_utf8(&buf) else {
+            return false;
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -334,6 +347,63 @@ mod tests {
         let collected = parse_jsonl(bytes.as_bytes()).unwrap();
         assert_eq!(collected.messages.len(), 1);
         assert_eq!(collected.failed, 3);
+    }
+
+    #[test]
+    fn invalid_utf8_in_body_fails_the_row_instead_of_rewriting_it() {
+        // The reported bug's reproduction: a lone 0xff byte inside the
+        // body's JSON string used to import as "a\u{fffd}b" and count
+        // as success.
+        let bytes = b"{\"source\":\"demo\",\"external_id\":\"badutf8\",\"body\":\"a\xffb\"}\n";
+        let collected = parse_jsonl(bytes).unwrap();
+        assert_eq!(collected.messages.len(), 0);
+        assert_eq!(collected.failed, 1);
+        assert!(!collected
+            .messages
+            .iter()
+            .any(|m| m.body.contains('\u{fffd}')));
+    }
+
+    #[test]
+    fn invalid_utf8_in_identity_fields_fails_the_row() {
+        // Identity bytes must never be rewritten before dedup — the
+        // row is recorded as a failure instead.
+        let bad_source = b"{\"source\":\"te\xffgram\",\"external_id\":\"42/7\",\"body\":\"x\"}\n";
+        let bad_external_id =
+            b"{\"source\":\"telegram\",\"external_id\":\"42\xff7\",\"body\":\"x\"}\n";
+        for bytes in [&bad_source[..], &bad_external_id[..]] {
+            let collected = parse_jsonl(bytes).unwrap();
+            assert_eq!(collected.messages.len(), 0, "{bytes:?}");
+            assert_eq!(collected.failed, 1);
+        }
+    }
+
+    #[test]
+    fn multibyte_and_escaped_control_rows_import_verbatim() {
+        // Valid UTF-8 — multibyte text plus JSON-escaped controls —
+        // imports byte-for-byte; no replacement character appears.
+        let bytes = b"{\"source\":\"demo\",\"external_id\":\"uni\",\"body\":\"zdravo \xf0\x9f\x91\x8b \\u0007 \\t \\u017e \\u4e2d\"}\n";
+        let collected = parse_jsonl(bytes).unwrap();
+        assert_eq!(collected.messages.len(), 1);
+        assert_eq!(collected.failed, 0);
+        assert_eq!(
+            collected.messages[0].body,
+            "zdravo \u{1f44b} \u{7} \t \u{17e} \u{4e2d}"
+        );
+    }
+
+    #[test]
+    fn detection_rejects_invalid_utf8_on_the_first_nonblank_line() {
+        // A first nonblank line with invalid bytes is not this format.
+        assert!(!is_jsonl_export(
+            b"{\"source\":\"demo\",\"external_id\":\"1\",\"body\":\"a\xffb\"}\n"
+        ));
+        // A bad row further in still detects: only the first nonblank
+        // line is probed.
+        let mut raw: Vec<u8> = row_json(1, "demo", "1", "x").into_bytes();
+        raw.push(b'\n');
+        raw.extend_from_slice(b"{\"source\":\"demo\",\"external_id\":\"2\",\"body\":\"a\xffb\"}\n");
+        assert!(is_jsonl_export(&raw));
     }
 
     #[test]
