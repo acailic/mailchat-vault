@@ -38,17 +38,14 @@ workspace `Cargo.toml`, commit, tag `v<version>`, push the tag.
 > Billing & plans in the account settings), and every CI and Retrieval run
 > since re-enabling fails the same way. **No v0.2.0 release or draft
 > exists**, so `SHA256SUMS` at publish time and smoke gates against
-> published artifacts have not happened. Publishing waits on the billing
-> fix — the exact handoff is the
-> [v0.2.0 publish checklist](#v020-publish-handoff-maintainer-checklist)
-> below. Until then the workflow above is again the documented path, and
-> the local route (build per platform: `scripts/release/build-linux.sh` on
-> Linux; `npm run tauri build -- --bundles app,dmg` on macOS;
-> `npm run tauri build -- --bundles msi,nsis` on Windows; publish with
-> `gh release create/upload`, gated on the local smoke suites + checksums)
-> remains the fallback a maintainer can run without Actions. For *per-PR*
-> verification while CI is down, the interim protocol — tiers, commands, and
-> PR-body recording — is
+> published artifacts have not happened. The authorized execution route per
+> OS is decided (2026-11-15, #80): **local native builds are the authorized
+> route while hosted runners cannot start** — see
+> [Release execution route](#release-execution-route-decided-2026-11-15-80)
+> below. The exact v0.2.0 handoff (either route, same gates) is the
+> [v0.2.0 publish checklist](#v020-publish-handoff-maintainer-checklist).
+> For *per-PR* verification while CI is down, the interim protocol — tiers,
+> commands, and PR-body recording — is
 > [docs/testing.md → Interim per-PR verification](testing.md#interim-per-pr-verification-while-ci-is-down).
 
 The same packaging can be built locally without any host toolchain
@@ -95,6 +92,77 @@ needs:
 The `.mbox` association makes "open a mailbox archive" work from the
 file manager: `.mbox` files (`application/mbox`) offer Mailchat Vault
 as the handler (Viewer role; the app imports the file's mail).
+
+## Release execution route (decided 2026-11-15, #80)
+
+Who is authorized to build and gate release artifacts, per OS: local native
+machines or the hosted workflows. Decided by the release owner on
+2026-11-15 ([#80](https://github.com/acailic/mailchat-vault/issues/80));
+recorded as a [D11 amendment](decisions.md#d11-three-platform-release-with-honest-evidence).
+The standing rule from D11 applies to both routes: workflow YAML is not
+automation — only executed runs and executed local gates are evidence.
+
+**Decision: local native builds are the authorized execution route for
+every OS while GitHub-hosted runners cannot start (the billing block
+above).** Hosted workflows remain the intended default: the 2026-11-14
+re-enable (route (c), PR #85) stands, and once a hosted run actually
+executes on a release tag, hosted evidence is the default for that
+release. A release may mix routes only per OS — each OS's assets must
+carry that OS's executed gates from whichever route built them; no OS is
+ever certified from a route that did not run its gate.
+
+| OS | Authorized now (local native) | One-command column | Needs |
+| --- | --- | --- | --- |
+| Linux x86_64 | `scripts/release/build-linux.sh` + `scripts/release/smoke-linux.sh` (clean 22.04 **and** 24.04 containers) | `scripts/release/matrix-linux.sh` | any machine with docker — available today |
+| macOS (universal) | `npm run tauri build -- --target universal-apple-darwin --bundles app,dmg`, then `scripts/dmg-smoke-test.sh <dmg> <v>` and `scripts/release/smoke-macos.sh` | `scripts/release/matrix-macos.sh` | a real macOS host → [#81](https://github.com/acailic/mailchat-vault/issues/81) |
+| Windows x64 | `npm run tauri build -- --bundles msi,nsis`, then `scripts/windows-smoke.ps1` (upgrade phases with `-OldMsi`/`-OldExe`) | `pwsh scripts/release/matrix-windows.ps1` | a real Windows host → [#81](https://github.com/acailic/mailchat-vault/issues/81) |
+
+Both routes run the same gates (the matrix columns above), feed the same
+assembler — [`scripts/release/prepare-release.sh`](../scripts/release/prepare-release.sh)
+gathers the assets of every host into one draft directory with one combined
+`SHA256SUMS` — and end in the same human publish gate (`gh release create
+--draft` / upload for the local route; the workflow's own draft for the
+hosted route). Evidence quality is identical by construction; only who
+executes the column differs. One asymmetry is deliberate and planned
+separately below: hosted-only provenance (attestations) does not exist on
+the local route and cannot be approximated there.
+
+### Provenance: GitHub artifact attestations are a separate plan with preconditions
+
+Artifact attestations are **not** part of either route today, and cannot be
+created by a workflow-YAML change (go-public review finding S6). All three
+preconditions below must hold before any attestation exists:
+
+1. **An executing workflow.** Attestations are issued by a running Actions
+   job (`actions/attest-build-provenance` with `id-token: write`); no run,
+   no attestation — the same precondition as the hosted route. Restoring
+   Actions billing is the account-owner action recorded in the handoff
+   below; until it lands, the interim state is the CI-debt record
+   ([#102](https://github.com/acailic/mailchat-vault/issues/102)) and the
+   [interim per-PR verification protocol](testing.md#interim-per-pr-verification-while-ci-is-down).
+2. **An eligible repository plan.** Attestations are available for public
+   repositories; for private repositories they depend on the account's
+   plan — verify against GitHub's current attestation requirements when
+   wiring. The public move itself waits on the rights audit
+   ([#79](https://github.com/acailic/mailchat-vault/issues/79)); do not
+   change repository visibility for provenance alone.
+3. **Wiring, last.** Only once 1–2 hold, add `id-token: write` and the
+   attestation step to the three build jobs of
+   [`.github/workflows/release.yml`](../.github/workflows/release.yml), and
+   gate any claim on `gh attestation verify <asset>` succeeding against
+   the published release. Wiring earlier would manufacture the appearance
+   of provenance — exactly what D11's "YAML is not evidence" rule forbids.
+
+Until all three hold, the **`SHA256SUMS` asset is the integrity baseline**:
+generated by `scripts/release/prepare-release.sh` over exactly the shipped
+assets (or `release-verify.sh --attach` against a draft release, which also
+checks each line against GitHub's server-side asset digests), verified per
+[Checksums & verifying a published release](#checksums--verifying-a-published-release)
+below. When attestations arrive they are additive, not a replacement —
+`SHA256SUMS` also covers local-route and out-of-band-attached assets, which
+attestations by construction cannot. No release notes, download page, or
+support-matrix row may claim attestation-backed provenance for a release
+whose assets have not passed `gh attestation verify`.
 
 ## Checksums & verifying a published release
 
@@ -340,9 +408,18 @@ tag `v0.2.0` at commit `71ac2d4` (on `main`, documented route (c) in PR
 on that tag failed because hosted runners cannot start (account payments /
 spending limit); every CI and Retrieval run since re-enabling fails the
 same way; no v0.2.0 release or draft exists. Per D11, none of this counts
-as release evidence — the steps below finish it once hosted runners are
-unblocked. Publishing waits on them; do not tag or re-tag anything else in
-the meantime.
+as release evidence. Do not tag or re-tag anything else in the meantime.
+
+Two routes lead to the same gates, per the [execution-route
+decision](#release-execution-route-decided-2026-11-15-80): **Route H**
+(hosted — the default once runners can start; steps H1–H2) or **Route L**
+(local — authorized today; steps L1–L2, needs
+[#81](https://github.com/acailic/mailchat-vault/issues/81) hosts for macOS
+and Windows). Both converge on the shared tail (steps 3–6). One release may
+take Route L for some OSes and Route H for others, as long as each OS's
+executed gates are recorded.
+
+**Route H (hosted — once billing is fixed)**
 
 1. **Unblock hosted runners (account owner action, not a repo setting).**
    GitHub account → *Settings* → *Billing & plans*: fix the failed payment
@@ -358,21 +435,54 @@ the meantime.
    push origin v0.2.0`. The tag currently points at `71ac2d4`; moving it
    to a newer `main` commit is a maintainer decision that must be recorded
    here if taken.
+
+**Route L (local — authorized today)**
+
+1. **Build and gate each OS on a native host**, from a checkout of the tag
+   (`git checkout v0.2.0`): the per-OS commands and one-command columns are
+   the [execution-route table](#release-execution-route-decided-2026-11-15-80)
+   above (Linux: any docker machine — available now; macOS/Windows: real
+   hosts per [#81](https://github.com/acailic/mailchat-vault/issues/81)).
+   Each host runs its column; a leg skipped with a `--skip-*`/`-Skip*`
+   flag is never certification.
+2. **Assemble the draft locally.** On one host — or each host in turn; the
+   draft directory keeps assets from other hosts across re-runs —
+   `scripts/release/prepare-release.sh --version 0.2.0 --tag-exists-ok`
+   gathers every bundle into `target/release/draft-release/v0.2.0/`, writes
+   one combined `SHA256SUMS` over exactly those assets, and renders
+   `RELEASE-NOTES.md` (`--tag-exists-ok` exists for precisely this
+   post-tag local assembly; the normal flow still prepares before
+   tagging). Then draft and upload (the tag already exists, so nothing
+   triggers Actions):
+   ```sh
+   gh release create v0.2.0 --draft \
+     --title "Mailchat Vault v0.2.0" \
+     --notes-file target/release/draft-release/v0.2.0/RELEASE-NOTES.md
+   gh release upload v0.2.0 \
+     target/release/draft-release/v0.2.0/mailchat-vault_0.2.0_* \
+     target/release/draft-release/v0.2.0/SHA256SUMS --clobber
+   ```
+
+**Shared tail (either route)**
+
 3. **Verify the draft.** `gh release view v0.2.0` shows a **draft** with
    all six assets (Linux AppImage + `.deb`, macOS universal `.dmg` +
-   `.app.tar.gz`, Windows `.msi` + NSIS `.exe`); the in-workflow gates are
-   green: `smoke-linux` on clean 22.04 **and** 24.04, and the dmg smoke
-   that runs before the dmg is attached. Run the manually dispatched
-   **Windows smoke** workflow (Actions → *Windows smoke* → *Run workflow*)
-   on the tag being released and require green — it covers install,
-   launch, uninstall-keeps-data, and the in-place upgrade from v0.1.0.
+   `.app.tar.gz`, Windows `.msi` + NSIS `.exe`). Route H: the in-workflow
+   gates are green — `smoke-linux` on clean 22.04 **and** 24.04, and the
+   dmg smoke that runs before the dmg is attached — plus the manually
+   dispatched **Windows smoke** workflow (Actions → *Windows smoke* →
+   *Run workflow*) on the tag being released, covering install, launch,
+   uninstall-keeps-data, and the in-place upgrade from v0.1.0. Route L:
+   the L1 matrix columns are the required record — green suite, bundle,
+   and smoke legs per OS, with logs from `target/release/matrix-logs/`.
 4. **Attach `SHA256SUMS` at publish time.** From a checkout of the tag:
    `scripts/release/release-verify.sh v0.2.0 --attach --smoke` — it
    downloads the draft's assets, verifies each against GitHub's
-   server-side asset digests, uploads `SHA256SUMS` (idempotent), and can
-   chain the Linux smoke against the published bytes. Publishing rule: no
-   release is complete without its `SHA256SUMS` asset (v0.1.0 shipped
-   without one; it was attached retroactively — do not repeat that).
+   server-side asset digests, uploads `SHA256SUMS` (idempotent — under
+   Route L it re-verifies the already-attached file), and can chain the
+   Linux smoke against the published bytes. Publishing rule: no release
+   is complete without its `SHA256SUMS` asset (v0.1.0 shipped without
+   one; it was attached retroactively — do not repeat that).
 5. **Smoke against the published artifacts, or label honestly.** After
    publishing: `release-verify.sh v0.2.0 --smoke` (Linux),
    `pwsh scripts/release/windows-smoke-from-release.ps1 -Tag v0.2.0
@@ -383,10 +493,12 @@ the meantime.
    build** in its title/notes — under D11 an executed gate or an honest
    label are the only acceptable states.
 6. **Close the loop in docs.** Update the [download page](download.md)
-   release-status section, the [support matrix](support-matrix.md) row for
-   the execution route (#80), and the M6 record in the
-   [implementation roadmap](implementation-roadmap.md) with the published
-   evidence; the v0.2.0 CHANGELOG section already reflects route (c).
+   release-status section, the [support matrix](support-matrix.md) rows
+   for the execution route (#80) and attestations, the M6 record in the
+   [implementation roadmap](implementation-roadmap.md), and — once
+   attestations actually exist per the preconditions above — the
+   provenance statement here; the v0.2.0 CHANGELOG section already
+   reflects route (c).
 
 ## App icon
 
