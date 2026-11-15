@@ -61,9 +61,10 @@
 
       <div id="content">
         <header id="topbar">
-          <button id="nav-toggle" type="button" aria-controls="nav" aria-expanded="false">
-            <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-menu"></use></svg><span>Menu</span>
-          </button>
+          <!-- The nav toggle lives at the END of #content (below #main) so it
+               is NOT the first Tab stop inside content on every view; CSS
+               places it back into the topbar's left edge (see #nav-toggle
+               in app.css). The topbar reserves its footprint. -->
           <span class="topbar-title" id="topbar-title">Archive</span>
         </header>
 
@@ -681,6 +682,13 @@
             </section>
           </section>
         </main>
+
+        <!-- Placed after #main on purpose: the Tab order reaches the view
+             content before the topbar Menu button. The visual position in
+             the topbar is restored in app.css (#nav-toggle). -->
+        <button id="nav-toggle" type="button" aria-controls="nav" aria-expanded="false">
+          <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-menu"></use></svg><span>Menu</span>
+        </button>
       </div>
     </div>
 
