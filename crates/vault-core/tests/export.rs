@@ -148,6 +148,20 @@ fn assert_same_ignoring_ids(a: &[Message], b: &[Message]) {
     assert_eq!(sa, sb);
 }
 
+/// Clear `source_key` before a comparison: the portable source identity
+/// is export-only metadata (populated by the two JSON export streams,
+/// empty on rows built by every other query), so it is deliberately
+/// absent from the paginated search API's rows.
+fn strip_export_only_source_key(messages: Vec<Message>) -> Vec<Message> {
+    messages
+        .into_iter()
+        .map(|mut m| {
+            m.source_key = String::new();
+            m
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // CSV
 // ---------------------------------------------------------------------------
@@ -353,6 +367,7 @@ fn json_lines_round_trip_is_bit_identical_into_a_fresh_archive() {
             original_timestamp: String::new(),
             timezone: String::new(),
             time_confidence: String::new(),
+            source_label: String::new(),
         };
         target.insert_message(&new).unwrap();
     }
@@ -503,6 +518,7 @@ fn mbox_round_trip_through_the_production_parser() {
             let mut m = Message {
                 id: 0,
                 source: n.source.clone(),
+                source_key: String::new(),
                 external_id: n.external_id.clone(),
                 channel: n.channel.clone(),
                 chat_id: n.chat_id.clone(),
@@ -521,6 +537,7 @@ fn mbox_round_trip_through_the_production_parser() {
         .map(|n| Message {
             id: 0,
             source: n.source.clone(),
+            source_key: String::new(),
             external_id: n.external_id.clone(),
             channel: n.channel.clone(),
             chat_id: n.chat_id.clone(),
@@ -726,7 +743,8 @@ fn browse_export_is_newest_first_and_matches_pagination_order() {
     assert_eq!(exported.len(), 12);
     assert_eq!(paged.len(), 12);
     assert_eq!(
-        exported, paged,
+        strip_export_only_source_key(exported),
+        paged,
         "export order must match UI pagination order"
     );
 

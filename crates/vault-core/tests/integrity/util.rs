@@ -148,6 +148,7 @@ fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
     Ok(Message {
         id: row.get(0)?,
         source: row.get(1)?,
+        source_key: String::new(),
         external_id: row.get(2)?,
         channel: row.get(3)?,
         chat_id: row.get(4)?,

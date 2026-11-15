@@ -37,6 +37,11 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
 - Exporting search results preserves source-instance selection, attachment and
   import filters, date/timezone bounds, and sort order across every page.
   Older export callers keep their existing source-name contract.
+- JSON Lines exports carry a portable source identity (`source_key`), so a
+  subset exported from two sources sharing a display label — and a mail
+  Message-ID — imports with both messages retained instead of the second
+  collapsing onto the first as an apparent duplicate. Older JSON Lines files
+  import exactly as before.
 - Activity attention survives missed-event recovery and stays dismissed when an
   acknowledged failure event is replayed.
 - Corrected two native E2E calls that aborted the source-selection and Add source
