@@ -69,6 +69,15 @@ The console ends with `RESULT: PASS|FAIL`; the run writes
 tester, UTC timestamps, commit, per-phase results, SHA-256 of every
 installer smoked — new and old). Attach both to the evidence template.
 
+Honest current-state note: only `v0.1.0` is published (no `v0.2.0`
+release exists — the publish handoff is in
+[release.md](release.md#v020-publish-handoff-maintainer-checklist)), so
+today's honest native run is `-Tag v0.1.0` (fresh phases; same-version
+upgrade falls back to the REINSTALL path) or the locally-built-install
+route documented in
+[`tests/windows-smoke/README.md`](../tests/windows-smoke/README.md).
+Substitute the newest published tag as releases appear.
+
 **Data-safety note:** the smoke wipes `%APPDATA%\com.acailic.mailchatvault` between phases; `-AllowDataWipe` is the explicit consent switch. Never run it on a machine whose real archive lives there.
 
 The alternative hosted route is the manually dispatched **Windows smoke** workflow (Actions tab) — it drives the same four phases and uploads the logs; its zero dispatch record to date is the D11 gap this task tracks. Either route satisfies the automated half; the template's manual journey still needs a human at the machine.
