@@ -29,6 +29,49 @@ failure. Raise the random rounds locally with
 
 CI (`.github/workflows/ci.yml`) runs all of the above plus `clippy` and `fmt --check` on every push and PR.
 
+> **CI is not starting jobs since 2026-11-14** (account spending limit —
+> a billing action outside any repository change). Until that is lifted,
+> absent or red PR checks are **not code verdicts**; the operative gate is
+> the [interim per-PR local verification protocol](#interim-per-pr-verification-while-ci-is-down)
+> below, and the PR template's Local verification block is where results
+> are recorded. The permanent execution-route decision is tracked
+> separately in #80.
+
+## Interim per-PR verification while CI is down
+
+Since the billing cutoff, verification runs locally and is recorded in
+the PR body (`.github/PULL_REQUEST_TEMPLATE.md` carries the block). The
+protocol defines three tiers:
+
+| Tier | Machine class | Suites |
+| --- | --- | --- |
+| **A** | any machine with Node + a Rust toolchain (the root `cargo test` covers `vault-core` only — by design, the workspace `default-members`) | `npm run check`, `npm test`, `cargo test` |
+| **B** | Linux with the webkit2gtk stack, or the release suite container (`scripts/release/`) | `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `xvfb-run -a npm run test:e2e` |
+| **C** | packaged smoke — the machine class of the artifact being shipped (Linux: docker + `scripts/release/smoke-linux.sh`; the AppImage/deb install+launch gates) | `npm run tauri build` plus the release smoke scripts in [release.md](release.md) |
+
+Which tier a change requires:
+
+| Change class | Required tiers |
+| --- | --- |
+| Rust-only (`crates/vault-core`) | A, plus `cargo fmt --check` and `cargo clippy --workspace -- -D warnings` (they need no webkit2gtk — any tier A machine may run them) |
+| Frontend (`src/`, `index.html`) | A, plus the vitest suites that cover the touched modules |
+| UI shell / CSP / packaging (`src-tauri/`, `tauri.conf.json`, layout or iframe/security surface) | B in full (the e2e suite is the only automated driver of the real webview) **and** C: a packaged smoke while CI is down |
+
+Rules of the record:
+
+- Every PR fills the template's verification block from a real run on
+  the PR branch: suites, machine class, commit, pass/fail counts.
+- A leg this machine cannot run is written as **pending** with the tier
+  that retires it — never silently omitted, never backfilled.
+- Merging requires every tier the change class demands to be green in
+  the record (or explicitly waived in review with the pending leg named
+  as follow-up debt).
+
+The post-merge snapshot of the 2026-11-14 UI wave under this protocol —
+what ran, what stayed pending and on which machine class each pending
+leg retires — is recorded in
+[`docs/evidence/verification-2026-11-14.md`](evidence/verification-2026-11-14.md).
+
 ## Hermetic IMAP and OAuth testing
 
 IMAP sync is tested hermetically against an in-process mock IMAP4rev1 server (the greenmail equivalent), including an integration test that ingests the same `.mbox` fixture through both paths and compares the archives. The OAuth2 login (Google sign-in → XOAUTH2) is tested the same way: an in-process mock OAuth server (`tests/oauth_mock`) plays the authorization + token endpoints (PKCE, single-use codes, refresh grants, consent denial), an HTTP client stands in for the browser following the real loopback redirect, and the mock IMAP server verifies the SASL `XOAUTH2` string — the whole token flow end-to-end, plus the no-persist scan for the refresh token. A real-server test (`tests/imap_gmail_manual.rs`) is `#[ignore]`d: it needs live credentials and is **not** run in CI. To run it against your own account:

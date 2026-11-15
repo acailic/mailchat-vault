@@ -1,0 +1,25 @@
+From reporter@example.com Fri Nov 14 09:30:00 2026
+Message-ID: <rendered-m1@archive.local>
+From: Quarter Reporter <reporter@example.com>
+To: team@example.com
+Subject: Rendered preview beacon
+Date: Fri, 14 Nov 2026 09:30:00 +0000
+MIME-Version: 1.1
+Content-Type: multipart/alternative; boundary="rendered-bound-1"
+
+--rendered-bound-1
+Content-Type: text/plain; charset=utf-8
+
+The quarterly rendered preview beacon. Open this message and switch the
+reading pane to Rendered to see the embedded chart image and the link.
+--rendered-bound-1
+Content-Type: text/html; charset=utf-8
+
+<html><body>
+<h1>Quarterly beacon report</h1>
+<p>This chart image travels inline as a data: URL:</p>
+<img alt="quarterly beacon chart" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR42mM4pG+HFTEMLQkAuntLwXz4rcoAAAAASUVORK5CYII=" width="8" height="8">
+<p>And a link that must never navigate the pane:</p>
+<a href="https://example.com/never-followed-beacon">open the quarterly portal</a>
+</body></html>
+--rendered-bound-1--
