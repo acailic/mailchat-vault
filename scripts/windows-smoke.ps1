@@ -113,7 +113,7 @@ $script:DataDir = Join-Path $env:APPDATA $AppId
 $script:DbPath = Join-Path $script:DataDir 'vault.db'
 $script:Repo = Split-Path $PSScriptRoot -Parent
 if (-not $Tester) { $Tester = $env:MC_SMOKE_TESTER }
-if (-not $Tester) { $Tester = (git -C $script:Repo config user.name 2>$null) }
+if (-not $Tester) { try { $Tester = (git -C $script:Repo config user.name 2>$null) } catch { $Tester = '' } }
 if (-not $Tester) { $Tester = $env:USERNAME }
 if (-not $LogDir) {
     $base = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
@@ -374,7 +374,7 @@ $script:Artifacts = @(
     }
 )
 $script:HostOs = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
-$script:RepoCommit = (git -C $script:Repo rev-parse HEAD 2>$null)
+try { $script:RepoCommit = (git -C $script:Repo rev-parse HEAD 2>$null) } catch { $script:RepoCommit = '' }
 if (-not $script:RepoCommit) { $script:RepoCommit = 'unknown' }
 
 

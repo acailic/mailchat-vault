@@ -323,6 +323,15 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
 - `scripts/release/prepare-release.sh` assembles the local
   draft-release candidate (bundles, checksums, notes) without tagging
   or publishing anything — see `docs/release.md`.
+- Native verification (G1) is now a runbook with machine-readable
+  evidence: `scripts/release/smoke-macos.sh` and
+  `scripts/windows-smoke.ps1` (driven by
+  `scripts/release/windows-smoke-from-release.ps1`) each write a JSON
+  record binding the run's result to host, tester, UTC timestamps, and
+  the SHA-256 of every artifact smoked — pass `--tester` / `-Tester`.
+  The exact per-OS commands and the A14 evidence templates native runs
+  fill are in `docs/native-verification.md`; the runs themselves still
+  need real macOS/Windows hosts (#81).
 
 ### Upgrading from 0.1.0
 
