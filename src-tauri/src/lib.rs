@@ -51,10 +51,13 @@
 //!   failed-item rows, last-sync stamps, pause (exclusion) state, and
 //!   which credential kinds are stored; and the removal action that
 //!   forgets one account's keyring secrets while keeping its archive.
-//! - `watch_add_folder` / `watch_remove_folder` / `watch_status` —
-//!   automatic folder watching: new/modified export files in user-chosen
-//!   folders are imported in the background; the UI is kept current via
-//!   `watch-status` window events.
+//! - `watch_add_folder` / `watch_remove_folder` / `watch_retry` /
+//!   `watch_status` — automatic folder watching: new/modified export
+//!   files in user-chosen folders are imported in the background, a
+//!   failed import can be retried once its cause is resolved (the
+//!   file must still be under a watched folder; already stored rows
+//!   stay single); the UI is kept current via `watch-status` window
+//!   events (including per-unit import states for the retry affordance).
 //! - `oauth_gmail_login` — run the Gmail Google sign-in (browser OAuth2
 //!   flow with PKCE) and store the refresh token in the OS keyring.
 //! - `oauth_status` — Gmail sign-in availability for the UI (configured?
@@ -2268,6 +2271,23 @@ fn watch_remove_folder(state: State<AppState>, path: String) -> Result<WatchSnap
     Ok(state.watcher.snapshot())
 }
 
+/// Re-run a failed watched-folder import: the file must still sit under
+/// an enabled watched folder; it is re-enqueued through the watcher's
+/// settle window under its unchanged import identity, so already stored
+/// messages stay single. Returns the fresh status (its per-unit states
+/// tell the UI which units are retryable). A unit that is pending or
+/// running is left alone — repeated calls never duplicate work.
+#[tauri::command]
+fn watch_retry(state: State<AppState>, path: String) -> Result<WatchSnapshot, String> {
+    state.refuse_in_demo()?;
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("path is required".into());
+    }
+    state.watcher.retry(path)?;
+    Ok(state.watcher.snapshot())
+}
+
 /// Current watcher status: watched folders, pending files, recent events.
 #[tauri::command]
 fn watch_status(state: State<AppState>) -> WatchSnapshot {
@@ -3850,6 +3870,7 @@ pub fn run() {
             sync_schedule_set,
             watch_add_folder,
             watch_remove_folder,
+            watch_retry,
             watch_status,
             oauth_gmail_login,
             oauth_status,
