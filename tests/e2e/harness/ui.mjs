@@ -394,9 +394,21 @@ export async function search(browser, text) {
   );
 }
 
-/** All result rows as text (works for both generations' list markup). */
+/** All result rows as text (works for both generations' list markup).
+ * Reads the DOM textContent, not the WebDriver getText(): WebKit's
+ * getElementText is element.innerText (rendered text), and this suite's
+ * WebKitGTK builds return empty or partial text for some elements even
+ * when the text is set (the documented quirk the waitForApp and
+ * statsLabelText fallbacks already handle for live regions; the
+ * two-line-clamped browse rows hit it too — the date-range spec failed
+ * on a row whose DOM text was verified correct). Every consumer asserts
+ * substrings of row content, and textContent is a superset of the
+ * innerText those assertions were written against, so the read stays
+ * honest while becoming deterministic. */
 export async function resultTexts(browser) {
-  return browser.$$("#results li").map((li) => li.getText());
+  return browser.execute(() =>
+    [...document.querySelectorAll("#results li")].map((li) => li.textContent),
+  );
 }
 
 /** Read `#status` once. */
