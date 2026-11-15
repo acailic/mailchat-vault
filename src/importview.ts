@@ -44,6 +44,8 @@ export function formatLabel(kind: string): string {
       return "Discord Data Package";
     case "messenger":
       return "Messenger (Facebook) export";
+    case "jsonl":
+      return "JSON Lines export (.jsonl)";
     default:
       return kind;
   }
@@ -66,6 +68,8 @@ export function formatHint(kind: string): string | null {
       return "Discord → Settings → Privacy → Request Data (the package arrives by email).";
     case "messenger":
       return "Facebook → Settings → Your Facebook information → Download profile information — set Format to JSON; import messages/ or the whole export.";
+    case "jsonl":
+      return "Export results or a whole chat as JSON Lines from any vault (Export results… / Export chat…); rows keep their original source, so re-imports never duplicate.";
     default:
       return null;
   }

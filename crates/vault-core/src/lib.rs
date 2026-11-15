@@ -27,6 +27,8 @@
 //! - [`telegram`]: the Telegram `result.json` chat export source.
 //! - [`signal`]: the Signal Desktop conversation JSON export source.
 //! - [`discord`]: the Discord Data Package chat export source.
+//! - [`jsonl`]: the JSON Lines import source — rows from the app's own
+//!   JSON Lines export, each keeping its original source identity.
 //! - [`chat_export`]: chat export format detection plus the import flow
 //!   (with media extraction) for picked files.
 //! - [`media`]: content-addressed media store and the extraction pass that
@@ -84,6 +86,7 @@ pub mod imap_coordinator;
 pub mod import_bounds;
 pub mod ingest;
 pub mod jobs;
+pub mod jsonl;
 pub mod llm;
 pub mod mail;
 pub mod mbox;

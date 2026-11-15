@@ -18,6 +18,7 @@ use crate::discord::{
 };
 use crate::import_bounds::{expand_zip_bounded, ImportBounds};
 use crate::ingest::IngestSummary;
+use crate::jsonl::{is_jsonl_export, is_jsonl_export_reader, JsonlSource};
 use crate::media::MediaSummary;
 use crate::messenger::{
     is_messenger_export, is_messenger_export_dir, is_messenger_export_reader,
@@ -36,6 +37,9 @@ pub enum ChatFormat {
     Signal,
     Discord,
     Messenger,
+    /// The app's own JSON Lines export (`.jsonl`): one stored message
+    /// object per line, each row keeping its original source identity.
+    Jsonl,
 }
 
 /// Detect which chat export format `bytes` hold, if any.
@@ -48,7 +52,9 @@ pub enum ChatFormat {
 /// checked next, before the Telegram probe can claim it; a top-level
 /// JSON array of Signal Desktop message objects is a Signal
 /// conversation export; otherwise a Telegram `messages` array
-/// decides, then a WhatsApp header within the first lines. Anything
+/// decides, then a WhatsApp header within the first lines; last, a
+/// first line shaped like the app's own JSON Lines export rows (an
+/// object with `source` + `external_id`) claims it. Anything
 /// else returns `None`.
 pub fn detect_chat_format(bytes: &[u8]) -> Option<ChatFormat> {
     if is_discord_export(bytes) {
@@ -65,6 +71,9 @@ pub fn detect_chat_format(bytes: &[u8]) -> Option<ChatFormat> {
     }
     if is_whatsapp_export(bytes) {
         return Some(ChatFormat::WhatsApp);
+    }
+    if is_jsonl_export(bytes) {
+        return Some(ChatFormat::Jsonl);
     }
     None
 }
@@ -95,6 +104,10 @@ pub fn detect_chat_format_reader(path: &Path) -> Result<Option<ChatFormat>> {
     file.rewind()?;
     if is_whatsapp_export_reader(&mut file) {
         return Ok(Some(ChatFormat::WhatsApp));
+    }
+    file.rewind()?;
+    if is_jsonl_export_reader(&mut file) {
+        return Ok(Some(ChatFormat::Jsonl));
     }
     Ok(None)
 }
@@ -231,7 +244,7 @@ pub fn resolve_stream_source(
     }
     let format = detect_chat_format_reader(&file)?.ok_or_else(|| {
         Error::ChatImport(format!(
-            "unrecognized chat export format: {} (expected a WhatsApp .txt export, a Telegram result.json, a Messenger message_*.json, a Signal conversation .json, or a Discord messages.json)",
+            "unrecognized chat export format: {} (expected a WhatsApp .txt export, a Telegram result.json, a Messenger message_*.json, a Signal conversation .json, a Discord messages.json, or a JSON Lines .jsonl export)",
             file.display()
         ))
     })?;
@@ -241,6 +254,7 @@ pub fn resolve_stream_source(
         ChatFormat::WhatsApp => Box::new(WhatsappSource::new(&file)),
         ChatFormat::Discord => Box::new(DiscordSource::new(&file)),
         ChatFormat::Messenger => Box::new(MessengerSource::new(&file)),
+        ChatFormat::Jsonl => Box::new(JsonlSource::new(&file)),
     };
     Ok((format, file, source))
 }
@@ -254,7 +268,9 @@ pub fn resolve_stream_source(
 ///
 /// Media extraction runs per batch on the caller's thread (file copies
 /// stay outside every storage lock); Signal and Discord record
-/// attachments in `raw_json` only, as in [`import`]. A Messenger tree
+/// attachments in `raw_json` only, as in [`import`], and JSON Lines
+/// rows keep their `raw_json` media references as references — media
+/// bytes are not transferred. A Messenger tree
 /// pick (directory or `.zip`) configures its media pass at the DYI
 /// export root, so message-referenced files resolve, store, and link
 /// from `raw_json`; a single-file Messenger pick says nothing about
@@ -316,14 +332,20 @@ pub fn import_bounded(
         if let Some(data_dir) = data_dir {
             // Signal and Discord attachments stay recorded in `raw_json`
             // only — media extraction is not implemented for them yet.
-            // Messenger joins the media kinds only for a tree pick: a
-            // single-file pick says nothing about the tree around it, so
-            // its references stay in `raw_json` only (spec decision).
+            // JSON Lines rows keep their `raw_json` media references as
+            // references (media bytes are not transferred; the backup
+            // container is the whole-vault tool). Messenger joins the
+            // media kinds only for a tree pick: a single-file pick says
+            // nothing about the tree around it, so its references stay
+            // in `raw_json` only (spec decision).
             let kind = match format {
                 ChatFormat::Telegram => Some(MediaKind::Telegram),
                 ChatFormat::WhatsApp => Some(MediaKind::WhatsApp),
                 ChatFormat::Messenger if file.is_dir() => Some(MediaKind::Messenger),
-                ChatFormat::Signal | ChatFormat::Discord | ChatFormat::Messenger => None,
+                ChatFormat::Signal
+                | ChatFormat::Discord
+                | ChatFormat::Messenger
+                | ChatFormat::Jsonl => None,
             };
             if let Some(kind) = kind {
                 let pass = if kind == MediaKind::Messenger {

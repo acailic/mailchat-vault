@@ -32,9 +32,10 @@
 //!   (session-memory fallback) and never in the file or the database.
 //! - `import_mbox` — manual `.mbox` import (the demo ingest source).
 //! - `import_chat_export` — WhatsApp `.txt` / Telegram `result.json` /
-//!   Signal `.json` / Discord Data Package import with format
-//!   auto-detection and optional media extraction into the app data
-//!   `media/` store (the frontend picks the file via the dialog plugin).
+//!   Signal `.json` / Discord Data Package / Messenger / JSON Lines
+//!   `.jsonl` import with format auto-detection and optional media
+//!   extraction into the app data `media/` store (the frontend picks
+//!   the file via the dialog plugin).
 //! - `sync_imap` — incremental IMAP/Gmail sync (first live mail source):
 //!   app password, or Google sign-in (OAuth2 → XOAUTH2) when `auth` says
 //!   so.
@@ -1447,16 +1448,21 @@ async fn import_mbox(
 /// Import a chat export: a WhatsApp `.txt` export, a Telegram `result.json`
 /// (a directory containing it works too), a Signal conversation `.json`
 /// (e.g. from `sigtop export-messages -f json`, one file per conversation),
-/// or a Discord Data Package messages export — a single channel
+/// a Discord Data Package messages export — a single channel
 /// `messages.json`, the package's `messages/` directory, or the package
-/// root. The format is detected from the file contents. Re-importing skips
-/// already-stored messages.
+/// root — or a JSON Lines `.jsonl` export (one stored message object per
+/// line; each row keeps its original source and external id, so exports
+/// move between vaults and re-imports never duplicate). The format is
+/// detected from the file contents. Re-importing skips already-stored
+/// messages.
 ///
 /// With `extract_media` (default `true`), media files referenced by the
 /// export are copied into the app data `media/` store (hash-named,
 /// content-deduplicated) and linked from each message; messages already
 /// in the archive get their links backfilled, so re-importing an export
-/// with media enriches it.
+/// with media enriches it. JSON Lines rows carry media as `raw_json`
+/// references only — media bytes are not transferred (the backup
+/// container is the whole-vault tool).
 ///
 /// M2.2: the import streams — detection reads bounded views, the parser
 /// never holds the archive, and batches commit atomically through the

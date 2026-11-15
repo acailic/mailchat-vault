@@ -64,6 +64,8 @@ describe("formatLabel / formatHint", () => {
     expect(formatHint("telegram")).toContain("Telegram Desktop");
     expect(formatLabel("messenger")).toBe("Messenger (Facebook) export");
     expect(formatHint("messenger")).toContain("Download profile information");
+    expect(formatLabel("jsonl")).toBe("JSON Lines export (.jsonl)");
+    expect(formatHint("jsonl")).toContain("JSON Lines");
     expect(formatHint("nope")).toBeNull();
   });
 });

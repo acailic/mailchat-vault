@@ -2020,7 +2020,7 @@ describe("drag-drop import", () => {
     expect(zones.map((z) => z.id)).toEqual(["first-run-drop", "import-drop"]);
     for (const zone of zones) {
       expect(zone.textContent?.trim()).toBe(
-        "Drop archives here — .mbox · .eml · .json · .txt",
+        "Drop archives here — .mbox · .eml · .json · .jsonl · .txt",
       );
     }
   });

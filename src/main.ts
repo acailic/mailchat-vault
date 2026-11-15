@@ -1670,7 +1670,7 @@ function friendlyImportError(e: unknown, path: string): string {
     return `Could not read ${path} — the file may have moved or been deleted. Pick it again.`;
   }
   if (/unrecognized|unsupported/i.test(text)) {
-    return `${text} Supported inputs: an .mbox email archive, a bare .eml (or a folder/zip of them), a WhatsApp .txt, a Telegram result.json, a Signal .json, a Discord messages.json, a Messenger message_*.json (or its export folder/.zip), or a folder/.zip containing these.`;
+    return `${text} Supported inputs: an .mbox email archive, a bare .eml (or a folder/zip of them), a WhatsApp .txt, a Telegram result.json, a Signal .json, a Discord messages.json, a Messenger message_*.json (or its export folder/.zip), a JSON Lines .jsonl export, or a folder/.zip containing these.`;
   }
   return `Import failed: ${text}`;
 }
@@ -1694,8 +1694,8 @@ async function pickImportInput(directory: boolean): Promise<void> {
             title: "Import a file",
             filters: [
               {
-                name: "Email or chat export (.mbox, .eml, WhatsApp .txt, Telegram/Signal/Discord/Messenger .json, or a .zip)",
-                extensions: ["mbox", "eml", "txt", "json", "zip"],
+                name: "Email or chat export (.mbox, .eml, WhatsApp .txt, Telegram/Signal/Discord/Messenger .json, JSON Lines .jsonl, or a .zip)",
+                extensions: ["mbox", "eml", "txt", "json", "jsonl", "zip"],
               },
             ],
           },
