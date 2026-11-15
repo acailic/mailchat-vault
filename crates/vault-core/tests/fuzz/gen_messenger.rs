@@ -37,8 +37,9 @@ pub fn export(rng: &mut Rng) -> Vec<(String, Vec<u8>)> {
         ));
     }
     if broken_part {
-        // The truncated part export tools sometimes write: the whole
-        // pick must fail closed on it, never panic.
+        // The truncated part export tools sometimes write: one `Failed`
+        // item names it and the rest of the tree imports — never a
+        // panic, never a dead pick.
         files.push((
             "messages/inbox/thread_1000/message_2.json".to_string(),
             b"not json".to_vec(),
@@ -213,17 +214,13 @@ mod tests {
             let broken = files
                 .iter()
                 .any(|(_, b)| serde_json::from_slice::<serde_json::Value>(b).is_err());
-            if broken {
-                // The broken part fails the whole pick closed: an `Err`,
-                // never a panic.
-                assert!(ingest(&storage, &source).is_err(), "seed {seed}");
-                continue;
-            }
+            // Skip-and-record: a broken part is one counted failure
+            // naming the file; the healthy threads and parts import.
             let expected = expected_inserted(&files);
             let first = ingest(&storage, &source).unwrap();
             assert_eq!(first.source, MESSENGER_SOURCE, "seed {seed}");
             assert_eq!(first.inserted, expected, "seed {seed}");
-            assert_eq!(first.failed, 0, "seed {seed}");
+            assert_eq!(first.failed, u64::from(broken), "seed {seed}");
             let again = ingest(&storage, &source).unwrap();
             assert_eq!(again.inserted, 0, "seed {seed}");
             assert_eq!(again.skipped, expected, "seed {seed}");
@@ -241,33 +238,33 @@ mod tests {
     /// Independent oracle for the mix rules: an entry imports when it
     /// has a body or a non-empty media array (the reactions-only mix
     /// slot has neither). Every-7th byte-identical repeats count too —
-    /// distinct generated ids, both stored.
+    /// distinct generated ids, both stored. Unparseable files (the
+    /// broken part) contribute nothing and count as the run's one
+    /// failure instead.
     fn expected_inserted(files: &[(String, Vec<u8>)]) -> u64 {
         files
             .iter()
-            .map(|(_, bytes)| {
-                serde_json::from_slice::<serde_json::Value>(bytes).unwrap()["messages"]
-                    .as_array()
-                    .map(|entries| {
-                        entries
+            .filter_map(|(_, bytes)| {
+                let v = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+                v["messages"].as_array().map(|entries| {
+                    entries
+                        .iter()
+                        .filter(|e| {
+                            let body = e["content"].as_str().is_some_and(|s| !s.is_empty());
+                            let media = [
+                                "photos",
+                                "videos",
+                                "audio_files",
+                                "files",
+                                "gifs",
+                                "sticker",
+                            ]
                             .iter()
-                            .filter(|e| {
-                                let body = e["content"].as_str().is_some_and(|s| !s.is_empty());
-                                let media = [
-                                    "photos",
-                                    "videos",
-                                    "audio_files",
-                                    "files",
-                                    "gifs",
-                                    "sticker",
-                                ]
-                                .iter()
-                                .any(|f| e[*f].as_array().is_some_and(|a| !a.is_empty()));
-                                body || media
-                            })
-                            .count() as u64
-                    })
-                    .unwrap_or(0)
+                            .any(|f| e[*f].as_array().is_some_and(|a| !a.is_empty()));
+                            body || media
+                        })
+                        .count() as u64
+                })
             })
             .sum()
     }
