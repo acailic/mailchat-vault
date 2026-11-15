@@ -28,7 +28,7 @@ describe("watchStatusText", () => {
   it("counts folders, singular and plural, and pending files", () => {
     expect(watchStatusText(snapshot({ folders: ["/a"] }))).toContain("Watching 1 folder");
     expect(watchStatusText(snapshot({ folders: ["/a", "/b"], pending: 3 }))).toBe(
-      "Watching 2 folders · 3 files settling — new/modified .mbox, WhatsApp .txt, Telegram and Signal .json files import in the background.",
+      "Watching 2 folders · 3 files settling — new/modified .mbox / .eml mail files, WhatsApp .txt, Telegram and Signal .json exports, and Messenger message_*.json thread parts import in the background.",
     );
     expect(watchStatusText(snapshot({ folders: ["/a"], pending: 1 }))).toContain(
       "1 file settling",

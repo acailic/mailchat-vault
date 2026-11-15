@@ -119,7 +119,7 @@ fn looks_like_mbox(path: &Path) -> Result<bool> {
 /// and only when the field name leads with a letter — chat exports
 /// must stay on their own path (JSON leads with `{`, a WhatsApp `.txt`
 /// with `[date`, whose name also holds a space). (Bounded: one line.)
-fn looks_like_eml(path: &Path) -> Result<bool> {
+pub(crate) fn looks_like_eml(path: &Path) -> Result<bool> {
     let file = fs::File::open(path)?;
     let mut reader = BufReader::new(file);
     let mut first = String::new();
