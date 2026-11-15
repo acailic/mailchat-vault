@@ -210,7 +210,9 @@ impl StreamSource for MessengerSource {
 }
 
 /// True when `name` is a DYI message file: `message_<number>.json`.
-fn is_message_file(path: &Path) -> bool {
+/// (`pub(crate)`: the folder watcher routes settled part files to
+/// their thread with the same rule.)
+pub(crate) fn is_message_file(path: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     name.starts_with("message_")
         && path

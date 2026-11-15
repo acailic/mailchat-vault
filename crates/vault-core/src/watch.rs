@@ -4,8 +4,10 @@
 //! [`FolderWatcher`] arms a `notify` (inotify/FSEvents/ReadDirectoryChangesW)
 //! watch on each folder the user picked — recursively, persisted in the
 //! vault database, so watched folders survive restarts. New or modified
-//! `.mbox`, WhatsApp `.txt`, Telegram and Signal `.json` export files are imported
-//! in the background once they settle:
+//! `.mbox`/`.eml` mail files, WhatsApp `.txt`, Telegram and Signal `.json`
+//! exports, and Messenger `message_*.json` thread parts (a part landing
+//! re-imports its whole thread) are imported in the background once they
+//! settle:
 //!
 //! - **Debounce/settle**: file writes arrive in bursts (a file being copied
 //!   or written fires many events). A file becomes an import candidate only
@@ -49,6 +51,10 @@ use crate::bounded::{import_id_for, BoundedRun, StreamSource};
 use crate::ingest::IngestSummary;
 use crate::jobs::{DbPool, PoolSink};
 use crate::mbox::MboxSource;
+use crate::messenger::{
+    is_message_file, is_messenger_export_dir, is_messenger_export_reader, MessengerSource,
+};
+use crate::preview::looks_like_eml;
 use crate::signal::{is_signal_export_reader, SignalSource};
 use crate::storage::Storage;
 use crate::telegram::{is_telegram_export_reader, TelegramSource};
@@ -61,7 +67,7 @@ use crate::whatsapp::{is_whatsapp_export, WhatsappSource};
 const DETECT_SNIFF_BYTES: u64 = 64 * 1024;
 
 /// File extensions that are import candidates when they appear or change.
-const WATCHED_EXTENSIONS: [&str; 3] = ["mbox", "txt", "json"];
+const WATCHED_EXTENSIONS: [&str; 4] = ["mbox", "eml", "txt", "json"];
 
 /// How deep the initial folder scan descends (guards against symlink
 /// cycles).
@@ -685,12 +691,20 @@ fn import_file(
 ) {
     let display = path.display().to_string();
     let event = match import_source_for(path) {
-        Ok(Some(source)) => {
-            let import_id = import_id_for("watch", path);
+        Ok(Some(candidate)) => {
+            // The checkpoint keys on the source the run streams (the
+            // file, or a Messenger part's thread folder), so a resumed
+            // run stays aligned with what it is reading.
+            let import_id = import_id_for("watch", &candidate.key);
             let run = BoundedRun::new(import_id);
             let mut sink = PoolSink(pool);
             let mut no_progress = |_: u64, _: u64, _: &str| {};
-            match run.run(source.as_ref(), &mut sink, &|| false, &mut no_progress) {
+            match run.run(
+                candidate.source.as_ref(),
+                &mut sink,
+                &|| false,
+                &mut no_progress,
+            ) {
                 Ok(outcome) => WatchEvent::Imported {
                     path: display,
                     summary: outcome.summary,
@@ -703,7 +717,7 @@ fn import_file(
         }
         Ok(None) => WatchEvent::Skipped {
             path: display,
-            reason: "not a recognized export (.mbox, WhatsApp .txt, Telegram result.json, or Signal conversation .json)"
+            reason: "not a recognized export (.mbox or .eml mail, WhatsApp .txt, Telegram result.json, Signal conversation .json, or Messenger message_*.json)"
                 .into(),
         },
         Err(e) => WatchEvent::Failed {
@@ -719,22 +733,41 @@ fn import_file(
     on_change(&changed);
 }
 
+/// One resolved import candidate: the streaming source that parses the
+/// settled file, and the path its bounded run keys on — the file itself,
+/// except for a Messenger part, whose import unit is the thread folder
+/// it belongs to (the run's summary and resume position both describe
+/// the thread, like a manual directory pick).
+struct ImportCandidate {
+    source: Box<dyn StreamSource + Send>,
+    key: PathBuf,
+}
+
 /// Pick the ingest source for an import candidate by extension + contents.
 /// `Ok(None)` = watched extension but unknown contents (a skip, not an
 /// error — folders legitimately hold unrelated .txt/.json files).
 ///
 /// Detection is bounded: only a [`DETECT_SNIFF_BYTES`] prefix is read for
-/// the WhatsApp line check, and Telegram and Signal detection stream the
-/// file through a small fixed-size buffer, so an unrelated huge file costs
-/// neither a full read nor a parse tree.
-fn import_source_for(path: &Path) -> Result<Option<Box<dyn StreamSource + Send>>, String> {
+/// the WhatsApp line check, and Messenger, Telegram and Signal detection
+/// stream the file through a small fixed-size buffer, so an unrelated
+/// huge file costs neither a full read nor a parse tree. Mail needs no
+/// contents probe at all — an `.mbox`/`.eml` extension routes straight
+/// to the lenient mbox streamer (a file without a leading `From `
+/// separator is one bare RFC 5322 message), and a bare mail under a
+/// `.txt` name is sniffed by its first line only after every chat
+/// probe failed. Both share the `mbox` namespace, so the same message
+/// imported as `.mbox` and `.eml` stores once.
+fn import_source_for(path: &Path) -> Result<Option<ImportCandidate>, String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
         .unwrap_or_default();
-    if ext == "mbox" {
-        return Ok(Some(Box::new(MboxSource::new(path))));
+    if ext == "mbox" || ext == "eml" {
+        return Ok(Some(ImportCandidate {
+            source: Box::new(MboxSource::new(path)),
+            key: path.to_path_buf(),
+        }));
     }
     let mut file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut prefix = Vec::new();
@@ -745,15 +778,55 @@ fn import_source_for(path: &Path) -> Result<Option<Box<dyn StreamSource + Send>>
     file.rewind()
         .map_err(|e| format!("{}: {e}", path.display()))?;
     if is_whatsapp_export(&prefix) {
-        return Ok(Some(Box::new(WhatsappSource::new(path))));
+        return Ok(Some(ImportCandidate {
+            source: Box::new(WhatsappSource::new(path)),
+            key: path.to_path_buf(),
+        }));
+    }
+    // A Messenger DYI part, checked before the Telegram probe — a
+    // thread file also holds a `messages` array and would be misrouted
+    // (`chat_export` pins the same order for manual picks). The
+    // filename rule gates the streamed shape probe, and the parent must
+    // really be a thread folder. The part is not the import unit: the
+    // thread is — a later part re-imports the whole thread, and the
+    // content-hash ids keep every row single. The shape probe streams
+    // the file (not the sniffed prefix) because a part larger than
+    // [`DETECT_SNIFF_BYTES`] leaves the prefix mid-JSON, which would
+    // read as "not Messenger" and fall through to Telegram.
+    if is_message_file(path) {
+        if is_messenger_export_reader(&mut file) {
+            if let Some(thread) = path.parent().filter(|p| is_messenger_export_dir(p)) {
+                return Ok(Some(ImportCandidate {
+                    source: Box::new(MessengerSource::new(thread)),
+                    key: thread.to_path_buf(),
+                }));
+            }
+        }
+        file.rewind()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
     }
     if is_telegram_export_reader(&mut file) {
-        return Ok(Some(Box::new(TelegramSource::new(path))));
+        return Ok(Some(ImportCandidate {
+            source: Box::new(TelegramSource::new(path)),
+            key: path.to_path_buf(),
+        }));
     }
     file.rewind()
         .map_err(|e| format!("{}: {e}", path.display()))?;
     if is_signal_export_reader(&mut file) {
-        return Ok(Some(Box::new(SignalSource::new(path))));
+        return Ok(Some(ImportCandidate {
+            source: Box::new(SignalSource::new(path)),
+            key: path.to_path_buf(),
+        }));
+    }
+    // A bare RFC 5322 mail under a `.txt` name (an Outlook drag-out
+    // that lost its `.eml`): the preview's mail-side sniff, mirrored
+    // here as the last probe so every chat shape is tried first.
+    if looks_like_eml(path).map_err(|e| format!("{}: {e}", path.display()))? {
+        return Ok(Some(ImportCandidate {
+            source: Box::new(MboxSource::new(path)),
+            key: path.to_path_buf(),
+        }));
     }
     Ok(None)
 }
@@ -767,11 +840,110 @@ mod tests {
     fn extensions_filter_is_case_insensitive() {
         assert!(is_import_candidate(Path::new("/x/a.mbox")));
         assert!(is_import_candidate(Path::new("/x/A.MBOX")));
+        assert!(is_import_candidate(Path::new("/x/mail.eml")));
+        assert!(is_import_candidate(Path::new("/x/MAIL.EML")));
         assert!(is_import_candidate(Path::new("/x/chat.TXT")));
         assert!(is_import_candidate(Path::new("/x/result.json")));
         assert!(!is_import_candidate(Path::new("/x/photo.png")));
         assert!(!is_import_candidate(Path::new("/x/noext")));
         assert!(!is_import_candidate(Path::new("/x/report.pdf")));
+    }
+
+    #[test]
+    fn eml_and_bare_mail_txt_route_to_the_mbox_source() {
+        let dir = tempfile::tempdir().unwrap();
+        // A dropped .eml: extension alone routes it (the lenient mbox
+        // streamer treats a file without a `From ` separator as one
+        // bare RFC 5322 message).
+        let eml = dir.path().join("mail.eml");
+        std::fs::write(
+            &eml,
+            "From: a@b.c\nSubject: eml\nMessage-ID: <e@x>\n\nBody\n",
+        )
+        .unwrap();
+        let candidate = import_source_for(&eml).unwrap().unwrap();
+        assert_eq!(candidate.source.name(), "mbox");
+        assert_eq!(candidate.key, eml);
+        // A bare mail renamed to .txt: sniffed by its first header line
+        // after every chat probe failed.
+        let txt = dir.path().join("mail.txt");
+        std::fs::write(
+            &txt,
+            "Subject: renamed\nFrom: a@b.c\nMessage-ID: <t@x>\n\nBody\n",
+        )
+        .unwrap();
+        let candidate = import_source_for(&txt).unwrap().unwrap();
+        assert_eq!(candidate.source.name(), "mbox");
+        // The shared namespace: both spellings stay in `mbox`.
+        let mbox = dir.path().join("arch.mbox");
+        std::fs::write(
+            &mbox,
+            "From a@b.c Sat Nov 14 10:00:00 2026\nSubject: m\nMessage-ID: <m@x>\n\nBody\n",
+        )
+        .unwrap();
+        assert_eq!(
+            import_source_for(&mbox).unwrap().unwrap().source.name(),
+            "mbox"
+        );
+    }
+
+    #[test]
+    fn messenger_part_routes_to_its_thread_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let thread = dir
+            .path()
+            .join("facebook-ana/messages/inbox/ana_1234567890");
+        std::fs::create_dir_all(&thread).unwrap();
+        let part = thread.join("message_1.json");
+        std::fs::write(
+            &part,
+            r#"{"participants": [{"name": "Ana"}], "title": "Ana", "thread_path": "inbox/ana_1234567890",
+                "messages": [{"sender_name": "Ana", "timestamp_ms": 1762981200000, "content": "zdravo"}]}"#,
+        )
+        .unwrap();
+        let candidate = import_source_for(&part).unwrap().unwrap();
+        assert_eq!(candidate.source.name(), "messenger");
+        // The import unit is the thread, not the part: the run's key
+        // names the folder, so the checkpoint matches what is streamed.
+        assert_eq!(candidate.key, thread);
+
+        // A part that satisfies the Telegram shape ("has a messages
+        // array") still routes to Messenger — never to Telegram —
+        // because the Messenger probe runs first (the same pinned order
+        // as the manual import path).
+        let telegram_shaped =
+            br#"{"participants": [{"name": "Ana"}], "messages": [{"sender_name": "Ana", "timestamp_ms": 1, "content": "x"}]}"#;
+        assert!(crate::telegram::is_telegram_export(telegram_shaped));
+        let part2 = thread.join("message_2.json");
+        std::fs::write(&part2, telegram_shaped).unwrap();
+        let candidate = import_source_for(&part2).unwrap().unwrap();
+        assert_eq!(candidate.source.name(), "messenger");
+        assert_eq!(candidate.key, thread);
+    }
+
+    #[test]
+    fn unrelated_json_and_notes_still_skip() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = dir.path().join("package.json");
+        std::fs::write(&json, r#"{"name": "app", "version": "1.0"}"#).unwrap();
+        assert!(import_source_for(&json).unwrap().is_none());
+        let notes = dir.path().join("notes.txt");
+        std::fs::write(&notes, "shopping list\nno export shape\n").unwrap();
+        assert!(import_source_for(&notes).unwrap().is_none());
+        // A Messenger-shaped json that is not a `message_*.json` part is
+        // not special-cased by the watcher: the ordinary Telegram probe
+        // decides it (pre-existing behavior — only DYI parts route to
+        // the thread import).
+        let loose = dir.path().join("loose.json");
+        std::fs::write(
+            &loose,
+            r#"{"participants": [{"name": "Ana"}], "messages": [{"sender_name": "Ana", "timestamp_ms": 1, "content": "x"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            import_source_for(&loose).unwrap().unwrap().source.name(),
+            "telegram"
+        );
     }
 
     #[test]
@@ -903,7 +1075,7 @@ mod tests {
         )
         .unwrap();
         let source = import_source_for(&wa).unwrap().unwrap();
-        assert_eq!(source.name(), "whatsapp");
+        assert_eq!(source.source.name(), "whatsapp");
 
         // A Telegram export larger than the sniff cap: the prefix is a
         // truncated document, so only streaming detection finds it.
@@ -923,7 +1095,7 @@ mod tests {
         )
         .unwrap();
         let source = import_source_for(&tg).unwrap().unwrap();
-        assert_eq!(source.name(), "telegram");
+        assert_eq!(source.source.name(), "telegram");
 
         // A Signal export larger than the sniff cap: also streamed, and
         // the array shape is distinct from Telegram's object export.
@@ -939,7 +1111,7 @@ mod tests {
         let sig = dir.path().join("conversation.json");
         std::fs::write(&sig, format!("[{entries}]")).unwrap();
         let source = import_source_for(&sig).unwrap().unwrap();
-        assert_eq!(source.name(), "signal");
+        assert_eq!(source.source.name(), "signal");
     }
 
     #[test]
