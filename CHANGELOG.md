@@ -6,6 +6,27 @@ and packagers run, not item by item.
 
 ## [0.2.0] - pending tag
 
+### Added (GP03 — first-session journey)
+
+- The import preview confirms what it assumed: exports with clock times
+  but no timezone (WhatsApp, Telegram's fallback dates) state the count
+  and the assumed zone, which you confirm or correct once per run;
+  affected messages record the confirmed label (`user_confirmed`).
+  Ambiguous DST times keep the first occurrence and removed ones stay
+  unresolved with their original text — both stated, never hidden.
+- The import destination is explicit: the derived source name is
+  preselected (nothing new to do on a fresh vault) and can be replaced
+  with a new name or an existing import source; re-imports into the same
+  source never duplicate.
+- A failed import offers Retry in place — the same path and options
+  re-submit and resume without duplicating.
+- A finished import links its counts to recovery actions: parse failures
+  open Activity's explanation, missing media say how to re-export with
+  media and import again.
+- "What can I import?" (supported formats + per-format how-to-export
+  hints) now appears on the first-run card and the Add-source chooser,
+  not only inside the import section.
+
 The media release: attachments and chat-export media are now preserved
 and viewable in the app, AI answers run only behind your explicit
 consent, new mail can notify you, and the Linux packages install as

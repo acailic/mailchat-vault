@@ -77,11 +77,49 @@ const TIME_FORMATS: &[&str] = &["%H:%M:%S", "%H:%M", "%I:%M:%S %p", "%I:%M %p"];
 #[derive(Debug, Clone)]
 pub struct WhatsappSource {
     path: PathBuf,
+    /// GP03: a user-confirmed IANA zone — naive stamps resolve in it
+    /// with confidence `user_confirmed` instead of the OS assumption
+    /// (`legacy_assumed`).
+    confirmed_zone: Option<String>,
 }
 
 impl WhatsappSource {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            confirmed_zone: None,
+        }
+    }
+
+    /// Resolve naive stamps in this confirmed zone (GP03; once per run).
+    pub fn with_confirmed_zone(mut self, zone: impl Into<String>) -> Self {
+        self.confirmed_zone = Some(zone.into());
+        self
+    }
+}
+
+/// The zone one run resolves naive stamps in: a confirmed IANA name
+/// (GP03, confidence `user_confirmed`) or the OS local zone with its
+/// IANA label (confidence `legacy_assumed`).
+pub(crate) enum RunZone {
+    Confirmed(chrono_tz::Tz, String),
+    OsLocal(String),
+}
+
+/// Resolve a run's zone from an optional confirmed IANA name (GP03).
+pub(crate) fn run_zone(confirmed: Option<&str>) -> Result<RunZone> {
+    match confirmed {
+        Some(name) => {
+            let tz: chrono_tz::Tz = name.parse().map_err(|_| {
+                Error::ChatImport(format!(
+                    "unknown timezone {name:?} — use an IANA name such as Europe/Berlin"
+                ))
+            })?;
+            Ok(RunZone::Confirmed(tz, name.to_string()))
+        }
+        None => Ok(RunZone::OsLocal(
+            iana_time_zone::get_timezone().unwrap_or_else(|_| "local".to_string()),
+        )),
     }
 }
 
@@ -120,15 +158,26 @@ impl StreamSource for WhatsappSource {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let zone_label = iana_time_zone::get_timezone().unwrap_or_else(|_| "local".to_string());
-        stream_whatsapp_tz(
-            || Ok(BufReader::new(fs::File::open(&self.path)?)),
-            &chat_id,
-            &Local,
-            &zone_label,
-            skip,
-            emit,
-        )
+        match run_zone(self.confirmed_zone.as_deref())? {
+            RunZone::Confirmed(tz, label) => stream_whatsapp_tz(
+                || Ok(BufReader::new(fs::File::open(&self.path)?)),
+                &chat_id,
+                &tz,
+                &label,
+                true,
+                skip,
+                emit,
+            ),
+            RunZone::OsLocal(label) => stream_whatsapp_tz(
+                || Ok(BufReader::new(fs::File::open(&self.path)?)),
+                &chat_id,
+                &Local,
+                &label,
+                false,
+                skip,
+                emit,
+            ),
+        }
     }
 }
 
@@ -136,8 +185,10 @@ impl StreamSource for WhatsappSource {
 /// naive local timestamps in the machine's local timezone (the IANA name
 /// is recorded when resolvable).
 pub fn parse_whatsapp(bytes: &[u8], chat_id: &str) -> Result<Collected> {
-    let zone_label = iana_time_zone::get_timezone().unwrap_or_else(|_| "local".to_string());
-    parse_whatsapp_tz(bytes, chat_id, &Local, &zone_label)
+    match run_zone(None)? {
+        RunZone::Confirmed(tz, label) => parse_whatsapp_tz(bytes, chat_id, &tz, &label, true),
+        RunZone::OsLocal(label) => parse_whatsapp_tz(bytes, chat_id, &Local, &label, false),
+    }
 }
 
 /// Parse WhatsApp export text into messages under an explicit timezone.
@@ -157,6 +208,7 @@ pub fn parse_whatsapp_tz<Tz: TimeZone>(
     chat_id: &str,
     tz: &Tz,
     zone_label: &str,
+    confirmed: bool,
 ) -> Result<Collected> {
     let mut messages: Vec<NewMessage> = Vec::new();
     let mut failed: u64 = 0;
@@ -165,6 +217,7 @@ pub fn parse_whatsapp_tz<Tz: TimeZone>(
         chat_id,
         tz,
         zone_label,
+        confirmed,
         0,
         &mut |item| {
             match item {
@@ -187,6 +240,7 @@ pub fn stream_whatsapp_tz<R: BufRead, Tz: TimeZone>(
     chat_id: &str,
     tz: &Tz,
     zone_label: &str,
+    confirmed: bool,
     skip: u64,
     emit: &mut dyn FnMut(StreamItem) -> Result<Flow>,
 ) -> Result<()> {
@@ -244,6 +298,7 @@ pub fn stream_whatsapp_tz<R: BufRead, Tz: TimeZone>(
             &mut occurrence,
             tz,
             zone_label,
+            confirmed,
         );
         match crate::bounded::emit_entry(EntryOutcome::Message(msg), &mut skip, emit) {
             Ok(Flow::Continue) => true,
@@ -395,13 +450,20 @@ fn finished_to_message<Tz: TimeZone>(
     occurrence: &mut HashMap<u64, u32>,
     tz: &Tz,
     zone_label: &str,
+    confirmed: bool,
 ) -> NewMessage {
     // DST-aware interpretation in the explicit zone; a wall-time a
-    // DST gap removes has no instant at all (kept unresolved).
+    // DST gap removes has no instant at all (kept unresolved). A run
+    // whose zone the user confirmed (GP03) records that provenance:
+    // `user_confirmed` instead of `legacy_assumed`.
     let (sent_at, time_confidence) = match local_to_utc(&f.naive, tz) {
         Some(instant) => (
             instant.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            "legacy_assumed",
+            if confirmed {
+                "user_confirmed"
+            } else {
+                "legacy_assumed"
+            },
         ),
         None => (String::new(), "unresolved"),
     };
@@ -833,6 +895,52 @@ fn strip_prefix_ci<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn confirmed_zone_resolves_naive_stamps_and_labels_them_user_confirmed() {
+        // GP03: a run whose zone the user confirmed resolves the naive
+        // wall-times in it (November Berlin is CET, UTC+1) and records
+        // `user_confirmed` with the zone named.
+        let export = "[1.11.2026., 09:00:05] Marko: hi\n";
+        let tz: chrono_tz::Tz = "Europe/Berlin".parse().unwrap();
+        let collected =
+            parse_whatsapp_tz(export.as_bytes(), "chat", &tz, "Europe/Berlin", true).unwrap();
+        assert_eq!(collected.messages.len(), 1);
+        let m = &collected.messages[0];
+        assert_eq!(m.sent_at, "2026-11-01T08:00:05Z");
+        assert_eq!(m.timezone, "Europe/Berlin");
+        assert_eq!(m.time_confidence, "user_confirmed");
+        assert_eq!(m.original_timestamp, "2026-11-01T09:00:05");
+    }
+
+    #[test]
+    fn confirmed_zone_dst_gap_stays_unresolved_and_dst_fold_keeps_first_occurrence() {
+        // 2026-03-29 02:30 does not exist in Berlin (02:00 → 03:00);
+        // 2026-10-25 02:30 exists twice (CEST → CET). The gap keeps no
+        // instant but its original text; the fold keeps the earlier one.
+        let tz: chrono_tz::Tz = "Europe/Berlin".parse().unwrap();
+        let gap = parse_whatsapp_tz(
+            "[29.3.2026., 02:30:00] Marko: gap\n".as_bytes(),
+            "chat",
+            &tz,
+            "Europe/Berlin",
+            true,
+        )
+        .unwrap();
+        assert_eq!(gap.messages[0].sent_at, "");
+        assert_eq!(gap.messages[0].time_confidence, "unresolved");
+        assert_eq!(gap.messages[0].original_timestamp, "2026-03-29T02:30:00");
+        let fold = parse_whatsapp_tz(
+            "[25.10.2026., 02:30:00] Marko: fold\n".as_bytes(),
+            "chat",
+            &tz,
+            "Europe/Berlin",
+            true,
+        )
+        .unwrap();
+        assert_eq!(fold.messages[0].sent_at, "2026-10-25T00:30:00Z"); // CEST, first occurrence
+        assert_eq!(fold.messages[0].time_confidence, "user_confirmed");
+    }
 
     #[test]
     fn bracketed_header_parses_day_first() {

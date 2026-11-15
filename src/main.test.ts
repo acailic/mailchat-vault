@@ -1623,12 +1623,17 @@ describe("import picker → preview → confirm (U03)", () => {
     expect($(".preview-path").textContent).toBe("/tmp/tg-export/result.json");
     expect($("#import-preview").textContent).toContain("4 messages found");
 
-    // Confirm submits the import job with the checked media toggle.
+    // Confirm submits the import job with the checked media toggle and
+    // the resolved destination source (the derived name, GP03).
     $("#preview-import-btn").click();
     await vi.waitFor(() => expect(jobSubmits()).toHaveLength(1));
     expect(jobSubmits()[0].args).toEqual({
       kind: "import_chat_export",
-      params: { path: "/tmp/tg-export/result.json", extract_media: true },
+      params: {
+        path: "/tmp/tg-export/result.json",
+        extract_media: true,
+        source: "telegram",
+      },
     });
 
     // The inline card owns the run: queued before the first event, with
@@ -1847,6 +1852,107 @@ describe("import picker → preview → confirm (U03)", () => {
     $("#import-progress-dismiss").click();
     expect($("#import-progress").getAttribute("hidden")).not.toBeNull();
     expect($("#import-progress").children.length).toBe(0);
+  });
+
+  it("confirming a naive-timestamp preview carries the corrected zone and chosen source (GP03)", async () => {
+    await boot();
+    dialog.open.mockResolvedValue("/tmp/chat.txt");
+    tauri.handlers.set("preview_import", () =>
+      Promise.resolve({
+        ...TELEGRAM_PREVIEW,
+        naive_timestamps: 4,
+        assumed_zone: "Europe/Belgrade",
+      }),
+    );
+    tauri.handlers.set("job_submit", () => ({ id: 41 }));
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($("#preview-zone-input")).toBeTruthy());
+    // The card states the assumption and its DST honesty up front.
+    expect($("#import-preview").textContent).toContain(
+      "4 messages carry clock times without a timezone",
+    );
+    expect($("#import-preview").textContent).toContain("assumed Europe/Belgrade");
+    // Correct the zone once and rename the destination source.
+    input("#preview-zone-input").value = "Europe/Berlin";
+    input("#preview-source-input").value = "Family chats";
+    $("#preview-import-btn").click();
+    await vi.waitFor(() => expect(jobSubmits()).toHaveLength(1));
+    expect(jobSubmits()[0].args).toEqual({
+      kind: "import_chat_export",
+      params: {
+        path: "/tmp/chat.txt",
+        extract_media: true,
+        source: "Family chats",
+        confirmed_timezone: "Europe/Berlin",
+      },
+    });
+  });
+
+  it("a failed import's Retry re-submits the same path and options (GP03)", async () => {
+    await boot();
+    dialog.open.mockResolvedValue("/tmp/chat.txt");
+    tauri.handlers.set("preview_import", () =>
+      Promise.resolve({
+        ...TELEGRAM_PREVIEW,
+        naive_timestamps: 2,
+        assumed_zone: "Europe/Belgrade",
+      }),
+    );
+    let nextId = 42;
+    tauri.handlers.set("job_submit", () => ({ id: nextId++ }));
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($("#preview-zone-input")).toBeTruthy());
+    input("#preview-zone-input").value = "Europe/Berlin";
+    $("#preview-import-btn").click();
+    await vi.waitFor(() => expect(jobSubmits()).toHaveLength(1));
+    emitJob({ seq: 1, at: "t", job: 42, type: "submitted", kind: "import_chat_export" });
+    emitJob({ seq: 2, at: "t", job: 42, type: "failed", error: { kind: "import", message: "x" } });
+
+    // The failed card offers the in-place retry.
+    await vi.waitFor(() => expect($("#import-retry-btn")).toBeTruthy());
+    $("#import-retry-btn").click();
+    await vi.waitFor(() => expect(jobSubmits()).toHaveLength(2));
+    // Verbatim re-submission: same path and options, nothing re-asked.
+    expect(jobSubmits()[1].args).toEqual(jobSubmits()[0].args);
+    // The new run's card replaces the failure (follows the fresh job id).
+    await vi.waitFor(() =>
+      expect(win.document.querySelector(".import-progress-card.failed")).toBeNull(),
+    );
+    expect(win.document.querySelector(".import-progress-card.queued")).toBeTruthy();
+  });
+
+  it("a completed import links its non-zero counts to recovery actions (GP03)", async () => {
+    await boot();
+    dialog.open.mockResolvedValue("/tmp/chat.txt");
+    tauri.handlers.set("preview_import", () => Promise.resolve(TELEGRAM_PREVIEW));
+    tauri.handlers.set("job_submit", () => ({ id: 45 }));
+    tauri.handlers.set("list_import_scopes_v2", () => []);
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
+    $("#preview-import-btn").click();
+    emitJob({ seq: 1, at: "t", job: 45, type: "submitted", kind: "import_chat_export" });
+    emitJob({
+      seq: 2,
+      at: "t",
+      job: 45,
+      type: "succeeded",
+      result: jobResult(
+        { source: "telegram", seen: 4, inserted: 3, skipped: 0, failed: 1 },
+        "chat-import-abc",
+        { referenced: 2, stored: 1, deduped: 0, missing: 1, linked: 1, unlinked: 0, unlinked_deduped: 0 },
+      ),
+    });
+    await vi.waitFor(() => expect($("#import-status").textContent).toContain("1 failed to parse"));
+    // Each non-zero count gets its recovery action: the parse failure
+    // opens Activity's explanation; the missing media file names the
+    // re-export-with-media path.
+    const failures = $("#import-failures-btn");
+    expect(failures.textContent).toContain("failed to parse");
+    expect($("#import-missing-media").textContent).toContain(
+      "1 media file missing from the export",
+    );
+    failures.click();
+    await vi.waitFor(() => expect($("#app").dataset.view).toBe("activity"));
   });
 
   it("Cancel stops this flow's job with no confirm dialog, then the section resets", async () => {
