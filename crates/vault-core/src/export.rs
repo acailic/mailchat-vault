@@ -10,7 +10,8 @@
 //! - **JSON Lines** — one full `Message` object per line (the exact serde
 //!   shape the app already speaks, so a programmatic
 //!   [`crate::storage::Storage::insert_message`] loop re-imports it
-//!   losslessly). Export-only today: no app importer accepts this file.
+//!   losslessly); [`crate::jsonl`] streams it back through the ordinary
+//!   bounded import pipeline.
 //! - **MBOX** — the classic `From `-separated mailbox, written only for
 //!   email-channel rows (chat rows are counted in
 //!   [`ExportSummary::skipped`]): key headers are reconstructed from the

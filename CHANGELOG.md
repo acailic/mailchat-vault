@@ -21,6 +21,19 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
 - Corrected two native E2E calls that aborted the source-selection and Add source
   chooser scenarios before their assertions ran.
 
+### Added (JSON Lines import)
+
+- **JSON Lines import** — the `.jsonl` files the app exports now import
+  back: picking one runs the ordinary bounded preview → confirm → import
+  flow, each row keeping its original source and external id, so an
+  exported subset lands identically in another vault and importing the
+  same file twice stores each message exactly once. Malformed lines
+  become per-item issue records instead of aborting the run; media
+  references in a row's `raw_json` stay references (media bytes are not
+  transferred — the backup container remains the whole-vault tool).
+  Closes the export/import round-trip for the app's machine-readable
+  format.
+
 ### Added (.eml & Messenger import)
 
 - **`.eml` mail import** — single `.eml` messages (dragged out of any

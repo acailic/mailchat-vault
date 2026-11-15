@@ -1,0 +1,331 @@
+//! JSON Lines import source: reads back the `.jsonl` files the export
+//! writes ([`crate::export`]'s `ExportFormat::Json`) — one complete
+//! message object per line, the exact serde shape the app stores.
+//!
+//! This closes the export/import round-trip at the level of
+//! machine-readable single messages: an exported subset moves between
+//! vaults without a whole-vault backup container (which stays the right
+//! tool for full moves — it carries media bytes and settings too).
+//!
+//! Mapping into the archive schema:
+//! - Each row keeps its **own** `source` and `external_id` verbatim —
+//!   the legacy identity [`crate::storage`] dedups on — so a file
+//!   exported from one vault lands identically in another, re-imports
+//!   never duplicate, and mixed-source files keep their rows under
+//!   their original namespaces. The run-level name
+//!   ([`JSONL_SOURCE`]) only labels the import run's summary, mirroring
+//!   how `MBOX_SOURCE` names mail runs while rows dedup on their own
+//!   ids.
+//! - The exported row's `id` (the autoincrement of the exporting vault)
+//!   is ignored: a fresh vault assigns its own.
+//! - Every other field (`channel`, `chat_id`, `author`, `sent_at`,
+//!   `body`, `raw_json`) is copied verbatim; an absent `raw_json`
+//!   defaults to `"{}"`, an absent `channel` to `"email"`, as in
+//!   [`crate::message::NewMessage::new`].
+//! - A malformed line — invalid JSON, a non-object line, or an object
+//!   without the `source`/`external_id` identity pair — becomes a
+//!   durable per-item failure record (`StreamItem::Failed`, landing in
+//!   `import_issues` like every other format's parse failures) instead
+//!   of aborting the run; blank lines are not items at all.
+//! - Media references in a row's `raw_json` stay references: media
+//!   bytes are not transferred (no media pass runs for this format,
+//!   like Signal and Discord).
+//!
+//! Detection ([`is_jsonl_export_reader`]): the first non-empty line
+//! parses as a JSON object carrying a string `source` plus a string
+//! `external_id`. The chat-export probes (Discord, Messenger, Telegram,
+//! Signal, WhatsApp) all claim whole-file shapes and run first, so a
+//! one-object-per-line file can only reach this probe.
+
+use std::fs;
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
+
+use serde_json::Value;
+
+use crate::bounded::{emit_entry, EntryOutcome, Flow, StreamItem, StreamSource};
+use crate::ingest::{Collected, Source};
+use crate::message::NewMessage;
+use crate::Result;
+
+/// Run-level source name for JSON Lines imports. Labels the import run
+/// (summary, checkpoint, issue records); the identity of each row is its
+/// own `source` + `external_id`, preserved verbatim — see the
+/// [module docs](self).
+pub const JSONL_SOURCE: &str = "jsonl";
+
+/// Reads one `.jsonl` export (one message object per line, as written by
+/// [`crate::export`]) and yields its rows.
+#[derive(Debug, Clone)]
+pub struct JsonlSource {
+    path: PathBuf,
+}
+
+impl JsonlSource {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+/// The bounded streaming path: one line at a time, one decoded row
+/// alive at any moment — a `.jsonl` export of any size costs a fixed
+/// line buffer, never the whole file.
+impl StreamSource for JsonlSource {
+    fn name(&self) -> &str {
+        JSONL_SOURCE
+    }
+
+    fn stream(&self, skip: u64, emit: &mut dyn FnMut(StreamItem) -> Result<Flow>) -> Result<()> {
+        stream_jsonl(BufReader::new(fs::File::open(&self.path)?), skip, emit)
+    }
+}
+
+impl Source for JsonlSource {
+    fn name(&self) -> &str {
+        JSONL_SOURCE
+    }
+
+    fn collect(&self) -> Result<Collected> {
+        parse_jsonl(&fs::read(&self.path)?)
+    }
+}
+
+/// Parse JSON Lines bytes into messages (the whole-file test
+/// convenience; production streams through [`JsonlSource`]).
+pub fn parse_jsonl(bytes: &[u8]) -> Result<Collected> {
+    let mut messages = Vec::new();
+    let mut failed: u64 = 0;
+    stream_jsonl(std::io::Cursor::new(bytes), 0, &mut |item| {
+        match item {
+            StreamItem::Message(msg) => messages.push(msg),
+            StreamItem::Failed { .. } => failed += 1,
+        }
+        Ok(Flow::Continue)
+    })?;
+    Ok(Collected { messages, failed })
+}
+
+/// The shared engine behind the streaming source and the whole-file
+/// parser: read one line, convert it, offer it to the consumer (through
+/// the shared skip counter, so restart recovery fast-forwards over
+/// already-committed items). Lines are read as bytes and converted
+/// lossily, so a non-UTF-8 line is a per-item failure, never a run
+/// abort.
+pub fn stream_jsonl<R: BufRead>(
+    reader: R,
+    skip: u64,
+    emit: &mut dyn FnMut(StreamItem) -> Result<Flow>,
+) -> Result<()> {
+    let mut reader = reader;
+    let mut skip = skip;
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        buf.clear();
+        let read = reader.read_until(b'\n', &mut buf)?;
+        if read == 0 {
+            return Ok(());
+        }
+        let line = String::from_utf8_lossy(&buf);
+        let outcome = jsonl_line_outcome(&line);
+        if let Flow::Stop = emit_entry(outcome, &mut skip, emit)? {
+            return Ok(());
+        }
+    }
+}
+
+/// Convert one line: a well-formed row yields a message (its exported
+/// `id` ignored), a malformed line a durable failure record, a blank
+/// line nothing at all.
+fn jsonl_line_outcome(line: &str) -> EntryOutcome {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return EntryOutcome::Skip;
+    }
+    let value = match serde_json::from_str::<Value>(trimmed) {
+        Ok(value) => value,
+        Err(e) => {
+            return EntryOutcome::Failed {
+                // Nothing trustworthy to extract from an unparseable
+                // line; the position in the file is the durable locator.
+                external_ref: String::new(),
+                reason: format!("line is not valid JSON: {e}"),
+            };
+        }
+    };
+    let Some(obj) = value.as_object() else {
+        return EntryOutcome::Failed {
+            external_ref: String::new(),
+            reason: "line is not a JSON object".to_string(),
+        };
+    };
+    // The identity pair is the dedup contract: a row without it cannot
+    // round-trip and is recorded as a failure, exactly like an id-less
+    // entry in the other chat formats.
+    let (source, external_id) = match (
+        string_field(obj, "source"),
+        string_field(obj, "external_id"),
+    ) {
+        (Some(source), Some(external_id)) => (source, external_id),
+        _ => {
+            let external_ref = string_field(obj, "external_id").or_else(|| string_field(obj, "id"));
+            return EntryOutcome::Failed {
+                external_ref: external_ref.unwrap_or_default(),
+                reason: "row is missing its source or external_id identity".to_string(),
+            };
+        }
+    };
+    let field = |name: &str| string_field(obj, name).unwrap_or_default();
+    let mut msg = NewMessage::new(
+        source,
+        external_id,
+        field("author"),
+        field("sent_at"),
+        field("body"),
+    );
+    // An absent channel defaults to `"email"` (NewMessage's own
+    // default); an absent raw_json to the canonical empty extras `"{}"`.
+    msg.channel = field("channel");
+    if msg.channel.is_empty() {
+        msg.channel = "email".to_string();
+    }
+    msg.chat_id = field("chat_id");
+    msg.raw_json = field("raw_json");
+    if msg.raw_json.is_empty() {
+        msg.raw_json = "{}".to_string();
+    }
+    EntryOutcome::Message(msg)
+}
+
+/// True when the bytes are a JSON Lines export: the first non-empty
+/// line parses as a JSON object carrying a string `source` plus a
+/// string `external_id` — the export's exact row shape. Bounded: only
+/// that first line is read.
+pub fn is_jsonl_export(bytes: &[u8]) -> bool {
+    is_jsonl_export_reader(std::io::Cursor::new(bytes))
+}
+
+/// [`is_jsonl_export`] streamed from a reader (the real picks' shape).
+pub fn is_jsonl_export_reader<R: std::io::Read>(reader: R) -> bool {
+    let mut reader = BufReader::new(reader);
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => return false,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+        let line = String::from_utf8_lossy(&buf);
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) else {
+            return false;
+        };
+        return string_field(&obj, "source").is_some()
+            && string_field(&obj, "external_id").is_some();
+    }
+}
+
+fn string_field(obj: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    obj.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row_json(id: i64, source: &str, external_id: &str, body: &str) -> String {
+        format!(
+            r#"{{"id":{id},"source":"{source}","external_id":"{external_id}","channel":"chat","chat_id":"ekipa","author":"Marko","sent_at":"2026-11-01T10:00:00Z","body":"{body}","raw_json":"{{}}"}}"#
+        )
+    }
+
+    #[test]
+    fn rows_preserve_their_own_identity_and_fields() {
+        let bytes = format!(
+            "{}\n{}\n",
+            row_json(1, "telegram", "42/7", "zdravo"),
+            row_json(2, "mbox", "a@b.c", "pozdrav")
+        );
+        let collected = parse_jsonl(bytes.as_bytes()).unwrap();
+        assert_eq!(collected.messages.len(), 2);
+        assert_eq!(collected.failed, 0);
+        assert_eq!(collected.messages[0].source, "telegram");
+        assert_eq!(collected.messages[0].external_id, "42/7");
+        assert_eq!(collected.messages[0].channel, "chat");
+        assert_eq!(collected.messages[0].chat_id, "ekipa");
+        assert_eq!(collected.messages[0].author, "Marko");
+        assert_eq!(collected.messages[0].sent_at, "2026-11-01T10:00:00Z");
+        assert_eq!(collected.messages[0].body, "zdravo");
+        assert_eq!(collected.messages[1].source, "mbox");
+        assert_eq!(collected.messages[1].external_id, "a@b.c");
+    }
+
+    #[test]
+    fn exported_id_is_ignored() {
+        // Same row under two different vault ids: one message identity.
+        let bytes = format!(
+            "{}\n{}\n",
+            row_json(1, "telegram", "42/7", "x"),
+            row_json(999, "telegram", "42/7", "x")
+        );
+        let collected = parse_jsonl(bytes.as_bytes()).unwrap();
+        assert_eq!(collected.messages.len(), 2);
+        assert_eq!(
+            collected.messages[0].external_id,
+            collected.messages[1].external_id
+        );
+    }
+
+    #[test]
+    fn defaults_for_absent_optional_fields() {
+        let bytes = br#"{"source":"mbox","external_id":"a@b.c"}"#;
+        let collected = parse_jsonl(bytes).unwrap();
+        let msg = &collected.messages[0];
+        assert_eq!(msg.channel, "email");
+        assert_eq!(msg.raw_json, "{}");
+        assert_eq!(msg.body, "");
+    }
+
+    #[test]
+    fn blank_lines_are_not_items() {
+        let bytes = format!("\n\n{}\n   \n", row_json(1, "s", "e", "b"));
+        let collected = parse_jsonl(bytes.as_bytes()).unwrap();
+        assert_eq!(collected.messages.len(), 1);
+        assert_eq!(collected.failed, 0);
+    }
+
+    #[test]
+    fn malformed_lines_fail_without_aborting() {
+        let bytes = format!(
+            "{{not json}}\n{}\n\"just a string\"\n{{\"source\":\"s\"}}\n",
+            row_json(1, "s", "e", "b")
+        );
+        let collected = parse_jsonl(bytes.as_bytes()).unwrap();
+        assert_eq!(collected.messages.len(), 1);
+        assert_eq!(collected.failed, 3);
+    }
+
+    #[test]
+    fn detection_needs_the_identity_pair_on_the_first_line() {
+        assert!(is_jsonl_export(
+            row_json(1, "telegram", "42/7", "x").as_bytes()
+        ));
+        // Leading blank lines are tolerated.
+        assert!(is_jsonl_export(
+            format!("\n {}\n", row_json(1, "s", "e", "x")).as_bytes()
+        ));
+        // Objects without the identity pair are not JSON Lines rows.
+        assert!(!is_jsonl_export(br#"{"name":"Arhiva","messages":[]}"#));
+        assert!(!is_jsonl_export(br#"{"id":1,"source":"s"}"#));
+        // Non-objects, arrays, garbage: no.
+        assert!(!is_jsonl_export(br#"["not","jsonl"]"#));
+        assert!(!is_jsonl_export(b""));
+        assert!(!is_jsonl_export(b"just text\n"));
+    }
+}
