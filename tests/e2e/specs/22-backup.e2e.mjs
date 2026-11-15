@@ -4,10 +4,15 @@
 // return path — driven on the live product:
 //   - Create backup: the `backup_create` job writes one self-describing
 //     container; the Activity panel lists it; no snapshot temp litter is
-//     left beside the destination.
+//     left beside the destination. The vault carries known messages AND
+//     files (fixture mails with MIME attachments), and the run emits a
+//     [evidence] line binding it to the container's SHA-256 and manifest
+//     counts (GP04 candidate proof).
 //   - Restore: inspect → staged validated preview → commit replaces the
 //     vault; the replaced vault's predecessor lands whole in a
-//     previous-vault slot; the restarted app opens the restored vault.
+//     previous-vault slot; the restarted app opens the restored vault,
+//     its known messages, and its known files (media store + reading
+//     pane attachment list).
 //   - Return to previous vault: the recovery panel renders the slot; the
 //     backend return switches back; the restarted app opens the original
 //     vault again.
@@ -25,7 +30,8 @@
 // switch serialization, marker contract) are proven in the src-tauri unit
 // tests and vault-core's backup suite.
 
-import { existsSync, readdirSync, mkdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -120,20 +126,36 @@ export async function run(ctx) {
     let backupMessages = 0;
     let originalMessages = 0;
     let returnedSlotId = "";
+    let storedBefore = [];
     await withSession(
       {},
       async (browser, { dataDir }) => {
         firstDataDir = dataDir;
       await ui.waitForApp(browser);
 
-      // 1. A known 8-message archive.
+      // 1. A known archive: the 8-message fixture plus 2 mails whose
+      // MIME attachments land in the media store, so the backup
+      // container carries known messages AND files to restore (GP04
+      // candidate proof).
       const imported = await ui.importMbox(browser, ui.archiveMbox);
       assert.equal(imported.inserted, 8, `the mbox import finished: ${JSON.stringify(imported)}`);
+      const attached = await ui.importMbox(
+        browser,
+        path.join(ui.fixturesDir, "mail-attachments.mbox"),
+      );
+      assert.equal(attached.inserted, 2, `the attachments mbox import finished: ${JSON.stringify(attached)}`);
       const db = vaultDbPath(dataDir);
+      const storeDir = path.join(dataDir, "com.acailic.mailchatvault", "media");
+      storedBefore = readdirSync(storeDir).filter((n) => !n.startsWith("."));
+      assert.equal(
+        storedBefore.length,
+        2,
+        "both attachment objects are in the media store before the backup",
+      );
       if (sqlite) {
         const rows = await sqlite.query(db, "SELECT COUNT(*) AS n FROM archive_messages");
         backupMessages = rows[0].n;
-        assert.equal(backupMessages, 8, "the fixture imports 8 messages");
+        assert.equal(backupMessages, 10, "the fixtures import 10 messages");
       }
 
       await openBackupPanel(browser, ui);
@@ -163,7 +185,20 @@ export async function run(ctx) {
           backupMessages,
           "the manifest's message count matches the live database",
         );
+        assert.ok(
+          summary.manifest.counts.media_objects >= 2,
+          `the manifest counts the backed-up media objects: ${JSON.stringify(summary.manifest.counts)}`,
+        );
       }
+      // Candidate-proof evidence line (GP04): bind this run to the
+      // exact container bytes and record the manifest counts.
+      const containerDigest = createHash("sha256")
+        .update(readFileSync(backupPath))
+        .digest("hex");
+      log(
+        `      [evidence] backup container: sha256=${containerDigest}` +
+          ` bytes=${summary.size} counts=${JSON.stringify(summary.manifest.counts)}`,
+      );
 
       // No snapshot temp litter beside the destination (the backup_create
       // job must clean its working file on every exit path).
@@ -200,18 +235,16 @@ export async function run(ctx) {
       log("      [vault-backup] jobs panel listed the backup");
       await saveScreenshot(browser, "22-backup-job-in-activity.png");
 
-      // 3. Change the vault so the restore has something to undo.
-      const second = await ui.importMbox(
-        browser,
-        path.join(ui.fixturesDir, "mail-attachments.mbox"),
-      );
-      assert.ok(second.inserted > 0, `the second import finished: ${JSON.stringify(second)}`);
+      // 3. Change the vault so the restore has something to undo: the
+      // demo seed adds messages beyond the backup point (the fixture
+      // mails and their files are already inside the backup).
+      await ui.seedDemo(browser);
       if (sqlite) {
         const rows = await sqlite.query(db, "SELECT COUNT(*) AS n FROM archive_messages");
         originalMessages = rows[0].n;
         assert.ok(
           originalMessages > backupMessages,
-          "the second import grew the archive beyond the backup point",
+          "the demo seed grew the archive beyond the backup point",
         );
       }
 
@@ -317,6 +350,43 @@ export async function run(ctx) {
           `the restarted app opened the restored vault (stats: ${stats})`,
         );
       }
+
+      // GP04: the restored vault reopens its known messages AND files —
+      // search a distinctive attachment-fixture subject, open the
+      // reading pane, and confirm the attachment is listed as available
+      // (not unresolved) with its object back in the media store.
+      await ui.search(browser, "agenda");
+      await browser.execute(() =>
+        document.querySelector("#results li.hit-item")?.click(),
+      );
+      await browser.waitUntil(
+        () => browser.execute(() => document.querySelector("#detail.open") !== null),
+        { timeoutMsg: "the restored vault never opened the known message" },
+      );
+      const restoredMedia = await browser.execute(() =>
+        Array.from(
+          document.querySelectorAll("#detail .detail-media .media-name"),
+          (el) => el.textContent ?? "",
+        ),
+      );
+      assert.ok(
+        restoredMedia.includes("design-notes.pdf"),
+        `the restored vault lists the known file (got ${JSON.stringify(restoredMedia)})`,
+      );
+      const restoredStore = readdirSync(
+        path.join(firstDataDir, "com.acailic.mailchatvault", "media"),
+      ).filter((n) => !n.startsWith("."));
+      assert.equal(
+        restoredStore.length,
+        storedBefore.length,
+        `the restore brought the media objects back (${restoredStore.join(", ")})`,
+      );
+      log(
+        `      [evidence] restore reopened: messages=${backupMessages || "n/a"} files=${restoredStore.length}`,
+      );
+      await browser.execute(() =>
+        document.querySelector("#detail")?.classList.remove("open"),
+      );
 
       await openBackupPanel(browser, ui);
       const refresh = await browser.$("#recovery-refresh-btn");

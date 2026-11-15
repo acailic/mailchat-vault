@@ -88,7 +88,7 @@ async function invoke(browser, command, args = {}) {
 }
 
 export async function run(ctx) {
-  const { withSession, assert, ui } = ctx;
+  const { withSession, assert, ui, log } = ctx;
 
   await rm(workDir, { recursive: true, force: true });
   await mkdir(workDir, { recursive: true });
@@ -192,6 +192,11 @@ export async function run(ctx) {
         assert.ok(key in m, `message has ${key}`);
       }
     }
+    // Candidate-proof evidence line (GP04): counts for the record.
+    log(
+      `      [evidence] export parity: query "vault" total=${vaultTotal}` +
+        ` csv=${csv.value.written} jsonl=${json.value.written} skipped=0`,
+    );
 
     // The UI scopes by canonical instance id. Export must use that same
     // scope rather than comparing its id to a legacy source name.
@@ -213,6 +218,11 @@ export async function run(ctx) {
       scopedMessages.map((m) => m.id).join(","),
       scopedPage.value.hits.map((m) => m.id).join(","),
       "the export contains the source's exact originals in search order",
+    );
+    // Candidate-proof evidence line (GP04): source-scoped parity counts.
+    log(
+      `      [evidence] source-scoped export: search total=${scopedPage.value.total}` +
+        ` exported=${scopedExport.value.written} ids-in-search-order`,
     );
 
     // Scenario: formula-injection probe — chat bodies beginning with =, +,
