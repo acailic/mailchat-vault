@@ -404,6 +404,28 @@ describe("era chips", () => {
     });
     expect(el.children.length).toBe(0);
   });
+
+  it("shrinking to the cap resets expansion; a regrow starts collapsed", () => {
+    const el = document.createElement("div");
+    renderEraChips(el, { buckets: eightBuckets, activeIndex: -1, onToggle: () => {} });
+    (el.querySelector("button.era-more") as HTMLElement).click(); // expand
+    expect(el.querySelectorAll("button.era-chip").length).toBe(8);
+
+    // The timeline shrinks to the cap (a re-import with tighter bounds):
+    // nothing to hide, and the persisted expanded state must not linger.
+    const fiveBuckets = eightBuckets.slice(3);
+    renderEraChips(el, { buckets: fiveBuckets, activeIndex: -1, onToggle: () => {} });
+    expect(el.querySelectorAll("button.era-chip").length).toBe(5);
+    expect(el.querySelector("button.era-more")).toBeNull();
+
+    // Regrow past the cap: the strip starts collapsed again — five chips
+    // and an Older… toggle, not the eight the stale flag would show.
+    renderEraChips(el, { buckets: eightBuckets, activeIndex: -1, onToggle: () => {} });
+    expect(el.querySelectorAll("button.era-chip").length).toBe(5);
+    const older = el.querySelector("button.era-more") as HTMLElement;
+    expect(older.textContent).toBe("Older…");
+    expect(older.getAttribute("aria-expanded")).toBe("false");
+  });
 });
 
 describe("import scope picker", () => {
