@@ -271,15 +271,26 @@ body {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  /* Anchor for the absolutely-placed #nav-toggle (in the DOM it sits at
+   * the end of #content, after #main — see the topbar comment below). */
+  position: relative;
 }
 
 /* The topbar is visible at every width: its hamburger hides the nav column
- * on desktop and works the drawer on compact. */
+ * on desktop and works the drawer on compact. The toggle button itself
+ * lives at the END of #content in the DOM (after #main) so the Tab order
+ * reaches the view content first; CSS places it back into the bar's left
+ * edge, and these reservations keep the bar's geometry exactly as it was
+ * when the button was in flow: 8px inset + ~84px button (icon + gap +
+ * "Menu" + padding + border) + 8px gap before the title, and the height
+ * that button gave the bar (2×4px insets + ~33px + 1px border). */
 #topbar {
   display: flex;
   align-items: center;
   gap: var(--sp-2);
   padding: var(--sp-1) var(--sp-2);
+  padding-left: calc(var(--sp-2) + 84px + var(--sp-2));
+  min-height: 42px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
 }
@@ -288,7 +299,12 @@ body {
   color: var(--muted);
 }
 
+/* Absolutely placed into the topbar's left edge (see #topbar above);
+ * DOM position (end of #content) keeps it LAST in the tab order. */
 #nav-toggle {
+  position: absolute;
+  top: var(--sp-1);
+  left: var(--sp-2);
   display: inline-flex;
   align-items: center;
   gap: var(--sp-1);
@@ -448,6 +464,26 @@ input[type="text"], input[type="password"] {
 }
 input[type="date"] { padding: 4px 6px; font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--radius-s); }
 input[type="text"].short { flex: 0 1 14em; }
+
+/* Placeholder text: --muted (the tuned quiet-ink token), not the UA's
+ * alpha-gray, which fails 4.5:1 on dark panels. Measured pairs (WCAG
+ * relative luminance, the tokens.css convention):
+ *   light  #5d6a60 on --panel #ffffff = 5.68:1, on --panel-2 #f2efe8 = 4.95:1
+ *   dark   #9faaa1 on --panel #222825 = 6.25:1, on --panel-2 #2a312d = 5.55:1
+ * opacity 1 keeps the measured pair exact (UA placeholder opacity would
+ * dim it below the ratio). */
+::placeholder { color: var(--muted); opacity: 1; }
+
+/* Native checkboxes: pin the accent to the token so the checked state
+ * stays on the palette (GTK's dark theme would otherwise render its own
+ * amber — the one off-palette saturated color in the app). One global
+ * rule covers the settings checkboxes and the result-row row-select. */
+input[type="checkbox"] { accent-color: var(--accent); }
+
+/* The result-row selection checkbox: a 24px hit area (WCAG 2.2 target
+ * size) via a 4px padding halo around the natural-size glyph, offset by
+ * the same negative margin so the row layout does not shift. */
+.row-select { padding: 4px; margin: -4px; }
 
 button {
   padding: var(--sp-1) var(--sp-3);
@@ -941,13 +977,15 @@ mark.hit {
 
 /* Icon-only utility actions (reading header): quiet squares that name
  * their action through aria-label/title; the keyboard focus ring comes
- * from the global :focus-visible rule. */
+ * from the global :focus-visible rule. 32px so icon-only targets stay
+ * comfortably clickable for low-vision users (copy / link / export
+ * picker / close; WCAG 2.2 target size). */
 .icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   padding: 0;
   background: transparent;
   border: 1px solid transparent;
@@ -955,7 +993,7 @@ mark.hit {
 }
 .icon-btn:hover:not(:disabled) {
   background: var(--panel-2);
-  border-color: var(--border);
+  border-color: var(--border-strong);
 }
 summary.icon-btn {
   list-style: none;

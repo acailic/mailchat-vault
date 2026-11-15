@@ -46,7 +46,10 @@ workspace `Cargo.toml`, commit, tag `v<version>`, push the tag.
 > Linux; `npm run tauri build -- --bundles app,dmg` on macOS;
 > `npm run tauri build -- --bundles msi,nsis` on Windows; publish with
 > `gh release create/upload`, gated on the local smoke suites + checksums)
-> remains the fallback a maintainer can run without Actions.
+> remains the fallback a maintainer can run without Actions. For *per-PR*
+> verification while CI is down, the interim protocol — tiers, commands, and
+> PR-body recording — is
+> [docs/testing.md → Interim per-PR verification](testing.md#interim-per-pr-verification-while-ci-is-down).
 
 The same packaging can be built locally without any host toolchain
 (besides docker) with:

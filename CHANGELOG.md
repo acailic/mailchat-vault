@@ -36,6 +36,18 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
   archive-messages index — covered by migration 15's composite — is dropped;
   vaults upgrade in place as always.
 
+### Fixed (accessibility)
+
+- Placeholder text renders in the muted token at full opacity — the browser
+  default gray failed the 4.5:1 contrast floor on dark surfaces (measured
+  pairs recorded beside the rule, per the tokens.css convention). Native
+  checkboxes render with the palette accent instead of the GTK dark-theme
+  amber, and the result-row selection checkbox gained a 24px hit area via a
+  padding halo. Reading-header icon buttons (copy, link, export, close)
+  are 32px targets with a stronger hover border. The topbar Menu button is
+  no longer the first Tab stop inside content — view controls come first,
+  while the button keeps its visual place in the topbar.
+
 ### Added (JSON Lines import)
 
 - **JSON Lines import** — the `.jsonl` files the app exports now import
