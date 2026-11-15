@@ -84,6 +84,16 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
   that don't need quotes and cells without a prefix export byte-identical to
   before.
 
+### Fixed (export durability)
+
+- A failed message export no longer destroys the file it was writing to.
+  Every streaming export (search results, selection, whole conversation)
+  now writes into a private temporary sibling of the chosen destination
+  and replaces it only after the complete file is written, flushed, and
+  synced — a failure partway through leaves a previously valid export
+  byte-for-byte unchanged, and an export to a new path that fails leaves
+  no half-written file behind.
+
 ### Added (JSON Lines import)
 
 - **JSON Lines import** — the `.jsonl` files the app exports now import
