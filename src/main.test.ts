@@ -12,11 +12,18 @@ import { Window } from "happy-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ArchiveStats,
+  JobEventsPage,
+  JobRecord,
   Message,
   Stats,
   SyncScheduleView,
   WatchSnapshot,
 } from "./types";
+import type {
+  BackupManifest,
+  BackupSummaryView,
+  RestorePreviewView,
+} from "./backupview";
 import type {
   ConversationContext,
   MessageSummary,
@@ -5756,6 +5763,241 @@ describe("settings pages", () => {
     expect($("#settings-storage")!.contains(note)).toBe(false);
     expect($("#settings-ai")!.contains(note)).toBe(false);
     expect($("#settings-general")!.previousElementSibling).toBe(note);
+  });
+});
+
+// Backup & restore panel reconciliation (P2) ------------------------------
+//
+// The backend enqueues a job before `job_submit` replies, so a terminal
+// job-event can beat the reply (the panels' pending id did not exist
+// yet), and a terminal result recovered by a `job_events_since`
+// snapshot never arrives as a live event at all. Both panels must still
+// settle — from the live event, from the record the tracker already
+// holds once the handle arrives, or from a polled snapshot.
+
+const BACKUP_MANIFEST: BackupManifest = {
+  format_version: 1,
+  schema_version: 1,
+  created_at: "2026-11-15T10:00:00Z",
+  counts: { messages: 12, sources: 2, media_objects: 3 },
+  db: { path: "db.sqlite", size: 4096, sha256: "aa" },
+  settings: null,
+  objects: [],
+};
+
+const BACKUP_SUMMARY: BackupSummaryView = {
+  path: "/media/vault.mcbackup",
+  size: 2048,
+  manifest: BACKUP_MANIFEST,
+};
+
+const RESTORE_PREVIEW: RestorePreviewView = {
+  preview_id: "prev-1",
+  archive: "/media/vault.mcbackup",
+  manifest: BACKUP_MANIFEST,
+  restored_settings: false,
+  objects: 0,
+};
+
+const EMPTY_JOBS_PAGE: JobEventsPage = {
+  events: [],
+  latest_seq: 0,
+  oldest_kept: 1,
+  trimmed: false,
+  jobs: [],
+};
+
+/** A finished job's authoritative record, as a snapshot page carries it. */
+const finishedRecord = (id: number, kind: string, state: JobRecord["state"]): JobRecord => ({
+  id,
+  kind,
+  state,
+  submitted_at: "t",
+  started_at: "t",
+  finished_at: "t",
+  progress: null,
+});
+
+describe("backup & restore panels reconcile terminal job outcomes", () => {
+  const emit = (payload: unknown) =>
+    tauriEvents.listeners.get("job-event")!({ payload });
+
+  const jobSubmitCalls = () => tauri.calls.filter((c) => c.cmd === "job_submit");
+  const commitCalls = () => tauri.calls.filter((c) => c.cmd === "restore_commit");
+
+  const submittedKind = (kind: string) =>
+    jobSubmitCalls().some((c) => (c.args as { kind?: string }).kind === kind);
+
+  /** Start a backup whose `job_submit` reply stays pending; the test
+   * emits events and resolves the deferred to choose a timing. */
+  const startBackupJob = async () => {
+    dialog.savedPath = "/media/vault.mcbackup";
+    const submit = deferred<{ id: number }>();
+    tauri.handlers.set("job_submit", () => submit.promise);
+    $("#backup-create-btn").click();
+    await vi.waitFor(() => expect(submittedKind("backup_create")).toBe(true));
+    expect($("#backup-status").textContent).toContain("Backing up to /media/vault.mcbackup");
+    return submit;
+  };
+
+  /** Walk pick → inspect → Validate; the `job_submit` reply stays
+   * pending at the validation step. */
+  const startRestoreJob = async () => {
+    dialog.open.mockResolvedValue("/media/vault.mcbackup");
+    tauri.handlers.set("backup_inspect", () => BACKUP_MANIFEST);
+    const submit = deferred<{ id: number }>();
+    tauri.handlers.set("job_submit", () => submit.promise);
+    $("#restore-pick-btn").click();
+    await vi.waitFor(() =>
+      expect($("#restore-flow").textContent).toContain("Validate for restore"),
+    );
+    const validate = [...win.document.querySelectorAll("#restore-flow button")].find(
+      (b) => b.textContent === "Validate for restore…",
+    ) as unknown as HTMLButtonElement;
+    validate.click();
+    await vi.waitFor(() => expect(submittedKind("restore_preview")).toBe(true));
+    expect($("#restore-flow").textContent).toContain("Validating the backup");
+    return submit;
+  };
+
+  it("backup: a terminal event delivered before job_submit resolves settles the status line", async () => {
+    tauri.handlers.set("job_events_since", () => EMPTY_JOBS_PAGE);
+    await boot();
+    const submit = await startBackupJob();
+    // The backend finishes the job and emits before the reply arrives.
+    emit({ seq: 1, at: "t", job: 7, type: "submitted", kind: "backup_create" });
+    emit({ seq: 2, at: "t", job: 7, type: "succeeded", result: BACKUP_SUMMARY });
+    submit.resolve({ id: 7 });
+    await vi.waitFor(() =>
+      expect($("#backup-status").textContent).toBe("Backup written to /media/vault.mcbackup (2 KiB)."),
+    );
+  });
+
+  it("backup: failed and cancelled results delivered before the reply settle too", async () => {
+    tauri.handlers.set("job_events_since", () => EMPTY_JOBS_PAGE);
+    await boot();
+    let submit = await startBackupJob();
+    emit({ seq: 1, at: "t", job: 7, type: "submitted", kind: "backup_create" });
+    emit({ seq: 2, at: "t", job: 7, type: "failed", error: { kind: "io", message: "disk full" } });
+    submit.resolve({ id: 7 });
+    await vi.waitFor(() => expect($("#backup-status").textContent).toBe("Backup failed: disk full"));
+
+    submit = await startBackupJob();
+    emit({ seq: 3, at: "t", job: 8, type: "submitted", kind: "backup_create" });
+    emit({ seq: 4, at: "t", job: 8, type: "cancelled" });
+    submit.resolve({ id: 8 });
+    await vi.waitFor(() =>
+      expect($("#backup-status").textContent).toBe("Backup cancelled — no file was written."),
+    );
+  });
+
+  it("restore: a validated preview delivered before job_submit resolves reaches validated and never commits on its own", async () => {
+    tauri.handlers.set("job_events_since", () => EMPTY_JOBS_PAGE);
+    await boot();
+    const submit = await startRestoreJob();
+    emit({ seq: 1, at: "t", job: 8, type: "submitted", kind: "restore_preview" });
+    emit({ seq: 2, at: "t", job: 8, type: "succeeded", result: RESTORE_PREVIEW });
+    submit.resolve({ id: 8 });
+    await vi.waitFor(() =>
+      expect($("#restore-flow").textContent).toContain("— validated; no settings in this backup."),
+    );
+    const commit = $<HTMLButtonElement>("#restore-flow button");
+    expect(commit.textContent).toBe("Restore now…");
+    expect(commit.disabled).toBe(false);
+    // A validated preview only offers the commit; it never fires one.
+    await flush();
+    expect(commitCalls()).toHaveLength(0);
+  });
+
+  it("restore: failed and cancelled validations delivered before the reply settle to error and idle", async () => {
+    tauri.handlers.set("job_events_since", () => EMPTY_JOBS_PAGE);
+    await boot();
+    let submit = await startRestoreJob();
+    emit({ seq: 1, at: "t", job: 8, type: "submitted", kind: "restore_preview" });
+    emit({ seq: 2, at: "t", job: 8, type: "failed", error: { kind: "invalid", message: "checksum mismatch" } });
+    submit.resolve({ id: 8 });
+    await vi.waitFor(() =>
+      expect($("#restore-flow").textContent).toContain("Validation failed: checksum mismatch"),
+    );
+
+    // Cancelled returns the flow to idle: the panel empties.
+    submit = await startRestoreJob();
+    emit({ seq: 3, at: "t", job: 9, type: "submitted", kind: "restore_preview" });
+    emit({ seq: 4, at: "t", job: 9, type: "cancelled" });
+    submit.resolve({ id: 9 });
+    await vi.waitFor(() => expect($("#restore-flow").textContent).toBe(""));
+    expect(commitCalls()).toHaveLength(0);
+  });
+
+  it("a terminal result present only in a polling snapshot settles both panels", async () => {
+    let page: JobEventsPage = EMPTY_JOBS_PAGE;
+    tauri.handlers.set("job_events_since", () => page);
+    await boot();
+    const backupSubmit = await startBackupJob();
+    const restoreSubmit = await startRestoreJob();
+    backupSubmit.resolve({ id: 7 });
+    restoreSubmit.resolve({ id: 8 });
+    await flush();
+    // No live event ever matched: both panels are still mid-flight.
+    expect($("#backup-status").textContent).toContain("Backing up to /media/vault.mcbackup");
+    expect($("#restore-flow").textContent).toContain("Validating the backup");
+
+    // The terminal results surface only through the next poll's
+    // records snapshot; a seq gap in an unrelated live event is what
+    // triggers that recovery poll.
+    page = {
+      events: [],
+      latest_seq: 4,
+      oldest_kept: 1,
+      trimmed: false,
+      jobs: [
+        finishedRecord(7, "backup_create", { state: "succeeded", result: BACKUP_SUMMARY }),
+        finishedRecord(8, "restore_preview", { state: "succeeded", result: RESTORE_PREVIEW }),
+      ],
+    };
+    emit({ seq: 9, at: "t", job: 99, type: "submitted", kind: "imap_sync_all" });
+    await vi.waitFor(() =>
+      expect($("#backup-status").textContent).toBe("Backup written to /media/vault.mcbackup (2 KiB)."),
+    );
+    await vi.waitFor(() =>
+      expect($("#restore-flow").textContent).toContain("— validated; no settings in this backup."),
+    );
+    expect(commitCalls()).toHaveLength(0);
+  });
+
+  it("normal completion order settles both panels; a duplicate late event changes nothing", async () => {
+    tauri.handlers.set("job_events_since", () => EMPTY_JOBS_PAGE);
+    await boot();
+    // The common path: the submit reply resolves first, the terminal
+    // event after — the panels must settle exactly as before.
+    const backupSubmit = await startBackupJob();
+    backupSubmit.resolve({ id: 7 });
+    await flush(); // the reply lands before any event is emitted
+    emit({ seq: 1, at: "t", job: 7, type: "submitted", kind: "backup_create" });
+    emit({ seq: 2, at: "t", job: 7, type: "succeeded", result: BACKUP_SUMMARY });
+    await vi.waitFor(() =>
+      expect($("#backup-status").textContent).toBe("Backup written to /media/vault.mcbackup (2 KiB)."),
+    );
+
+    const restoreSubmit = await startRestoreJob();
+    restoreSubmit.resolve({ id: 8 });
+    await flush();
+    emit({ seq: 3, at: "t", job: 8, type: "submitted", kind: "restore_preview" });
+    emit({ seq: 4, at: "t", job: 8, type: "succeeded", result: RESTORE_PREVIEW });
+    await vi.waitFor(() =>
+      expect($("#restore-flow").textContent).toContain("— validated; no settings in this backup."),
+    );
+
+    // A late duplicate terminal event (fresh seq, outcome already
+    // applied and the pending ids cleared) must change nothing.
+    const backupLine = $("#backup-status").textContent;
+    const flowText = $("#restore-flow").textContent;
+    emit({ seq: 5, at: "t", job: 7, type: "succeeded", result: BACKUP_SUMMARY });
+    emit({ seq: 6, at: "t", job: 8, type: "succeeded", result: RESTORE_PREVIEW });
+    await flush();
+    expect($("#backup-status").textContent).toBe(backupLine);
+    expect($("#restore-flow").textContent).toBe(flowText);
+    expect(commitCalls()).toHaveLength(0);
   });
 });
 
