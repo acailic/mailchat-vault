@@ -129,6 +129,7 @@ import type {
   EmbeddingStatus,
   ExportSummary,
   JobEvent,
+  JobRecord,
   Message,
   SourceInstance,
   SyncScheduleView,
@@ -2705,6 +2706,9 @@ async function syncJobs(): Promise<void> {
   try {
     const page = await ipc.jobEventsSince(jobs.cursor);
     applyJobsPage(jobs, page);
+    // A terminal result recovered by the snapshot never arrives as a
+    // live event — it is an outcome for the panels all the same.
+    reconcilePendingJobOutcomes();
     renderJobs();
   } catch {
     // Backend not ready (early boot) — the next job-event retry polls.
@@ -2965,6 +2969,9 @@ async function createBackup(): Promise<void> {
   try {
     const handle = await ipc.jobSubmit("backup_create", { dest: picked });
     pendingBackupJob = handle.id;
+    // The backend enqueues before replying: the job may already have
+    // finished, its terminal event missing the pending id above.
+    reconcilePendingJobOutcomes();
   } catch (e) {
     backupStatus.textContent = `Backup failed to start: ${e}`;
   }
@@ -3001,6 +3008,8 @@ async function startRestoreValidation(archive: string): Promise<void> {
   try {
     const handle = await ipc.jobSubmit("restore_preview", { archive });
     pendingRestoreJob = handle.id;
+    // Same as createBackup: the validation may already be over.
+    reconcilePendingJobOutcomes();
   } catch (e) {
     restoreFlow = { step: "error", message: `Validation failed to start: ${e}` };
     renderRestorePanel();
@@ -3155,36 +3164,106 @@ async function onForgetSlot(slotId: string): Promise<void> {
   void refreshRecovery();
 }
 
+/** A job state that carries an outcome for these panels. */
+type TerminalJobState = Extract<
+  JobRecord["state"],
+  { state: "succeeded" } | { state: "failed" } | { state: "cancelled" }
+>;
+
+function isTerminalState(state: JobRecord["state"]): state is TerminalJobState {
+  return (
+    state.state === "succeeded" || state.state === "failed" || state.state === "cancelled"
+  );
+}
+
+/** Apply a terminal backup outcome to the panel's status line. */
+function applyBackupOutcome(terminal: TerminalJobState): void {
+  if (terminal.state === "succeeded") {
+    backupStatus.textContent = backupDoneLine(terminal.result as BackupSummaryView);
+  } else if (terminal.state === "failed") {
+    backupStatus.textContent = `Backup failed: ${"message" in terminal.error ? terminal.error.message : terminal.error.kind}`;
+  } else if (terminal.state === "cancelled") {
+    backupStatus.textContent = "Backup cancelled — no file was written.";
+  }
+}
+
+/** Apply a terminal restore-validation outcome to the flow. Success
+ *  only stages the validated preview — committing stays behind the
+ *  explicit, user-confirmed `commitRestore`, never automatic. */
+function applyRestoreOutcome(terminal: TerminalJobState): void {
+  if (terminal.state === "succeeded") {
+    restoreFlow = { step: "validated", preview: terminal.result as RestorePreviewView };
+  } else if (terminal.state === "failed") {
+    restoreFlow = {
+      step: "error",
+      message: `Validation failed: ${"message" in terminal.error ? terminal.error.message : terminal.error.kind}`,
+    };
+  } else if (terminal.state === "cancelled") {
+    restoreFlow = { step: "idle" };
+  }
+}
+
+type TerminalJobEvent = Extract<
+  JobEvent,
+  { type: "succeeded" } | { type: "failed" } | { type: "cancelled" }
+>;
+
+function isTerminalEvent(event: JobEvent): event is TerminalJobEvent {
+  return (
+    event.type === "succeeded" || event.type === "failed" || event.type === "cancelled"
+  );
+}
+
 /** Feed backup/restore job outcomes into their panels (the job stream
- *  carries the results; the tracker only keeps states). */
+ *  carries the results; the tracker only keeps states). Applying a
+ *  terminal outcome clears its pending id, so a replayed duplicate no
+ *  longer matches — every outcome lands exactly once. */
 function feedBackupJobEvent(event: JobEvent): void {
+  if (!isTerminalEvent(event)) return;
+  const terminal: TerminalJobState =
+    event.type === "succeeded"
+      ? { state: "succeeded", result: event.result }
+      : event.type === "failed"
+        ? { state: "failed", error: event.error }
+        : { state: "cancelled" };
   if (pendingBackupJob !== null && event.job === pendingBackupJob) {
-    if (event.type === "succeeded") {
-      const summary = event.result as BackupSummaryView;
-      backupStatus.textContent = backupDoneLine(summary);
-      pendingBackupJob = null;
-    } else if (event.type === "failed") {
-      backupStatus.textContent = `Backup failed: ${"message" in event.error ? event.error.message : event.error.kind}`;
-      pendingBackupJob = null;
-    } else if (event.type === "cancelled") {
-      backupStatus.textContent = "Backup cancelled — no file was written.";
-      pendingBackupJob = null;
-    }
+    applyBackupOutcome(terminal);
+    pendingBackupJob = null;
   }
   if (pendingRestoreJob !== null && event.job === pendingRestoreJob) {
-    if (event.type === "succeeded") {
-      restoreFlow = { step: "validated", preview: event.result as RestorePreviewView };
-      pendingRestoreJob = null;
-    } else if (event.type === "failed") {
-      restoreFlow = {
-        step: "error",
-        message: `Validation failed: ${"message" in event.error ? event.error.message : event.error.kind}`,
-      };
-      pendingRestoreJob = null;
-    } else if (event.type === "cancelled") {
-      restoreFlow = { step: "idle" };
-      pendingRestoreJob = null;
-    }
+    applyRestoreOutcome(terminal);
+    pendingRestoreJob = null;
+    renderRestorePanel();
+  }
+}
+
+/** Reconcile the panels' pending operations from the authoritative job
+ *  records. Two timings hide a terminal outcome from the live-event
+ *  path above: the backend can finish a job (and emit its terminal
+ *  event) before `job_submit` resolves — the pending ids did not exist
+ *  yet, so nothing matched — and a terminal result recovered by a
+ *  polling snapshot never arrives as a live event at all. Reading the
+ *  record closes both gaps; applying an outcome clears the pending id,
+ *  so this and the live path stay exactly-once against each other (and
+ *  against repeat polls). Restored ledger rows carry a summary string,
+ *  not the full result: pending ids are session-scoped and never
+ *  reference them, but they are skipped defensively anyway. */
+function reconcilePendingJobOutcomes(): void {
+  const pendingState = (id: number | null): JobRecord["state"] | null => {
+    if (id === null) return null;
+    const record = jobs.records.get(id);
+    if (record === undefined || record.restored) return null;
+    return record.state;
+  };
+  const backup = pendingState(pendingBackupJob);
+  if (backup !== null && isTerminalState(backup)) {
+    applyBackupOutcome(backup);
+    pendingBackupJob = null;
+  }
+  const restore = pendingState(pendingRestoreJob);
+  if (restore !== null && isTerminalState(restore)) {
+    applyRestoreOutcome(restore);
+    pendingRestoreJob = null;
     renderRestorePanel();
   }
 }
