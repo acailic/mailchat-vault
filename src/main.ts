@@ -172,6 +172,9 @@ const fromDateInput = document.querySelector<HTMLInputElement>("#from-date")!;
 const toDateInput = document.querySelector<HTMLInputElement>("#to-date")!;
 const sortOrderSelect = document.querySelector<HTMLSelectElement>("#sort-order")!;
 const hasAttachmentSelect = document.querySelector<HTMLSelectElement>("#has-attachment")!;
+const timeAssumedSelect = document.querySelector<HTMLSelectElement>("#time-assumed")!;
+const groupingUnverifiedSelect = document.querySelector<HTMLSelectElement>("#grouping-unverified")!;
+const filesMissingSelect = document.querySelector<HTMLSelectElement>("#files-missing")!;
 const importScopeSelect = document.querySelector<HTMLSelectElement>("#import-scope")!;
 const filtersSummary = document.querySelector<HTMLElement>("#filters-summary")!;
 const eraChips = document.querySelector<HTMLElement>("#era-chips")!;
@@ -1220,6 +1223,14 @@ function readFilters(text: string): SearchFilters {
     timezone: "",
     hasAttachment:
       hasAttachmentSelect.value === "" ? null : hasAttachmentSelect.value === "with",
+    timeAssumed:
+      timeAssumedSelect.value === "" ? null : timeAssumedSelect.value === "assumed",
+    groupingUnverified:
+      groupingUnverifiedSelect.value === ""
+        ? null
+        : groupingUnverifiedSelect.value === "unverified",
+    filesMissing:
+      filesMissingSelect.value === "" ? null : filesMissingSelect.value === "missing",
     importJobId: importScopeSelect.value === "" ? null : importScopeSelect.value,
     sort: sortOrderSelect.value === "newest" ? "newest" : "relevance",
   };
@@ -1233,6 +1244,12 @@ function writeFilters(f: SearchFilters): void {
   toDateInput.value = f.toDate;
   hasAttachmentSelect.value =
     f.hasAttachment === null ? "" : f.hasAttachment ? "with" : "without";
+  timeAssumedSelect.value =
+    f.timeAssumed == null ? "" : f.timeAssumed ? "assumed" : "confirmed";
+  groupingUnverifiedSelect.value =
+    f.groupingUnverified == null ? "" : f.groupingUnverified ? "unverified" : "verified";
+  filesMissingSelect.value =
+    f.filesMissing == null ? "" : f.filesMissing ? "missing" : "preserved";
   importScopeSelect.value = f.importJobId ?? "";
   sortOrderSelect.value = f.sort;
 }
@@ -1351,6 +1368,9 @@ function clearFilters(): void {
   fromDateInput.value = "";
   toDateInput.value = "";
   hasAttachmentSelect.value = "";
+  timeAssumedSelect.value = "";
+  groupingUnverifiedSelect.value = "";
+  filesMissingSelect.value = "";
   importScopeSelect.value = "";
   sortOrderSelect.value = "relevance";
   void refreshStats();
@@ -3119,6 +3139,9 @@ fromDateInput.addEventListener("change", () => void runSearch(0));
 toDateInput.addEventListener("change", () => void runSearch(0));
 sortOrderSelect.addEventListener("change", () => void runSearch(0));
 hasAttachmentSelect.addEventListener("change", () => void runSearch(0));
+timeAssumedSelect.addEventListener("change", () => void runSearch(0));
+groupingUnverifiedSelect.addEventListener("change", () => void runSearch(0));
+filesMissingSelect.addEventListener("change", () => void runSearch(0));
 importScopeSelect.addEventListener("change", () => void runSearch(0));
 exportSelectionButton.addEventListener("click", exportSelectionFromResults);
 clearFiltersButton.addEventListener("click", clearFilters);
