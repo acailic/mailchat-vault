@@ -376,7 +376,9 @@ carries the archive) against exactly the bytes users download.
 draft-release candidate for the version named in
 `src-tauri/tauri.conf.json` (or `--version X.Y.Z`): it verifies the
 version is bumped consistently (tauri.conf.json, workspace `Cargo.toml`,
-`package.json`, `Cargo.lock`) and that no `v<version>` tag exists yet,
+`package.json`, `Cargo.lock`) and that no `v<version>` tag exists yet
+(`--tag-exists-ok` permits post-tag local assembly under the local
+execution route, e.g. for the already-tagged `v0.2.0`),
 runs this platform's full validation matrix column, builds the Linux
 bundles, and writes into `target/release/draft-release/v<version>/`:
 
@@ -387,7 +389,8 @@ bundles, and writes into `target/release/draft-release/v<version>/`:
 - `RELEASE-NOTES.md` — the version's [`CHANGELOG.md`](../CHANGELOG.md)
   section plus the standing unsigned-artifacts disclosure,
 - `PUBLISH-CHECKLIST.md` — the remaining tag/publish/smoke steps in
-  gate order, waiting on the maintainer's host/Actions decision.
+  gate order, following the [execution-route
+  decision](#release-execution-route-decided-2026-11-15-80) (#80).
 
 It never tags, never calls `gh release`, and never touches Actions:
 publishing stays a separate human decision by design. `--skip-matrix`
@@ -497,8 +500,8 @@ executed gates are recorded.
    for the execution route (#80) and attestations, the M6 record in the
    [implementation roadmap](implementation-roadmap.md), and — once
    attestations actually exist per the preconditions above — the
-   provenance statement here; the v0.2.0 CHANGELOG section already
-   reflects route (c).
+   provenance statement here; the v0.2.0 CHANGELOG section records the
+   route state.
 
 ## App icon
 
