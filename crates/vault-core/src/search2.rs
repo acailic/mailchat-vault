@@ -577,22 +577,56 @@ pub fn attachment_summaries(raw_json: &str) -> Vec<AttachmentSummary> {
             });
         }
     }
-    // Discord Data Package rows keep the API's `attachments` array.
+    // Signal and Discord both keep an `attachments` array verbatim in
+    // `raw_json`, and the shapes collide. Ownership is decided at ARRAY
+    // level — one exporter writes one shape for the whole array — by the
+    // camelCase `fileName` key only Signal Desktop writes. A
+    // Signal-owned array renders like the Telegram/Messenger fields: no
+    // row per entry, but one honest unavailable row when the media pass
+    // has not accounted for the array (a stored or missing `media`
+    // entry always carries a name from `media::signal_entry_names`, the
+    // single shared rule, so a processed array never also renders a
+    // phantom row). A Discord-owned array renders its per-entry rows
+    // exactly as before; a mixed array is claimed whole by the Signal
+    // arm.
     if let Some(Value::Array(entries)) = map.get("attachments") {
-        for entry in entries {
-            let Value::Object(entry) = entry else {
-                continue;
-            };
-            let name = str_of(entry, "filename").unwrap_or("attachment");
-            let kind = str_of(entry, "content_type").unwrap_or("file");
-            let size = entry.get("size").and_then(Value::as_u64).unwrap_or(0);
-            out.push(AttachmentSummary {
-                name: name.to_string(),
-                kind: kind.to_string(),
-                size,
-                available: false,
-                path: None,
-            });
+        let signal_owned = entries.iter().any(|entry| {
+            entry
+                .get("fileName")
+                .and_then(Value::as_str)
+                .is_some_and(|name| !name.is_empty())
+        });
+        if signal_owned {
+            let names = crate::media::signal_entry_names(&map);
+            if !names.iter().any(|n| media_names.contains(n)) {
+                if let Some((name, kind)) = crate::media::signal_first_ref(&map) {
+                    out.push(AttachmentSummary {
+                        name,
+                        kind,
+                        size: 0,
+                        available: false,
+                        path: None,
+                    });
+                }
+            }
+        } else {
+            // Discord Data Package rows keep the API's `attachments`
+            // array (snake_case entries, reference-only by construction).
+            for entry in entries {
+                let Value::Object(entry) = entry else {
+                    continue;
+                };
+                let name = str_of(entry, "filename").unwrap_or("attachment");
+                let kind = str_of(entry, "content_type").unwrap_or("file");
+                let size = entry.get("size").and_then(Value::as_u64).unwrap_or(0);
+                out.push(AttachmentSummary {
+                    name: name.to_string(),
+                    kind: kind.to_string(),
+                    size,
+                    available: false,
+                    path: None,
+                });
+            }
         }
     }
     // Telegram exports keep the original objects verbatim. The media
@@ -728,12 +762,16 @@ const GROUPING_UNVERIFIED_SQL: &str = "(m.conversation_id IS NULL \
 /// approximations): a `media` entry recorded missing or without stored
 /// bytes; a WhatsApp `attachment` placeholder no stored entry accounts
 /// for (name equality, the single shared suppression rule); a Discord
-/// `attachments` array (reference-only by construction); or a
-/// Telegram/Messenger reference with no `media` entry at all (the media
-/// pass names stored entries by exactly the reader's entry names, so a
-/// stored reference always suppresses the phantom row — and a processed
-/// but absent file already matched the missing-entry arm). The
-/// negation is "every reference preserved", including none at all.
+/// `attachments` array (reference-only by construction) or a Signal one
+/// no `media` entry accounts for (the same coarse `media`-empty
+/// approximation the Telegram/Messenger arms use — the pass names every
+/// stored or missing entry, so an accounted array is covered by the
+/// media arms); or a Telegram/Messenger reference with no `media` entry
+/// at all (the media pass names stored entries by exactly the reader's
+/// entry names, so a stored reference always suppresses the phantom
+/// row — and a processed but absent file already matched the
+/// missing-entry arm). The negation is "every reference preserved",
+/// including none at all.
 const FILES_MISSING_SQL: &str = "(EXISTS (SELECT 1 FROM json_each(m.raw_json, '$.media') je \
      WHERE json_extract(je.value, '$.missing') = 1 \
         OR COALESCE(json_extract(je.value, '$.sha256'), '') = '') \
@@ -741,7 +779,8 @@ const FILES_MISSING_SQL: &str = "(EXISTS (SELECT 1 FROM json_each(m.raw_json, '$
          AND NOT EXISTS (SELECT 1 FROM json_each(m.raw_json, '$.media') je \
              WHERE json_extract(je.value, '$.name') \
                    IS json_extract(m.raw_json, '$.attachment.name'))) \
-     OR COALESCE(json_array_length(m.raw_json, '$.attachments'), 0) > 0 \
+     OR (COALESCE(json_array_length(m.raw_json, '$.attachments'), 0) > 0 \
+         AND COALESCE(json_array_length(m.raw_json, '$.media'), 0) = 0) \
      OR (json_type(m.raw_json, '$.photo') IS NOT NULL \
          AND COALESCE(json_array_length(m.raw_json, '$.media'), 0) = 0) \
      OR (json_type(m.raw_json, '$.file') IS NOT NULL \
@@ -3107,6 +3146,117 @@ mod attachment_summary_tests {
         })
         .to_string();
         assert!(attachment_summaries(&raw).is_empty());
+    }
+
+    #[test]
+    fn unaccounted_signal_references_render_one_honest_row() {
+        // A Signal `attachments` array (camelCase `fileName` entries)
+        // renders like the Telegram/Messenger fields: one honest
+        // unavailable row when the media pass has not accounted for it —
+        // never one row per entry, and never a name-less Discord "attachment"
+        // row for an entry that carries no snake_case `filename`.
+        let raw = serde_json::json!({
+            "attachments": [
+                {"fileName": "signal-2023-11-01-110050.jpg", "contentType": "image/jpeg"},
+                {"fileName": "report.pdf", "contentType": "application/pdf"}
+            ]
+        })
+        .to_string();
+        let summaries = attachment_summaries(&raw);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].name, "signal-2023-11-01-110050.jpg");
+        assert_eq!(summaries[0].kind, "image");
+        assert!(!summaries[0].available);
+        assert!(summaries[0].path.is_none());
+
+        // A name-less Signal entry (a voice note) must not fall through
+        // to the Discord arm: the array is Signal-owned, one row.
+        let raw = serde_json::json!({
+            "attachments": [
+                {"fileName": "photo.jpg", "contentType": "image/jpeg"},
+                {"contentType": "audio/ogg"}
+            ]
+        })
+        .to_string();
+        let summaries = attachment_summaries(&raw);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].name, "photo.jpg");
+
+        // An accounted array renders no phantom row: the media pass
+        // recorded the reference (stored or missing), and that entry's
+        // name is exactly one of `signal_entry_names`.
+        let stored = serde_json::json!({
+            "attachments": [
+                {"fileName": "photo.jpg", "contentType": "image/jpeg"}
+            ],
+            "media": [
+                {"sha256": "a", "path": "media/a.jpg", "name": "photo.jpg", "kind": "image", "size": 9}
+            ]
+        })
+        .to_string();
+        let summaries = attachment_summaries(&stored);
+        assert_eq!(summaries.len(), 1);
+        assert!(summaries[0].available);
+        let missing = serde_json::json!({
+            "attachments": [
+                {"fileName": "gone.jpg", "contentType": "image/jpeg"}
+            ],
+            "media": [
+                {"name": "gone.jpg", "kind": "image", "missing": true, "reason": "not-in-export"}
+            ]
+        })
+        .to_string();
+        let summaries = attachment_summaries(&missing);
+        assert_eq!(summaries.len(), 1);
+        assert!(!summaries[0].available);
+        assert_eq!(summaries[0].name, "gone.jpg");
+    }
+
+    #[test]
+    fn discord_attachment_rows_render_exactly_as_today() {
+        // A Discord `attachments` array (snake_case entries, no media
+        // pass) renders one row per entry, exactly as before the Signal
+        // arm existed: `filename`/`content_type` verbatim, unavailable.
+        let raw = serde_json::json!({
+            "attachments": [
+                {"filename": "clip.mp4", "content_type": "video/mp4", "size": 42},
+                {"filename": "notes.txt", "content_type": "text/plain", "size": 7}
+            ]
+        })
+        .to_string();
+        let summaries = attachment_summaries(&raw);
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].name, "clip.mp4");
+        assert_eq!(summaries[0].kind, "video/mp4");
+        assert_eq!(summaries[0].size, 42);
+        assert!(!summaries[0].available);
+        assert_eq!(summaries[1].name, "notes.txt");
+
+        // Shape collision: a mixed array (one snake_case entry, one
+        // camelCase entry) is claimed whole by the Signal arm — ownership
+        // is decided at array level, so only the Signal row renders.
+        let raw = serde_json::json!({
+            "attachments": [
+                {"filename": "clip.mp4", "content_type": "video/mp4"},
+                {"fileName": "signal-2023-11-01-110050.jpg", "contentType": "image/jpeg"}
+            ]
+        })
+        .to_string();
+        let summaries = attachment_summaries(&raw);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].name, "signal-2023-11-01-110050.jpg");
+        assert_eq!(summaries[0].kind, "image");
+        assert!(!summaries[0].available);
+
+        // A Discord entry without `filename` keeps its honest fallback.
+        let raw = serde_json::json!({
+            "attachments": [{"content_type": "application/octet-stream"}]
+        })
+        .to_string();
+        let summaries = attachment_summaries(&raw);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].name, "attachment");
+        assert_eq!(summaries[0].kind, "application/octet-stream");
     }
 
     #[test]

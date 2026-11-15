@@ -262,12 +262,16 @@ impl Default for StreamLimits {
 }
 
 /// Which export flavor the media pass should run for a bounded import
-/// (see [`crate::media`]; Signal and Discord record attachments in
-/// `raw_json` only, so they have no media pass yet).
+/// (see [`crate::media`]; Discord records attachments in `raw_json`
+/// only, so it has no media pass yet).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaKind {
     Telegram,
     WhatsApp,
+    /// Signal conversation exports: attachment `fileName`s in `raw_json`
+    /// carry no paths — the bytes sit somewhere in the export tree — so
+    /// the pass matches names against a bounded walk of it.
+    Signal,
     /// Email (mbox): the parser decoded MIME attachment/inline parts into
     /// [`NewMessage::attachments`]; the pass stages their bytes into the
     /// object store and records `media` entries before the batch commits.
@@ -620,6 +624,14 @@ impl RunState<'_, '_> {
                         &mut self.consumed_paths,
                     )?,
                     MediaKind::WhatsApp => crate::media::extract_whatsapp(
+                        &mut self.batch,
+                        pass.export_root,
+                        pass.data_dir,
+                        summary,
+                        &mut self.media_budget,
+                        &mut self.consumed_paths,
+                    )?,
+                    MediaKind::Signal => crate::media::extract_signal(
                         &mut self.batch,
                         pass.export_root,
                         pass.data_dir,
