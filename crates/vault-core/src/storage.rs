@@ -1995,28 +1995,54 @@ impl Storage {
             .map_err(Into::into)
     }
 
-    /// Every message of one chat thread, oldest → newest (same order the
-    /// detail view walks the thread in, but without the radius bound). The
-    /// legacy `(source namespace, chat_id)` key resolves through the
-    /// conversation rows the canonical store maintains; a message with no
-    /// conversation has no thread and yields no rows. Ties and unknown
+    /// Stream every message of the conversation containing message `id`,
+    /// oldest → newest, through `sink` one row at a time (used by
+    /// export, which must cover the whole thread without collecting it
+    /// into memory). The anchor's canonical conversation — the same
+    /// identity [`Storage::chat_context`] walks — defines the set:
+    /// provider-key conversations and email threads group there exactly
+    /// like legacy `(source, chat_id)` groups, so renames and chats
+    /// sharing a display name never change what streams. A message with
+    /// no conversation (standalone mail, ungrouped legacy rows) stands
+    /// alone and streams as its own single row. Ties and unknown
     /// instants order by id, matching the legacy ordering exactly
-    /// (COALESCE maps the unknown NULL instant to the legacy empty-string
-    /// position).
-    pub fn chat_thread_messages(&self, source: &str, chat_id: &str) -> Result<Vec<Message>> {
+    /// (COALESCE maps the unknown NULL instant to the legacy
+    /// empty-string position).
+    pub fn conversation_thread_stream(
+        &self,
+        id: i64,
+        sink: &mut dyn FnMut(&Message) -> Result<()>,
+    ) -> Result<()> {
+        // Peers exist only inside a conversation: M1.3 resolved rows
+        // (provider keys, email threads) group there, while messages
+        // without one (empty legacy `chat_id`, standalone mail) stand
+        // alone.
+        let has_conversation: bool = self.conn.query_row(
+            "SELECT conversation_id IS NOT NULL FROM archive_messages WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if !has_conversation {
+            return match self.get(id)? {
+                Some(m) => sink(&m),
+                None => Ok(()),
+            };
+        }
+
         let mut stmt = self.conn.prepare(
             "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
              m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), m.body, m.raw_json \
              FROM archive_messages AS m \
-             JOIN conversations AS c ON c.id = m.conversation_id \
-             JOIN source_instances AS si ON si.id = c.source_instance_id \
-             WHERE si.legacy_namespace = ?1 AND c.legacy_chat_key = ?2 \
+             JOIN source_instances AS si ON si.id = m.source_instance_id \
+             WHERE m.conversation_id = ( \
+                 SELECT conversation_id FROM archive_messages WHERE id = ?1) \
              ORDER BY COALESCE(m.sent_instant, '') ASC, m.id ASC",
         )?;
-        let rows = stmt
-            .query_map(params![source, chat_id], message_from_row)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+        let mut rows = stmt.query(params![id])?;
+        while let Some(row) = rows.next()? {
+            sink(&message_from_row(row)?)?;
+        }
+        Ok(())
     }
 
     /// Archive counts: total and per source.

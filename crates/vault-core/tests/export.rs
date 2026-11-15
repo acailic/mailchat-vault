@@ -882,6 +882,125 @@ fn chat_export_mbox_skips_non_email_thread_rows() {
 }
 
 // ---------------------------------------------------------------------------
+// Conversation-identity whole-chat export (provider keys, renames)
+// ---------------------------------------------------------------------------
+
+/// One Telegram export chat keyed by its provider id, the fixture shape
+/// the conversation suite uses (crates/vault-core/tests/conversations.rs).
+const TG_EXPORT: &str = r#"{"name": "Staro ime", "id": 42, "messages": [
+    {"id": 1, "type": "message", "date_unixtime": "1730432400", "from": "Ana", "text": "poruka jedan"},
+    {"id": 2, "type": "message", "date_unixtime": "1730432500", "from": "Ana", "text": "poruka dva"},
+    {"id": 3, "type": "message", "date_unixtime": "1730432600", "from": "Ana", "text": "poruka tri"}]}"#;
+// The same chat (provider id 42) re-exported under a new display name.
+const TG_EXPORT_RENAMED: &str = r#"{"name": "Novo ime", "id": 42, "messages": [
+    {"id": 1, "type": "message", "date_unixtime": "1730432400", "from": "Ana", "text": "poruka jedan"},
+    {"id": 2, "type": "message", "date_unixtime": "1730432500", "from": "Ana", "text": "poruka dva"},
+    {"id": 3, "type": "message", "date_unixtime": "1730432600", "from": "Ana", "text": "poruka tri"}]}"#;
+// A different chat sharing the first export's display name.
+const TG_EXPORT_SAME_LABEL: &str = r#"{"name": "Staro ime", "id": 77, "messages": [
+    {"id": 1, "type": "message", "date_unixtime": "1730432400", "from": "Bane", "text": "drugi chat"}]}"#;
+
+/// Write one Telegram export file and return its path (the tempdir is
+/// forgotten, keeping the file alive for the storage's lifetime).
+fn tg_export(file: &str, json: &str) -> std::path::PathBuf {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(file);
+    std::fs::write(&path, json.as_bytes()).unwrap();
+    std::mem::forget(dir);
+    path
+}
+
+/// Ingest `json` as a Telegram export into `storage`.
+fn tg_ingest(storage: &Storage, file: &str, json: &str) {
+    vault_core::ingest::ingest(
+        storage,
+        &vault_core::telegram::TelegramSource::new(tg_export(file, json)),
+    )
+    .unwrap();
+}
+
+/// The row id of the one message whose body contains `needle`.
+fn id_by_body(storage: &Storage, needle: &str) -> i64 {
+    storage
+        .search_filtered(&format!("\"{needle}\""), None, None, None, false, 10)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body.contains(needle))
+        .unwrap_or_else(|| panic!("no message with {needle}"))
+        .id
+}
+
+/// Export one anchor's whole chat as JSON Lines and return the summary
+/// plus the parsed rows.
+fn chat_rows(storage: &Storage, anchor: i64) -> (ExportSummary, Vec<Message>) {
+    let mut buf = Vec::new();
+    let summary = export_chat(storage, anchor, ExportFormat::Json, &mut buf)
+        .unwrap()
+        .expect("message exists");
+    let rows: Vec<Message> = String::from_utf8(buf)
+        .unwrap()
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    (summary, rows)
+}
+
+#[test]
+fn chat_export_of_a_provider_key_conversation_writes_every_message() {
+    // A Telegram chat keyed by its provider id carries a conversation
+    // with no legacy chat key: the legacy display-name thread lookup
+    // found nothing for these rows and the export came out empty.
+    // Conversation identity must export the whole chat, oldest first.
+    let storage = Storage::open_in_memory().unwrap();
+    tg_ingest(&storage, "result.json", TG_EXPORT);
+    assert_eq!(storage.stats().unwrap().total, 3);
+
+    // Anchor on a mid-thread message.
+    let (summary, rows) = chat_rows(&storage, id_by_body(&storage, "poruka dva"));
+    assert_eq!(summary.written, 3, "the whole conversation exports");
+    let bodies: Vec<&str> = rows.iter().map(|m| m.body.as_str()).collect();
+    assert_eq!(bodies, vec!["poruka jedan", "poruka dva", "poruka tri"]);
+}
+
+#[test]
+fn chat_export_after_a_rename_stays_whole() {
+    // Two exports of the same chat (provider id 42) under two display
+    // names: one conversation, three rows after dedup — and an export
+    // anchored on a row stored under the old name still covers all of
+    // it, because identity, not the label, selects the thread.
+    let storage = Storage::open_in_memory().unwrap();
+    tg_ingest(&storage, "a.json", TG_EXPORT);
+    tg_ingest(&storage, "b.json", TG_EXPORT_RENAMED);
+    assert_eq!(storage.stats().unwrap().total, 3);
+
+    let (summary, rows) = chat_rows(&storage, id_by_body(&storage, "poruka jedan"));
+    assert_eq!(summary.written, 3);
+    let bodies: Vec<&str> = rows.iter().map(|m| m.body.as_str()).collect();
+    assert_eq!(bodies, vec!["poruka jedan", "poruka dva", "poruka tri"]);
+}
+
+#[test]
+fn chat_export_of_same_label_conversations_stays_distinct() {
+    // Chats 42 and 77 share the display name "Staro ime": grouping by
+    // display name (the legacy key) would mix them. Conversation
+    // identity must keep both exports to their own messages.
+    let storage = Storage::open_in_memory().unwrap();
+    tg_ingest(&storage, "a.json", TG_EXPORT);
+    tg_ingest(&storage, "b.json", TG_EXPORT_SAME_LABEL);
+    assert_eq!(storage.stats().unwrap().total, 4);
+
+    let (summary, rows) = chat_rows(&storage, id_by_body(&storage, "drugi chat"));
+    assert_eq!(summary.written, 1);
+    let bodies: Vec<&str> = rows.iter().map(|m| m.body.as_str()).collect();
+    assert_eq!(bodies, vec!["drugi chat"]);
+
+    let (summary, rows) = chat_rows(&storage, id_by_body(&storage, "poruka jedan"));
+    assert_eq!(summary.written, 3);
+    assert!(!rows.iter().any(|m| m.body.contains("drugi chat")));
+}
+
+// ---------------------------------------------------------------------------
 // Empty results and format parsing
 // ---------------------------------------------------------------------------
 

@@ -111,29 +111,24 @@ pub fn export_search_v2<W: Write>(
     writer.finish()
 }
 
-/// Export the whole chat thread containing message `id` into `out` as
-/// `format`, oldest → newest. A message with no `chat_id` exports as a
-/// single-row file. Returns `Ok(None)` when no message has that id.
+/// Export the whole conversation containing message `id` into `out` as
+/// `format`, oldest → newest. The thread is the anchor's canonical
+/// conversation — the same identity the detail view walks — so renames
+/// and chats sharing a display name never change what exports; a
+/// message with no conversation exports as a single-row file. Returns
+/// `Ok(None)` when no message has that id.
 pub fn export_chat<W: Write>(
     storage: &Storage,
     id: i64,
     format: ExportFormat,
     out: W,
 ) -> Result<Option<ExportSummary>> {
-    let Some(message) = storage.get(id)? else {
+    if storage.get(id)?.is_none() {
         return Ok(None);
-    };
-    let rows = if message.chat_id.is_empty() {
-        vec![message]
-    } else {
-        storage.chat_thread_messages(&message.source, &message.chat_id)?
-    };
-    let mut writer = Writer::new(format, out)?;
-    for m in &rows {
-        writer.write_message(m)?;
     }
-    let summary = writer.finish()?;
-    Ok(Some(summary))
+    let mut writer = Writer::new(format, out)?;
+    storage.conversation_thread_stream(id, &mut |m| writer.write_message(m))?;
+    Ok(Some(writer.finish()?))
 }
 
 /// Format-specific row writer: owns the output and the per-format header /
