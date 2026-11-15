@@ -27,12 +27,13 @@ asset (see [verify your download](#verify-your-download)):
 ### Release status
 
 **v0.2.0 is tagged but not yet released.** The tag `v0.2.0` (commit
-`71ac2d4`, on `main`) exists and the decided release route — route (c),
-2026-11-14: CI and Release workflows enabled on GitHub-hosted runners — is
-in place, but the Release run on that tag failed because hosted runners
-currently cannot start (an account payments/spending-limit failure), so no
-v0.2.0 release or draft exists. Publishing waits on that billing fix; the
-maintainer handoff is the
+`71ac2d4`, on `main`) exists. The release execution route is decided
+(2026-11-15, #80): **local native builds are the authorized route while
+GitHub-hosted runners cannot start** (an account payments/spending-limit
+failure killed the Release run on that tag, so no v0.2.0 release or draft
+exists) — Linux can proceed on any docker machine now, macOS/Windows wait
+on native hosts (#81); hosted workflows resume as the default once
+billing is restored. Publishing proceeds by either route through the
 [publish checklist in release.md](release.md#v020-publish-handoff-maintainer-checklist).
 Until a v0.2.0 release is published and smoke-gated, **v0.1.0 is the only
 installable release**. The honest per-release evidence record lives in
