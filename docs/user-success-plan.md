@@ -70,6 +70,8 @@ IDs below are planning identifiers, not newly filed issues. Size is a relative e
 | U09 | P1 / L per platform | Validate the actual distributed candidate on each claimed platform. Release + QA | M6; U01–U08 for the promised workflow | Install, launch, import, retrieval, keychain/session fallback, upgrade, backup/restore and uninstall-retains-data records on the platform; exact artifact/version and support status recorded |
 | U10 | P0 learning / research | Discovery, comparative tests, then a supported 30-day pilot. Product/research | [Research playbook](user-research-playbook.md); staged gates below | Recruitment log, task observations, failure reasons, support time and a written proceed/narrow/stop decision; no invented or averaged-away participant evidence |
 
+The U10 pilot's runner kit — screener, day-0/7/30 schedule, tracking log, readout template — is prepared as the [pilot kit](evidence/u10-pilot-kit-2026-11-15.md) (2026-11-15); its [gate record](evidence/u10-pilot-gate-2026-11-15.md) names the GP03/GP04 preconditions and holds the no-promotion-without-readout rule.
+
 U01 and U10 discovery are the first actions. U03 and U05 are the substantial adoption/trust investments. U07 starts early enough to find a retrieval-quality problem before UI work is mistaken for a solution. Statistics polish and new connectors wait behind these outcomes.
 
 ### Reconcile existing work before dispatch

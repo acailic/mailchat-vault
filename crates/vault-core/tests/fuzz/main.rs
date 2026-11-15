@@ -210,7 +210,8 @@ fn messenger_fuzz_never_panics() {
     // so every round's export is materialized in a fresh tempdir and
     // driven through the public source API: byte detection, directory
     // detection, the single-file pick, `collect`, and the two-pass
-    // `stream`. Malformed trees surface as `Err`, never a panic.
+    // `stream`. Malformed trees surface as `Err` (structural refusals)
+    // or as counted `Failed` items (broken parts), never a panic.
     for (idx, (desc, input)) in corpus::messenger_cases().into_iter().enumerate() {
         // Each corpus case is a lone `message_1.json` in a fresh
         // tempdir, driven through the same probe/detect/collect/stream

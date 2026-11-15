@@ -181,9 +181,27 @@
                   <!-- Whole-window drag-drop import: static copy whose only
                        dynamic behavior is the highlight class the Tauri
                        drag-drop events toggle (src/main.ts). -->
-                  <div id="first-run-drop" class="drop-zone">
-                    Drop archives here — .mbox · .eml · .json · .jsonl · .txt
-                  </div>
+              <div id="first-run-drop" class="drop-zone">
+                Drop archives here — .mbox · .eml · .json · .jsonl · .txt
+              </div>
+              <!-- GP03: supported-format help where a newcomer starts,
+                   not only inside the import section. -->
+              <details id="first-run-format-help" style="margin-top: 6px">
+                <summary class="meta">What can I import?</summary>
+                <ul class="meta" id="first-run-format-list" style="margin: 6px 0 0; padding-left: 18px">
+                  <li>Email archive (.mbox) — any mail app can export folders as .mbox (Thunderbird: ImportExportTools NG).</li>
+                  <li>Email messages (.eml) — drag messages out of Outlook (or any mail app); a folder of them imports together.</li>
+                  <li>WhatsApp export — WhatsApp → chat → ⋮ → More → Export chat (with or without media).</li>
+                  <li>Telegram export — Telegram Desktop → chat settings → Export chat history (JSON, machine-readable).</li>
+                  <li>Signal conversation export — sigtop export-messages -f json (Signal Desktop keeps no built-in JSON export).</li>
+                  <li>Discord Data Package — Discord → Settings → Privacy → Request Data (the package arrives by email).</li>
+                  <li>Messenger (Facebook) export — Download your information with Format set to JSON; import messages/ or the whole export.</li>
+                  <li>JSON Lines export (.jsonl) — from any vault's Export results… / Export chat…; re-imports never duplicate.</li>
+                </ul>
+                <p class="meta" style="margin: 6px 0 0">
+                  You will see a preview before anything is stored, and re-importing never duplicates.
+                </p>
+              </details>
                   <p class="meta">
                     Not ready with your own data?
                     <button id="first-run-demo-btn" class="link-btn" type="button">Try a sample archive</button>
@@ -333,6 +351,21 @@
                 email account that syncs over IMAP. Everything lands in the same
                 searchable archive.
               </p>
+              <!-- GP03: the supported-format list and per-format
+                   how-to-export hints on the add-source chooser itself. -->
+              <details id="add-format-help" style="margin-top: 6px">
+                <summary class="meta">What can I import?</summary>
+                <ul class="meta" id="add-format-list" style="margin: 6px 0 0; padding-left: 18px">
+                  <li>Email archive (.mbox) — any mail app can export folders as .mbox (Thunderbird: ImportExportTools NG).</li>
+                  <li>Email messages (.eml) — drag messages out of Outlook (or any mail app); a folder of them imports together.</li>
+                  <li>WhatsApp export — WhatsApp → chat → ⋮ → More → Export chat (with or without media).</li>
+                  <li>Telegram export — Telegram Desktop → chat settings → Export chat history (JSON, machine-readable).</li>
+                  <li>Signal conversation export — sigtop export-messages -f json (Signal Desktop keeps no built-in JSON export).</li>
+                  <li>Discord Data Package — Discord → Settings → Privacy → Request Data (the package arrives by email).</li>
+                  <li>Messenger (Facebook) export — Download your information with Format set to JSON; import messages/ or the whole export.</li>
+                  <li>JSON Lines export (.jsonl) — from any vault's Export results… / Export chat…; re-imports never duplicate.</li>
+                </ul>
+              </details>
             </section>
 
             <!-- Import: the U03 picker → preview → confirm flow. -->
@@ -362,6 +395,24 @@
               <div id="import-drop" class="drop-zone">
                 Drop archives here — .mbox · .eml · .json · .jsonl · .txt
               </div>
+              <!-- GP03: suggestion list for the preview's timezone
+                   confirmation input (an IANA zone name; free text works). -->
+              <datalist id="iana-zone-list">
+                <option value="Europe/London"></option>
+                <option value="Europe/Berlin"></option>
+                <option value="Europe/Belgrade"></option>
+                <option value="Europe/Moscow"></option>
+                <option value="America/New_York"></option>
+                <option value="America/Chicago"></option>
+                <option value="America/Los_Angeles"></option>
+                <option value="America/Sao_Paulo"></option>
+                <option value="Asia/Dubai"></option>
+                <option value="Asia/Kolkata"></option>
+                <option value="Asia/Shanghai"></option>
+                <option value="Asia/Tokyo"></option>
+                <option value="Australia/Sydney"></option>
+                <option value="UTC"></option>
+              </datalist>
               <div id="import-preview" hidden></div>
               <!-- This flow's import job, followed inline: stage, counts,
                    bar, Cancel (Activity stays the aggregate over all jobs). -->

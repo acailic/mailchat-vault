@@ -6,6 +6,27 @@ and packagers run, not item by item.
 
 ## [0.2.0] - pending tag
 
+### Added (GP03 — first-session journey)
+
+- The import preview confirms what it assumed: exports with clock times
+  but no timezone (WhatsApp, Telegram's fallback dates) state the count
+  and the assumed zone, which you confirm or correct once per run;
+  affected messages record the confirmed label (`user_confirmed`).
+  Ambiguous DST times keep the first occurrence and removed ones stay
+  unresolved with their original text — both stated, never hidden.
+- The import destination is explicit: the derived source name is
+  preselected (nothing new to do on a fresh vault) and can be replaced
+  with a new name or an existing import source; re-imports into the same
+  source never duplicate.
+- A failed import offers Retry in place — the same path and options
+  re-submit and resume without duplicating.
+- A finished import links its counts to recovery actions: parse failures
+  open Activity's explanation, missing media say how to re-export with
+  media and import again.
+- "What can I import?" (supported formats + per-format how-to-export
+  hints) now appears on the first-run card and the Add-source chooser,
+  not only inside the import section.
+
 The media release: attachments and chat-export media are now preserved
 and viewable in the app, AI answers run only behind your explicit
 consent, new mail can notify you, and the Linux packages install as
@@ -316,13 +337,17 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
   off-platform). A full Linux column run is green at this tree.
 - Automated Windows installer smoke (fresh install, uninstall-retention,
   in-place upgrade from 0.1.0 with a frozen archive fixture) runs on
-  demand from the re-enabled Actions (Windows smoke → Run workflow);
-  the macOS dmg smoke (`scripts/dmg-smoke-test.sh`) runs wherever a
-  dmg exists — including inside the Release workflow, before the dmg
-  is attached to the draft.
+  demand from the Windows smoke workflow while Actions can start jobs;
+  with runners billing-blocked, the same gate runs locally
+  (`scripts/windows-smoke.ps1` against built installers, or
+  `scripts/release/windows-smoke-from-release.ps1` against a published
+  release). The macOS dmg smoke (`scripts/dmg-smoke-test.sh`) runs
+  wherever a dmg exists — including inside the Release workflow, before
+  the dmg is attached to the draft.
 - `scripts/release/prepare-release.sh` assembles the local
   draft-release candidate (bundles, checksums, notes) without tagging
-  or publishing anything — see `docs/release.md`.
+  or publishing anything — `--tag-exists-ok` permits post-tag local
+  assembly under the local execution route; see `docs/release.md`.
 - Native verification (G1) is now a runbook with machine-readable
   evidence: `scripts/release/smoke-macos.sh` and
   `scripts/windows-smoke.ps1` (driven by
@@ -351,17 +376,20 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
   shows "Windows protected your PC" → *More info* → *Run anyway*.
   Real signing/notarization is an external dependency, deliberately not
   acquired by this codebase.
-- **macOS/Windows bundles are built by re-enabled GitHub Actions** —
-  the release route was decided on 2026-11-14 (route (c)): CI and
-  Release workflows are on again, and pushing the v0.2.0 tag builds
-  all three platforms on GitHub-hosted runners (Linux AppImage + deb,
-  macOS universal dmg, Windows msi + NSIS) and attaches them to a
-  draft release. What remains a limitation: only the Linux column is
-  validated on the maintainer's own machines at this tree; macOS and
-  Windows ride on the workflow's built-in smokes (dmg mount/copy/
-  `--version` checks on the runner, deb + AppImage in clean
-  22.04/24.04 containers) and the manually dispatched Windows smoke,
-  not on physical test machines.
+- **Release builds: local native route while hosted runners are
+  billing-blocked** — route (c) (re-enabled Actions) was decided
+  2026-11-14, but the account's payments/spending limit has kept
+  GitHub-hosted runners from starting (the v0.2.0 Release run failed in
+  seconds), so workflows cannot currently build or gate anything. The
+  authorized route meanwhile (decided 2026-11-15, #80) is local native
+  builds per OS — Linux on any docker machine, macOS/Windows on real
+  hosts — through the same gates and one combined `SHA256SUMS`. What
+  remains a limitation either way: only the Linux column is validated
+  on the maintainer's own machines at this tree; macOS and Windows
+  need physical test hosts (#81). Artifact attestations are not
+  available on any route until an executing workflow and an eligible
+  repository plan exist (review S6); `SHA256SUMS` is the integrity
+  baseline.
 - **Backups are manual and never carry credentials** — versioned
   backup/restore is shipped in 0.2.0 (Settings → Storage & backup);
   what remains a limitation: backups run only when you start one (no

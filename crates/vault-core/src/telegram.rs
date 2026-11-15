@@ -30,7 +30,7 @@ use serde_json::Value;
 use crate::bounded::{EntryOutcome, Flow, StreamItem, StreamSource};
 use crate::ingest::{Collected, Source};
 use crate::message::NewMessage;
-use crate::Result;
+use crate::{Error, Result};
 
 /// Source name and dedup namespace for Telegram imports.
 pub const TELEGRAM_SOURCE: &str = "telegram";
@@ -39,11 +39,25 @@ pub const TELEGRAM_SOURCE: &str = "telegram";
 #[derive(Debug, Clone)]
 pub struct TelegramSource {
     path: PathBuf,
+    /// GP03: a user-confirmed IANA zone — the naive `date` fallback
+    /// resolves in it with confidence `user_confirmed` instead of the
+    /// documented UTC assumption (`legacy_assumed`).
+    confirmed_zone: Option<String>,
 }
 
 impl TelegramSource {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            confirmed_zone: None,
+        }
+    }
+
+    /// Resolve naive `date` stamps in this confirmed zone (GP03; once
+    /// per run). `date_unixtime` stamps are exact and stay untouched.
+    pub fn with_confirmed_zone(mut self, zone: impl Into<String>) -> Self {
+        self.confirmed_zone = Some(zone.into());
+        self
     }
 }
 
@@ -59,7 +73,7 @@ impl Source for TelegramSource {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        parse_telegram(&bytes, &chat_id_fallback)
+        parse_telegram_confirmed(&bytes, &chat_id_fallback, self.confirmed_zone.as_deref())
     }
 }
 
@@ -84,7 +98,8 @@ impl StreamSource for TelegramSource {
         // memory — IgnoredAny elements are zero-sized).
         let header: TelegramHeader =
             serde_json::from_reader(BufReader::new(fs::File::open(&self.path)?))?;
-        let ctx = TelegramContext::from_header(&header, &chat_id_fallback);
+        let ctx = TelegramContext::from_header(&header, &chat_id_fallback)
+            .with_confirmed_zone(self.confirmed_zone.as_deref())?;
         // Pass 2: the messages array, one element at a time.
         let mut failure = None;
         let (stopped, result) = {
@@ -139,6 +154,9 @@ struct TelegramContext {
     chat_id: String,
     dedup_chat: String,
     conversation_key: String,
+    /// GP03: the user-confirmed zone naive `date` stamps resolve in
+    /// (`None` → the documented UTC assumption).
+    confirmed: Option<(chrono_tz::Tz, String)>,
 }
 
 impl TelegramContext {
@@ -168,7 +186,21 @@ impl TelegramContext {
             chat_id,
             dedup_chat,
             conversation_key,
+            confirmed: None,
         }
+    }
+
+    /// GP03: confirm the zone the naive `date` fallback resolves in.
+    fn with_confirmed_zone(mut self, zone: Option<&str>) -> Result<Self> {
+        if let Some(name) = zone {
+            let tz: chrono_tz::Tz = name.parse().map_err(|_| {
+                Error::ChatImport(format!(
+                    "unknown timezone {name:?} — use an IANA name such as Europe/Berlin"
+                ))
+            })?;
+            self.confirmed = Some((tz, name.to_string()));
+        }
+        Ok(self)
     }
 }
 
@@ -214,7 +246,8 @@ fn telegram_entry(entry: &Value, ctx: &TelegramContext) -> EntryOutcome {
         .or_else(|| obj.get("from_id").and_then(Value::as_str))
         .unwrap_or_default()
         .to_string();
-    let (sent_at, original_timestamp, timezone, confidence) = telegram_sent_at(obj);
+    let (sent_at, original_timestamp, timezone, confidence) =
+        telegram_sent_at(obj, ctx.confirmed.as_ref());
     let body = message_text(obj.get("text"));
     let external_id = format!("{}/{}", ctx.dedup_chat, id);
 
@@ -331,9 +364,20 @@ struct TelegramExport {
 /// objects or have no id count as failed; service entries are skipped
 /// silently.
 pub fn parse_telegram(bytes: &[u8], chat_id_fallback: &str) -> Result<Collected> {
+    parse_telegram_confirmed(bytes, chat_id_fallback, None)
+}
+
+/// The whole-file parser with an optional confirmed zone (GP03): naive
+/// `date` stamps resolve in it with the `user_confirmed` label.
+pub fn parse_telegram_confirmed(
+    bytes: &[u8],
+    chat_id_fallback: &str,
+    confirmed_zone: Option<&str>,
+) -> Result<Collected> {
     let export: TelegramExport = serde_json::from_slice(bytes)?;
     let ctx =
-        TelegramContext::from_fields(export.name.as_deref(), export.id.as_ref(), chat_id_fallback);
+        TelegramContext::from_fields(export.name.as_deref(), export.id.as_ref(), chat_id_fallback)
+            .with_confirmed_zone(confirmed_zone)?;
     let mut messages = Vec::new();
     let mut failed: u64 = 0;
     for entry in &export.messages {
@@ -380,7 +424,10 @@ pub fn is_telegram_export_reader<R: std::io::Read>(reader: R) -> bool {
 /// a fallback stored as UTC, exactly as the export writes it (confidence
 /// `legacy_assumed`, zone `UTC`). Returns `(sent_at, original, timezone,
 /// confidence)`; an unparseable stamp stays empty (no instant, no text).
-fn telegram_sent_at(obj: &serde_json::Map<String, Value>) -> (String, String, String, String) {
+fn telegram_sent_at(
+    obj: &serde_json::Map<String, Value>,
+    confirmed: Option<&(chrono_tz::Tz, String)>,
+) -> (String, String, String, String) {
     const RFC3339: &str = "%Y-%m-%dT%H:%M:%SZ";
     if let Some(unix_text) = obj.get("date_unixtime").and_then(Value::as_str) {
         if let Ok(unix) = unix_text.parse::<i64>() {
@@ -397,6 +444,33 @@ fn telegram_sent_at(obj: &serde_json::Map<String, Value>) -> (String, String, St
     if let Some(date_text) = obj.get("date").and_then(Value::as_str) {
         if let Ok(naive) = NaiveDateTime::parse_from_str(date_text, "%Y-%m-%dT%H:%M:%S") {
             let naive_text = naive.format("%Y-%m-%dT%H:%M:%S").to_string();
+            // GP03: with a user-confirmed zone, the naive wall-time
+            // resolves in it (confidence `user_confirmed`); a DST fold
+            // keeps the first occurrence and a DST gap stays unresolved
+            // with its original text. Unconfirmed runs keep the
+            // documented assumption: the stamp is stored as written.
+            if let Some((tz, label)) = confirmed {
+                return match tz.from_local_datetime(&naive) {
+                    chrono::LocalResult::Single(dt) => (
+                        dt.with_timezone(&Utc).format(RFC3339).to_string(),
+                        naive_text,
+                        label.clone(),
+                        "user_confirmed".to_string(),
+                    ),
+                    chrono::LocalResult::Ambiguous(dt, _) => (
+                        dt.with_timezone(&Utc).format(RFC3339).to_string(),
+                        naive_text,
+                        label.clone(),
+                        "user_confirmed".to_string(),
+                    ),
+                    chrono::LocalResult::None => (
+                        String::new(),
+                        naive_text,
+                        label.clone(),
+                        "unresolved".to_string(),
+                    ),
+                };
+            }
             return (
                 format!("{naive_text}Z"),
                 naive_text,

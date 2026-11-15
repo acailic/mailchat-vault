@@ -82,6 +82,16 @@ pub struct ImportPreview {
     /// certain; WhatsApp name matching is fuzzier, so absence is not
     /// claimed there).
     pub media_missing: u64,
+    /// GP03: scanned messages whose timestamps carry no timezone and
+    /// resolve in an assumed zone (`legacy_assumed` confidence) — the
+    /// count the confirm card states so the zone can be confirmed or
+    /// corrected once per run. A lower bound like every count when
+    /// `scan_complete` is `false`.
+    pub naive_timestamps: u64,
+    /// The zone those naive stamps resolve in (the OS's IANA name for
+    /// local-stamp exports, `UTC` for the Telegram naive fallback);
+    /// `None` when no scanned message carried a naive stamp.
+    pub assumed_zone: Option<String>,
     /// Human-readable caveats ("scan stopped at 500 items…").
     pub warnings: Vec<String>,
 }
@@ -144,7 +154,7 @@ fn format_name(format: ChatFormat) -> &'static str {
 
 /// Resolve a chat-export source from a file path (bare pick).
 fn resolve_chat_file(file: &Path) -> Result<PreviewSource> {
-    let (format, file, stream) = chat_export::resolve_stream_source(file)?;
+    let (format, file, stream) = chat_export::resolve_stream_source(file, None)?;
     let export_root = if format == ChatFormat::Messenger {
         // A lone Messenger file says nothing about the tree around it —
         // the import runs no media pass for it either, so the preview
@@ -172,7 +182,7 @@ fn resolve_chat_file(file: &Path) -> Result<PreviewSource> {
 /// folder but it holds `.eml` files, to an Outlook drag-out folder
 /// (one mail per file). `display` is only used in error messages.
 fn resolve_dir_source(root: &Path, display: &Path) -> Result<PreviewSource> {
-    match chat_export::resolve_stream_source(root) {
+    match chat_export::resolve_stream_source(root, None) {
         Ok((format, file, stream)) => {
             let export_root = if format == ChatFormat::Messenger {
                 // DYI uris are `messages/…`-rooted: they resolve at the
@@ -441,6 +451,8 @@ pub fn preview_import(picked: &Path) -> Result<ImportPreview> {
     let mut parse_failures: u64 = 0;
     let mut media_referenced: u64 = 0;
     let mut media_missing: u64 = 0;
+    let mut naive_timestamps: u64 = 0;
+    let mut assumed_zone: Option<String> = None;
     let mut samples: Vec<ImportPreviewSample> = Vec::new();
     let mut scan_complete = true;
     resolved
@@ -449,6 +461,12 @@ pub fn preview_import(picked: &Path) -> Result<ImportPreview> {
             match item {
                 StreamItem::Message(msg) => {
                     messages_seen += 1;
+                    if msg.time_confidence == "legacy_assumed" {
+                        naive_timestamps += 1;
+                        if assumed_zone.is_none() && !msg.timezone.is_empty() {
+                            assumed_zone = Some(msg.timezone);
+                        }
+                    }
                     let (refs, missing) = media_refs_of(
                         &resolved.kind,
                         &msg.raw_json,
@@ -522,6 +540,8 @@ pub fn preview_import(picked: &Path) -> Result<ImportPreview> {
         samples,
         media_referenced,
         media_missing,
+        naive_timestamps,
+        assumed_zone,
         warnings,
     })
 }
@@ -561,6 +581,10 @@ mod tests {
         assert_eq!(preview.samples.len(), 2);
         assert_eq!(preview.input_bytes, std::fs::metadata(&path).unwrap().len());
         assert!(preview.warnings.is_empty());
+        // GP03: RFC 5322 Date headers carry explicit offsets — no naive
+        // stamps, nothing to confirm.
+        assert_eq!(preview.naive_timestamps, 0);
+        assert_eq!(preview.assumed_zone, None);
     }
 
     #[test]
@@ -678,6 +702,10 @@ mod tests {
         let preview = preview_import(&path).expect("telegram preview");
         assert_eq!(preview.kind, "telegram");
         assert_eq!(preview.messages_seen, 2);
+        // GP03: bare `date` strings (no `date_unixtime`) are the naive
+        // fallback — counted and attributed to their assumed zone.
+        assert_eq!(preview.naive_timestamps, 2);
+        assert_eq!(preview.assumed_zone.as_deref(), Some("UTC"));
         assert_eq!(preview.media_referenced, 1);
         assert_eq!(
             preview.media_missing, 1,
@@ -696,6 +724,10 @@ mod tests {
         );
         let preview = preview_import(&path).expect("whatsapp preview");
         assert_eq!(preview.kind, "whatsapp");
+        // GP03: the exporter's local wall-times are naive — counted, with
+        // the machine's zone named as the assumption.
+        assert_eq!(preview.naive_timestamps, 2);
+        assert!(preview.assumed_zone.is_some());
         assert_eq!(preview.media_referenced, 1);
         assert_eq!(
             preview.media_missing, 0,

@@ -316,6 +316,230 @@ fn directory_without_threads_is_refused() {
     assert!(text.contains(&tmp.path().display().to_string()), "{text}");
 }
 
+/// dyi_tree with ana's `message_2.json` overwritten by unparseable
+/// bytes: one corrupt part, healthy threads and parts around it.
+fn dyi_tree_with_broken_part(dir: &std::path::Path) -> PathBuf {
+    let root = dyi_tree(dir);
+    std::fs::write(
+        root.join("messages/inbox/ana_1111/message_2.json"),
+        b"{not json",
+    )
+    .unwrap();
+    root
+}
+
+#[test]
+fn broken_part_is_recorded_and_the_rest_of_the_tree_imports() {
+    // One corrupt part never costs the tree: every healthy thread and
+    // part still imports, the part becomes one failure whose durable
+    // issue record names the file, and `collect` and `stream` agree on
+    // messages and failed counts.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = dyi_tree_with_broken_part(tmp.path());
+    let collected = MessengerSource::new(&root).collect().unwrap();
+    assert_eq!(collected.messages.len(), 3);
+    assert_eq!(collected.failed, 1);
+
+    use vault_core::bounded::{Flow, StreamItem, StreamSource};
+    let mut streamed = Vec::new();
+    MessengerSource::new(&root)
+        .stream(0, &mut |item| {
+            streamed.push(item);
+            Ok(Flow::Continue)
+        })
+        .unwrap();
+    // The failure item sits at the broken part's position in the item
+    // order (ana part 2, between parts 1 and 10) and names the file.
+    assert_eq!(streamed.len(), 4);
+    assert_eq!(
+        streamed[0],
+        StreamItem::Message(collected.messages[0].clone())
+    );
+    match &streamed[1] {
+        StreamItem::Failed {
+            external_ref,
+            reason,
+        } => {
+            assert!(external_ref.contains("message_2.json"), "{external_ref}");
+            assert!(!reason.is_empty());
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        streamed[2],
+        StreamItem::Message(collected.messages[1].clone())
+    );
+    assert_eq!(
+        streamed[3],
+        StreamItem::Message(collected.messages[2].clone())
+    );
+
+    // Through the bounded driver the failure is a durable, named issue
+    // row and the summary counts it honestly.
+    use vault_core::chat_export::import_bounded;
+    let mut storage = Storage::open_in_memory().unwrap();
+    let outcome = import_bounded(
+        &mut storage,
+        &root,
+        false,
+        None,
+        &|| false,
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    assert_eq!(outcome.summary.inserted, 3);
+    assert_eq!(outcome.summary.failed, 1);
+    assert_eq!(outcome.summary.seen, 4);
+    let issues = storage.import_issues(&outcome.import_id, 0, 100).unwrap();
+    assert_eq!(issues.len(), 1);
+    assert!(
+        issues[0].external_ref.contains("message_2.json"),
+        "{:?}",
+        issues[0]
+    );
+}
+
+#[test]
+fn thread_whose_first_part_is_broken_falls_back_to_a_later_header() {
+    // The header pass reads parts in numeric order until one parses: a
+    // broken `message_1` costs one failure item, and the thread's
+    // context — title, thread key — comes from the first parseable part.
+    let tmp = tempfile::tempdir().unwrap();
+    let thread = tmp.path().join("messages/inbox/ana_1111");
+    std::fs::create_dir_all(&thread).unwrap();
+    std::fs::write(thread.join("message_1.json"), b"not json").unwrap();
+    std::fs::write(
+        thread.join("message_2.json"),
+        r#"{"participants": [{"name": "Ana"}], "title": "Ana (drugi deo)", "thread_path": "inbox/ana_1111",
+            "messages": [{"sender_name": "Ana", "timestamp_ms": 1762982400000, "content": "iz drugog dela"}]}"#,
+    )
+    .unwrap();
+    let collected = MessengerSource::new(&thread).collect().unwrap();
+    assert_eq!(collected.messages.len(), 1);
+    assert_eq!(collected.failed, 1);
+    assert_eq!(collected.messages[0].chat_id, "Ana (drugi deo)");
+    assert_eq!(
+        collected.messages[0].conversation_key,
+        "messenger:thread:1111"
+    );
+}
+
+#[test]
+fn thread_with_no_parseable_part_is_one_failure_next_to_healthy_threads() {
+    // Every part of one thread broken: the thread is a single failure
+    // naming its first part, and the tree's other threads still import.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = dyi_tree(tmp.path());
+    std::fs::write(
+        root.join("messages/inbox/ana_1111/message_1.json"),
+        b"not json",
+    )
+    .unwrap();
+    std::fs::remove_file(root.join("messages/inbox/ana_1111/message_2.json")).unwrap();
+    std::fs::remove_file(root.join("messages/inbox/ana_1111/message_10.json")).unwrap();
+    let collected = MessengerSource::new(&root).collect().unwrap();
+    assert_eq!(collected.messages.len(), 1, "grupa still imports");
+    assert_eq!(collected.failed, 1);
+
+    use vault_core::bounded::{Flow, StreamItem, StreamSource};
+    let mut streamed = Vec::new();
+    MessengerSource::new(&root)
+        .stream(0, &mut |item| {
+            streamed.push(item);
+            Ok(Flow::Continue)
+        })
+        .unwrap();
+    match &streamed[0] {
+        StreamItem::Failed { external_ref, .. } => {
+            // ana sorts before grupa: the failure comes first, naming
+            // the thread's numerically first part.
+            assert!(external_ref.contains("message_1.json"), "{external_ref}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        streamed[1],
+        StreamItem::Message(collected.messages[0].clone())
+    );
+}
+
+#[test]
+fn bounded_broken_part_commits_completes_and_repairs() {
+    // The bounded recovery story, pinned: with a broken part after a
+    // batch boundary, earlier batches commit and the run *completes* —
+    // the recorded failure is a committed item, so the checkpoint can
+    // pass the corrupt part and the pick is never stuck. The issue row
+    // names the part; a re-import is idempotent; replacing the corrupt
+    // part with valid content inserts the repaired messages without
+    // duplicates. File-backed storage, like the crash-resume test.
+    use vault_core::bounded::{BoundedRun, StreamLimits};
+    let tmp = tempfile::tempdir().unwrap();
+    let root = dyi_tree_with_broken_part(tmp.path());
+    let db = tmp.path().join("vault.db");
+    let source = MessengerSource::new(&root);
+    let run = BoundedRun {
+        import_id: "msg".into(),
+        limits: StreamLimits {
+            max_messages_per_batch: 1,
+            max_batch_text_bytes: usize::MAX,
+        },
+        media: None,
+    };
+
+    // Run 1: one item per batch — ana's message_1 commits before the
+    // broken part is even reached, and the run finishes on its own.
+    let mut storage = Storage::open(&db).unwrap();
+    let outcome = run
+        .run(&source, &mut storage, &|| false, &mut |_, _, _| {})
+        .unwrap();
+    assert!(!outcome.cancelled);
+    assert_eq!(outcome.summary.inserted, 3);
+    assert_eq!(outcome.summary.failed, 1);
+    assert_eq!(outcome.summary.seen, 4);
+    assert_eq!(storage.stats().unwrap().total, 3);
+    assert_eq!(
+        storage.import_checkpoint("msg").unwrap(),
+        None,
+        "completion clears the checkpoint — the pick is not stuck"
+    );
+    let issues = storage.import_issues("msg", 0, 100).unwrap();
+    assert_eq!(issues.len(), 1);
+    assert!(
+        issues[0].external_ref.contains("message_2.json"),
+        "{:?}",
+        issues[0]
+    );
+    drop(storage);
+
+    // Run 2 (a fresh process, same tree): idempotent.
+    let mut storage = Storage::open(&db).unwrap();
+    let outcome = run
+        .run(&source, &mut storage, &|| false, &mut |_, _, _| {})
+        .unwrap();
+    assert_eq!(outcome.summary.inserted, 0);
+    assert_eq!(outcome.summary.skipped, 3);
+    assert_eq!(outcome.summary.failed, 1);
+    assert_eq!(storage.stats().unwrap().total, 3);
+    drop(storage);
+
+    // Run 3: the export was repaired — the corrupt part replaced with a
+    // valid one. Its messages arrive; nothing duplicates.
+    std::fs::write(
+        root.join("messages/inbox/ana_1111/message_2.json"),
+        r#"{"participants": [{"name": "Ana"}], "title": "Ana", "thread_path": "inbox/ana_1111",
+            "messages": [{"sender_name": "Ana", "timestamp_ms": 1762982400000, "content": "dva (popravljeno)"}]}"#,
+    )
+    .unwrap();
+    let mut storage = Storage::open(&db).unwrap();
+    let outcome = run
+        .run(&source, &mut storage, &|| false, &mut |_, _, _| {})
+        .unwrap();
+    assert_eq!(outcome.summary.inserted, 1, "the repaired message arrives");
+    assert_eq!(outcome.summary.skipped, 3);
+    assert_eq!(outcome.summary.failed, 0);
+    assert_eq!(storage.stats().unwrap().total, 4, "no duplicates");
+}
+
 #[test]
 fn tree_import_through_chat_export_is_dedup_idempotent() {
     use vault_core::chat_export::import_bounded;

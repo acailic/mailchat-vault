@@ -1474,6 +1474,8 @@ async fn import_chat_export(
     state: State<'_, AppState>,
     path: String,
     extract_media: Option<bool>,
+    confirmed_timezone: Option<String>,
+    source: Option<String>,
 ) -> Result<ChatImportOutcome, String> {
     state.refuse_in_demo()?;
     let extract_media = extract_media.unwrap_or(true);
@@ -1486,11 +1488,13 @@ async fn import_chat_export(
     tauri::async_runtime::spawn_blocking(move || {
         let mut sink = PoolSink(&pool);
         let mut no_progress = |_: u64, _: u64, _: &str| {};
-        chat_export::import_bounded(
+        chat_export::import_bounded_with(
             &mut sink,
             Path::new(&path),
             extract_media,
             data_dir.as_deref(),
+            confirmed_timezone.as_deref(),
+            source.as_deref(),
             &|| false,
             &mut no_progress,
         )
@@ -1943,6 +1947,12 @@ enum JobSpec {
     ImportChatExport {
         path: String,
         extract_media: bool,
+        /// GP03: the user-confirmed IANA zone for naive timestamps
+        /// (None → the documented default assumption).
+        confirmed_timezone: Option<String>,
+        /// GP03: the explicitly chosen destination source — the run's
+        /// dedup namespace (None → the derived name).
+        source: Option<String>,
     },
     EmbedMessages,
     ImapSync {
@@ -2005,9 +2015,21 @@ impl JobSpec {
                     .get("extract_media")
                     .and_then(Value::as_bool)
                     .unwrap_or(true);
+                // GP03: both optional — absent means the documented
+                // defaults (the derived source, the assumed zone).
+                let optional_field = |name: &str| -> Option<String> {
+                    params
+                        .get(name)
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                };
                 Ok(JobSpec::ImportChatExport {
                     path: string_field("path")?,
                     extract_media,
+                    confirmed_timezone: optional_field("confirmed_timezone"),
+                    source: optional_field("source"),
                 })
             }
             "imap_sync" => {
@@ -2245,6 +2267,8 @@ fn run_job_spec(
         JobSpec::ImportChatExport {
             path,
             extract_media,
+            confirmed_timezone,
+            source,
         } => {
             if ctx.is_cancelled() {
                 return Err(JobError::Cancelled);
@@ -2261,11 +2285,13 @@ fn run_job_spec(
             let progress =
                 |done: u64, total: u64, message: &str| ctx.progress(done, total, message);
             let mut progress = progress;
-            let outcome = chat_export::import_bounded(
+            let outcome = chat_export::import_bounded_with(
                 &mut sink,
                 Path::new(&moved_path),
                 extract,
                 media_dir.as_deref(),
+                confirmed_timezone.as_deref(),
+                source.as_deref(),
                 &cancelled,
                 &mut progress,
             )?;
@@ -3664,7 +3690,9 @@ mod tests {
             JobSpec::parse("import_chat_export", &params(json!({"path": "/c.txt"}))).unwrap(),
             JobSpec::ImportChatExport {
                 path: "/c.txt".into(),
-                extract_media: true
+                extract_media: true,
+                confirmed_timezone: None,
+                source: None
             }
         );
         assert_eq!(
@@ -3675,7 +3703,27 @@ mod tests {
             .unwrap(),
             JobSpec::ImportChatExport {
                 path: "/c.txt".into(),
-                extract_media: false
+                extract_media: false,
+                confirmed_timezone: None,
+                source: None
+            }
+        );
+        // GP03: the confirmed zone and destination source round-trip.
+        assert_eq!(
+            JobSpec::parse(
+                "import_chat_export",
+                &params(json!({
+                    "path": "/c.txt",
+                    "confirmed_timezone": "Europe/Berlin",
+                    "source": "Family chats"
+                }))
+            )
+            .unwrap(),
+            JobSpec::ImportChatExport {
+                path: "/c.txt".into(),
+                extract_media: true,
+                confirmed_timezone: Some("Europe/Berlin".into()),
+                source: Some("Family chats".into())
             }
         );
         assert_eq!(
@@ -3782,7 +3830,9 @@ mod tests {
         assert_eq!(
             JobSpec::ImportChatExport {
                 path: String::new(),
-                extract_media: true
+                extract_media: true,
+                confirmed_timezone: None,
+                source: None
             }
             .kind(),
             "import_chat_export"
