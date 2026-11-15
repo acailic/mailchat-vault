@@ -1128,11 +1128,14 @@ async function refreshStats(): Promise<void> {
     if (!statsGuard.isCurrent(token)) return; // a newer refresh superseded this response
     lastStats = stats;
     archiveTotal = demoActive ? archiveTotal : stats.total;
+    // Thousands-grouped like the source chips beside the line
+    // (renderSourceChips), so the same count reads the same in both;
+    // the raw `mbox` namespace reads as plain words the same way.
     const parts = stats.by_source
-      .map((s) => `${friendlySourceLabel(s.source)}: ${s.count}`)
+      .map((s) => `${friendlySourceLabel(s.source)}: ${s.count.toLocaleString()}`)
       .join(", ");
     statsLabel.textContent =
-      stats.total === 0 ? "empty archive" : `${stats.total} messages (${parts})`;
+      stats.total === 0 ? "empty archive" : `${stats.total.toLocaleString()} messages (${parts})`;
     renderSourceChipsNow();
     updateVaultChrome();
     maybeInitialBrowse();

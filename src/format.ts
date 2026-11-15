@@ -43,7 +43,10 @@ export function importScopeLabel(scope: {
 }
 
 /** The display part of an author string: "Ana Sender <ana@example.com>"
- *  renders as "Ana Sender", a bare address or handle stays whole. The
+ *  renders as "Ana Sender", a bare address or handle stays whole. One
+ *  pair of surrounding quotes is stripped, so the header spellings
+ *  '"Ana Sender" <ana@example.com>' and 'Ana Sender <ana@example.com>'
+ *  read as the same name; inner quotes and everything else stay. The
  *  full string stays the identity of record — callers keep it in the
  *  title attribute, because the address is often the only stable handle
  *  of a correspondent. */
@@ -51,8 +54,12 @@ export function authorDisplayName(author: string | null | undefined): string {
   const raw = (author ?? "").trim();
   if (!raw) return "";
   const at = raw.indexOf(" <");
-  if (at <= 0) return raw;
-  return raw.slice(0, at).trim() || raw;
+  const display = at <= 0 ? raw : raw.slice(0, at).trim() || raw;
+  const unquoted =
+    display.length >= 2 && display.startsWith('"') && display.endsWith('"')
+      ? display.slice(1, -1)
+      : display;
+  return unquoted || raw;
 }
 
 /** The plain-language display label of a stored source label: the raw

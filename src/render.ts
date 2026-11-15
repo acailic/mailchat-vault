@@ -455,6 +455,45 @@ function countTable(caption: string, rows: CountRow[]): HTMLElement {
   return card;
 }
 
+/** Top-author table rows with display-identical authors merged: header
+ *  spellings of one identity ('"Ana" <a@b.c>' and 'Ana <a@b.c>') become
+ *  one row with the summed count, re-sorted descending. The merged
+ *  row's title joins the distinct full identities ("; ") so the
+ *  addresses stay one hover away. Merging happens after the backend's
+ *  LIMIT, so a variant below the top-N cutoff can be under-counted —
+ *  a deliberate display-side trade, not a stats change. */
+function topAuthorRows(authors: ArchiveStats["top_authors"]): CountRow[] {
+  const byLabel = new Map<string, { count: number; identities: string[] }>();
+  for (const a of authors) {
+    const label = authorDisplayName(a.author) || "(unknown)";
+    const identity = a.author || "(unknown)";
+    const merged = byLabel.get(label) ?? { count: 0, identities: [] };
+    merged.count += a.count;
+    if (!merged.identities.includes(identity)) merged.identities.push(identity);
+    byLabel.set(label, merged);
+  }
+  return [...byLabel]
+    .map(([label, m]) => ({ label, title: m.identities.join("; "), count: m.count }))
+    .sort((a, b) => b.count - a.count);
+}
+
+/** True when a Top chats source is mail: an mbox import or a live IMAP
+ *  account (labels "mbox" and "imap:host:port:user"). Mail folder names
+ *  come from the provider (Gmail's "All mail Including Spam and Trash"),
+ *  not from the user, so the dashboard normalizes their casing; chat
+ *  names are user-chosen proper nouns and stay verbatim. */
+function isMailSource(source: string): boolean {
+  return source === "mbox" || source.startsWith("imap:");
+}
+
+/** Sentence-case a mail folder label: first word capitalized, the rest
+ *  lowercased ("All mail Including Spam and Trash" → "All mail
+ *  including spam and trash"). The raw value stays in the tooltip. */
+function sentenceCaseFolder(name: string): string {
+  const lowered = name.toLowerCase();
+  return lowered.charAt(0).toUpperCase() + lowered.slice(1);
+}
+
 export interface DashboardOptions {
   stats: ArchiveStats;
 }
@@ -487,21 +526,15 @@ export function renderDashboard(el: HTMLElement, opts: DashboardOptions): void {
     countTable(
       "Busiest folders",
       stats.top_chats.map((c) => ({
-        label: `${friendlySourceLabel(c.source)} · ${c.chat_id}`,
+        // Mail folder names arrive in the provider's casing; chat names
+        // are user-chosen and render verbatim. The source reads in plain
+        // words (friendlySourceLabel); the raw label stays in the tooltip.
+        label: `${friendlySourceLabel(c.source)} · ${isMailSource(c.source) ? sentenceCaseFolder(c.chat_id) : c.chat_id}`,
         title: `${c.source} · ${c.chat_id}`,
         count: c.count,
       })),
     ),
-    countTable(
-      "Top authors",
-      stats.top_authors.map((a) => ({
-        // The display name reads; the full "Name <address>" identity
-        // stays one hover away (title).
-        label: authorDisplayName(a.author) || "(unknown)",
-        title: a.author || "(unknown)",
-        count: a.count,
-      })),
-    ),
+    countTable("Top authors", topAuthorRows(stats.top_authors)),
   );
   el.replaceChildren(summary, dayChart(stats.by_day), grid);
 }

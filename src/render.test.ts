@@ -484,7 +484,7 @@ describe("dashboard", () => {
     const folderRows = [...el.querySelectorAll(".stat-table")[1].querySelectorAll("td.label")];
     expect(folderRows.map((td) => td.textContent)).toEqual([
       "whatsapp · family",
-      "Mail import · thread-a",
+      "Mail import · Thread-a",
     ]);
     // The author shows its display name; the full address stays in the
     // tooltip; the unknown author gets a readable label.
@@ -547,6 +547,57 @@ describe("dashboard", () => {
     });
     expect(el.textContent).toBe("empty archive");
     expect(el.querySelectorAll(".day-chart,.stat-table").length).toBe(0);
+  });
+
+  it("merges quoted and unquoted spellings of one author into one row", () => {
+    const el = document.createElement("div");
+    renderDashboard(el, {
+      stats: archiveStats({
+        top_authors: [
+          { author: '"Aleksandar Ilic" <a@b.c>', count: 759 },
+          { author: "Aleksandar Ilic <a@b.c>", count: 272 },
+          { author: "Ana <ana@example.com>", count: 500 },
+        ],
+      }),
+    });
+    const rows = [...el.querySelectorAll(".stat-table")[2].querySelectorAll("tbody tr")];
+    // One person, one row, summed count — re-sorted so the merged row leads.
+    expect(rows.map((tr) => tr.querySelector("td.label")?.textContent)).toEqual([
+      "Aleksandar Ilic",
+      "Ana",
+    ]);
+    expect(rows[0].querySelector("td.num")?.textContent).toBe("1,031");
+    // The tooltip keeps both full identities of record.
+    expect(rows[0].querySelector("td.label")?.getAttribute("title")).toBe(
+      '"Aleksandar Ilic" <a@b.c>; Aleksandar Ilic <a@b.c>',
+    );
+    expect(rows[1].querySelector("td.label")?.getAttribute("title")).toBe(
+      "Ana <ana@example.com>",
+    );
+  });
+
+  it("sentence-cases mail folder names in Top chats and leaves chat names verbatim", () => {
+    const el = document.createElement("div");
+    renderDashboard(el, {
+      stats: archiveStats({
+        top_chats: [
+          { source: "mbox", chat_id: "All mail Including Spam and Trash", count: 90 },
+          { source: "whatsapp", chat_id: "Family Group", count: 300 },
+        ],
+      }),
+    });
+    const labels = [...el.querySelectorAll(".stat-table")[1].querySelectorAll("td.label")];
+    // The mail folder label reads in sentence case; the user-chosen chat
+    // name keeps its own casing. (Rows keep the backend's count order.)
+    expect(labels.map((td) => td.textContent)).toEqual([
+      "Mail import · All mail including spam and trash",
+      "whatsapp · Family Group",
+    ]);
+    // The raw stored value stays in the tooltip.
+    expect(labels[0].getAttribute("title")).toBe(
+      "mbox · All mail Including Spam and Trash",
+    );
+    expect(labels[1].getAttribute("title")).toBe("whatsapp · Family Group");
   });
 
   it("never interpolates archive content as HTML", () => {

@@ -44,6 +44,28 @@ describe("authorDisplayName (the display part of an author string)", () => {
     expect(authorDisplayName("<noreply@example.com>")).toBe("<noreply@example.com>");
   });
 
+  it("strips one pair of surrounding quotes from header-variant names", () => {
+    // '"Aleksandar Ilic" <a@b.c>' and 'Aleksandar Ilic <a@b.c>' are the
+    // same correspondent in two header spellings — both read as one.
+    expect(authorDisplayName('"Aleksandar Ilic" <a@b.c>')).toBe("Aleksandar Ilic");
+    expect(authorDisplayName('"Ana Sender" <ana@example.com>')).toBe("Ana Sender");
+    // A quoted name without an address strips too.
+    expect(authorDisplayName('"Aleksandar Ilic"')).toBe("Aleksandar Ilic");
+  });
+
+  it("leaves inner quotes and non-quoted names untouched", () => {
+    expect(authorDisplayName('Ana "The Vault" Sender <ana@example.com>')).toBe(
+      'Ana "The Vault" Sender',
+    );
+    expect(authorDisplayName('"Ana "The Vault" Sender" <ana@example.com>')).toBe(
+      'Ana "The Vault" Sender',
+    );
+  });
+
+  it("a name of only quotes falls back to the whole string, never empty", () => {
+    expect(authorDisplayName('"" <ana@example.com>')).toBe('"" <ana@example.com>');
+  });
+
   it("never returns an empty display string", () => {
     expect(authorDisplayName("")).toBe("");
     expect(authorDisplayName(null)).toBe("");
