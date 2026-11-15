@@ -1862,6 +1862,60 @@ describe("import picker → preview → confirm (U03)", () => {
     expect(win.document.querySelector("#view-imported-btn")).toBeNull();
   });
 
+  it("a failed stats fetch at import completion never marks the archive view live", async () => {
+    // Empty archive at boot: the first-run state leaves the initial
+    // browse armed, so the import's completion follow-up is what would
+    // mark the view live — and must not when the stats fetch fails.
+    tauri.handlers.set("stats", () => ({ total: 0, by_source: [] }));
+    await boot();
+    expect($("#status").textContent).toBe("Your archive is empty — add a source to get started.");
+    dialog.open.mockResolvedValue("/tmp/chat.txt");
+    tauri.handlers.set("preview_import", () => Promise.resolve(TELEGRAM_PREVIEW));
+    tauri.handlers.set("job_submit", () => ({ id: 38 }));
+    $("#import-pick-btn").click();
+    await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
+    $("#preview-import-btn").click();
+    await vi.waitFor(() => expect($("#import-progress").getAttribute("hidden")).toBeNull());
+
+    // The stats fetch at completion fails: no browse may fire on the
+    // stale total, while the summary line and follow-up still render.
+    tauri.handlers.set("stats", () => Promise.reject("stats backend down"));
+    emitJob({ seq: 1, at: "t", job: 38, type: "submitted", kind: "import_chat_export" });
+    emitJob({
+      seq: 2,
+      at: "t",
+      job: 38,
+      type: "succeeded",
+      result: jobResult(
+        { source: "telegram", seen: 4, inserted: 4, skipped: 0, failed: 0 },
+        "chat-import-noStats",
+      ),
+    });
+    await vi.waitFor(() =>
+      expect($("#import-status").textContent).toBe(
+        "Imported 4 new, 0 already present (of 4 in telegram).",
+      ),
+    );
+    expect($("#import-followup").getAttribute("hidden")).toBeNull();
+    expect(win.document.querySelector("#view-imported-btn")).toBeTruthy();
+    // The honest status line from the catch stands in for the counts…
+    expect($("#status").textContent).toBe("Type something to search, or set a filter to browse.");
+    // …and no archive browse ran: the search IPC stayed uncalled.
+    expect(searchCalls()).toHaveLength(0);
+
+    // The next successful stats refresh (here: another job's terminal
+    // event) drives the browse — proving the failed pass never armed
+    // nor consumed the initial-browse flag.
+    tauri.handlers.set("stats", () => ({
+      total: 4,
+      by_source: [{ source: "telegram", count: 4 }],
+    }));
+    emitJob({ seq: 3, at: "t", job: 39, type: "submitted", kind: "imap_sync" });
+    emitJob({ seq: 4, at: "t", job: 39, type: "cancelled", kind: "imap_sync" });
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    await vi.waitFor(() => expect($("#status").textContent).toBe("0 results"));
+  });
+
   it("the confirm button disables when free space cannot fit the input", async () => {
     await boot();
     dialog.open.mockResolvedValue("/tmp/big.zip");

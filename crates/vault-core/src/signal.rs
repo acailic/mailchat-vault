@@ -25,8 +25,10 @@
 //! - Entries whose `type` is neither `incoming` nor `outgoing`
 //!   (`call-history`, `keychange`, `profile-change`, `group-v2-change`, …)
 //!   are service events without a body: skipped, like Telegram's.
-//! - Media is not extracted in v0: attachments, quotes, reactions, and
-//!   group info stay recorded verbatim in `raw_json`.
+//! - The whole original object (attachments, quotes, reactions, group
+//!   info) stays recorded verbatim in `raw_json`; the media pass
+//!   ([`crate::media::extract_signal`]) additionally copies named
+//!   attachment files into the store and links them from `raw_json`.
 
 use std::collections::HashMap;
 use std::fs;
