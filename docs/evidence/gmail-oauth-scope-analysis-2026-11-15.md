@@ -63,3 +63,24 @@ These are Google-console/account actions with external lead time; none can be do
 | Vault issues only `EXAMINE`, `UID SEARCH`, `UID FETCH` | [imap.rs](../../crates/vault-core/src/imap.rs) sync path; hermetic IMAP suites |
 | Scope constant pinned; BYO rationale in code | [oauth.rs](../../crates/vault-core/src/oauth.rs) `GMAIL_SCOPE` + tests |
 | No one-click/public Gmail claim in UI or docs | README, `index.html`, `src/main.ts` sign-in hints, `docs/imap-sync.md`, [product-review F04](../product-review.md) |
+
+## Local verification (interim per-PR protocol, [testing](../testing.md#interim-per-pr-verification-while-ci-is-down))
+
+Change class: Rust-only in `crates/vault-core` (doc comments + one unit test) plus documentation — required tier A plus `fmt`/`clippy`. Machine: this CI-down runner (Linux x86_64; no Docker, no sudo, no WebKitGTK, no system C toolchain). Rust ran user-local (rustup minimal stable) with the same toolchain substitution as the [2026-11-15 UI-wave record](ui-wave-local-verification-2026-11-15.md): `zig cc` 0.17.1 (sha256-verified tarball) as compiler/linker and rustup's `llvm-ar` — bundled SQLite compiled by it.
+
+| Suite | Command | Result |
+| --- | --- | --- |
+| TypeScript type-check | `npm run check` | pass (clean) |
+| Frontend unit tests | `npm test` | pass — 19 files, 605/605 |
+| vault-core lib tests | `cargo test -p vault-core --lib` | pass — 263/263, incl. the new `gmail_scope_is_exactly_the_full_mail_scope_google_imap_requires` |
+| OAuth flow integration | `cargo test -p vault-core --test oauth_flow` | pass — 10/10 |
+| Full vault-core suite | `cargo test -p vault-core --no-fail-fast` | **46 binaries green; one pre-existing failure (below)** |
+| Formatting | `cargo fmt -p vault-core -- --check` | `oauth.rs` clean; pre-existing drift in untouched files (below) |
+| Lint | `cargo clippy -p vault-core --all-targets -- -D warnings` | `oauth.rs` clean; 3 pre-existing warnings in untouched files (below) |
+
+Not run (pending a tier B/C machine or restored CI, [#80](https://github.com/acailic/mailchat-vault/issues/80)): `cargo test --workspace` and `clippy --workspace` (`src-tauri` needs webkit2gtk), the e2e suite, packaged smoke.
+
+### Pre-existing main-branch findings surfaced by this run (not caused by this change)
+
+1. **`tests/integrity` fails on pristine `main` (`d5d86e3`)** — verified in a clean worktree. `canonical::old_schema_fixture_migrates_without_loss` asserts the applied-migration list is `[1..=16]` while asserting `schema_version() == 17` three lines above; migration 17 and the stale list landed together in `d5d86e3` (PR #140), so every tier-A run of `cargo test` on main fails 46/47 in that binary. Fix is a one-line expectation update; follow-up recommended.
+2. **fmt/clippy drift in untouched files** (`jobs.rs`, `search2.rs`, `mbox.rs`, some tests) — this runner's newer rustfmt/clippy formats and lints them differently than they were authored; left alone per scope. `search2.rs`/`mbox.rs` are the same files finding 1's PR touched, so PR #140 likely never ran these gates (CI was already down).
