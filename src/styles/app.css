@@ -985,6 +985,12 @@ summary.icon-btn::-webkit-details-marker { display: none; }
   border-radius: var(--radius-m);
   box-shadow: var(--shadow);
 }
+/* The actions sit beside each row's .meta caption (the format select
+ * matches at the same size); default-size buttons would tower over the
+ * row's own hierarchy. */
+.export-popover button {
+  font-size: var(--text-meta);
+}
 .export-row {
   display: flex;
   gap: var(--sp-2);

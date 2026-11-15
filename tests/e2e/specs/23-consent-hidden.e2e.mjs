@@ -20,6 +20,13 @@ export async function run(ctx) {
   await withSession({}, async (browser) => {
     await ui.waitForApp(browser);
 
+    // Un-confound the checks below: the prompt lives inside the Ask
+    // fold, and a closed fold hides it on its own — indistinguishable
+    // from the [hidden] regression these assertions exist to catch.
+    // Open the fold first (idempotent), so only the hidden attribute
+    // can explain any invisibility from here on.
+    await ui.openAsk(browser);
+
     // --- fresh boot, empty archive: the consent prompt must be invisible --
     const prompt = await browser.$("#consent-prompt");
     assert.ok(

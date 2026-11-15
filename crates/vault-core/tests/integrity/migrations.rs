@@ -14,7 +14,7 @@ use crate::util::{migrations_table, msg, raw, version1_db_with_data};
 
 /// The schema version this build knows; bump expectation when a migration
 /// is added (the assertions below are version-agnostic where possible).
-const KNOWN_VERSION: i64 = 16;
+const KNOWN_VERSION: i64 = 17;
 
 fn migrations_rows(db: &std::path::Path) -> Vec<i64> {
     let conn = raw(db);
@@ -33,6 +33,22 @@ fn migrations_rows(db: &std::path::Path) -> Vec<i64> {
 fn version0_db(path: &std::path::Path) {
     let conn = Connection::open(path).unwrap();
     migrations_table(&conn);
+}
+
+/// The named indexes present on `archive_messages` (raw sqlite_master
+/// read — the upgrade path's end state, not any accessor).
+fn archive_message_indexes(db: &std::path::Path) -> Vec<String> {
+    let conn = raw(db);
+    let mut stmt = conn
+        .prepare(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'index' AND tbl_name = 'archive_messages'",
+        )
+        .unwrap();
+    stmt.query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
 }
 
 #[test]
@@ -82,6 +98,20 @@ fn version0_database_upgrades_in_place() {
     assert_eq!(
         migrations_rows(&db),
         (1..=KNOWN_VERSION).collect::<Vec<_>>()
+    );
+    // Migration 17's cleanup holds on the upgraded schema: migration 15's
+    // composite stays, and the single-column index it made redundant
+    // (a strict prefix, created by migration 4) is gone.
+    let indexes = archive_message_indexes(&db);
+    assert!(
+        indexes
+            .iter()
+            .any(|n| n == "idx_archive_messages_source_channel"),
+        "the composite covering index must survive the upgrade, got {indexes:?}"
+    );
+    assert!(
+        !indexes.iter().any(|n| n == "idx_archive_messages_source"),
+        "migration 17 must drop the redundant prefix index, got {indexes:?}"
     );
     // The upgraded database works end to end: write, index, read.
     s.insert_message(&msg("integrity", "up-1", "upgraded archive body"))
