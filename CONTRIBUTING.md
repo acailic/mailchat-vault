@@ -16,7 +16,7 @@ Mailchat Vault is a personal, local email and chat archive ([D01](docs/decisions
 
 ## Development
 
-Setup, prerequisites and the test suites are in the [README](README.md): `npm test`, `npm run check`, `cargo test` (plus `--workspace` where the Tauri prerequisites exist). CI runs the suites with `clippy` and `fmt --check`.
+Setup, prerequisites and the test suites are in the [README](README.md): `npm test`, `npm run check`, `cargo test` (plus `--workspace` where the Tauri prerequisites exist). CI runs the suites with `clippy` and `fmt --check` — but while Actions is down for billing, the operative per-PR gate is the [interim local verification protocol](docs/testing.md#interim-per-pr-verification-while-ci-is-down), recorded in the PR body.
 
 Update the affected documentation in the same change as a behavior change (see [docs maintenance](docs/README.md#maintenance)); use synthetic fixtures and never commit real message content or credentials.
 
