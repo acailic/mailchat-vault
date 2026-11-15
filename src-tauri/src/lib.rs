@@ -2977,9 +2977,9 @@ async fn export_search_v2(
     .map_err(|e| AppError::internal(format!("export task failed: {e}")))?
 }
 
-/// Export the whole chat thread containing message `id` (oldest → newest;
-/// a threadless message exports as one row) to `path`. `None` when no
-/// message has that id.
+/// Export the whole conversation containing message `id` (oldest →
+/// newest; a message with no conversation exports as one row) to
+/// `path`. `None` when no message has that id.
 #[tauri::command]
 async fn export_chat(
     state: State<'_, AppState>,

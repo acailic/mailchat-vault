@@ -1,11 +1,13 @@
 //! Export integration tests: search results and whole chat threads to CSV,
-//! JSON Lines and MBOX. Round-trips (CSV through a minimal RFC 4180 reader,
-//! JSON Lines through serde and a fresh database, MBOX through the
-//! production `parse_mbox` importer), Unicode bodies, filter fidelity,
-//! ordering, whole-thread export, and large result sets that exceed every
-//! pagination bound.
+//! JSON Lines and MBOX. Round-trips (CSV through a strict RFC 4180 reader
+//! and the independent `csv` crate parser, JSON Lines through serde and a
+//! fresh database, MBOX through the production `parse_mbox` importer),
+//! Unicode bodies, filter fidelity, ordering, whole-thread export, and
+//! large result sets that exceed every pagination bound.
 
+use std::collections::HashMap;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use vault_core::export::{export_chat, export_search, ExportFormat, ExportSummary};
 use vault_core::mbox::parse_mbox;
@@ -80,8 +82,11 @@ fn export_to_vec(
 }
 
 // ---------------------------------------------------------------------------
-// Minimal RFC 4180 reader (records separated by CRLF, quoted fields with
-// doubled quotes; no embedded newlines handling beyond the standard).
+// Strict RFC 4180 reader (records separated by CRLF, quoted fields with
+// doubled quotes). A double quote may only open a quoted field at the very
+// start of a field — a quote in the middle of an unquoted field is
+// malformed and rejected, so the old prefixed-cell malformation (the
+// mitigation apostrophe written outside the quotes) cannot parse.
 // ---------------------------------------------------------------------------
 
 fn parse_csv(bytes: &[u8]) -> Vec<Vec<String>> {
@@ -109,7 +114,13 @@ fn parse_csv(bytes: &[u8]) -> Vec<Vec<String>> {
             }
         } else {
             match c {
-                '"' => in_quotes = true,
+                '"' => {
+                    assert!(
+                        field.is_empty(),
+                        "double quote inside an unquoted field: not RFC 4180 (a quote may only open a quoted field at the start of a field)"
+                    );
+                    in_quotes = true;
+                }
                 ',' => {
                     record.push(std::mem::take(&mut field));
                 }
@@ -137,6 +148,20 @@ fn assert_same_ignoring_ids(a: &[Message], b: &[Message]) {
     let sa: Vec<_> = a.iter().map(strip).collect();
     let sb: Vec<_> = b.iter().map(strip).collect();
     assert_eq!(sa, sb);
+}
+
+/// Clear `source_key` before a comparison: the portable source identity
+/// is export-only metadata (populated by the two JSON export streams,
+/// empty on rows built by every other query), so it is deliberately
+/// absent from the paginated search API's rows.
+fn strip_export_only_source_key(messages: Vec<Message>) -> Vec<Message> {
+    messages
+        .into_iter()
+        .map(|mut m| {
+            m.source_key = String::new();
+            m
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +241,82 @@ fn csv_round_trip_preserves_every_field() {
     assert_eq!(records[3][7], "{}");
 }
 
+/// Regression (see the CSV export malformation): a cell that gets the
+/// formula-mitigation apostrophe *and* needs RFC 4180 quoting must carry
+/// the apostrophe inside the quotes. The exported bytes are parsed by the
+/// independent `csv` crate in its default non-flexible mode — any record
+/// whose column count drifts from the 8-column header is a hard error —
+/// so a strict third-party reader, not one duplicating the writer's
+/// assumptions, is the judge.
+#[test]
+fn csv_prefixed_cells_that_need_quoting_are_valid_rfc4180() {
+    let bodies = [
+        "- hello, world", // the reported reproduction
+        "= comma, after the prefix",
+        "+ \"quote\" after the prefix",
+        "- newline\nafter the prefix",
+        "@ CRLF\r\nafter the prefix",
+        "= unicode čćžšđ 👋 中文, prefix",
+        "+ comma, \"quote\"\nand newline after the prefix",
+        "@ lone @ prefix, no quotes", // prefixed but unquotable
+        "plain unprefixed, control",
+        "plain \"quoted\" unprefixed control",
+        "plain\nunprefixed newline control",
+    ];
+    let s = seeded(
+        bodies
+            .iter()
+            .enumerate()
+            .map(|(i, body)| {
+                NewMessage::new(
+                    "mbox",
+                    format!("prefix-{i}@example.com"),
+                    "Ana Sender <ana@example.com>",
+                    "2026-11-03T09:00:00Z",
+                    (*body).to_string(),
+                )
+            })
+            .collect(),
+    );
+    let (_, bytes) = export_to_vec(&s, &SearchQuery::default(), ExportFormat::Csv);
+
+    // The apostrophe sits inside the quotes in the raw bytes for the
+    // reproduction case (the old writer glued it outside, before the `"`).
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        text.contains("\"'- hello, world\""),
+        "prefixed cell must quote the apostrophe into the field, got: {text}"
+    );
+
+    let mut reader = csv::ReaderBuilder::new().from_reader(bytes.as_slice());
+    let headers = reader.headers().expect("header record parses").clone();
+    assert_eq!(headers, vault_core::export::CSV_COLUMNS.to_vec());
+
+    let mut parsed = Vec::new();
+    for (i, record) in reader.records().enumerate() {
+        let record = record.unwrap_or_else(|e| panic!("record {i} is not valid RFC 4180: {e}"));
+        assert_eq!(record.len(), 8, "record {i} must keep exactly 8 columns");
+        parsed.push(record);
+    }
+    assert_eq!(parsed.len(), bodies.len(), "one record per message");
+
+    // Every body cell carries the mitigation apostrophe and the original
+    // text, matched by the row's external_id (order-independent).
+    for (i, body) in bodies.iter().enumerate() {
+        let id = format!("prefix-{i}@example.com");
+        let record = parsed
+            .iter()
+            .find(|r| r[1] == id)
+            .unwrap_or_else(|| panic!("record for external_id {id} missing"));
+        let expected = if matches!(body.as_bytes().first(), Some(b'=' | b'+' | b'-' | b'@')) {
+            format!("'{body}")
+        } else {
+            (*body).to_string()
+        };
+        assert_eq!(record[6], expected, "body cell of {id}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // JSON Lines
 // ---------------------------------------------------------------------------
@@ -268,6 +369,7 @@ fn json_lines_round_trip_is_bit_identical_into_a_fresh_archive() {
             original_timestamp: String::new(),
             timezone: String::new(),
             time_confidence: String::new(),
+            source_label: String::new(),
         };
         target.insert_message(&new).unwrap();
     }
@@ -418,6 +520,7 @@ fn mbox_round_trip_through_the_production_parser() {
             let mut m = Message {
                 id: 0,
                 source: n.source.clone(),
+                source_key: String::new(),
                 external_id: n.external_id.clone(),
                 channel: n.channel.clone(),
                 chat_id: n.chat_id.clone(),
@@ -436,6 +539,7 @@ fn mbox_round_trip_through_the_production_parser() {
         .map(|n| Message {
             id: 0,
             source: n.source.clone(),
+            source_key: String::new(),
             external_id: n.external_id.clone(),
             channel: n.channel.clone(),
             chat_id: n.chat_id.clone(),
@@ -641,7 +745,8 @@ fn browse_export_is_newest_first_and_matches_pagination_order() {
     assert_eq!(exported.len(), 12);
     assert_eq!(paged.len(), 12);
     assert_eq!(
-        exported, paged,
+        strip_export_only_source_key(exported),
+        paged,
         "export order must match UI pagination order"
     );
 
@@ -882,6 +987,125 @@ fn chat_export_mbox_skips_non_email_thread_rows() {
 }
 
 // ---------------------------------------------------------------------------
+// Conversation-identity whole-chat export (provider keys, renames)
+// ---------------------------------------------------------------------------
+
+/// One Telegram export chat keyed by its provider id, the fixture shape
+/// the conversation suite uses (crates/vault-core/tests/conversations.rs).
+const TG_EXPORT: &str = r#"{"name": "Staro ime", "id": 42, "messages": [
+    {"id": 1, "type": "message", "date_unixtime": "1730432400", "from": "Ana", "text": "poruka jedan"},
+    {"id": 2, "type": "message", "date_unixtime": "1730432500", "from": "Ana", "text": "poruka dva"},
+    {"id": 3, "type": "message", "date_unixtime": "1730432600", "from": "Ana", "text": "poruka tri"}]}"#;
+// The same chat (provider id 42) re-exported under a new display name.
+const TG_EXPORT_RENAMED: &str = r#"{"name": "Novo ime", "id": 42, "messages": [
+    {"id": 1, "type": "message", "date_unixtime": "1730432400", "from": "Ana", "text": "poruka jedan"},
+    {"id": 2, "type": "message", "date_unixtime": "1730432500", "from": "Ana", "text": "poruka dva"},
+    {"id": 3, "type": "message", "date_unixtime": "1730432600", "from": "Ana", "text": "poruka tri"}]}"#;
+// A different chat sharing the first export's display name.
+const TG_EXPORT_SAME_LABEL: &str = r#"{"name": "Staro ime", "id": 77, "messages": [
+    {"id": 1, "type": "message", "date_unixtime": "1730432400", "from": "Bane", "text": "drugi chat"}]}"#;
+
+/// Write one Telegram export file and return its path (the tempdir is
+/// forgotten, keeping the file alive for the storage's lifetime).
+fn tg_export(file: &str, json: &str) -> std::path::PathBuf {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(file);
+    std::fs::write(&path, json.as_bytes()).unwrap();
+    std::mem::forget(dir);
+    path
+}
+
+/// Ingest `json` as a Telegram export into `storage`.
+fn tg_ingest(storage: &Storage, file: &str, json: &str) {
+    vault_core::ingest::ingest(
+        storage,
+        &vault_core::telegram::TelegramSource::new(tg_export(file, json)),
+    )
+    .unwrap();
+}
+
+/// The row id of the one message whose body contains `needle`.
+fn id_by_body(storage: &Storage, needle: &str) -> i64 {
+    storage
+        .search_filtered(&format!("\"{needle}\""), None, None, None, false, 10)
+        .unwrap()
+        .into_iter()
+        .find(|m| m.body.contains(needle))
+        .unwrap_or_else(|| panic!("no message with {needle}"))
+        .id
+}
+
+/// Export one anchor's whole chat as JSON Lines and return the summary
+/// plus the parsed rows.
+fn chat_rows(storage: &Storage, anchor: i64) -> (ExportSummary, Vec<Message>) {
+    let mut buf = Vec::new();
+    let summary = export_chat(storage, anchor, ExportFormat::Json, &mut buf)
+        .unwrap()
+        .expect("message exists");
+    let rows: Vec<Message> = String::from_utf8(buf)
+        .unwrap()
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    (summary, rows)
+}
+
+#[test]
+fn chat_export_of_a_provider_key_conversation_writes_every_message() {
+    // A Telegram chat keyed by its provider id carries a conversation
+    // with no legacy chat key: the legacy display-name thread lookup
+    // found nothing for these rows and the export came out empty.
+    // Conversation identity must export the whole chat, oldest first.
+    let storage = Storage::open_in_memory().unwrap();
+    tg_ingest(&storage, "result.json", TG_EXPORT);
+    assert_eq!(storage.stats().unwrap().total, 3);
+
+    // Anchor on a mid-thread message.
+    let (summary, rows) = chat_rows(&storage, id_by_body(&storage, "poruka dva"));
+    assert_eq!(summary.written, 3, "the whole conversation exports");
+    let bodies: Vec<&str> = rows.iter().map(|m| m.body.as_str()).collect();
+    assert_eq!(bodies, vec!["poruka jedan", "poruka dva", "poruka tri"]);
+}
+
+#[test]
+fn chat_export_after_a_rename_stays_whole() {
+    // Two exports of the same chat (provider id 42) under two display
+    // names: one conversation, three rows after dedup — and an export
+    // anchored on a row stored under the old name still covers all of
+    // it, because identity, not the label, selects the thread.
+    let storage = Storage::open_in_memory().unwrap();
+    tg_ingest(&storage, "a.json", TG_EXPORT);
+    tg_ingest(&storage, "b.json", TG_EXPORT_RENAMED);
+    assert_eq!(storage.stats().unwrap().total, 3);
+
+    let (summary, rows) = chat_rows(&storage, id_by_body(&storage, "poruka jedan"));
+    assert_eq!(summary.written, 3);
+    let bodies: Vec<&str> = rows.iter().map(|m| m.body.as_str()).collect();
+    assert_eq!(bodies, vec!["poruka jedan", "poruka dva", "poruka tri"]);
+}
+
+#[test]
+fn chat_export_of_same_label_conversations_stays_distinct() {
+    // Chats 42 and 77 share the display name "Staro ime": grouping by
+    // display name (the legacy key) would mix them. Conversation
+    // identity must keep both exports to their own messages.
+    let storage = Storage::open_in_memory().unwrap();
+    tg_ingest(&storage, "a.json", TG_EXPORT);
+    tg_ingest(&storage, "b.json", TG_EXPORT_SAME_LABEL);
+    assert_eq!(storage.stats().unwrap().total, 4);
+
+    let (summary, rows) = chat_rows(&storage, id_by_body(&storage, "drugi chat"));
+    assert_eq!(summary.written, 1);
+    let bodies: Vec<&str> = rows.iter().map(|m| m.body.as_str()).collect();
+    assert_eq!(bodies, vec!["drugi chat"]);
+
+    let (summary, rows) = chat_rows(&storage, id_by_body(&storage, "poruka jedan"));
+    assert_eq!(summary.written, 3);
+    assert!(!rows.iter().any(|m| m.body.contains("drugi chat")));
+}
+
+// ---------------------------------------------------------------------------
 // Empty results and format parsing
 // ---------------------------------------------------------------------------
 
@@ -945,4 +1169,362 @@ fn sink_error_propagates_out_of_the_stream() {
         })
         .unwrap_err();
     assert!(err.to_string().contains("stop"));
+}
+
+// ---------------------------------------------------------------------------
+// Signal media rows ride every export format like email attachments
+// (the media entries the storage half links into `raw_json` must travel
+// the ordinary email path verbatim: same eight CSV columns, same JSON
+// Lines row, same MBOX skip — no Signal-specific format anywhere)
+// ---------------------------------------------------------------------------
+
+/// Real small files committed with the repo (the same fixtures
+/// tests/media_extract.rs drives its Signal harness with).
+const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
+
+/// A Signal conversation export (`sigtop export-messages -f json` shape:
+/// raw message objects in a top-level array): a text message, a stored
+/// photo, a stored document plus a name-less voice-note reference, and a
+/// referenced-but-absent photo whose quote nests another attachment.
+const SIGNAL_MEDIA_JSON: &str = r#"[
+  { "id": "m1", "type": "incoming", "conversationId": "conv-1",
+    "source": "+385912345678.2", "sent_at": 1698832800000, "body": "zdravo" },
+  { "id": "m2", "type": "incoming", "conversationId": "conv-1",
+    "source": "+385912345678.2", "sent_at": 1698832900000, "body": "",
+    "attachments": [
+      { "fileName": "signal-2023-11-01-110050.jpg", "contentType": "image/jpeg", "size": 284119 }
+    ] },
+  { "id": "m3", "type": "outgoing", "conversationId": "conv-1",
+    "sent_at": 1698833000000, "body": "",
+    "attachments": [
+      { "fileName": "report-2023.pdf", "contentType": "application/pdf" },
+      { "contentType": "audio/ogg" }
+    ] },
+  { "id": "m4", "type": "incoming", "conversationId": "conv-1",
+    "source": "+385912345678.2", "sent_at": 1698833100000, "body": "vidi sliku",
+    "attachments": [ { "fileName": "gone.jpg", "contentType": "image/jpeg" } ],
+    "quote": { "text": "zdravo", "attachments": [ { "fileName": "quoted.jpg" } ] } }
+]"#;
+
+/// One temp workspace per test: a Signal `export/` tree and a `data/`
+/// app-data dir the media pass stores into (the harness pattern of
+/// tests/media_extract.rs — nothing touches the repo).
+struct SignalSandbox {
+    #[allow(dead_code)]
+    keeper: tempfile::TempDir,
+    root: PathBuf,
+}
+
+impl SignalSandbox {
+    fn new(tag: &str) -> Self {
+        let keeper = tempfile::tempdir().unwrap();
+        let root = keeper.path().join(tag);
+        std::fs::create_dir_all(&root).unwrap();
+        Self { keeper, root }
+    }
+
+    fn export_dir(&self) -> PathBuf {
+        let dir = self.root.join("export");
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn data_dir(&self) -> PathBuf {
+        self.root.join("data")
+    }
+
+    /// Copy a fixture into the export tree at `rel`.
+    fn put(&self, rel: &str, fixture_name: &str) {
+        let target = self.export_dir().join(rel);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::copy(Path::new(MEDIA_FIXTURES).join(fixture_name), &target).unwrap();
+    }
+
+    /// Import the Signal export with the media pass into `storage`, like
+    /// the chat-export job does for a picked export folder.
+    fn import(&self, storage: &mut Storage) -> vault_core::chat_export::ChatImportOutcome {
+        vault_core::chat_export::import_bounded(
+            storage,
+            &self.export_dir(),
+            true,
+            Some(&self.data_dir()),
+            &|| false,
+            &mut |_, _, _| {},
+        )
+        .map(vault_core::chat_export::ChatImportOutcome::from)
+        .unwrap()
+    }
+}
+
+/// The Signal media fixture imported into in-memory storage: four rows,
+/// two stored media entries (photo, document), one honest missing entry.
+fn signal_media_storage(tag: &str) -> (SignalSandbox, Storage) {
+    let sb = SignalSandbox::new(tag);
+    sb.put("attachments/signal-2023-11-01-110050.jpg", "photo.jpg");
+    sb.put("attachments/report-2023.pdf", "plan.pdf");
+    std::fs::write(sb.export_dir().join("Marko.json"), SIGNAL_MEDIA_JSON).unwrap();
+    let mut storage = Storage::open_in_memory().unwrap();
+    let outcome = sb.import(&mut storage);
+    assert_eq!(outcome.summary.inserted, 4);
+    assert_eq!(outcome.summary.source, "signal");
+    let media = outcome.media.expect("media pass ran");
+    // m2 (photo) + m3 (document) stored; m4's gone.jpg honestly missing;
+    // m3's name-less voice note is not a resolvable reference.
+    assert_eq!(media.referenced, 3);
+    assert_eq!(media.stored, 2);
+    assert_eq!(media.missing, 1);
+    assert_eq!(media.linked, 3);
+    (sb, storage)
+}
+
+/// Every stored row's `raw_json` by `external_id`, exactly as the export
+/// streams read it.
+fn stored_raw_json(storage: &Storage) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    storage
+        .search_export_stream(&SearchQuery::default(), &mut |m| {
+            map.insert(m.external_id.clone(), m.raw_json.clone());
+            Ok(())
+        })
+        .unwrap();
+    map
+}
+
+/// The row id of the message with this `external_id`.
+fn row_id_of(storage: &Storage, external_id: &str) -> i64 {
+    storage
+        .search_page(&SearchQuery {
+            limit: 100,
+            ..SearchQuery::default()
+        })
+        .unwrap()
+        .hits
+        .into_iter()
+        .find(|h| h.message.external_id == external_id)
+        .unwrap_or_else(|| panic!("message {external_id} not stored"))
+        .message
+        .id
+}
+
+#[test]
+fn csv_export_carries_signal_raw_json_byte_identical() {
+    let (_sb, s) = signal_media_storage("signal-csv");
+    let stored = stored_raw_json(&s);
+
+    let (summary, bytes) = export_to_vec(&s, &SearchQuery::default(), ExportFormat::Csv);
+    assert_eq!(
+        summary,
+        ExportSummary {
+            format: ExportFormat::Csv,
+            written: 4,
+            skipped: 0,
+        }
+    );
+
+    // The strict RFC 4180 reader parses every Signal row into the stable
+    // eight columns — no Signal-specific columns, no drift.
+    let records = parse_csv(&bytes);
+    assert_eq!(records[0], vault_core::export::CSV_COLUMNS.to_vec());
+    assert_eq!(records.len(), 5, "header + four messages");
+    assert!(
+        records.iter().all(|r| r.len() == 8),
+        "every record keeps exactly 8 columns"
+    );
+
+    // The raw_json cell is byte-identical to what the archive stores,
+    // for every row — media entries included.
+    for (id, raw) in &stored {
+        let record = records
+            .iter()
+            .find(|r| &r[1] == id)
+            .unwrap_or_else(|| panic!("record for {id} missing"));
+        assert_eq!(
+            &record[7], raw,
+            "raw_json cell of {id} must be byte-identical"
+        );
+        assert_eq!(&record[0], "signal", "source column of {id}");
+        assert_eq!(&record[2], "chat", "channel column of {id}");
+    }
+
+    // The stored photo entry rode the cell: digest, store path and the
+    // verbatim attachment fields next to it.
+    let m2: serde_json::Value = serde_json::from_str(&stored["conv-1/m2"]).unwrap();
+    let entry = &m2["media"][0];
+    assert_eq!(entry["name"], "signal-2023-11-01-110050.jpg");
+    assert_eq!(entry["kind"], "image");
+    let sha = entry["sha256"].as_str().unwrap();
+    assert_eq!(sha.len(), 64, "sha256 hex digest");
+    assert_eq!(entry["path"], format!("media/{sha}.jpg"));
+    assert_eq!(
+        m2["attachments"][0]["fileName"],
+        "signal-2023-11-01-110050.jpg"
+    );
+
+    // The referenced-but-absent file is the honest missing entry — it
+    // rides the cell like a stored one, never dropped.
+    let m4: serde_json::Value = serde_json::from_str(&stored["conv-1/m4"]).unwrap();
+    assert_eq!(m4["media"][0]["name"], "gone.jpg");
+    assert_eq!(m4["media"][0]["missing"], true);
+    assert_eq!(m4["media"][0]["reason"], "not-in-export");
+
+    // The name-less voice-note reference stays in the verbatim
+    // attachments array; it is not a resolvable reference, so no media
+    // entry exists for it — one media entry for the named document.
+    let m3: serde_json::Value = serde_json::from_str(&stored["conv-1/m3"]).unwrap();
+    assert_eq!(m3["attachments"].as_array().unwrap().len(), 2);
+    assert_eq!(m3["media"].as_array().unwrap().len(), 1);
+    assert_eq!(m3["media"][0]["name"], "report-2023.pdf");
+    assert_eq!(m3["media"][0]["kind"], "document");
+}
+
+#[test]
+fn whole_chat_csv_export_carries_signal_media_verbatim() {
+    // The whole-thread export seam (conversation identity) must carry the
+    // same rows the search export does — media entries and all.
+    let (_sb, s) = signal_media_storage("signal-chat-csv");
+    let stored = stored_raw_json(&s);
+
+    let anchor = row_id_of(&s, "conv-1/m2");
+    let mut buf = Vec::new();
+    let summary = export_chat(&s, anchor, ExportFormat::Csv, &mut buf)
+        .unwrap()
+        .expect("message exists");
+    assert_eq!(summary.written, 4);
+    assert_eq!(summary.skipped, 0);
+
+    let records = parse_csv(&buf);
+    assert_eq!(records.len(), 5, "header + the whole conversation");
+    // Oldest → newest, the thread order.
+    let ids: Vec<&str> = records[1..].iter().map(|r| r[1].as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["conv-1/m1", "conv-1/m2", "conv-1/m3", "conv-1/m4"]
+    );
+    for record in &records[1..] {
+        assert_eq!(
+            &record[7],
+            stored.get(record[1].as_str()).unwrap(),
+            "raw_json cell of {} must be byte-identical",
+            record[1]
+        );
+    }
+}
+
+#[test]
+fn json_lines_signal_rows_reimport_row_for_row() {
+    let (_sb, s) = signal_media_storage("signal-jsonl");
+    let (_, bytes) = export_to_vec(&s, &SearchQuery::default(), ExportFormat::Json);
+
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 4);
+
+    // Re-import into a fresh archive through the public insert path,
+    // exactly like the email rows' round-trip.
+    let target = Storage::open_in_memory().unwrap();
+    for line in &lines {
+        let m: Message = serde_json::from_str(line).unwrap();
+        assert_eq!(m.source, "signal");
+        target
+            .insert_message(&NewMessage {
+                source: m.source.clone(),
+                external_id: m.external_id.clone(),
+                channel: m.channel.clone(),
+                chat_id: m.chat_id.clone(),
+                author: m.author.clone(),
+                sent_at: m.sent_at.clone(),
+                body: m.body.clone(),
+                raw_json: m.raw_json.clone(),
+                conversation_key: String::new(),
+                attachments: Vec::new(),
+                reply_refs: Vec::new(),
+                original_timestamp: String::new(),
+                timezone: String::new(),
+                time_confidence: String::new(),
+                source_label: String::new(),
+            })
+            .unwrap();
+    }
+    let mut before: Vec<Message> = Vec::new();
+    s.search_export_stream(&SearchQuery::default(), &mut |m| {
+        before.push(m.clone());
+        Ok(())
+    })
+    .unwrap();
+    let mut after: Vec<Message> = Vec::new();
+    target
+        .search_export_stream(&SearchQuery::default(), &mut |m| {
+            after.push(m.clone());
+            Ok(())
+        })
+        .unwrap();
+    assert_same_ignoring_ids(&before, &after);
+
+    // Media references stay references: the stored entries keep their
+    // digest and store path, the missing entry stays missing — nothing
+    // duplicates and no bytes move (the row is the reference).
+    let raw_by_id = |rows: &[Message]| -> HashMap<String, String> {
+        rows.iter()
+            .map(|m| (m.external_id.clone(), m.raw_json.clone()))
+            .collect()
+    };
+    let raw_before = raw_by_id(&before);
+    let raw_after = raw_by_id(&after);
+    for id in ["conv-1/m2", "conv-1/m3", "conv-1/m4"] {
+        assert_eq!(
+            raw_before.get(id),
+            raw_after.get(id),
+            "media entries of {id} must survive the round-trip verbatim"
+        );
+    }
+
+    // And the exported lines import back into the source archive through
+    // the bounded importer without duplicating a single Signal row.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("signal.jsonl");
+    std::fs::write(&path, bytes).unwrap();
+    let mut s = s;
+    let again = vault_core::chat_export::import_bounded(
+        &mut s,
+        &path,
+        false,
+        None,
+        &|| false,
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    assert_eq!(again.summary.inserted, 0);
+    assert_eq!(again.summary.skipped, 4);
+    assert_eq!(s.stats().unwrap().total, 4);
+}
+
+#[test]
+fn mbox_export_skips_signal_rows_and_counts_them() {
+    // MBOX carries email-channel rows only: Signal rows are skipped and
+    // counted in `ExportSummary::skipped`, identically to other chat
+    // rows — never reformatted, never silently dropped.
+    let (_sb, s) = signal_media_storage("signal-mbox");
+    s.insert_message(&email(
+        "mixed@e.com",
+        "Mejl",
+        "email row in the mixed archive",
+        "2026-11-01T09:00:00Z",
+        "t@e.com",
+    ))
+    .unwrap();
+
+    let (summary, bytes) = export_to_vec(&s, &SearchQuery::default(), ExportFormat::Mbox);
+    assert_eq!(summary.written, 1);
+    assert_eq!(summary.skipped, 4);
+
+    let collected = parse_mbox(&bytes, "x").unwrap();
+    assert_eq!(collected.messages.len(), 1);
+    assert_eq!(collected.messages[0].external_id, "mixed@e.com");
+
+    // No Signal content leaks into the MBOX bytes: neither bodies nor
+    // media references — the rows are skipped, not translated.
+    let text = String::from_utf8(bytes).unwrap();
+    assert!(!text.contains("vidi sliku"));
+    assert!(!text.contains("signal-2023-11-01-110050.jpg"));
+    assert!(!text.contains("gone.jpg"));
 }

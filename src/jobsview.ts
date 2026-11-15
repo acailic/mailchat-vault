@@ -22,13 +22,24 @@ export interface JobsTrackerState {
   latestFailureSeq: number;
   /** Records by id, insertion-ordered (newest submitted last). */
   records: Map<number, JobRecord>;
+  /** Seq of the newest detail applied per job id. A polling page is a
+   * snapshot taken at its `latest_seq`; a record whose applied seq is
+   * beyond that horizon knows more than the page and must survive the
+   * merge (a late response must not revert a finished job). */
+  appliedSeq: Map<number, number>;
   /** True when an event revealed a gap the tracker cannot close alone —
    * the caller should run a `job_events_since` poll. */
   needsPoll: boolean;
 }
 
 export function newJobsTracker(): JobsTrackerState {
-  return { cursor: 0, latestFailureSeq: 0, records: new Map(), needsPoll: true };
+  return {
+    cursor: 0,
+    latestFailureSeq: 0,
+    records: new Map(),
+    appliedSeq: new Map(),
+    needsPoll: true,
+  };
 }
 
 /** Apply one live event (in arrival order). Sets `needsPoll` when the
@@ -41,30 +52,67 @@ export function applyJobEvent(tracker: JobsTrackerState, event: JobEvent): void 
 }
 
 /** Apply a polling page. With `trimmed`, timeline reconstruction is
- * impossible — the snapshot replaces the record map wholesale. */
+ * impossible — the snapshot replaces the record map wholesale. The merge
+ * is monotonic in the page's `latest_seq` (the snapshot's knowledge
+ * horizon): a record the tracker updated past that horizon — a live
+ * event that landed while the request was in flight — keeps its newer
+ * state, so a late response can never revert a finished job. */
 export function applyJobsPage(tracker: JobsTrackerState, page: JobEventsPage): void {
-  // A gap can put the cursor beyond a missed failure; a trimmed ring can
-  // omit its event entirely. The snapshot still tells us it is newly failed.
-  const recoveredFailure = page.jobs.some(
-    (record) => record.state.state === "failed" &&
-      tracker.records.get(record.id)?.state.state !== "failed",
+  // Jobs whose applied knowledge outruns the snapshot's horizon. Decided
+  // before any mutation; page events cannot join this set (their seq is
+  // at most `latest_seq`).
+  const outrunsPage = new Set(
+    [...tracker.appliedSeq]
+      .filter(([, seq]) => seq > page.latest_seq)
+      .map(([id]) => id),
   );
+  // A gap can put the cursor beyond a missed failure; a trimmed ring can
+  // omit its event entirely. The snapshot still tells us it is newly
+  // failed — but only where the merge actually accepts the row.
+  const wasFailed = new Map(
+    [...tracker.records].map(([id, r]) => [id, r.state.state === "failed"]),
+  );
+  const recoversFailure = (record: JobRecord): boolean =>
+    record.state.state === "failed" &&
+    !outrunsPage.has(record.id) &&
+    !wasFailed.get(record.id);
+
+  let recoveredFailure = false;
   if (page.trimmed) {
+    // Timeline reconstruction is impossible — the snapshot replaces the
+    // record map wholesale (records absent from it still drop) — then the
+    // records that outrun the snapshot's horizon are put back over it,
+    // so in-flight terminal states survive a stale trimmed page.
+    const newer = [...tracker.records.entries()]
+      .filter(([id]) => outrunsPage.has(id))
+      .map(([id, record]) => [id, record, tracker.appliedSeq.get(id)!] as const);
     tracker.records = new Map(page.jobs.map((r) => [r.id, r]));
+    tracker.appliedSeq = new Map(page.jobs.map((r) => [r.id, page.latest_seq]));
+    for (const [id, record, seq] of newer) {
+      tracker.records.set(id, record);
+      tracker.appliedSeq.set(id, seq);
+    }
+    recoveredFailure = page.jobs.some(recoversFailure);
   } else {
     for (const event of page.events) {
       if (event.seq <= tracker.cursor) continue;
       applyDetail(tracker, event);
     }
     for (const record of page.jobs) {
+      if (outrunsPage.has(record.id)) continue; // keep the newer live record
       tracker.records.set(record.id, record);
+      tracker.appliedSeq.set(record.id, page.latest_seq);
     }
+    recoveredFailure = page.jobs.some(recoversFailure);
   }
   tracker.cursor = Math.max(tracker.cursor, page.latest_seq);
   if (recoveredFailure) {
     tracker.latestFailureSeq = Math.max(tracker.latestFailureSeq, page.latest_seq);
   }
-  tracker.needsPoll = false;
+  // A page older than the cursor (a response that raced newer events)
+  // cannot have covered the gap — keep the flag so the caller re-polls
+  // instead of stranding it.
+  tracker.needsPoll = page.latest_seq < tracker.cursor;
 }
 
 function applyDetail(tracker: JobsTrackerState, event: JobEvent): void {
@@ -109,6 +157,7 @@ function applyDetail(tracker: JobsTrackerState, event: JobEvent): void {
       break;
   }
   tracker.records.set(event.job, base);
+  tracker.appliedSeq.set(event.job, event.seq);
 }
 
 /** Records ordered newest-first (most recently submitted first). */

@@ -16,6 +16,20 @@
 //!   ([`JSONL_SOURCE`]) only labels the import run's summary, mirroring
 //!   how `MBOX_SOURCE` names mail runs while rows dedup on their own
 //!   ids.
+//! - **Portable source identity.** Rows exported by the current search
+//!   streams also carry a `source_key`: the source instance's
+//!   label-independent identity — `instance:<kind>:<connector_key>` for
+//!   connector-owned instances, the legacy namespace for legacy ones.
+//!   When present, that key (never the human label) is the dedup
+//!   namespace, and the row's display `source` names the created
+//!   instance; two instances sharing a display label therefore
+//!   round-trip as two distinct sources instead of collapsing onto one
+//!   `(label, external_id)` identity. Rows without a key — every
+//!   legacy export — import exactly as before. Destination instances
+//!   are legacy-style with the key as their namespace, so re-exporting
+//!   from the destination emits the same key and the cycle is stable;
+//!   renaming an instance's display label changes only the label, never
+//!   the key.
 //! - The exported row's `id` (the autoincrement of the exporting vault)
 //!   is ignored: a fresh vault assigns its own.
 //! - Every other field (`channel`, `chat_id`, `author`, `sent_at`,
@@ -183,14 +197,25 @@ fn jsonl_line_outcome(line: &str) -> EntryOutcome {
             };
         }
     };
+    // A portable source-identity key (see the module docs) re-namespaces
+    // the row: the machine key becomes the dedup namespace — so two
+    // same-labelled sources stay distinct — and the row's display
+    // `source` names the destination instance instead. Rows without a
+    // key (every legacy export) keep the documented `(source,
+    // external_id)` contract verbatim.
+    let (namespace, label) = match string_field(obj, "source_key") {
+        Some(key) => (key, source),
+        None => (source, String::new()),
+    };
     let field = |name: &str| string_field(obj, name).unwrap_or_default();
     let mut msg = NewMessage::new(
-        source,
+        namespace,
         external_id,
         field("author"),
         field("sent_at"),
         field("body"),
     );
+    msg.source_label = label;
     // An absent channel defaults to `"email"` (NewMessage's own
     // default); an absent raw_json to the canonical empty extras `"{}"`.
     msg.channel = field("channel");
@@ -379,6 +404,54 @@ mod tests {
         raw.push(b'\n');
         raw.extend_from_slice(b"{\"source\":\"demo\",\"external_id\":\"2\",\"body\":\"a\xffb\"}\n");
         assert!(is_jsonl_export(&raw));
+    }
+
+    #[test]
+    fn source_key_renamespaces_the_row_and_the_label_names_the_instance() {
+        // Two same-labelled sources, one shared external id: the machine
+        // keys keep them distinct while the display label survives.
+        let bytes = concat!(
+            r#"{"id":1,"source":"Shared mailbox","source_key":"instance:imap:account-a","external_id":"same-message-id","channel":"email","author":"Ana","sent_at":"2026-11-01T10:00:00Z","body":"from a"}"#,
+            "\n",
+            r#"{"id":2,"source":"Shared mailbox","source_key":"instance:imap:account-b","external_id":"same-message-id","channel":"email","author":"Ana","sent_at":"2026-11-01T10:00:00Z","body":"from b"}"#,
+            "\n",
+        );
+        let collected = parse_jsonl(bytes.as_bytes()).unwrap();
+        assert_eq!(collected.failed, 0);
+        assert_eq!(collected.messages.len(), 2);
+        assert_eq!(collected.messages[0].source, "instance:imap:account-a");
+        assert_eq!(collected.messages[0].source_label, "Shared mailbox");
+        assert_eq!(collected.messages[1].source, "instance:imap:account-b");
+        assert_eq!(collected.messages[1].source_label, "Shared mailbox");
+        // The external ids are identical; only the namespaces differ, so
+        // the storage dedup sees two identities, not one.
+        assert_eq!(
+            collected.messages[0].external_id,
+            collected.messages[1].external_id
+        );
+        assert_ne!(collected.messages[0].source, collected.messages[1].source);
+    }
+
+    #[test]
+    fn legacy_rows_without_source_key_keep_the_display_string_identity() {
+        let bytes = format!("{}\n", row_json(1, "telegram", "42/7", "zdravo"));
+        let collected = parse_jsonl(bytes.as_bytes()).unwrap();
+        let msg = &collected.messages[0];
+        assert_eq!(msg.source, "telegram");
+        assert_eq!(
+            msg.source_label, "",
+            "no key: the namespace is its own label"
+        );
+    }
+
+    #[test]
+    fn blank_source_key_falls_back_to_the_legacy_contract() {
+        // An explicitly empty key is absent (string_field filters
+        // empties): the display source remains the identity.
+        let bytes = br#"{"id":1,"source":"mbox","source_key":"","external_id":"a@b.c","body":"x"}"#;
+        let collected = parse_jsonl(bytes).unwrap();
+        assert_eq!(collected.messages[0].source, "mbox");
+        assert_eq!(collected.messages[0].source_label, "");
     }
 
     #[test]

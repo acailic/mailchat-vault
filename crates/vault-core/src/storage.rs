@@ -1862,13 +1862,14 @@ impl Storage {
         let (sql, bind): (String, Vec<SqlValue>) = if query.text.trim().is_empty() {
             (
                 format!(
-                    "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
-                     m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
-                     m.body, m.raw_json \
-                     FROM archive_messages AS m \
-                     JOIN source_instances AS si ON si.id = m.source_instance_id \
-                     WHERE 1=1 {} \
-                     ORDER BY m.sent_instant DESC, m.id DESC",
+                    "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), \
+                     m.external_id, \
+                      m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
+                      m.body, m.raw_json, {SOURCE_KEY_COLUMN} \
+                      FROM archive_messages AS m \
+                      JOIN source_instances AS si ON si.id = m.source_instance_id \
+                      WHERE 1=1 {} \
+                      ORDER BY m.sent_instant DESC, m.id DESC",
                     filters.sql
                 ),
                 filters.bind(),
@@ -1880,15 +1881,16 @@ impl Storage {
             bind.extend(filters.bind());
             (
                 format!(
-                    "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
-                     m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
-                     m.body, m.raw_json \
-                     FROM archive_fts \
-                     JOIN archive_messages AS m ON m.id = archive_fts.rowid \
-                     JOIN source_instances AS si ON si.id = m.source_instance_id \
-                     WHERE archive_fts MATCH ?1 {} \
-                     ORDER BY bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, \
-                                   {BM25_WEIGHT_SUBJECT}), m.id",
+                    "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), \
+                     m.external_id, \
+                      m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
+                      m.body, m.raw_json, {SOURCE_KEY_COLUMN} \
+                      FROM archive_fts \
+                      JOIN archive_messages AS m ON m.id = archive_fts.rowid \
+                      JOIN source_instances AS si ON si.id = m.source_instance_id \
+                      WHERE archive_fts MATCH ?1 {} \
+                      ORDER BY bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, \
+                                    {BM25_WEIGHT_SUBJECT}), m.id",
                     filters.sql
                 ),
                 bind,
@@ -1899,7 +1901,7 @@ impl Storage {
         let mut rows = stmt.query(params_from_iter(bind))?;
         let mut count = 0;
         while let Some(row) = rows.next()? {
-            sink(&message_from_row(row)?)?;
+            sink(&export_message_from_row(row)?)?;
             count += 1;
         }
         Ok(count)
@@ -1995,28 +1997,54 @@ impl Storage {
             .map_err(Into::into)
     }
 
-    /// Every message of one chat thread, oldest → newest (same order the
-    /// detail view walks the thread in, but without the radius bound). The
-    /// legacy `(source namespace, chat_id)` key resolves through the
-    /// conversation rows the canonical store maintains; a message with no
-    /// conversation has no thread and yields no rows. Ties and unknown
+    /// Stream every message of the conversation containing message `id`,
+    /// oldest → newest, through `sink` one row at a time (used by
+    /// export, which must cover the whole thread without collecting it
+    /// into memory). The anchor's canonical conversation — the same
+    /// identity [`Storage::chat_context`] walks — defines the set:
+    /// provider-key conversations and email threads group there exactly
+    /// like legacy `(source, chat_id)` groups, so renames and chats
+    /// sharing a display name never change what streams. A message with
+    /// no conversation (standalone mail, ungrouped legacy rows) stands
+    /// alone and streams as its own single row. Ties and unknown
     /// instants order by id, matching the legacy ordering exactly
-    /// (COALESCE maps the unknown NULL instant to the legacy empty-string
-    /// position).
-    pub fn chat_thread_messages(&self, source: &str, chat_id: &str) -> Result<Vec<Message>> {
+    /// (COALESCE maps the unknown NULL instant to the legacy
+    /// empty-string position).
+    pub fn conversation_thread_stream(
+        &self,
+        id: i64,
+        sink: &mut dyn FnMut(&Message) -> Result<()>,
+    ) -> Result<()> {
+        // Peers exist only inside a conversation: M1.3 resolved rows
+        // (provider keys, email threads) group there, while messages
+        // without one (empty legacy `chat_id`, standalone mail) stand
+        // alone.
+        let has_conversation: bool = self.conn.query_row(
+            "SELECT conversation_id IS NOT NULL FROM archive_messages WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if !has_conversation {
+            return match self.get(id)? {
+                Some(m) => sink(&m),
+                None => Ok(()),
+            };
+        }
+
         let mut stmt = self.conn.prepare(
             "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
              m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), m.body, m.raw_json \
              FROM archive_messages AS m \
-             JOIN conversations AS c ON c.id = m.conversation_id \
-             JOIN source_instances AS si ON si.id = c.source_instance_id \
-             WHERE si.legacy_namespace = ?1 AND c.legacy_chat_key = ?2 \
+             JOIN source_instances AS si ON si.id = m.source_instance_id \
+             WHERE m.conversation_id = ( \
+                 SELECT conversation_id FROM archive_messages WHERE id = ?1) \
              ORDER BY COALESCE(m.sent_instant, '') ASC, m.id ASC",
         )?;
-        let rows = stmt
-            .query_map(params![source, chat_id], message_from_row)?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
+        let mut rows = stmt.query(params![id])?;
+        while let Some(row) = rows.next()? {
+            sink(&message_from_row(row)?)?;
+        }
+        Ok(())
     }
 
     /// Archive counts: total and per source.
@@ -2275,7 +2303,7 @@ impl Storage {
         last_uid: u32,
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        let instance = resolve_legacy_instance(&tx, source)?;
+        let instance = resolve_legacy_instance(&tx, source, "")?;
         tx.execute(
             "INSERT INTO sync_checkpoints
                  (source_instance_id, folder, uidvalidity, last_uid, updated_at)
@@ -2824,7 +2852,7 @@ fn insert_message_in_tx(
     import_id: &str,
     msg: &NewMessage,
 ) -> Result<InsertOutcome> {
-    let instance = resolve_legacy_instance(tx, &msg.source)?;
+    let instance = resolve_legacy_instance(tx, &msg.source, &msg.source_label)?;
 
     // Dedup on the canonical identity: first write wins forever.
     let existing: Option<i64> = tx
@@ -3126,10 +3154,17 @@ fn attach_media_in_tx(
     Ok(changed)
 }
 
-/// Find the legacy source instance for `namespace`, creating an unresolved
-/// one when the namespace is new (kind/label record what is actually known:
-/// a legacy-namespaced source with no connector provenance).
-fn resolve_legacy_instance(conn: &Connection, namespace: &str) -> Result<String> {
+/// Find the legacy source instance for `namespace`, creating an
+/// unresolved one when the namespace is new (kind/label record what is
+/// actually known: a legacy-namespaced source with no connector
+/// provenance). `label` is the instance's display name: the JSON Lines
+/// importer passes a portable identity key as the namespace together
+/// with the exporting vault's human label, so the destination instance
+/// is named what the source vault named it; empty (every other caller)
+/// means the namespace is its own label. Names follow identity — a
+/// label only ever renames the resolved instance, never selects a
+/// different one.
+fn resolve_legacy_instance(conn: &Connection, namespace: &str, label: &str) -> Result<String> {
     if let Some(id) = conn
         .query_row(
             "SELECT id FROM source_instances WHERE legacy_namespace = ?1",
@@ -3138,13 +3173,23 @@ fn resolve_legacy_instance(conn: &Connection, namespace: &str) -> Result<String>
         )
         .optional()?
     {
+        if !label.is_empty() {
+            conn.execute(
+                "UPDATE source_instances SET label = ?1 WHERE id = ?2 AND label <> ?1",
+                params![label, id],
+            )?;
+        }
         return Ok(id);
     }
     let id = new_uuid();
     conn.execute(
         "INSERT INTO source_instances (id, legacy_namespace, kind, label)
-         VALUES (?1, ?2, 'legacy', ?2)",
-        params![id, namespace],
+         VALUES (?1, ?2, 'legacy', ?3)",
+        params![
+            id,
+            namespace,
+            if label.is_empty() { namespace } else { label }
+        ],
     )?;
     Ok(id)
 }
@@ -3393,6 +3438,7 @@ pub(crate) fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
     Ok(Message {
         id: row.get(0)?,
         source: row.get(1)?,
+        source_key: String::new(),
         external_id: row.get(2)?,
         channel: row.get(3)?,
         chat_id: row.get(4)?,
@@ -3401,6 +3447,29 @@ pub(crate) fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
         body: row.get(7)?,
         raw_json: row.get(8)?,
     })
+}
+
+/// The portable source identity of a row's source instance, as one SQL
+/// column projected next to the [`message_from_row`] columns: connector-
+/// owned instances compose `instance:<kind>:<connector_key>` (both parts
+/// are connector-controlled, never human-edited labels, and the
+/// `instance:` prefix keeps the key from aliasing any display string),
+/// legacy instances reuse their legacy namespace (whose export already
+/// carried it as `source`, so behavior is unchanged). An instance with
+/// neither — the pre-canonical degenerate case — projects an empty key
+/// and the legacy display-string contract applies.
+pub(crate) const SOURCE_KEY_COLUMN: &str = "CASE WHEN si.connector_key IS NOT NULL \
+     THEN 'instance:' || si.kind || ':' || si.connector_key \
+     ELSE COALESCE(si.legacy_namespace, '') END";
+
+/// Build an export row from a 10-column selection: the nine
+/// [`message_from_row`] columns plus [`SOURCE_KEY_COLUMN`]. Only the two
+/// JSON export streams select that extra column; every other query keeps
+/// the 9-column shape and an empty key.
+pub(crate) fn export_message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
+    let mut message = message_from_row(row)?;
+    message.source_key = row.get(9)?;
+    Ok(message)
 }
 
 /// A connector's registration of a durable source instance

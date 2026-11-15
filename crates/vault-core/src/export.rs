@@ -24,6 +24,7 @@
 //! preserved (relevance for text queries, newest-first for filtered
 //! browse, oldest→newest for chat threads).
 
+use std::borrow::Cow;
 use std::io::Write;
 
 use serde::{Deserialize, Serialize};
@@ -111,29 +112,24 @@ pub fn export_search_v2<W: Write>(
     writer.finish()
 }
 
-/// Export the whole chat thread containing message `id` into `out` as
-/// `format`, oldest → newest. A message with no `chat_id` exports as a
-/// single-row file. Returns `Ok(None)` when no message has that id.
+/// Export the whole conversation containing message `id` into `out` as
+/// `format`, oldest → newest. The thread is the anchor's canonical
+/// conversation — the same identity the detail view walks — so renames
+/// and chats sharing a display name never change what exports; a
+/// message with no conversation exports as a single-row file. Returns
+/// `Ok(None)` when no message has that id.
 pub fn export_chat<W: Write>(
     storage: &Storage,
     id: i64,
     format: ExportFormat,
     out: W,
 ) -> Result<Option<ExportSummary>> {
-    let Some(message) = storage.get(id)? else {
+    if storage.get(id)?.is_none() {
         return Ok(None);
-    };
-    let rows = if message.chat_id.is_empty() {
-        vec![message]
-    } else {
-        storage.chat_thread_messages(&message.source, &message.chat_id)?
-    };
-    let mut writer = Writer::new(format, out)?;
-    for m in &rows {
-        writer.write_message(m)?;
     }
-    let summary = writer.finish()?;
-    Ok(Some(summary))
+    let mut writer = Writer::new(format, out)?;
+    storage.conversation_thread_stream(id, &mut |m| writer.write_message(m))?;
+    Ok(Some(writer.finish()?))
 }
 
 /// Format-specific row writer: owns the output and the per-format header /
@@ -205,6 +201,11 @@ impl<W: Write> Writer<W> {
 
 /// Write one CSV record (RFC 4180): fields quoted iff they contain a
 /// comma, double quote, CR or LF; embedded quotes doubled; CRLF endings.
+/// Cells beginning with `=`, `+`, `-` or `@` get the spreadsheet-injection
+/// apostrophe applied to the field value first, so it ends up inside the
+/// quotes when the field also needs quoting (RFC 4180 forbids a quote in
+/// the middle of an unquoted field — writing `'` outside would shift the
+/// record's columns in every strict parser).
 fn write_csv_row<I: IntoIterator<Item = S>, S: AsRef<str>>(
     out: &mut impl Write,
     fields: I,
@@ -218,16 +219,20 @@ fn write_csv_row<I: IntoIterator<Item = S>, S: AsRef<str>>(
         // Spreadsheet formula-injection mitigation: a cell beginning with
         // `=`, `+`, `-` or `@` would be executed as a formula by Excel /
         // LibreOffice; the standard mitigation prefixes such cells with an
-        // apostrophe so they open as inert text.
-        if matches!(field.as_bytes().first(), Some(b'=' | b'+' | b'-' | b'@')) {
-            record.push('\'');
-        }
+        // apostrophe so they open as inert text. The prefix joins the
+        // value *before* the quoting decision so it is escaped with the
+        // field, not glued outside the quotes.
+        let field = if matches!(field.as_bytes().first(), Some(b'=' | b'+' | b'-' | b'@')) {
+            Cow::Owned(format!("'{field}"))
+        } else {
+            Cow::Borrowed(field)
+        };
         if field.chars().any(|c| matches!(c, ',' | '"' | '\r' | '\n')) {
             record.push('"');
             record.push_str(&field.replace('"', "\"\""));
             record.push('"');
         } else {
-            record.push_str(field);
+            record.push_str(&field);
         }
     }
     record.push_str("\r\n");
@@ -369,6 +374,7 @@ mod tests {
         Message {
             id: 1,
             source: "mbox".into(),
+            source_key: String::new(),
             external_id: "a@b.c".into(),
             channel: "email".into(),
             chat_id: "".into(),
@@ -399,12 +405,15 @@ mod tests {
                 "@x",
                 "plain text",
                 "normal -dash and +plus",
+                // A prefixed cell that also needs quoting: the apostrophe
+                // must join the value before escaping.
+                "-2, +3",
             ],
         )
         .unwrap();
         assert_eq!(
             String::from_utf8(buf).unwrap(),
-            "'=cmd|' /C calc'!A0 probe,'+SUM(A1),'-2+3,'@x,plain text,normal -dash and +plus\r\n",
+            "'=cmd|' /C calc'!A0 probe,'+SUM(A1),'-2+3,'@x,plain text,normal -dash and +plus,\"'-2, +3\"\r\n",
         );
     }
 
@@ -419,12 +428,40 @@ mod tests {
                 "say \"hi\"",
                 "line\nbreak",
                 "čćžšđ 👋",
+                // Prefixed but unquotable: byte-identical to before the fix.
+                "-plain prefix",
             ],
         )
         .unwrap();
         assert_eq!(
             String::from_utf8(buf).unwrap(),
-            "plain,\"with,comma\",\"say \"\"hi\"\"\",\"line\nbreak\",čćžšđ 👋\r\n"
+            "plain,\"with,comma\",\"say \"\"hi\"\"\",\"line\nbreak\",čćžšđ 👋,'-plain prefix\r\n"
+        );
+    }
+
+    #[test]
+    fn csv_prefix_goes_inside_the_quotes_when_the_cell_needs_quoting() {
+        // Regression: the mitigation apostrophe is part of the field value
+        // before RFC 4180 escaping, so quoted prefixed cells read
+        // `"'- …"` — a strict parser must never see a quote in the middle
+        // of an unquoted field (which shifted `raw_json` by one column).
+        let mut buf = Vec::new();
+        write_csv_row(
+            &mut buf,
+            [
+                "= comma, after prefix",
+                "+ \"quote\" after prefix",
+                "- newline\nafter prefix",
+                "@ CRLF\r\nafter prefix",
+                "= unicode čćžšđ 👋 中文, prefix",
+                "plain, unprefixed control",
+                "plain \"quoted\" unprefixed control",
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "\"'= comma, after prefix\",\"'+ \"\"quote\"\" after prefix\",\"'- newline\nafter prefix\",\"'@ CRLF\r\nafter prefix\",\"'= unicode čćžšđ 👋 中文, prefix\",\"plain, unprefixed control\",\"plain \"\"quoted\"\" unprefixed control\"\r\n"
         );
     }
 

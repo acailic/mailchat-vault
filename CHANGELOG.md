@@ -37,6 +37,11 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
 - Exporting search results preserves source-instance selection, attachment and
   import filters, date/timezone bounds, and sort order across every page.
   Older export callers keep their existing source-name contract.
+- JSON Lines exports carry a portable source identity (`source_key`), so a
+  subset exported from two sources sharing a display label — and a mail
+  Message-ID — imports with both messages retained instead of the second
+  collapsing onto the first as an apparent duplicate. Older JSON Lines files
+  import exactly as before.
 - Activity attention survives missed-event recovery and stays dismissed when an
   acknowledged failure event is replayed.
 - Corrected two native E2E calls that aborted the source-selection and Add source
@@ -68,6 +73,16 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
   are 32px targets with a stronger hover border. The topbar Menu button is
   no longer the first Tab stop inside content — view controls come first,
   while the button keeps its visual place in the topbar.
+
+### Fixed (CSV export)
+
+- CSV exports no longer corrupt rows whose cells get the spreadsheet-formula
+  apostrophe and also need quoting: a body like `- hello, world` exported as
+  `'\"- hello, world\"` with the apostrophe outside the quotes, so strict CSV
+  readers saw 9 columns instead of 8 and shifted the data. The apostrophe is
+  now part of the field value before quoting (`\"'- hello, world\"`); cells
+  that don't need quotes and cells without a prefix export byte-identical to
+  before.
 
 ### Added (JSON Lines import)
 
