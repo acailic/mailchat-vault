@@ -245,6 +245,12 @@ export async function run(ctx) {
     );
     assert.ok(await noHorizontalClip(browser), "collapsed nav never clips horizontally");
     await fixtureShot(browser, "16-nav-collapsed.png");
+    // Let the wide-collapse relayout settle before the restore click: the
+    // WebKit driver can keep serving the pre-transition element state (the
+    // hidden #nav) after the collapse, so the restore click lands against a
+    // stale view and the column never comes back. Same settle pattern as
+    // the compact relayout below.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
     await (await browser.$("#nav-toggle")).click();
     await browser.waitUntil(
       async () => (await (await browser.$("#nav"))).isDisplayed() === true,
