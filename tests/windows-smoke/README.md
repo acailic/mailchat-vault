@@ -54,8 +54,15 @@ cargo build --release -p vault-core --example smoke_inspect
   -OldLabel v0.1.0 `
   -FixtureDb tests\windows-smoke\fixtures\vault-v0.1.0.db `
   -InspectExe target\release\examples\smoke_inspect.exe `
+  -Tester "Your Name" `
   -AllowDataWipe
 ```
+
+Every run writes `summary.txt` plus a machine-readable `summary.json`
+(result, host, tester, UTC timestamps, commit, per-phase results, and
+the SHA-256 of every installer smoked) into `-LogDir` — the evidence
+record the [native verification runbook](../../docs/native-verification.md)
+binds G1/A14 runs to.
 
 On GitHub: *Actions → Windows smoke → Run workflow*, pick the ref to
 build, the old tag to upgrade from (default `v0.1.0`), and optionally a

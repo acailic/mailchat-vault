@@ -18,6 +18,7 @@ Hands-on guides sit alongside the specification set:
 | [Testing](testing.md) | Test suites, performance budgets, fuzzing, CI, hermetic server setup |
 | [Download & install](download.md) | Version × OS × architecture matrix, minimum requirements, checksum verification, limitations, manual upgrade path |
 | [Release](release.md) | Installers, local builds, smoke tests, checksums, publishing |
+| [Native verification runbook](native-verification.md) | The G1/A14 procedure for real macOS/Windows verification hosts: exact commands per OS, evidence binding (artifact SHA-256, tester, date), and the templates native runs fill |
 | [Support matrix](support-matrix.md) | Current capability and claim status with evidence links, plus open go-public blockers |
 
 ## Reading order
