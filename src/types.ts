@@ -114,6 +114,14 @@ export interface ImportPreview {
   media_referenced: number;
   media_missing: number;
   warnings: string[];
+  /** GP03: scanned messages whose timestamps carry no timezone and
+   * resolve in the assumed zone (a lower bound like every count when
+   * `scan_complete` is false). */
+  naive_timestamps: number;
+  /** The zone those naive timestamps resolve in (the local IANA name
+   * for WhatsApp-style local stamps, "UTC" for the Telegram naive
+   * fallback); null when no scanned message carried a naive stamp. */
+  assumed_zone: string | null;
   /** Added by the `preview_import` command: free bytes on the vault's
    * data dir (null when unavailable). */
   free_bytes: number | null;
