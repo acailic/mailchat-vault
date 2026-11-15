@@ -35,7 +35,12 @@
 //! ("Desktop app" type) in Google Cloud Console; the client id/secret are
 //! configured through the environment ([`OAuthConfig::from_env`]) and are
 //! never stored by the app. See the README ("IMAP sync → Gmail (Google
-//! sign-in)") for the registration walkthrough.
+//! sign-in)") for the registration walkthrough. This BYO-client design is
+//! deliberate: personal-use clients (fewer than 100 users) are exempt
+//! from Google's OAuth verification, so the app itself never needs a
+//! verified public client — the flow stays labeled advanced setup. See
+//! `docs/evidence/gmail-oauth-scope-2026-11-15.md` for the scope and
+//! verification analysis (issue #82).
 //!
 //! # Testing
 //!
@@ -63,9 +68,20 @@ use crate::{Error, Result};
 pub const GMAIL_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 /// Google's token endpoint (code exchange + refresh).
 pub const GMAIL_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-/// The scope an IMAP XOAUTH2 login needs: full IMAP access. The vault only
-/// ever issues read-only IMAP commands (`EXAMINE`, `UID SEARCH`, `UID
-/// FETCH`), but Gmail's IMAP endpoint wants this scope for login.
+/// The scope Gmail requires for IMAP `AUTHENTICATE XOAUTH2`: **full mail
+/// access** — one of Google's *restricted* scopes. This is not the vault's
+/// choice to narrow: Google's XOAUTH2 documentation states the scope for
+/// IMAP/POP/SMTP access is exactly this URL (a token granted any narrower
+/// scope is refused at SASL auth — the error challenge names this scope
+/// back), and that apps which do not need it must migrate to the Gmail API
+/// for granular scopes. The vault only ever issues read-only IMAP commands
+/// (`EXAMINE`, `UID SEARCH`, `UID FETCH` — see [`crate::imap`]), but
+/// read-only *commands* do not reduce the OAuth *permission*: the grant
+/// still covers read-write mail access. Least privilege therefore cannot
+/// be reached on the IMAP path — the narrower-scope alternative is a Gmail
+/// API connector with `gmail.readonly`, a separate project (issue #82);
+/// until then this flow stays labeled advanced setup, BYO client only.
+/// Analysis: `docs/evidence/gmail-oauth-scope-2026-11-15.md`.
 pub const GMAIL_SCOPE: &str = "https://mail.google.com/";
 
 /// Environment variable carrying the user's own Google OAuth client id.
@@ -616,6 +632,22 @@ mod tests {
         // two-char terminating sequence.
         assert!(sasl.ends_with("\u{1}\u{1}"));
         assert_eq!(sasl.matches('\u{1}').count(), 3);
+    }
+
+    #[test]
+    fn gmail_scope_is_exactly_the_full_mail_scope_google_imap_requires() {
+        // Google's XOAUTH2 documentation pins the IMAP/POP/SMTP scope to
+        // exactly this URL; a token granted a narrower scope (e.g.
+        // `gmail.readonly`) is refused at AUTHENTICATE with a
+        // scope-mismatch challenge naming this scope. Read-only command
+        // usage cannot narrow the permission, so a well-meant
+        // "least-privilege" edit here would break every Google sign-in —
+        // the granular alternative is a Gmail API connector (issue #82,
+        // docs/evidence/gmail-oauth-scope-2026-11-15.md).
+        assert_eq!(GMAIL_SCOPE, "https://mail.google.com/");
+        // The Gmail preset — and therefore the env-configured client —
+        // requests exactly it, unmodified.
+        assert_eq!(OAuthConfig::gmail("id", "secret").scope, GMAIL_SCOPE);
     }
 
     #[test]
