@@ -287,6 +287,97 @@ fn json_lines_round_trip_is_bit_identical_into_a_fresh_archive() {
     assert_same_ignoring_ids(&before, &after);
 }
 
+/// The full round-trip through the **importer**: export a seeded archive
+/// as JSON Lines, feed the bytes back through the app's own bounded
+/// import (`import_bounded`, the path the chat-export job runs), and
+/// demand row-for-row identity — then the idempotence re-imports the
+/// dedup contract promises.
+#[test]
+fn json_lines_import_round_trip_through_the_importer() {
+    let rows = vec![
+        email(
+            "rt@example.com",
+            "Pozdrav čćžšđ",
+            "unicode body: hvala 👋 中文",
+            "2026-11-01T09:00:00Z",
+            "Bob <bob@example.com>",
+        ),
+        chat(
+            "w-1",
+            "marko",
+            "2026-11-01T10:00:00Z",
+            "zdravo ekipa 🎉",
+            "arhiva",
+        ),
+        chat("t-9", "ana", "2026-11-01T11:00:00Z", "vidimo se", "arhiva"),
+    ];
+    let mut s = seeded(rows);
+    let (_, bytes) = export_to_vec(&s, &SearchQuery::default(), ExportFormat::Json);
+
+    // The exported bytes as a picked file: one well-formed row per line.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("subset.jsonl");
+    std::fs::write(&path, &bytes).unwrap();
+
+    // Import into a fresh archive through the bounded pipeline.
+    let mut target = Storage::open_in_memory().unwrap();
+    let outcome = vault_core::chat_export::import_bounded(
+        &mut target,
+        &path,
+        false,
+        None,
+        &|| false,
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    assert_eq!(outcome.summary.inserted, 3);
+    assert_eq!(outcome.summary.failed, 0);
+
+    let mut before: Vec<Message> = Vec::new();
+    s.search_export_stream(&SearchQuery::default(), &mut |m| {
+        before.push(m.clone());
+        Ok(())
+    })
+    .unwrap();
+    let mut after: Vec<Message> = Vec::new();
+    target
+        .search_export_stream(&SearchQuery::default(), &mut |m| {
+            after.push(m.clone());
+            Ok(())
+        })
+        .unwrap();
+    assert_same_ignoring_ids(&before, &after);
+
+    // Re-import the same file: every row reports duplicate, nothing new.
+    let again = vault_core::chat_export::import_bounded(
+        &mut target,
+        &path,
+        false,
+        None,
+        &|| false,
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    assert_eq!(again.summary.inserted, 0);
+    assert_eq!(again.summary.skipped, 3);
+    assert_eq!(target.stats().unwrap().total, 3);
+
+    // And into the original archive: nothing duplicates there either —
+    // rows keep their own (source, external_id) identity.
+    let original = vault_core::chat_export::import_bounded(
+        &mut s,
+        &path,
+        false,
+        None,
+        &|| false,
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    assert_eq!(original.summary.inserted, 0);
+    assert_eq!(original.summary.skipped, 3);
+    assert_eq!(s.stats().unwrap().total, 3);
+}
+
 // ---------------------------------------------------------------------------
 // MBOX
 // ---------------------------------------------------------------------------

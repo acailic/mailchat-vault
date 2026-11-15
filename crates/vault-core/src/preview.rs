@@ -58,7 +58,7 @@ pub struct ImportPreviewSample {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportPreview {
     /// Machine-readable format id: `mbox`, `eml`, `whatsapp`,
-    /// `telegram`, `signal`, `discord`, or `messenger`.
+    /// `telegram`, `signal`, `discord`, `messenger`, or `jsonl`.
     pub kind: String,
     /// The dedup namespace the import will store under (`source.name()`).
     pub source: String,
@@ -138,6 +138,7 @@ fn format_name(format: ChatFormat) -> &'static str {
         ChatFormat::Signal => "signal",
         ChatFormat::Discord => "discord",
         ChatFormat::Messenger => "messenger",
+        ChatFormat::Jsonl => "jsonl",
     }
 }
 
@@ -396,6 +397,18 @@ fn media_refs_of(kind: &str, raw_json: &str, export_root: Option<&Path>) -> (u64
             .and_then(Value::as_str)
             .is_some_and(|n| !n.is_empty());
     if whatsapp {
+        return (1, 0);
+    }
+    // JSON Lines rows carry their media as already-stored `media`
+    // entries in `raw_json` (digest references into the exporting
+    // vault's object store): counted as references, but the bytes are
+    // not transferred, so absence is never claimed.
+    if kind == "jsonl"
+        && obj
+            .get("media")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty())
+    {
         return (1, 0);
     }
     (0, 0)
