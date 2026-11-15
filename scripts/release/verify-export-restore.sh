@@ -432,10 +432,15 @@ if [[ "$overall" -eq 0 ]]; then
 else
   verdict="FAIL — at least one leg failed (recorded honestly, not silently fixed)"
 fi
+if [[ "$SKIP_EXPORT" -eq 1 || "$SKIP_RESTORE" -eq 1 || "$SKIP_SUITES" -eq 1 ]]; then
+  verdict="$verdict — NOT a certification run (at least one leg was skipped)"
+fi
 
 evidence_lines="$(grep -h "\[evidence\]" "$LOGS"/e2e-*.log 2>/dev/null | sed 's/^ *//' || true)"
-backup_ok="$(grep -c '^test .* \.\.\. ok' "$LOGS/suite-backup.log" 2>/dev/null || echo 0)"
-exportv2_ok="$(grep -c '^test .* \.\.\. ok' "$LOGS/suite-export_v2.log" 2>/dev/null || echo 0)"
+backup_ok="$(grep -c '^test .* \.\.\. ok' "$LOGS/suite-backup.log" 2>/dev/null)"
+backup_ok="${backup_ok:-0}"
+exportv2_ok="$(grep -c '^test .* \.\.\. ok' "$LOGS/suite-export_v2.log" 2>/dev/null)"
+exportv2_ok="${exportv2_ok:-0}"
 interrupt_lines="$(grep '^test interrupted' "$LOGS/suite-backup.log" 2>/dev/null || true)"
 
 {
