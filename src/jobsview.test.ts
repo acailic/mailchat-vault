@@ -3,7 +3,7 @@
 // client (live event application, gap detection → polling, trimmed-page
 // reconciliation), status wording, and the DOM list builder.
 import { describe, expect, it } from "vitest";
-import type { JobEvent, JobEventsPage, JobRecord } from "./types";
+import type { JobError, JobEvent, JobEventsPage, JobRecord } from "./types";
 import {
   activeJobCount,
   applyJobEvent,
@@ -41,6 +41,19 @@ const succeeded = (seq: number, job: number, result: unknown): JobEvent => ({
   job,
   type: "succeeded",
   result,
+});
+const failed = (seq: number, job: number, error: JobError): JobEvent => ({
+  seq,
+  at,
+  job,
+  type: "failed",
+  error,
+});
+const cancelled = (seq: number, job: number): JobEvent => ({
+  seq,
+  at,
+  job,
+  type: "cancelled",
 });
 const record = (over: Partial<JobRecord>): JobRecord => ({
   id: 1,
@@ -180,6 +193,199 @@ describe("jobs tracker (v2 protocol client)", () => {
     );
     expect(tracker.records.get(1)!.state.state).toBe("succeeded");
     expect(orderedRecords(tracker)).toHaveLength(1);
+  });
+});
+
+describe("late poll responses (event/page interleaving)", () => {
+  it("a late poll response never reverts a finished job to running", () => {
+    const tracker = newJobsTracker();
+    applyJobEvent(tracker, submitted(1, 1));
+    applyJobEvent(tracker, started(2, 1));
+    // The response snapshot was taken at seq 2 (job still running); the
+    // terminal event lands before the response does.
+    const stale = page({
+      latest_seq: 2,
+      jobs: [record({ id: 1, state: { state: "running" }, started_at: at })],
+    });
+    applyJobEvent(tracker, succeeded(3, 1, { inserted: 3 }));
+    applyJobsPage(tracker, stale);
+    expect(tracker.cursor).toBe(3);
+    expect(tracker.records.get(1)!.state).toEqual({
+      state: "succeeded",
+      result: { inserted: 3 },
+    });
+    expect(activeJobCount(tracker)).toBe(0);
+    expect(hasActiveJob(tracker, "import_mbox")).toBe(false);
+  });
+
+  it("failed and cancelled jobs equally survive their own stale pages", () => {
+    const tracker = newJobsTracker();
+    applyJobEvent(tracker, submitted(1, 1));
+    applyJobEvent(tracker, started(2, 1));
+    applyJobEvent(tracker, submitted(3, 2));
+    applyJobEvent(tracker, failed(4, 1, { kind: "network", message: "down" }));
+    applyJobEvent(tracker, cancelled(5, 2));
+    // Snapshot served at seq 3: job 1 running, job 2 queued.
+    applyJobsPage(
+      tracker,
+      page({
+        latest_seq: 3,
+        jobs: [
+          record({ id: 1, state: { state: "running" }, started_at: at }),
+          record({ id: 2, state: { state: "queued" } }),
+        ],
+      }),
+    );
+    expect(tracker.records.get(1)!.state.state).toBe("failed");
+    expect(tracker.records.get(2)!.state.state).toBe("cancelled");
+    expect(activeJobCount(tracker)).toBe(0);
+    expect(tracker.cursor).toBe(5);
+  });
+
+  it("a stale trimmed page keeps newer records over the wholesale rebuild", () => {
+    const tracker = newJobsTracker();
+    applyJobEvent(tracker, submitted(1, 1));
+    applyJobEvent(tracker, started(2, 1));
+    applyJobEvent(tracker, succeeded(3, 1, null));
+    // Job 2 was submitted while the request was in flight — the snapshot
+    // never saw it at all.
+    applyJobEvent(tracker, submitted(4, 2));
+    applyJobsPage(
+      tracker,
+      page({
+        trimmed: true,
+        oldest_kept: 1,
+        latest_seq: 2,
+        jobs: [record({ id: 1, state: { state: "running" }, started_at: at })],
+      }),
+    );
+    expect(tracker.records.get(1)!.state.state).toBe("succeeded");
+    expect(tracker.records.get(2)!.state.state).toBe("queued");
+    expect(activeJobCount(tracker)).toBe(1);
+    expect(tracker.cursor).toBe(4);
+  });
+
+  it("overlapping poll responses applied out of order cannot revert anything", () => {
+    const tracker = newJobsTracker();
+    applyJobEvent(tracker, submitted(1, 1));
+    applyJobEvent(tracker, submitted(2, 2));
+    applyJobEvent(tracker, started(3, 1));
+    applyJobEvent(tracker, succeeded(4, 1, { embedded: 4 }));
+    // The newer response (served at seq 5) lands first: it carries job
+    // 2's start, which was missed live.
+    applyJobsPage(
+      tracker,
+      page({
+        events: [started(5, 2)],
+        latest_seq: 5,
+        jobs: [
+          record({
+            id: 1,
+            state: { state: "succeeded", result: { embedded: 4 } },
+            finished_at: at,
+          }),
+          record({ id: 2, kind: "imap_sync", state: { state: "running" }, started_at: at }),
+        ],
+      }),
+    );
+    // ...then the older one (served at seq 3), which believes job 1 is
+    // still running and job 2 still queued.
+    applyJobsPage(
+      tracker,
+      page({
+        latest_seq: 3,
+        jobs: [
+          record({ id: 1, state: { state: "running" }, started_at: at }),
+          record({ id: 2, kind: "imap_sync", state: { state: "queued" } }),
+        ],
+      }),
+    );
+    expect(tracker.cursor).toBe(5);
+    expect(tracker.records.get(1)!.state.state).toBe("succeeded");
+    expect(tracker.records.get(2)!.state.state).toBe("running");
+    expect(activeJobCount(tracker)).toBe(1);
+  });
+
+  it("live progress outruns a snapshot row taken before it", () => {
+    const tracker = newJobsTracker();
+    applyJobEvent(tracker, submitted(1, 1));
+    applyJobEvent(tracker, started(2, 1));
+    applyJobEvent(tracker, progress(3, 1, 7, 10));
+    applyJobsPage(
+      tracker,
+      page({
+        latest_seq: 2,
+        jobs: [
+          record({
+            id: 1,
+            state: { state: "running" },
+            started_at: at,
+            progress: { done: 2, total: 10, message: "embedding" },
+          }),
+        ],
+      }),
+    );
+    const rec = tracker.records.get(1)!;
+    expect(rec.state.state).toBe("running");
+    expect(rec.progress).toEqual({ done: 7, total: 10, message: "embedding" });
+    expect(activeJobCount(tracker)).toBe(1);
+  });
+
+  it("a gap stays flagged until a page new enough to cover it lands", () => {
+    const tracker = newJobsTracker();
+    applyJobEvent(tracker, submitted(1, 1));
+    applyJobEvent(tracker, succeeded(4, 1, null)); // gap: 2..3 missed
+    expect(tracker.needsPoll).toBe(true);
+    // A response racing the gap (older than the cursor) cannot heal it…
+    applyJobsPage(
+      tracker,
+      page({
+        latest_seq: 3,
+        jobs: [record({ id: 1, state: { state: "running" }, started_at: at })],
+      }),
+    );
+    expect(tracker.needsPoll).toBe(true);
+    expect(tracker.cursor).toBe(4);
+    expect(tracker.records.get(1)!.state.state).toBe("succeeded");
+    // …a page at the cursor does.
+    applyJobsPage(
+      tracker,
+      page({
+        events: [started(2, 1), progress(3, 1, 1, 2)],
+        latest_seq: 4,
+        jobs: [
+          record({ id: 1, state: { state: "succeeded", result: null }, finished_at: at }),
+        ],
+      }),
+    );
+    expect(tracker.needsPoll).toBe(false);
+    expect(tracker.cursor).toBe(4);
+  });
+
+  it("a stale page still delivers rows the tracker has no newer knowledge for", () => {
+    const tracker = newJobsTracker();
+    applyJobEvent(tracker, submitted(1, 1));
+    // Job 2 lived entirely inside the missed gap 2..3.
+    applyJobEvent(tracker, succeeded(4, 1, null));
+    // A poll response served at seq 3 lands late: its snapshot saw job 2
+    // running but not job 1 finishing. Job 1 keeps its terminal state;
+    // job 2 — otherwise unknown — is still merged in.
+    applyJobsPage(
+      tracker,
+      page({
+        latest_seq: 3,
+        events: [], // older than the cursor — nothing to replay
+        jobs: [
+          record({ id: 1, state: { state: "running" }, started_at: at }),
+          record({ id: 2, kind: "imap_sync", state: { state: "running" }, started_at: at }),
+        ],
+      }),
+    );
+    expect(tracker.records.get(1)!.state.state).toBe("succeeded");
+    expect(tracker.records.get(2)!.state.state).toBe("running");
+    expect(activeJobCount(tracker)).toBe(1);
+    // The page predates the cursor, so the gap flag survives it.
+    expect(tracker.needsPoll).toBe(true);
   });
 });
 
