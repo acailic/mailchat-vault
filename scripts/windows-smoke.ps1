@@ -55,6 +55,12 @@
 .PARAMETER ProductName / AppId
     Tauri productName / identifier. Defaults match tauri.conf.json.
 
+.PARAMETER Tester
+    Name recorded in the run's evidence (summary.json binds result, host,
+    tester, UTC timestamps and the SHA-256 of every installer smoked —
+    the fields the G1 native verification gate requires). Default:
+    $env:MC_SMOKE_TESTER, then git user.name, then $env:USERNAME.
+
 .PARAMETER AliveSeconds
     How long a launched app must stay alive to prove it did not crash.
     Default 20.
@@ -72,8 +78,10 @@
 
 .NOTES
     Exit code 0 = every phase passed; 1 = at least one failed (per-phase
-    results are printed and written to summary.txt). Requires no
-    interactive session beyond what a standard GitHub Windows runner
+    results are printed, written to summary.txt, and — with host, tester,
+    timestamps and installer SHA-256 hashes — to the machine-readable
+    summary.json that the native-run evidence templates consume. Requires
+    no interactive session beyond what a standard GitHub Windows runner
     provides (WebView2 runtime is preinstalled there).
 #>
 [CmdletBinding()]
@@ -87,6 +95,7 @@ param(
     [string] $InspectExe = '',
     [string] $ProductName = 'mailchat-vault',
     [string] $AppId = 'com.acailic.mailchatvault',
+    [string] $Tester = '',
     [int] $AliveSeconds = 20,
     [string] $LogDir = '',
     [switch] $AllowDataWipe
@@ -94,13 +103,18 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $script:Results = [ordered]@{}
-if (-not $env:APPDATA) {
-    # Windows always sets this; anything else means we are not on a
+$script:StartedUtc = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+if (-not $env:APPDATA -or -not $env:ProgramFiles) {
+    # Windows always sets these; anything else means we are not on a
     # Windows-style profile and the whole smoke contract is void.
-    throw 'APPDATA is not set — this smoke test must run on Windows.'
+    throw 'APPDATA/ProgramFiles are not set — this smoke test must run on Windows.'
 }
 $script:DataDir = Join-Path $env:APPDATA $AppId
 $script:DbPath = Join-Path $script:DataDir 'vault.db'
+$script:Repo = Split-Path $PSScriptRoot -Parent
+if (-not $Tester) { $Tester = $env:MC_SMOKE_TESTER }
+if (-not $Tester) { $Tester = (git -C $script:Repo config user.name 2>$null) }
+if (-not $Tester) { $Tester = $env:USERNAME }
 if (-not $LogDir) {
     $base = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
     $LogDir = Join-Path $base 'windows-smoke'
@@ -339,6 +353,31 @@ if ((Test-Path $script:DbPath) -and -not $AllowDataWipe) {
         "deletes {1} before every phase and at the end; rerun with " +
         "-AllowDataWipe to consent to that.") -f $script:DbPath, $script:DataDir)
 }
+
+# --- evidence binding (G1): hash every installer this run smokes ----------
+# The summary must be bound to the exact artifact bytes, so record the
+# SHA-256 of each input up front and repeat it in the log and summary.json.
+function Get-ArtifactSha256 {
+    param([string] $Path)
+    if ($Path -and (Test-Path $Path)) {
+        return (Get-FileHash -Algorithm SHA256 $Path).Hash.ToLower()
+    }
+    return ''
+}
+$script:Artifacts = @(
+    foreach ($p in @($NewMsi, $NewExe, $OldMsi, $OldExe)) {
+        if ($p) {
+            $sha = Get-ArtifactSha256 $p
+            Write-Log ("artifact: {0} sha256={1}" -f (Split-Path $p -Leaf), $sha)
+            [ordered]@{ name = (Split-Path $p -Leaf); sha256 = $sha }
+        }
+    }
+)
+$script:HostOs = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
+$script:RepoCommit = (git -C $script:Repo rev-parse HEAD 2>$null)
+if (-not $script:RepoCommit) { $script:RepoCommit = 'unknown' }
+
+
 $upgradeReady = ($OldMsi -ne '' -and $OldExe -ne '' -and
     $FixtureDb -ne '' -and $InspectExe -ne '')
 if (-not $upgradeReady) {
@@ -455,9 +494,37 @@ $summaryPath = Join-Path $LogDir 'summary.txt'
 ($script:Results.GetEnumerator() | ForEach-Object { '{0} {1}' -f $_.Key, $_.Value }) |
     Set-Content $summaryPath
 Write-Log ("summary written to {0}" -f $summaryPath)
+
+# Machine-readable evidence record (G1): binds the result to host,
+# tester, UTC timestamps, repo commit and every artifact's SHA-256.
+$finishedUtc = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+$phases = @(
+    foreach ($entry in $script:Results.GetEnumerator()) {
+        $status = if ($entry.Value -eq 'PASS') { 'PASS' } else { 'FAIL' }
+        [ordered]@{ name = $entry.Key; status = $status }
+    }
+)
+$evidence = [ordered]@{
+    schema        = 'mailchat-vault/windows-smoke/1'
+    result        = if ($failed -gt 0) { 'FAIL' } else { 'PASS' }
+    started_utc   = $script:StartedUtc
+    finished_utc  = $finishedUtc
+    host          = [ordered]@{ os = $script:HostOs; arch = $env:PROCESSOR_ARCHITECTURE }
+    repo          = [ordered]@{ commit = $script:RepoCommit }
+    tester        = $Tester
+    alive_seconds = $AliveSeconds
+    artifacts     = $script:Artifacts
+    phases        = $phases
+    failed_phases = $failed
+}
+$jsonPath = Join-Path $LogDir 'summary.json'
+$evidence | ConvertTo-Json -Depth 5 | Set-Content $jsonPath
+Write-Log ("evidence json written to {0}" -f $jsonPath)
 if ($failed -gt 0) {
     Write-Host ("{0} phase(s) FAILED" -f $failed) -ForegroundColor Red
+    Write-Host 'RESULT: FAIL'
     exit 1
 }
 Write-Host 'all phases passed' -ForegroundColor Green
+Write-Host 'RESULT: PASS'
 exit 0
