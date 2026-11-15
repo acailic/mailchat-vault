@@ -1,9 +1,9 @@
 //! Export integration tests: search results and whole chat threads to CSV,
-//! JSON Lines and MBOX. Round-trips (CSV through a minimal RFC 4180 reader,
-//! JSON Lines through serde and a fresh database, MBOX through the
-//! production `parse_mbox` importer), Unicode bodies, filter fidelity,
-//! ordering, whole-thread export, and large result sets that exceed every
-//! pagination bound.
+//! JSON Lines and MBOX. Round-trips (CSV through a strict RFC 4180 reader
+//! and the independent `csv` crate parser, JSON Lines through serde and a
+//! fresh database, MBOX through the production `parse_mbox` importer),
+//! Unicode bodies, filter fidelity, ordering, whole-thread export, and
+//! large result sets that exceed every pagination bound.
 
 use std::io::Write;
 
@@ -80,8 +80,11 @@ fn export_to_vec(
 }
 
 // ---------------------------------------------------------------------------
-// Minimal RFC 4180 reader (records separated by CRLF, quoted fields with
-// doubled quotes; no embedded newlines handling beyond the standard).
+// Strict RFC 4180 reader (records separated by CRLF, quoted fields with
+// doubled quotes). A double quote may only open a quoted field at the very
+// start of a field — a quote in the middle of an unquoted field is
+// malformed and rejected, so the old prefixed-cell malformation (the
+// mitigation apostrophe written outside the quotes) cannot parse.
 // ---------------------------------------------------------------------------
 
 fn parse_csv(bytes: &[u8]) -> Vec<Vec<String>> {
@@ -109,7 +112,13 @@ fn parse_csv(bytes: &[u8]) -> Vec<Vec<String>> {
             }
         } else {
             match c {
-                '"' => in_quotes = true,
+                '"' => {
+                    assert!(
+                        field.is_empty(),
+                        "double quote inside an unquoted field: not RFC 4180 (a quote may only open a quoted field at the start of a field)"
+                    );
+                    in_quotes = true;
+                }
                 ',' => {
                     record.push(std::mem::take(&mut field));
                 }
@@ -214,6 +223,82 @@ fn csv_round_trip_preserves_every_field() {
     assert_eq!(records[3][0], "telegram");
     assert_eq!(records[3][6], "");
     assert_eq!(records[3][7], "{}");
+}
+
+/// Regression (see the CSV export malformation): a cell that gets the
+/// formula-mitigation apostrophe *and* needs RFC 4180 quoting must carry
+/// the apostrophe inside the quotes. The exported bytes are parsed by the
+/// independent `csv` crate in its default non-flexible mode — any record
+/// whose column count drifts from the 8-column header is a hard error —
+/// so a strict third-party reader, not one duplicating the writer's
+/// assumptions, is the judge.
+#[test]
+fn csv_prefixed_cells_that_need_quoting_are_valid_rfc4180() {
+    let bodies = [
+        "- hello, world", // the reported reproduction
+        "= comma, after the prefix",
+        "+ \"quote\" after the prefix",
+        "- newline\nafter the prefix",
+        "@ CRLF\r\nafter the prefix",
+        "= unicode čćžšđ 👋 中文, prefix",
+        "+ comma, \"quote\"\nand newline after the prefix",
+        "@ lone @ prefix, no quotes", // prefixed but unquotable
+        "plain unprefixed, control",
+        "plain \"quoted\" unprefixed control",
+        "plain\nunprefixed newline control",
+    ];
+    let s = seeded(
+        bodies
+            .iter()
+            .enumerate()
+            .map(|(i, body)| {
+                NewMessage::new(
+                    "mbox",
+                    format!("prefix-{i}@example.com"),
+                    "Ana Sender <ana@example.com>",
+                    "2026-11-03T09:00:00Z",
+                    (*body).to_string(),
+                )
+            })
+            .collect(),
+    );
+    let (_, bytes) = export_to_vec(&s, &SearchQuery::default(), ExportFormat::Csv);
+
+    // The apostrophe sits inside the quotes in the raw bytes for the
+    // reproduction case (the old writer glued it outside, before the `"`).
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        text.contains("\"'- hello, world\""),
+        "prefixed cell must quote the apostrophe into the field, got: {text}"
+    );
+
+    let mut reader = csv::ReaderBuilder::new().from_reader(bytes.as_slice());
+    let headers = reader.headers().expect("header record parses").clone();
+    assert_eq!(headers, vault_core::export::CSV_COLUMNS.to_vec());
+
+    let mut parsed = Vec::new();
+    for (i, record) in reader.records().enumerate() {
+        let record = record.unwrap_or_else(|e| panic!("record {i} is not valid RFC 4180: {e}"));
+        assert_eq!(record.len(), 8, "record {i} must keep exactly 8 columns");
+        parsed.push(record);
+    }
+    assert_eq!(parsed.len(), bodies.len(), "one record per message");
+
+    // Every body cell carries the mitigation apostrophe and the original
+    // text, matched by the row's external_id (order-independent).
+    for (i, body) in bodies.iter().enumerate() {
+        let id = format!("prefix-{i}@example.com");
+        let record = parsed
+            .iter()
+            .find(|r| r[1] == id)
+            .unwrap_or_else(|| panic!("record for external_id {id} missing"));
+        let expected = if matches!(body.as_bytes().first(), Some(b'=' | b'+' | b'-' | b'@')) {
+            format!("'{body}")
+        } else {
+            (*body).to_string()
+        };
+        assert_eq!(record[6], expected, "body cell of {id}");
+    }
 }
 
 // ---------------------------------------------------------------------------

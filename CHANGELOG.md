@@ -69,6 +69,16 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
   no longer the first Tab stop inside content — view controls come first,
   while the button keeps its visual place in the topbar.
 
+### Fixed (CSV export)
+
+- CSV exports no longer corrupt rows whose cells get the spreadsheet-formula
+  apostrophe and also need quoting: a body like `- hello, world` exported as
+  `'\"- hello, world\"` with the apostrophe outside the quotes, so strict CSV
+  readers saw 9 columns instead of 8 and shifted the data. The apostrophe is
+  now part of the field value before quoting (`\"'- hello, world\"`); cells
+  that don't need quotes and cells without a prefix export byte-identical to
+  before.
+
 ### Added (JSON Lines import)
 
 - **JSON Lines import** — the `.jsonl` files the app exports now import
