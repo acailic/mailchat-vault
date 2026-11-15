@@ -205,7 +205,7 @@ export async function run(ctx) {
     const activeChips = await browser.execute(
       () => document.querySelector("#active-filter-chips")?.textContent ?? "",
     );
-    assert.includes(activeChips, "mbox", "the source appears as an active filter chip");
+    assert.includes(activeChips, "Mail import", "the source appears as an active filter chip");
 
     // =============================================================
     // 6. Pause/resume: the exclusion flag persists in the vault DB and

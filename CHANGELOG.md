@@ -39,6 +39,25 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
   labels `.eml` picks ("Email messages (.eml)") and Messenger exports
   ("Messenger (Facebook) export"), with a how-to-export hint for each.
 
+### Added (drag-and-drop import)
+
+- **Drop archives anywhere on the window to import them** — files and
+  folders alike route into the exact same bounded preview → confirm →
+  import flow the Import file… / Import folder… buttons produce;
+  nothing is ever stored without the confirmed preview. Two dashed
+  drop zones advertise the surface — on the first-run "Add your first
+  source" card and in Sources → Import, both reading "Drop archives
+  here — .mbox · .eml · .json · .txt" — and highlight while a drag is
+  over the window. Dropping several paths at once previews them one at
+  a time in drop order (the waiting count shows in the section's
+  status line); a drop while an import runs waits until it finishes,
+  and drops are ignored while the sample archive is open, like the
+  picker buttons. Routed through the Tauri 2 drag-drop events (real
+  file/folder paths) with the window's `dragDropEnabled` setting pinned
+  on. Manual smoke (on a desktop): drag one `.mbox` and one export
+  folder onto the window — each previews with the same card the pickers
+  show.
+
 ### Added (first-sync failure loop — resilience)
 
 - **A failed first sync keeps the account** — connecting an email account

@@ -5,6 +5,7 @@ import {
   folderSummaryLine,
   formatDayLabel,
   formatSentAt,
+  friendlySourceLabel,
   humanSize,
   importScopeLabel,
   mediaSummaryPart,
@@ -13,6 +14,21 @@ import {
   timeConfidenceLabel,
 } from "./format";
 import type { FolderSyncSummary } from "./types";
+
+describe("friendlySourceLabel (plain words for stored source labels)", () => {
+  it("reads the raw mbox ingest namespace as Mail import", () => {
+    expect(friendlySourceLabel("mbox")).toBe("Mail import");
+  });
+
+  it("passes every other label through unchanged", () => {
+    expect(friendlySourceLabel("demo")).toBe("demo");
+    expect(friendlySourceLabel("whatsapp")).toBe("whatsapp");
+    // Labels that merely contain the token are not the token.
+    expect(friendlySourceLabel("mbox:archive.mbox")).toBe("mbox:archive.mbox");
+    expect(friendlySourceLabel("imap.gmail.com-ana")).toBe("imap.gmail.com-ana");
+    expect(friendlySourceLabel("")).toBe("");
+  });
+});
 
 describe("authorDisplayName (the display part of an author string)", () => {
   it("returns the name before the address", () => {

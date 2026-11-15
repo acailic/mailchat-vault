@@ -12,6 +12,7 @@ import type {
   Message,
   SearchHit,
 } from "./types";
+import { friendlySourceLabel } from "./format";
 import {
   type DayBar,
   type HitGroup,
@@ -499,8 +500,8 @@ export interface DashboardOptions {
 
 /**
  * Render the statistics dashboard: a summary line, the per-day histogram
- * (CSS bars, no chart library), and count tables for sources, top chats,
- * and top authors. An empty archive renders the summary only.
+ * (CSS bars, no chart library), and count tables for sources, busiest
+ * folders, and top authors. An empty archive renders the summary only.
  */
 export function renderDashboard(el: HTMLElement, opts: DashboardOptions): void {
   const { stats } = opts;
@@ -516,15 +517,19 @@ export function renderDashboard(el: HTMLElement, opts: DashboardOptions): void {
   grid.append(
     countTable(
       "By source",
-      stats.by_source.map((s) => ({ label: s.source, count: s.count })),
+      stats.by_source.map((s) => ({
+        label: friendlySourceLabel(s.source),
+        title: s.source,
+        count: s.count,
+      })),
     ),
     countTable(
-      "Top chats",
+      "Busiest folders",
       stats.top_chats.map((c) => ({
         // Mail folder names arrive in the provider's casing; chat names
-        // are user-chosen and render verbatim. The raw label stays in
-        // the tooltip either way.
-        label: `${c.source} · ${isMailSource(c.source) ? sentenceCaseFolder(c.chat_id) : c.chat_id}`,
+        // are user-chosen and render verbatim. The source reads in plain
+        // words (friendlySourceLabel); the raw label stays in the tooltip.
+        label: `${friendlySourceLabel(c.source)} · ${isMailSource(c.source) ? sentenceCaseFolder(c.chat_id) : c.chat_id}`,
         title: `${c.source} · ${c.chat_id}`,
         count: c.count,
       })),

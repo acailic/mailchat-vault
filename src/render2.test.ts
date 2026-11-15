@@ -15,6 +15,7 @@ import {
   timeLabel,
 } from "./render2";
 import { contextEntries } from "./searchstate";
+import { HIGHLIGHT_MAX_MARKS } from "./viewmodel";
 import type { ConversationContext, MessageSummary } from "./v2types";
 
 // Timestamps render timezone-independently (formatSentAt is covered by
@@ -63,6 +64,8 @@ describe("flat results", () => {
     expect(rows[1].classList.contains("active")).toBe(true);
     expect(rows[0].textContent).toContain("Ana");
     expect(rows[1].textContent).toContain("Bo");
+    // The raw `mbox` source label reads as plain words on the row.
+    expect(rows[0].textContent).toContain("Mail import");
     // Flat: no group headers between rows.
     expect(el.querySelector(".group")).toBeNull();
   });
@@ -146,6 +149,11 @@ describe("flat results", () => {
     renderFlatResults(el, {
       hits: [
         hit({ attachment_count: 2, available_attachment_count: 1 }),
+        hit({
+          attachment_count: 1,
+          available_attachment_count: 0,
+        }),
+        hit({ attachment_count: 2, available_attachment_count: 2 }),
         hit({ has_conflicting_revision: true }),
       ],
       activeIndex: -1,
@@ -156,9 +164,14 @@ describe("flat results", () => {
       onToggleSelect: () => {},
     });
     const badges = el.querySelectorAll(".badge.attachments");
-    expect(badges[0].textContent).toBe("1/2");
+    // The visible words carry their units ("files kept"); the exact
+    // counts and the references-vs-preserved split stay in title/aria.
+    expect(badges[0].textContent).toBe("1 of 2 files kept");
     expect(badges[0].getAttribute("aria-label")).toBe("attachments: 1 of 2");
     expect(badges[0].innerHTML).toContain("#i-paperclip");
+    expect(badges[1].textContent).toBe("0 of 1 files kept");
+    expect(badges[1].getAttribute("aria-label")).toBe("attachments: 0 of 1");
+    expect(badges[2].textContent).toBe("2 files");
     expect(el.querySelector(".badge.conflict")?.textContent).toBe("revisions");
   });
 
@@ -529,7 +542,13 @@ describe("reading pane", () => {
     const card = el.querySelector(".detail-card") as HTMLElement;
     expect(card.querySelector("h2")?.textContent).toBe("Ana");
     const table = card.querySelector(".meta-table")?.textContent ?? "";
-    expect(table).toContain("mbox");
+    // The raw `mbox` label reads as "Mail import"; the stored label
+    // stays one hover away on the source row.
+    expect(table).toContain("Mail import");
+    const sourceCell = [...card.querySelectorAll(".meta-table dd")].find((dd) =>
+      dd.textContent === "Mail import",
+    ) as HTMLElement;
+    expect(sourceCell.title).toBe("Stored source: mbox");
     expect(table).toContain("e2e-m-3");
     expect(table).toContain("Delivery date");
     // F08: confidence reads as a word, never the raw store token, and
@@ -589,6 +608,47 @@ describe("reading pane", () => {
     // The conversation row itself says why in user terms.
     expect(el.textContent).toContain("thread-a (unverified grouping)");
     expect(el.querySelectorAll("li.thread-row").length).toBe(1);
+  });
+
+  it("conversation-context neighbor rows mark the query terms", () => {
+    const neighborCtx: ConversationContext = {
+      ...ctx,
+      before: [{ ...ctx.before[0], body: "earlier vault message" }],
+      after: [{ ...ctx.after[0], body: "later vault message" }],
+    };
+    const el = render({ ctx: neighborCtx, entries: contextEntries(neighborCtx) });
+    const beforeRow = el.querySelector('li.thread-row[data-id="1"]') as HTMLElement;
+    const afterRow = el.querySelector('li.thread-row[data-id="4"]') as HTMLElement;
+    expect(beforeRow.querySelector("mark.hit")?.textContent).toBe("vault");
+    expect(afterRow.querySelectorAll("mark.hit").length).toBe(1);
+    // Marks never change the rendered text.
+    expect(beforeRow.querySelector(".body")?.textContent).toBe("earlier vault message");
+  });
+
+  it("browse mode (no query text) renders no marks anywhere in the pane", () => {
+    const neighborCtx: ConversationContext = {
+      ...ctx,
+      before: [{ ...ctx.before[0], body: "earlier vault message" }],
+      after: [{ ...ctx.after[0], body: "later vault message" }],
+    };
+    const el = render({
+      ctx: neighborCtx,
+      entries: contextEntries(neighborCtx),
+      queryText: "",
+    });
+    expect(el.querySelectorAll("mark.hit").length).toBe(0);
+  });
+
+  it("the anchor body marks at most the shared cap, text unchanged", () => {
+    const body = `${"see vault ".repeat(HIGHLIGHT_MAX_MARKS + 5)}end`;
+    const cappedCtx: ConversationContext = {
+      ...ctx,
+      anchor: { ...ctx.anchor, body },
+    };
+    const el = render({ ctx: cappedCtx, entries: contextEntries(cappedCtx) });
+    const bodyEl = el.querySelector(".detail-body .body") as HTMLElement;
+    expect(bodyEl.querySelectorAll("mark.hit").length).toBe(HIGHLIGHT_MAX_MARKS);
+    expect(bodyEl.textContent).toBe(body);
   });
 
   it("actions are wired: copy, copy link, export, export chat, close, open neighbor", () => {

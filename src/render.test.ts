@@ -470,6 +470,22 @@ describe("dashboard", () => {
     ).toEqual(["2026-01-01", "2026-02-01", "2026-03-31"]);
     expect(el.querySelectorAll(".stat-table").length).toBe(3);
     expect(el.querySelectorAll(".stat-table tbody tr").length).toBe(6);
+    // Plain language: the folder table reads "Busiest folders", and the
+    // raw `mbox` label reads "Mail import" (the stored label stays one
+    // hover away in the row's tooltip).
+    expect([...el.querySelectorAll(".stat-table h3")].map((h) => h.textContent)).toEqual([
+      "By source",
+      "Busiest folders",
+      "Top authors",
+    ]);
+    const sourceRows = [...el.querySelectorAll(".stat-table")[0].querySelectorAll("td.label")];
+    expect(sourceRows.map((td) => td.textContent)).toEqual(["Mail import", "whatsapp"]);
+    expect(sourceRows[0].getAttribute("title")).toBe("mbox");
+    const folderRows = [...el.querySelectorAll(".stat-table")[1].querySelectorAll("td.label")];
+    expect(folderRows.map((td) => td.textContent)).toEqual([
+      "whatsapp · family",
+      "Mail import · Thread-a",
+    ]);
     // The author shows its display name; the full address stays in the
     // tooltip; the unknown author gets a readable label.
     const authorRows = [...el.querySelectorAll(".stat-table")[2].querySelectorAll("td.label")];
@@ -574,7 +590,7 @@ describe("dashboard", () => {
     // The mail folder label reads in sentence case; the user-chosen chat
     // name keeps its own casing. (Rows keep the backend's count order.)
     expect(labels.map((td) => td.textContent)).toEqual([
-      "mbox · All mail including spam and trash",
+      "Mail import · All mail including spam and trash",
       "whatsapp · Family Group",
     ]);
     // The raw stored value stays in the tooltip.

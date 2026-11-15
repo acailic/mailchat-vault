@@ -48,6 +48,17 @@ describe("filter model", () => {
     expect(hasActiveFilters(filters({ hasAttachment: false }))).toBe(true);
   });
 
+  it("any honesty filter alone activates browse; defaults stay inactive", () => {
+    expect(hasActiveFilters(filters({ timeAssumed: true }))).toBe(true);
+    expect(hasActiveFilters(filters({ timeAssumed: false }))).toBe(true);
+    expect(hasActiveFilters(filters({ groupingUnverified: true }))).toBe(true);
+    expect(hasActiveFilters(filters({ groupingUnverified: false }))).toBe(true);
+    expect(hasActiveFilters(filters({ filesMissing: true }))).toBe(true);
+    expect(hasActiveFilters(filters({ filesMissing: false }))).toBe(true);
+    // Defaults (all null) keep a plain browse inactive.
+    expect(hasActiveFilters(DEFAULT_FILTERS)).toBe(false);
+  });
+
   it("chips cover every filter kind with removable labels", () => {
     const f = filters({
       sourceIds: ["s1", "s2"],
@@ -55,6 +66,9 @@ describe("filter model", () => {
       fromDate: "2026-01-01",
       toDate: "2026-02-01",
       hasAttachment: true,
+      timeAssumed: true,
+      groupingUnverified: true,
+      filesMissing: true,
       importJobId: "imp-9",
     });
     const chips = filterChips(f, labels);
@@ -65,18 +79,44 @@ describe("filter model", () => {
       "from-date",
       "to-date",
       "attachment",
+      "time-assumed",
+      "grouping-unverified",
+      "files-missing",
       "import-scope",
     ]);
     expect(chips[0].label).toBe("Source s1");
     expect(chips[2].label).toBe("author: Ana");
     expect(chips[3].label).toBe("from 2026-01-01");
     expect(chips[5].label).toBe("has attachment");
-    expect(chips[6].label).toBe("import: import-imp-9");
+    expect(chips[9].label).toBe("import: import-imp-9");
   });
 
   it("a negative attachment chip reads as no attachment", () => {
     const chips = filterChips(filters({ hasAttachment: false }), labels);
     expect(chips[0].label).toBe("no attachment");
+  });
+
+  it("honesty chips use the agreed labels for both polarities, with no counts", () => {
+    const on = filterChips(
+      filters({ timeAssumed: true, groupingUnverified: true, filesMissing: true }),
+      labels,
+    );
+    expect(on.map((c) => c.label)).toEqual([
+      "dates assumed",
+      "grouping unverified",
+      "files missing",
+    ]);
+    const off = filterChips(
+      filters({ timeAssumed: false, groupingUnverified: false, filesMissing: false }),
+      labels,
+    );
+    expect(off.map((c) => c.label)).toEqual([
+      "dates confirmed",
+      "grouping verified",
+      "files preserved",
+    ]);
+    // Off filters emit no chips at all.
+    expect(filterChips(DEFAULT_FILTERS, labels)).toEqual([]);
   });
 
   it("removing a chip clears exactly that filter", () => {
@@ -90,6 +130,32 @@ describe("filter model", () => {
     expect(next.sourceIds).toEqual(["s2"]);
     next = withoutChip(next, filterChips(next, labels)[1]); // remove attachment
     expect(next.hasAttachment).toBeNull();
+  });
+
+  it("removing an honesty chip clears exactly that filter, leaving the others intact", () => {
+    const f = filters({
+      timeAssumed: true,
+      groupingUnverified: false,
+      filesMissing: true,
+      hasAttachment: true,
+    });
+    const byKind = new Map(filterChips(f, labels).map((c) => [c.kind, c]));
+
+    const noDates = withoutChip(f, byKind.get("time-assumed")!);
+    expect(noDates.timeAssumed).toBeNull();
+    expect(noDates.groupingUnverified).toBe(false);
+    expect(noDates.filesMissing).toBe(true);
+    expect(noDates.hasAttachment).toBe(true);
+
+    const noGrouping = withoutChip(f, byKind.get("grouping-unverified")!);
+    expect(noGrouping.groupingUnverified).toBeNull();
+    expect(noGrouping.timeAssumed).toBe(true);
+    expect(noGrouping.filesMissing).toBe(true);
+
+    const noFiles = withoutChip(f, byKind.get("files-missing")!);
+    expect(noFiles.filesMissing).toBeNull();
+    expect(noFiles.timeAssumed).toBe(true);
+    expect(noFiles.groupingUnverified).toBe(false);
   });
 
   it("reversed date bounds are rejected before invocation", () => {
@@ -108,6 +174,9 @@ describe("filter model", () => {
         fromDate: "2026-01-01",
         importJobId: "imp-1",
         hasAttachment: true,
+        timeAssumed: true,
+        groupingUnverified: false,
+        filesMissing: true,
         sort: "newest",
       }),
       50,
@@ -121,6 +190,9 @@ describe("filter model", () => {
       to_date: null,
       timezone: "",
       has_attachment: true,
+      time_assumed: true,
+      grouping_unverified: false,
+      files_missing: true,
       import_job_id: "imp-1",
       sort: "newest",
       limit: 50,
@@ -128,6 +200,32 @@ describe("filter model", () => {
     });
     // The user's sort choice survives for text searches.
     expect(buildRequest(filters({ text: "x", sort: "newest" }), 50, 0).sort).toBe("newest");
+  });
+
+  it("buildRequest maps each honesty tri-state onto its wire key", () => {
+    // True and false both flow through; null (off) stays null on the wire.
+    const on = buildRequest(
+      filters({ timeAssumed: true, groupingUnverified: true, filesMissing: true }),
+      50,
+      0,
+    );
+    expect(on.time_assumed).toBe(true);
+    expect(on.grouping_unverified).toBe(true);
+    expect(on.files_missing).toBe(true);
+
+    const inverted = buildRequest(
+      filters({ timeAssumed: false, groupingUnverified: false, filesMissing: false }),
+      50,
+      0,
+    );
+    expect(inverted.time_assumed).toBe(false);
+    expect(inverted.grouping_unverified).toBe(false);
+    expect(inverted.files_missing).toBe(false);
+
+    const off = buildRequest(DEFAULT_FILTERS, 50, 0);
+    expect(off.time_assumed).toBeNull();
+    expect(off.grouping_unverified).toBeNull();
+    expect(off.files_missing).toBeNull();
   });
 });
 
@@ -359,7 +457,9 @@ describe("copy text", () => {
   it("renders readable text with metadata and provenance", () => {
     const text = messageToText(detail);
     expect(text).toContain("=== Message 7 ===");
-    expect(text).toContain("Source: mbox (uuid-1)");
+    // The source line reads the plain-word label; the stored one and the
+    // id ride along as provenance in the parens.
+    expect(text).toContain("Source: Mail import (mbox) (uuid-1)");
     expect(text).toContain("From: Ana <ana@example.com>");
     expect(text).toContain("Subject: Delivery date");
     // Confidence reaches the reader as words, never the store's raw

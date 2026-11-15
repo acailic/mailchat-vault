@@ -1,6 +1,6 @@
 # Retrieval quality slice 1 — results record (2026-11-14)
 
-Status: **complete**. Implementation record for the first retrieval-quality slice, grounded in the [literature review of 2026-11-13](literature-review-2026-11-13.md) (its top three recommendations). Execution: subagent-driven development against the plan at [`docs/superpowers/plans/2026-11-13-retrieval-quality-1.md`](../superpowers/plans/2026-11-13-retrieval-quality-1.md), branch `feat/retrieval-quality-1`, fast-forward merged to `main` as `63d1fe6` (main was `fef48e9`; reconciliation with the parallel app-identity merge followed as `ef6bd46`).
+Status: **complete**. Implementation record for the first retrieval-quality slice, grounded in the [literature review of 2026-11-13](literature-review-2026-11-13.md) (its top three recommendations). Execution: subagent-driven development against the plan at [`docs/superpowers/plans/2026-11-13-retrieval-quality-1.md`](../superpowers/plans/2026-11-13-retrieval-quality-1.md), branch `feat/retrieval-quality-1`. *Merge status corrected 2026-11-14 (see the [recommendations audit](retrieval-recommendations-audit-2026-11-14.md)):* the branch series `af286c5`…`63d1fe6` (fast-forwarded over `fef48e9`, reconciled with the parallel app-identity merge as `ef6bd46`) is **not** an ancestor of `main` — that line diverged. The content reached `main` as a patch-identical rebuilt series, `0e00d85`…`d099b36`, merged via `836e9dd`; every commit pair compares equal by stable patch-id. Everything below describes work whose content is on `main`; the SHAs name the branch-side originals.
 
 ## What landed
 
@@ -13,6 +13,8 @@ Status: **complete**. Implementation record for the first retrieval-quality slic
 | `4ef65a9` | **Lost-in-the-Middle context ordering** — `summarize_results` feeds the top-8 blocks in order `1,3,5,7,8,6,4,2` (odds ascending, evens descending; strongest at the prompt edges), numbering `[1]..[8]` by rank unchanged; header now "numbered by relevance" |
 | `531b044` | CHANGELOG entry (user-facing summary) |
 | `63d1fe6` | **Final-review fixes** — two mixed email+chat labeled queries (the axis the weights move), floors re-derived from the 16-query baseline, a weight-sensitive ordering assertion through the v2 path (fails at subject weight 1.0, passes at 3.0), the stale relevance-sort sentence in `data-and-api-contracts.md` corrected |
+
+*Annotation (2026-11-14): the SHAs above are the branch-side (`feat/retrieval-quality-1`) originals — none is an ancestor of `main`. The main-side equivalents, patch-id-identical pairwise, are `0e00d85`, `0bbaf79`, `b2ee1ef`, `9099416`, `12e92f5`, `678e438`, and `d099b36`; `d099b36` is the immediate parent of the merge `836e9dd` that delivered the slice to `main` (provenance: [retrieval-recommendations-audit-2026-11-14.md](retrieval-recommendations-audit-2026-11-14.md)). This annotation covers the `63d1fe6` references throughout this record, including Findings and the Verification record below.*
 
 ## Measured results
 

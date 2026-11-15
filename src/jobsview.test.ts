@@ -298,7 +298,10 @@ describe("describeJobState", () => {
       state: { state: "running" },
       progress: { done: 500, total: 1200, message: "embedding" },
     });
-    expect(describeJobState(rec)).toBe("local embeddings — 500/1200 (42%) · embedding");
+    // Plain words on the Activity row: the kind reads "local search
+    // index" and the backend's "embedding" worker token renders as
+    // "indexing" (the wire token itself stays unchanged).
+    expect(describeJobState(rec)).toBe("local search index — 500/1200 (42%) · indexing");
   });
 
   it("renders terminal states with summaries and typed errors", () => {
@@ -381,7 +384,7 @@ describe("renderJobsList", () => {
     // restored rows newest-first (the newest carries the higher id) — all
     // through describeJobState, so a restored import reads exactly like
     // one this session ran.
-    expect(items[0].textContent).toBe("local embeddings — done (8 embedded)");
+    expect(items[0].textContent).toBe("local search index — done (8 indexed)");
     expect(items[0].className).toBe("job succeeded");
     expect(items[1].textContent).toBe("IMAP sync — failed: connection refused");
     expect(items[1].className).toBe("job failed");

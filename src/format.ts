@@ -62,6 +62,17 @@ export function authorDisplayName(author: string | null | undefined): string {
   return unquoted || raw;
 }
 
+/** The plain-language display label of a stored source label: the raw
+ *  "mbox" ingest namespace reads as "Mail import" on every primary
+ *  surface (stats line, chips, dashboard, reading pane, exports), the
+ *  same rewrite `accountTitle` applies to IMAP connector labels. Any
+ *  other label passes through unchanged; the stored label stays the
+ *  identity of record — callers keep it one hover away in titles. */
+export function friendlySourceLabel(label: string): string {
+  if (label === "mbox") return "Mail import";
+  return label;
+}
+
 /** The user-facing label of one time-confidence token: a short word
  *  (or two) that says how much to trust the shown time — the token
  *  itself never reaches the reading pane, the copy text, or exports

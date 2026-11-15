@@ -156,6 +156,12 @@
                     <button id="first-run-import-btn" class="primary" type="button">Import files…</button>
                     <button id="first-run-account-btn" type="button">Connect email…</button>
                   </div>
+                  <!-- Whole-window drag-drop import: static copy whose only
+                       dynamic behavior is the highlight class the Tauri
+                       drag-drop events toggle (src/main.ts). -->
+                  <div id="first-run-drop" class="drop-zone">
+                    Drop archives here — .mbox · .eml · .json · .txt
+                  </div>
                   <p class="meta">
                     Not ready with your own data?
                     <button id="first-run-demo-btn" class="link-btn" type="button">Try a sample archive</button>
@@ -328,6 +334,12 @@
                 or a .zip of any of these. You will see a preview before anything is stored;
                 re-importing never duplicates.
               </p>
+              <!-- The same drop surface as the first-run card: dropping on
+                   any part of the window routes through this section's
+                   preview → confirm flow. -->
+              <div id="import-drop" class="drop-zone">
+                Drop archives here — .mbox · .eml · .json · .txt
+              </div>
               <div id="import-preview" hidden></div>
               <!-- This flow's import job, followed inline: stage, counts,
                    bar, Cancel (Activity stays the aggregate over all jobs). -->
@@ -409,11 +421,19 @@
               </div>
               <div id="auto-sync-status" class="meta" style="margin-top: 6px; min-height: 1em" role="status"></div>
               <div class="row" style="margin-top: 12px">
-                <label class="visually-hidden" for="watch-path">Folder to watch</label>
-                <input id="watch-path" type="text" placeholder="/path/to/folder with .mbox / chat exports" />
-                <button id="watch-btn" type="button">Watch</button>
                 <button id="watch-add-btn" type="button">Pick folder…</button>
               </div>
+              <!-- The picker is the promised path (no typed paths); the
+                   typed input stays for automation and power users,
+                   demoted behind a fold. -->
+              <details id="watch-typed-fold" style="margin-top: 6px">
+                <summary class="meta">Type a path instead</summary>
+                <div class="row" style="margin-top: 6px">
+                  <label class="visually-hidden" for="watch-path">Folder to watch</label>
+                  <input id="watch-path" type="text" placeholder="/path/to/folder with .mbox / chat exports" />
+                  <button id="watch-btn" type="button">Watch</button>
+                </div>
+              </details>
               <div id="watch-status" class="meta" style="margin-top: 6px; min-height: 1em" role="status"></div>
               <ul id="watch-folders" class="watch-list"></ul>
               <ul id="watch-events" class="watch-list"></ul>
@@ -619,20 +639,23 @@
                    the local index lives here with the rest of the AI
                    configuration, not under every result set. -->
               <div class="row">
-                <button id="embed-btn" type="button" title="Embed messages that don't have a local embedding yet (incremental, offline)">
+                <button id="embed-btn" type="button" title="Build the local search index Ask uses offline: messages without an entry yet are added (incremental, offline)">
                   Update local embeddings
                 </button>
                 <span id="embed-status" class="meta" style="flex: 1; min-height: 1em" role="status"></span>
               </div>
               <p class="meta" style="margin-top: 4px">
-                Local embeddings run entirely on this device and feed Ask's offline
-                matching; updating is incremental, so only new messages are embedded.
+                The local search index runs entirely on this device and feeds Ask's offline
+                matching; updating is incremental, so only new messages are indexed.
               </p>
-              <p class="meta" style="font-size: 12px; margin-top: 8px">
-                Providers live in settings.json in the app data dir; API keys are stored in the OS keyring
-                (session memory when none is available) — never in the settings file or the database.
-                Text is set in the bundled Source Sans 3 (SIL OFL 1.1), falling back to your system font.
-              </p>
+              <details style="margin-top: 8px">
+                <summary class="meta" style="font-size: 12px">Technical details</summary>
+                <p class="meta" style="font-size: 12px; margin-top: 4px">
+                  Providers live in settings.json in the app data dir; API keys are stored in the OS keyring
+                  (session memory when none is available) — never in the settings file or the database.
+                  Text is set in the bundled Source Sans 3 (SIL OFL 1.1), falling back to your system font.
+                </p>
+              </details>
             </section>
           </section>
         </main>

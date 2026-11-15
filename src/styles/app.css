@@ -607,6 +607,25 @@ kbd {
 
 #first-run .row { margin-top: var(--sp-3); }
 
+/* Drop zones (whole-window drag-drop import): static copy whose only
+ * dynamic behavior is the highlight class the Tauri drag-drop events
+ * toggle (src/main.ts) — dashed and quiet at rest, accent-tinted while
+ * a drag is over the window. */
+.drop-zone {
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-m);
+  color: var(--muted);
+  font-size: var(--text-meta);
+  text-align: center;
+}
+.drop-zone.drop-active {
+  border-color: var(--accent);
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 10%, var(--canvas));
+}
+
 button.link-btn {
   padding: 0;
   border: none;

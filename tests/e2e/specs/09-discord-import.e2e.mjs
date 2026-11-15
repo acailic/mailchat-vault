@@ -1,12 +1,12 @@
-// Path: end-to-end Discord Data Package import — the real Tauri command,
+// Path: end-to-end Discord Data Package import — the real job engine,
 // the real vault database, the real search UI.
 //
 // The chat-import button opens a native file dialog no WebDriver can
-// drive, so the spec calls the very same `import_chat_export` command the
-// button invokes through the page's Tauri IPC bridge
-// (`window.__TAURI_INTERNALS__`) — everything else is the user path:
-// command → format detection → vault-core DiscordSource → SQLite/FTS5 →
-// search_messages → rendered results.
+// drive, so the spec submits the very same `import_chat_export` job
+// the button's confirm step submits (`job_submit` through the page's
+// Tauri IPC bridge, `window.__TAURI_INTERNALS__`) — everything else is
+// the user path: job → format detection → vault-core DiscordSource →
+// SQLite/FTS5 → search_messages → rendered results.
 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,39 +20,6 @@ const fixturesDir = path.resolve(
   "discord-package",
 );
 
-/** Invoke a Tauri command inside the live webview (real IPC, real
- * app). WebKitWebDriver has no async-script endpoint, so the result is
- * parked on `window` and polled — the page-side promise settles it. */
-async function tauriInvoke(browser, cmd, args, { timeout = 20_000 } = {}) {
-  await browser.execute(
-    (command, payload) => {
-      window.__e2eInvoke = null;
-      window.__TAURI_INTERNALS__
-        .invoke(command, payload)
-        .then((value) => {
-          window.__e2eInvoke = { ok: value };
-        })
-        .catch((error) => {
-          window.__e2eInvoke = { err: String(error) };
-        });
-    },
-    cmd,
-    args,
-  );
-  await browser.waitUntil(
-    async () => (await browser.execute(() => window.__e2eInvoke)) !== null,
-    { timeout, timeoutMsg: `${cmd} never settled in the webview` },
-  );
-  const settled = await browser.execute(() => window.__e2eInvoke);
-  await browser.execute(() => {
-    delete window.__e2eInvoke;
-  });
-  if (settled.err !== undefined) {
-    throw new Error(`${cmd} failed in webview: ${settled.err}`);
-  }
-  return settled.ok;
-}
-
 export async function run(ctx) {
   const { withSession, assert, ui, vaultDbPath } = ctx;
 
@@ -62,21 +29,21 @@ export async function run(ctx) {
     // clickable regardless of the driver's default window size.
     await browser.setWindowRect(0, 0, 1280, 960).catch(() => {});
 
-    // --- import the whole package directory through the real command ----
-    const outcome = await tauriInvoke(browser, "import_chat_export", {
-      path: fixturesDir,
-    });
+    // --- import the whole package directory through the confirm path ----
+    const outcome = await ui.importChatExport(browser, fixturesDir);
+    assert.ok(outcome.ok, `import job succeeded: ${outcome.error ?? ""}`);
     // 8 user messages across two guild channels and one DM; the
     // GuildMemberJoin system entry is skipped (and not counted as seen).
-    const summary = outcome.summary;
+    const summary = outcome.value.summary;
     assert.equal(summary.source, "discord", "summary source");
     assert.equal(summary.seen, 8, "summary seen");
     assert.equal(summary.inserted, 8, "summary inserted");
     assert.equal(summary.skipped, 0, "summary skipped");
     assert.equal(summary.failed, 0, "summary failed");
 
-    // The command ran outside the button handler, so the stats label
-    // needs one real UI action to repaint (Clear refreshes stats too).
+    // The job's terminal event already refreshed every vault-reading
+    // panel (the helper settles the stats label); Clear refreshes
+    // stats too, so the assertion also holds through a real UI action.
     await (await browser.$("#clear-filters")).click();
     assert.equal(
       await ui.waitForText(browser, "#stats", "8 messages (discord: 8)"),
@@ -112,11 +79,10 @@ export async function run(ctx) {
     assert.includes(dm, "1–1 of 1", "DM search result count");
 
     // --- re-import is idempotent end to end -----------------------------
-    const reimport = await tauriInvoke(browser, "import_chat_export", {
-      path: fixturesDir,
-    });
-    assert.equal(reimport.summary.inserted, 0, "re-import inserts nothing");
-    assert.equal(reimport.summary.skipped, 8, "re-import skips every message");
+    const reimport = await ui.importChatExport(browser, fixturesDir);
+    assert.ok(reimport.ok, `re-import job succeeded: ${reimport.error ?? ""}`);
+    assert.equal(reimport.value.summary.inserted, 0, "re-import inserts nothing");
+    assert.equal(reimport.value.summary.skipped, 8, "re-import skips every message");
     await (await browser.$("#clear-filters")).click();
     assert.equal(
       await ui.waitForText(browser, "#stats", "8 messages (discord: 8)"),
@@ -125,10 +91,12 @@ export async function run(ctx) {
     );
 
     // --- the same message id in another channel is no duplicate ---------
-    const channelFile = await tauriInvoke(browser, "import_chat_export", {
-      path: path.join(fixturesDir, "messages", "900000000000000101.json"),
-    });
-    assert.equal(channelFile.summary.inserted, 0, "single channel file re-import dedups");
+    const channelFile = await ui.importChatExport(
+      browser,
+      path.join(fixturesDir, "messages", "900000000000000101.json"),
+    );
+    assert.ok(channelFile.ok, `channel-file job succeeded: ${channelFile.error ?? ""}`);
+    assert.equal(channelFile.value.summary.inserted, 0, "single channel file re-import dedups");
 
     // --- database state: grouping, ids, reactions/attachments in raw ----
     const db = vaultDbPath(dataDir);

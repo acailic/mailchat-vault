@@ -229,7 +229,7 @@ export async function run(ctx) {
         "[1.11.2026., 09:00:04] Formula Probe: plain probe body without prefix",
       ].join("\n") + "\n",
     );
-    const probeImport = await invoke(browser, "import_chat_export", { path: probeTxt });
+    const probeImport = await ui.importChatExport(browser, probeTxt);
     assert.ok(probeImport.ok, `formula probe import succeeded: ${probeImport.error}`);
     const probeCsv = await invoke(browser, "export_search", {
       query: { ...uiQuery, text: "probe", sources: ["whatsapp"] },

@@ -1,10 +1,11 @@
 // Media extraction end-to-end: import a Telegram export (real fixture
-// files) through the running app's import_chat_export command with the
-// same wire shape the "Import chat export..." button sends, verify the
-// content-addressed store on disk, the media section in the detail view,
-// the extraction-off path, one re-import dedup, and the WhatsApp
-// stem-matching guard (plan.pdf.bak must not answer for a missing
-// plan.pdf, while IMG-1.jpg still matches IMG-1.jpeg).
+// files) through the running app's import-confirm job path (the same
+// `job_submit` of kind `import_chat_export` the "Import chat export…"
+// button sends), verify the content-addressed store on disk, the media
+// section in the detail view, the extraction-off path, one re-import
+// dedup, and the WhatsApp stem-matching guard (plan.pdf.bak must not
+// answer for a missing plan.pdf, while IMG-1.jpg still matches
+// IMG-1.jpeg).
 export const name = "media-extract";
 
 import { copyFile, mkdir, writeFile, readFile, readdir } from "node:fs/promises";
@@ -27,23 +28,6 @@ const mediaFixtures = path.resolve(
 );
 
 const sha256Hex = async (p) => createHash("sha256").update(await readFile(p)).digest("hex");
-
-// Invoke a Tauri command in the app and await { ok, value, error }.
-// Same shape and rationale as the signal-import spec: the native GTK file
-// chooser cannot be automated over WebDriver, so the command is invoked
-// with the exact argument object the button handler builds.
-async function invoke(browser, command, args = {}) {
-  try {
-    const value = await browser.execute(
-      async (cmd, payload) => window.__TAURI_INTERNALS__.invoke(cmd, payload),
-      command,
-      args,
-    );
-    return { ok: true, value };
-  } catch (e) {
-    return { ok: false, error: String(e?.message ?? e) };
-  }
-}
 
 export async function run(ctx) {
   const { withSession, assert, ui } = ctx;
@@ -86,11 +70,8 @@ export async function run(ctx) {
     );
     await writeFile(path.join(exportDir, "video_files/clip.mp4"), Buffer.from("fake-video-bytes"));
 
-    // --- import with the wire shape the UI button sends -------------------
-    const outcome = await invoke(browser, "import_chat_export", {
-      path: exportDir,
-      extractMedia: true,
-    });
+    // --- import with the payload the UI's confirm step submits ------------
+    const outcome = await ui.importChatExport(browser, exportDir, { extractMedia: true });
     assert.ok(outcome.ok, `telegram import succeeded: ${outcome.error ?? ""}`);
     const s = outcome.value.summary;
     assert.ok(
@@ -203,10 +184,7 @@ export async function run(ctx) {
         ],
       }),
     );
-    const offOutcome = await invoke(browser, "import_chat_export", {
-      path: offExport,
-      extractMedia: false,
-    });
+    const offOutcome = await ui.importChatExport(browser, offExport, { extractMedia: false });
     assert.ok(offOutcome.ok, `extract-off import succeeded: ${offOutcome.error ?? ""}`);
     assert.ok(offOutcome.value.media === null, "media summary is null when extraction is off");
     const namesAfterOff = await readdir(storeDir);
@@ -224,10 +202,7 @@ export async function run(ctx) {
     );
 
     // --- re-import dedup ----------------------------------------------------
-    const again = await invoke(browser, "import_chat_export", {
-      path: exportDir,
-      extractMedia: true,
-    });
+    const again = await ui.importChatExport(browser, exportDir, { extractMedia: true });
     assert.ok(again.ok, `re-import succeeded: ${again.error ?? ""}`);
     const rm = again.value.media;
     assert.ok(
@@ -254,10 +229,7 @@ export async function run(ctx) {
         ],
       }),
     );
-    const bigOutcome = await invoke(browser, "import_chat_export", {
-      path: bigDir,
-      extractMedia: true,
-    });
+    const bigOutcome = await ui.importChatExport(browser, bigDir, { extractMedia: true });
     assert.ok(bigOutcome.ok, `big import succeeded: ${bigOutcome.error ?? ""}`);
     const bm = bigOutcome.value.media;
     assert.ok(!!bm, "media summary present for the oversized tree");
@@ -282,7 +254,7 @@ export async function run(ctx) {
         "[1.11.2026., 09:01:00] Ana: plan.pdf (file attached)\n" +
         "[1.11.2026., 09:02:00] Marko: IMG-1.jpg (file attached)\n",
     );
-    const wa = await invoke(browser, "import_chat_export", { path: chat, extractMedia: true });
+    const wa = await ui.importChatExport(browser, chat, { extractMedia: true });
     assert.ok(wa.ok, `whatsapp import succeeded: ${wa.error ?? ""}`);
     const wm = wa.value.media;
     // M4.2 records the missing reference as an explicit missing media

@@ -27,6 +27,15 @@ export async function run(ctx) {
       await (await browser.$("#first-run")).isDisplayed(),
       "first-run card visible on an empty archive",
     );
+    // The drag-drop import surface is advertised on the first-run card
+    // (native OS drags cannot be synthesized through WebDriver — the
+    // wiring is pinned by main.test.ts; this asserts the surface).
+    const dropZoneCopy = "Drop archives here — .mbox · .eml · .json · .txt";
+    assert.equal(
+      await (await browser.$("#first-run-drop")).getText(),
+      dropZoneCopy,
+      "the first-run card carries the drop zone with the exact copy",
+    );
     assert.equal(
       await (await browser.$("#demo-banner")).isDisplayed(),
       false,
@@ -44,6 +53,11 @@ export async function run(ctx) {
     assert.ok(
       await (await browser.$("#import-pick-btn")).isDisplayed(),
       "the import picker button is the offered action",
+    );
+    assert.equal(
+      await (await browser.$("#import-drop")).getText(),
+      dropZoneCopy,
+      "the Sources → Import section carries the drop zone with the exact copy",
     );
     // The connect CTA deep-links the same way, into the email section.
     await ui.openView(browser, "workspace");

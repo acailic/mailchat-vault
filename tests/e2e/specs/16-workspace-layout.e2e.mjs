@@ -475,12 +475,11 @@ export async function run(ctx) {
     // the detail-view spec), so this drives the focus contract through
     // the Signal fixture's stable-key conversation instead.
     const signalFixture = path.join(fixturesDir, "signal-conversation.json");
-    const signalImport = await browser.execute(
-      async (cmd, payload) => window.__TAURI_INTERNALS__.invoke(cmd, payload),
-      "import_chat_export",
-      { path: signalFixture },
+    const signalImport = await ui.importChatExport(browser, signalFixture);
+    assert.ok(
+      signalImport.ok && signalImport.value.summary.inserted > 0,
+      "signal conversation imported for context focus",
     );
-    assert.ok(signalImport?.summary?.inserted > 0, "signal conversation imported for context focus");
     await ui.search(browser, "reagiram");
     await browser.execute(() => {
       document.querySelector("#results .hit-item").click();

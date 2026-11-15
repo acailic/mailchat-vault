@@ -8,6 +8,7 @@ import {
   authorDisplayName,
   conversationConfidenceLabel,
   formatSentAt,
+  friendlySourceLabel,
   importScopeLabel,
   snippet as truncateBody,
   timeConfidenceDetail,
@@ -113,7 +114,7 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
   ) {
     time.title = timeConfidenceDetail(hit.time_confidence);
   }
-  meta.append(displayAuthor, " · ", time, " · ", hit.source_label);
+  meta.append(displayAuthor, " · ", time, " · ", friendlySourceLabel(hit.source_label));
   if (hit.conversation_label) meta.append(" · ", hit.conversation_label);
   // The full "Name <address>" form stays one hover away.
   if (displayAuthor !== (hit.author || "unknown")) meta.title = hit.author;
@@ -128,11 +129,13 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
       "aria-label",
       `attachments: ${hit.available_attachment_count} of ${hit.attachment_count}`,
     );
+    // The visible words say what the numbers mean — a bare "0/1" reads
+    // as a fraction with no units; the title/aria keep the exact counts.
     files.innerHTML =
       icon("paperclip") +
       (hit.available_attachment_count < hit.attachment_count
-        ? `${hit.available_attachment_count}/${hit.attachment_count}`
-        : `${hit.attachment_count}`);
+        ? `${hit.available_attachment_count} of ${hit.attachment_count} files kept`
+        : `${hit.attachment_count} ${hit.attachment_count === 1 ? "file" : "files"}`);
     meta.append(" ", files);
   }
   if (hit.has_conflicting_revision) {
@@ -404,11 +407,15 @@ function contextRow(
   meta.textContent = `${entry.author || "unknown"} · ${formatSentAt(entry.sentAt ?? "")}`;
   const body = document.createElement("div");
   body.className = "body";
-  if (entry.current) {
-    appendSegments(body, highlightSegments(entry.body, terms));
-  } else {
-    body.textContent = truncateBody(entry.body, 140);
-  }
+  // Neighbors show truncated text, the current row the full body; both
+  // mark the active query terms with the same bounded highlight.
+  appendSegments(
+    body,
+    highlightSegments(
+      entry.current ? entry.body : truncateBody(entry.body, 140),
+      terms,
+    ),
+  );
   row.append(meta, body);
   if (!entry.current) {
     row.classList.add("link");
@@ -611,7 +618,15 @@ export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
     if (title) dd.title = title;
     meta.append(dt, dd);
   };
-  metaRow("source", detail.source_label);
+  metaRow(
+    "source",
+    friendlySourceLabel(detail.source_label),
+    // The stored label stays one hover away (the same discipline as the
+    // account rows' "Stored source" title).
+    detail.source_label === friendlySourceLabel(detail.source_label)
+      ? undefined
+      : `Stored source: ${detail.source_label}`,
+  );
   metaRow("from", detail.author || "unknown");
   if (detail.subject) metaRow("subject", detail.subject);
   if (detail.conversation_label) {

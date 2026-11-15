@@ -64,6 +64,23 @@ vi.mock("@tauri-apps/api/event", () => ({
     return Promise.resolve(() => tauriEvents.listeners.delete(name));
   },}));
 
+// Whole-window drag-drop import: the Tauri webview API is faked the same
+// way — the drag-drop handler is captured so tests can emit the
+// enter/over/drop/leave payloads the native events deliver (an OS drag
+// itself cannot be synthesized in happy-dom, the same stance as the
+// pickers).
+const tauriWebview = vi.hoisted(() => ({
+  dragHandlers: [] as Array<(e: { payload: unknown }) => void>,
+}));
+vi.mock("@tauri-apps/api/webview", () => ({
+  getCurrentWebview: () => ({
+    onDragDropEvent: (handler: (e: { payload: unknown }) => void) => {
+      tauriWebview.dragHandlers.push(handler);
+      return Promise.resolve(() => {});
+    },
+  }),
+}));
+
 // Desktop notifications: the plugin surface is faked per test (sent
 // titles/bodies land in `notifications.sent`); permission defaults to
 // granted so tests exercise the decision layer, not the OS.
@@ -352,6 +369,7 @@ beforeEach(() => {
     },
   ]);
   tauriEvents.listeners.clear();
+  tauriWebview.dragHandlers.length = 0;
   dialog.open.mockReset();
   dialog.savedPath = null;
   notifications.granted = true;
@@ -376,12 +394,12 @@ const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 describe("search box", () => {
   it("boots with stats, chips, and the initial newest-first browse", async () => {
     await boot();
-    expect($("#stats").textContent).toBe("9 messages (mbox: 6, demo: 3)");
+    expect($("#stats").textContent).toBe("9 messages (Mail import: 6, demo: 3)");
     // U04: boot ends in a browse, not a dead prompt.
     expect($("#status").textContent).toBe("0 results");
     expect($("#status").classList.contains("error")).toBe(false);
     expect([...win.document.querySelectorAll(".chip")].map((c) => c.textContent)).toEqual([
-      "mbox (6)",
+      "Mail import (6)",
       "demo (3)",
     ]);
     expect($("#results").children.length).toBe(0);
@@ -410,6 +428,9 @@ describe("search box", () => {
         to_date: null,
         timezone: "",
         has_attachment: null,
+        time_assumed: null,
+        grouping_unverified: null,
+        files_missing: null,
         import_job_id: null,
         sort: "relevance",
         limit: 50,
@@ -618,8 +639,8 @@ describe("filters", () => {
     // The shared label is disambiguated and loses the (ambiguous) count;
     // the unique label keeps its count.
     expect(chips.map((c) => c.textContent)).toEqual([
-      "mbox · import",
-      "mbox",
+      "Mail import · import",
+      "Mail import",
       "demo (3)",
     ]);
     searchRespondsWith(() => pageOf(HITS.slice(0, 1), 6));
@@ -682,8 +703,8 @@ describe("filters", () => {
     // One applied filter chip per instance id, labeled distinctly.
     const chips = [...win.document.querySelectorAll("#active-filter-chips .filter-chip")];
     expect(chips.map((c) => c.textContent?.trim())).toEqual([
-      "mbox ×",
-      "mbox · import ×",
+      "Mail import ×",
+      "Mail import · import ×",
     ]);
     // Removing one leaves the other instance's filter in place.
     (chips[0] as unknown as HTMLElement).click();
@@ -1952,6 +1973,186 @@ describe("import picker → preview → confirm (U03)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Whole-window drag-drop import (Tauri drag-drop events → the same flow)
+// ---------------------------------------------------------------------------
+
+describe("drag-drop import", () => {
+  const PREVIEW = {
+    kind: "telegram",
+    source: "telegram",
+    input_bytes: 4096,
+    messages_seen: 4,
+    scan_complete: true,
+    parse_failures: 0,
+    samples: [
+      { author: "Marko", subject: "hi", sent_at: "2026-11-01T10:00:00Z", snippet: "hi" },
+    ],
+    media_referenced: 0,
+    media_missing: 0,
+    warnings: [],
+    free_bytes: 1024 * 1024 * 1024,
+  };
+
+  function importCalls(cmd: string): Array<{ cmd: string; args: unknown }> {
+    return tauri.calls.filter((c) => c.cmd === cmd);
+  }
+
+  function previewedPaths(): string[] {
+    return importCalls("preview_import").map((c) => (c.args as { path: string }).path);
+  }
+
+  /** Emit one Tauri drag-drop event exactly as the webview API delivers
+   * it (the wiring ignores positions). */
+  const emitDrag = (payload: unknown) => {
+    for (const handler of tauriWebview.dragHandlers) handler({ payload });
+  };
+  const dragOver = () => emitDrag({ type: "over", position: { x: 2, y: 2 } });
+  const dragLeave = () => emitDrag({ type: "leave" });
+  const dropPaths = (paths: string[]) =>
+    emitDrag({ type: "drop", paths, position: { x: 1, y: 1 } });
+  const emitJob = (payload: unknown) =>
+    tauriEvents.listeners.get("job-event")!({ payload });
+
+  it("both drop zones render with the advertised copy", async () => {
+    await boot();
+    const zones = [...win.document.querySelectorAll(".drop-zone")] as unknown as HTMLElement[];
+    expect(zones.map((z) => z.id)).toEqual(["first-run-drop", "import-drop"]);
+    for (const zone of zones) {
+      expect(zone.textContent?.trim()).toBe(
+        "Drop archives here — .mbox · .eml · .json · .txt",
+      );
+    }
+  });
+
+  it("a dropped file routes through the same bounded preview as the picker", async () => {
+    await boot();
+    tauri.handlers.set("preview_import", () => Promise.resolve(PREVIEW));
+    dropPaths(["/tmp/archive.mbox"]);
+    await vi.waitFor(() => expect($("#import-preview").getAttribute("hidden")).toBeNull());
+    expect(previewedPaths()).toEqual(["/tmp/archive.mbox"]);
+    expect($(".preview-path").textContent).toBe("/tmp/archive.mbox");
+    // Nothing is stored without the confirm — the preview card waits.
+    expect(tauri.calls.filter((c) => c.cmd === "job_submit")).toHaveLength(0);
+    expect($("#preview-import-btn")).toBeTruthy();
+  });
+
+  it("a dropped folder path routes the same way", async () => {
+    await boot();
+    tauri.handlers.set("preview_import", () => Promise.resolve(PREVIEW));
+    dropPaths(["/tmp/tg-export"]);
+    await vi.waitFor(() => expect($(".preview-path").textContent).toBe("/tmp/tg-export"));
+    expect(previewedPaths()).toEqual(["/tmp/tg-export"]);
+    expect(tauri.calls.filter((c) => c.cmd === "job_submit")).toHaveLength(0);
+  });
+
+  it("a multi-path drop previews one at a time, in drop order", async () => {
+    await boot();
+    tauri.handlers.set("preview_import", () => Promise.resolve(PREVIEW));
+    dropPaths(["/tmp/a.mbox", "/tmp/b.json", "/tmp/c.txt"]);
+    // The first path previews immediately; the rest queue behind it.
+    await vi.waitFor(() => expect($(".preview-path").textContent).toBe("/tmp/a.mbox"));
+    expect(previewedPaths()).toEqual(["/tmp/a.mbox"]);
+    expect($("#import-status").textContent).toBe("2 dropped archives waiting.");
+
+    // Cancelling the first preview hands the flow to the second.
+    $("#preview-cancel-btn").click();
+    await vi.waitFor(() => expect($(".preview-path").textContent).toBe("/tmp/b.json"));
+    expect(previewedPaths()).toEqual(["/tmp/a.mbox", "/tmp/b.json"]);
+    expect($("#import-status").textContent).toBe("1 dropped archive waiting.");
+
+    // The third previews the same way; the drained queue goes quiet.
+    $("#preview-cancel-btn").click();
+    await vi.waitFor(() => expect($(".preview-path").textContent).toBe("/tmp/c.txt"));
+    expect($("#import-status").textContent).toBe("");
+    $("#preview-cancel-btn").click();
+    await flush();
+    expect(previewedPaths()).toEqual(["/tmp/a.mbox", "/tmp/b.json", "/tmp/c.txt"]);
+    expect(tauri.calls.filter((c) => c.cmd === "job_submit")).toHaveLength(0);
+  });
+
+  it("a drop mid-import waits, then previews at the job's terminal event", async () => {
+    await boot();
+    tauri.handlers.set("preview_import", () => Promise.resolve(PREVIEW));
+    tauri.handlers.set("job_submit", () => ({ id: 71 }));
+    tauri.handlers.set("list_import_scopes_v2", () => []);
+    dropPaths(["/tmp/a.mbox"]);
+    await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
+    $("#preview-import-btn").click();
+    await vi.waitFor(() =>
+      expect(tauri.calls.filter((c) => c.cmd === "job_submit")).toHaveLength(1),
+    );
+
+    // The drop lands while the job runs: it waits, nothing previews.
+    dropPaths(["/tmp/b.mbox"]);
+    await flush();
+    expect(previewedPaths()).toEqual(["/tmp/a.mbox"]);
+    expect($("#import-status").textContent).toBe("1 dropped archive waiting.");
+
+    // The terminal event frees the flow — the next path previews.
+    emitJob({ seq: 1, at: "t", job: 71, type: "submitted", kind: "import_chat_export" });
+    emitJob({
+      seq: 2,
+      at: "t",
+      job: 71,
+      type: "succeeded",
+      result: {
+        summary: { source: "telegram", seen: 4, inserted: 4, skipped: 0, failed: 0 },
+        import_id: "chat-import-drop",
+        media: null,
+      },
+    });
+    await vi.waitFor(() => expect(previewedPaths()).toEqual(["/tmp/a.mbox", "/tmp/b.mbox"]));
+    await vi.waitFor(() => expect($(".preview-path").textContent).toBe("/tmp/b.mbox"));
+  });
+
+  it("a refused submission frees the flow for the next dropped path", async () => {
+    await boot();
+    tauri.handlers.set("preview_import", () => Promise.resolve(PREVIEW));
+    tauri.handlers.set("job_submit", () => Promise.reject("queue is full"));
+    dropPaths(["/tmp/a.mbox", "/tmp/b.mbox"]);
+    await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
+    $("#preview-import-btn").click();
+    // Refused before any job existed: the queue advances to the next
+    // path instead of stalling behind a flow that never ran.
+    await vi.waitFor(() => expect(previewedPaths()).toEqual(["/tmp/a.mbox", "/tmp/b.mbox"]));
+    await vi.waitFor(() => expect($(".preview-path").textContent).toBe("/tmp/b.mbox"));
+  });
+
+  it("drops are ignored while the sample archive is open", async () => {
+    tauri.handlers.set("stats", () => ({ total: 0, by_source: [] }));
+    tauri.handlers.set("demo_status", () => Promise.resolve({ active: true }));
+    await boot();
+    await vi.waitFor(() => expect($("#demo-banner").getAttribute("hidden")).toBeNull());
+    dropPaths(["/tmp/a.mbox"]);
+    await flush();
+    expect(importCalls("preview_import")).toHaveLength(0);
+    expect($("#import-status").textContent).toBe("");
+  });
+
+  it("drag enter/over highlight both drop zones; leave and drop clear it", async () => {
+    await boot();
+    tauri.handlers.set("preview_import", () => Promise.resolve(PREVIEW));
+    const active = () =>
+      ([...win.document.querySelectorAll(".drop-zone")] as unknown as HTMLElement[]).map(
+        (z) => z.classList.contains("drop-active"),
+      );
+    emitDrag({ type: "enter", paths: ["/tmp/a.mbox"], position: { x: 1, y: 1 } });
+    expect(active()).toEqual([true, true]);
+    dragOver();
+    expect(active()).toEqual([true, true]);
+    dragLeave();
+    expect(active()).toEqual([false, false]);
+    // A re-enter highlights again; the drop itself clears it (and an
+    // empty drop enqueues nothing).
+    emitDrag({ type: "enter", paths: [], position: { x: 1, y: 1 } });
+    expect(active()).toEqual([true, true]);
+    dropPaths([]);
+    expect(active()).toEqual([false, false]);
+    expect(importCalls("preview_import")).toHaveLength(0);
+  });
+});
+
 describe("first-run state and the isolated sample archive (U02)", () => {
   it("an empty archive presents the first-source card instead of a search prompt", async () => {
     tauri.handlers.set("stats", () => ({ total: 0, by_source: [] }));
@@ -2028,7 +2229,7 @@ describe("first-run state and the isolated sample archive (U02)", () => {
     $("#demo-leave-btn").click();
     await vi.waitFor(() => expect(demoCalls).toEqual(["enter", "leave"]));
     await vi.waitFor(() =>
-      expect($("#stats").textContent).toBe("9 messages (mbox: 6, demo: 3)"),
+      expect($("#stats").textContent).toBe("9 messages (Mail import: 6, demo: 3)"),
     );
     await vi.waitFor(() => expect($("#demo-banner").getAttribute("hidden")).not.toBeNull());
     await vi.waitFor(() => expect($("#status").textContent).toBe("1–9 of 9"));
@@ -2111,6 +2312,9 @@ describe("export", () => {
         to_date: "2026-12-31",
         timezone: "",
         has_attachment: true,
+        time_assumed: null,
+        grouping_unverified: null,
+        files_missing: null,
         import_job_id: "imp-1",
         sort: "newest",
         limit: 50,
@@ -2310,11 +2514,11 @@ describe("stats and chips", () => {
     }));
     await boot();
     await vi.waitFor(() =>
-      expect($("#stats").textContent).toBe("5,505 messages (mbox: 5,505)"),
+      expect($("#stats").textContent).toBe("5,505 messages (Mail import: 5,505)"),
     );
     // The same count renders the same in the chip just below the line.
     expect([...win.document.querySelectorAll(".chip")].map((c) => c.textContent)).toEqual([
-      "mbox (5,505)",
+      "Mail import (5,505)",
     ]);
   });
 
@@ -2397,7 +2601,7 @@ describe("ask and local embeddings", () => {
   it("boots with the embedding coverage line", async () => {
     tauri.handlers.set("embed_status", () => EMBED_STATUS);
     await boot();
-    await vi.waitFor(() => expect($("#embed-status").textContent).toContain("3/4"));
+    await vi.waitFor(() => expect($("#embed-status").textContent).toContain("3 of 4"));
     expect($("#embed-status").textContent).toContain("1 pending");
     expect($("#embed-status").textContent).toContain("hash-ngram-v1");
   });
@@ -2443,7 +2647,7 @@ describe("ask and local embeddings", () => {
     );
     // The button is busy while the job runs (no v1 result awaited).
     expect($<HTMLButtonElement>("#embed-btn").disabled).toBe(true);
-    expect($("#embed-status").textContent).toContain("Embedding…");
+    expect($("#embed-status").textContent).toContain("Building the local search index");
 
     // The jobs panel renders the job lifecycle from its events.
     const emit = (payload: unknown) =>
@@ -2459,10 +2663,10 @@ describe("ask and local embeddings", () => {
       total: 4,
       message: "embedding",
     });
-    expect($("#jobs-list").textContent).toContain("local embeddings — 2/4 (50%)");
+    expect($("#jobs-list").textContent).toContain("local search index — 2/4 (50%)");
     emit({ seq: 4, at: "t", job: 9, type: "succeeded", result: { embedded: 4 } });
     await vi.waitFor(() =>
-      expect($("#jobs-list").textContent).toContain("local embeddings — done (4 embedded)"),
+      expect($("#jobs-list").textContent).toContain("local search index — done (4 indexed)"),
     );
     // Finished: the button re-enables.
     expect($<HTMLButtonElement>("#embed-btn").disabled).toBe(false);
@@ -2474,7 +2678,9 @@ describe("ask and local embeddings", () => {
     tauri.handlers.set("job_submit", () => Promise.reject("queue is full"));
     $("#embed-btn").click();
     await vi.waitFor(() =>
-      expect($("#embed-status").textContent).toBe("Embedding job failed to start: queue is full"),
+      expect($("#embed-status").textContent).toBe(
+        "Could not start building the local search index: queue is full",
+      ),
     );
     expect($<HTMLButtonElement>("#embed-btn").disabled).toBe(false);
   });
@@ -2727,7 +2933,7 @@ describe("folder watching", () => {
     await boot();
     pressKey(input("#watch-path"), "Enter");
     await vi.waitFor(() =>
-      expect($("#watch-status").textContent).toContain("Type a folder path first"),
+      expect($("#watch-status").textContent).toContain("Pick a folder above"),
     );
     expect(watchCalls().some((c) => c.cmd === "watch_add_folder")).toBe(false);
   });

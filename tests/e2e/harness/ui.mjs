@@ -291,13 +291,17 @@ async function statsLabelText(browser) {
 
 /** Wait until the #stats label matches a fresh `stats` round trip — the
  * deterministic settle for "the UI noticed the archive changed" (the
- * terminal job event refreshes every vault-reading panel). */
+ * terminal job event refreshes every vault-reading panel). The expected
+ * line applies the UI's plain-word source mapping ("mbox" reads as
+ * "Mail import"; format.ts friendlySourceLabel). */
 export async function waitForStatsSync(browser, { timeout = 30_000 } = {}) {
   await browser.waitUntil(
     async () => {
       const stats = await invokeCommand(browser, "stats", {});
       const label = await statsLabelText(browser);
-      const parts = stats.by_source.map((s) => `${s.source}: ${s.count}`).join(", ");
+      const parts = stats.by_source
+        .map((s) => `${s.source === "mbox" ? "Mail import" : s.source}: ${s.count}`)
+        .join(", ");
       const expected =
         stats.total === 0 ? "empty archive" : `${stats.total} messages (${parts})`;
       return label === expected;
@@ -326,6 +330,35 @@ export async function importMbox(browser, mboxPath) {
   const summary = result.summary ?? result;
   await waitForStatsSync(browser);
   return summary;
+}
+
+/**
+ * Import a chat export (Signal .json, Telegram/Discord/Messenger tree,
+ * WhatsApp .txt, …) through the same `job_submit` the import UI's
+ * confirm step dispatches (src/main.ts `confirmImport`): kind
+ * `import_chat_export`, params `{ path, extract_media }` (omitting
+ * `extractMedia` means true — the UI toggle's default and
+ * `JobSpec::parse`'s). The native picker itself is beyond WebDriver's
+ * reach, as documented. Unlike `importMbox`, this resolves with the
+ * `{ ok, value, error }` triple the chat specs already assert on:
+ * `value` is the job's `ChatImportOutcome { summary, import_id, media }`
+ * (identical to the direct command's return), `error` the failed or
+ * cancelled job's message — so failure-path specs (unrecognized files)
+ * keep reading the importer's error text through the job record.
+ */
+export async function importChatExport(browser, chatPath, { extractMedia = true } = {}) {
+  const { id } = await invokeCommand(browser, "job_submit", {
+    kind: "import_chat_export",
+    params: { path: chatPath, extract_media: extractMedia },
+  });
+  const job = await waitForJob(browser, id);
+  if (job.state.state !== "succeeded") {
+    return { ok: false, error: job.state.error?.message ?? job.state.state };
+  }
+  // The terminal job event is what refreshes the UI's panels — the
+  // same settle importMbox relies on.
+  await waitForStatsSync(browser);
+  return { ok: true, value: job.state.result };
 }
 
 export async function seedDemo(browser) {

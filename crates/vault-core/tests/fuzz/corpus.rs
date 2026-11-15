@@ -504,6 +504,154 @@ pub fn discord_cases() -> Cases {
     cases
 }
 
+/// A realistic Messenger DYI thread file used as the truncation seed
+/// (the shape of `THREAD_JSON` in `messenger_ingest.rs`).
+fn valid_messenger() -> Vec<u8> {
+    r#"{
+  "participants": [{"name": "Ana Peric"}, {"name": "Marko Horvat"}],
+  "title": "Ana Peric",
+  "thread_path": "inbox/anaperic_1234567890",
+  "is_still_participant": true,
+  "messages": [
+    {"sender_name": "Ana Peric", "timestamp_ms": 1762981200000, "content": "Zdravo! Kako si?"},
+    {"sender_name": "Marko Horvat", "timestamp_ms": 1762981260000, "content": "Dobro, hvala."},
+    {"sender_name": "Ana Peric", "timestamp_ms": 1762981320000,
+     "photos": [{"uri": "messages/inbox/anaperic_1234567890/photos/ana.jpg", "creation_timestamp": 1762981320}]},
+    {"sender_name": "Ana Peric", "timestamp_ms": 1762981380000, "reactions": [{"reaction": "❤"}]}
+  ]
+}"#
+        .as_bytes()
+        .to_vec()
+}
+
+/// Hand-crafted Messenger DYI thread-file edge cases, modeled on
+/// `discord_cases()`.
+pub fn messenger_cases() -> Cases {
+    let mut cases = vec![
+        case("empty file", b""),
+        case("BOM then empty json", b"\xef\xbb\xbf{}"),
+        case("bare null", b"null"),
+        case("bare number", b"42"),
+        case("bare string", b"\"just a string\""),
+        case("empty object", b"{}"),
+        case("messages not array", br#"{"participants": [], "messages": {"a": 1}}"#),
+        case("messages null", br#"{"participants": [], "messages": null}"#),
+        case("messages string", br#"{"participants": [], "messages": "x"}"#),
+        case(
+            "missing participants",
+            br#"{"messages": [{"sender_name": "Ana", "timestamp_ms": 1, "content": "x"}]}"#,
+        ),
+        case("participants not array", br#"{"participants": "x", "messages": []}"#),
+        case("participants null", br#"{"participants": null, "messages": []}"#),
+        case(
+            "missing messages member",
+            br#"{"participants": [{"name": "Ana"}], "title": "Ana"}"#,
+        ),
+        case(
+            "duplicate top-level keys",
+            br#"{"participants": [], "messages": [{"sender_name": "Ana", "timestamp_ms": 1}], "messages": [{"timestamp_ms": 2}]}"#,
+        ),
+        case(
+            "duplicate message keys",
+            br#"{"participants": [], "messages": [{"sender_name": "Ana", "sender_name": "Marko", "timestamp_ms": 1, "timestamp_ms": 2}]}"#,
+        ),
+        case(
+            "entry not an object",
+            br#"{"participants": [], "messages": ["str", 5, null, true, [], {}]}"#,
+        ),
+        case(
+            "entry with neither sender nor timestamp",
+            br#"{"participants": [], "messages": [{"content": "x"}, {"photos": [], "content": "y"}]}"#,
+        ),
+        case(
+            "sender and timestamp variants",
+            br#"{"participants": [], "messages": [
+                {"sender_name": "Ana", "timestamp_ms": 0},
+                {"sender_name": "Ana", "timestamp_ms": -5},
+                {"sender_name": "Ana", "timestamp_ms": 1.5},
+                {"sender_name": "Ana", "timestamp_ms": 9223372036854775807},
+                {"sender_name": "Ana", "timestamp_ms": null},
+                {"sender_name": 5, "timestamp_ms": 1},
+                {"sender_name": null, "timestamp_ms": 1},
+                {"sender_name": [], "timestamp_ms": "1"},
+                {"timestamp_ms": 1e999}
+            ]}"#,
+        ),
+        case(
+            "content variants",
+            r#"{"participants": [], "messages": [
+                {"sender_name": "A", "timestamp_ms": 1, "content": "plain"},
+                {"sender_name": "A", "timestamp_ms": 2, "content": null},
+                {"sender_name": "A", "timestamp_ms": 3, "content": 123},
+                {"sender_name": "A", "timestamp_ms": 4, "content": []},
+                {"sender_name": "A", "timestamp_ms": 5, "content": ""},
+                {"sender_name": "A", "timestamp_ms": 6, "content": "prvi red\nvidi 🔥\r\nkraj"}
+            ]}"#
+                .as_bytes(),
+        ),
+        case(
+            "media field variants",
+            br#"{"participants": [], "messages": [
+                {"sender_name": "A", "timestamp_ms": 1, "photos": [{"uri": "messages/inbox/t_1/photos/a.jpg"}]},
+                {"sender_name": "A", "timestamp_ms": 2, "videos": []},
+                {"sender_name": "A", "timestamp_ms": 3, "audio_files": [{}]},
+                {"sender_name": "A", "timestamp_ms": 4, "files": "not an array"},
+                {"sender_name": "A", "timestamp_ms": 5, "gifs": [1, 2]},
+                {"sender_name": "A", "timestamp_ms": 6, "sticker": {"uri": "x.webp"}},
+                {"timestamp_ms": 7, "photos": null},
+                {"sender_name": "A", "photos": []},
+                {"sender_name": "A", "timestamp_ms": 8, "photos": {}, "sticker": 5}
+            ]}"#,
+        ),
+        case(
+            "title and thread_path variants",
+            br#"{"participants": [], "title": 5, "thread_path": [], "messages": []}"#,
+        ),
+        case(
+            "lone surrogate escape",
+            b"{\"participants\": [], \"title\": \"\\ud800\", \"messages\": []}",
+        ),
+        case(
+            "bad escape",
+            b"{\"participants\": [], \"title\": \"\\q\", \"messages\": []}",
+        ),
+        case(
+            "unterminated string",
+            b"{\"participants\": [], \"title\": \"unterminated",
+        ),
+        case(
+            "nesting beyond serde limit",
+            format!(
+                "{{\"participants\": [], \"messages\":{}1{}}}",
+                "[".repeat(400),
+                "]".repeat(400)
+            )
+            .into_bytes(),
+        ),
+        case("trailing garbage after json", br#"{"participants": [], "messages": []} trailing"#),
+        case("json then null bytes", b"{\"participants\": [], \"messages\": []}\x00\x00"),
+        case(
+            "huge single string value",
+            format!(
+                "{{\"participants\": [], \"messages\": [{{\"sender_name\": \"A\", \"timestamp_ms\": 1, \"content\": \"{}\"}}]}}",
+                "y".repeat(2_000_000)
+            )
+            .into_bytes(),
+        ),
+        case(
+            "unicode escapes and marks",
+            b"{\"participants\": [{\"name\": \"\\u0041\\u200e\\u200f\\u2028\"}], \"messages\": [{\"sender_name\": \"A\", \"timestamp_ms\": 1}]}",
+        ),
+        case(
+            "telegram-shaped keys alongside messenger shape",
+            br#"{"participants": [], "name": "Arhiva", "id": 42, "type": "private_group", "messages": [{"sender_name": "A", "timestamp_ms": 1}]}"#,
+        ),
+    ];
+    let mut tr = truncations("messenger thread file", &valid_messenger());
+    cases.append(&mut tr);
+    cases
+}
+
 pub fn mbox_cases() -> Cases {
     let mut cases = vec![
         case("empty file", b""),
@@ -786,6 +934,7 @@ mod tests {
             ("telegram", telegram_cases()),
             ("signal", signal_cases()),
             ("discord", discord_cases()),
+            ("messenger", messenger_cases()),
             ("mbox", mbox_cases()),
             ("mixed", mixed_format_cases()),
         ] {

@@ -211,6 +211,26 @@ fn messenger_fuzz_never_panics() {
     // driven through the public source API: byte detection, directory
     // detection, the single-file pick, `collect`, and the two-pass
     // `stream`. Malformed trees surface as `Err`, never a panic.
+    for (idx, (desc, input)) in corpus::messenger_cases().into_iter().enumerate() {
+        // Each corpus case is a lone `message_1.json` in a fresh
+        // tempdir, driven through the same probe/detect/collect/stream
+        // closure as the random rounds.
+        check_no_panic("messenger", idx, &desc, &input, || {
+            use vault_core::bounded::{Flow, StreamSource as _};
+            use vault_core::ingest::Source as _;
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("message_1.json");
+            std::fs::write(&path, &input).unwrap();
+            let _ = vault_core::messenger::is_messenger_export(&input);
+            let _ = vault_core::messenger::is_messenger_export_dir(dir.path());
+            let tree = vault_core::messenger::MessengerSource::new(dir.path());
+            let _ = tree.collect();
+            let _ = tree.stream(0, &mut |_| Ok(Flow::Continue));
+            let file = vault_core::messenger::MessengerSource::new(&path);
+            let _ = file.collect();
+            let _ = file.stream(0, &mut |_| Ok(Flow::Continue));
+        });
+    }
     let mut rng = rng::Rng::new(0x6d65_7373_656e_6765); // "messenge"
     for i in 0..iterations() {
         let seed = rng.next_u64();
@@ -262,6 +282,7 @@ fn detect_chat_format_fuzz_never_panics() {
     cases.extend(corpus::telegram_cases());
     cases.extend(corpus::signal_cases());
     cases.extend(corpus::discord_cases());
+    cases.extend(corpus::messenger_cases());
     cases.extend(corpus::mbox_cases());
     cases.extend(corpus::mixed_format_cases());
     for (idx, (desc, input)) in cases.into_iter().enumerate() {

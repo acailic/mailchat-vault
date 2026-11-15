@@ -128,10 +128,7 @@ export async function run(ctx) {
     const fixture = path.join(dir, "conversation.json");
     await writeFile(fixture, JSON.stringify(messages));
 
-    const imported = await invoke(browser, "import_chat_export", {
-      path: fixture,
-      extract_media: false,
-    });
+    const imported = await ui.importChatExport(browser, fixture, { extractMedia: false });
     assert.ok(imported.ok, `signal import succeeded: ${imported.error ?? ""}`);
     assert.equal(
       imported.value.summary.inserted,

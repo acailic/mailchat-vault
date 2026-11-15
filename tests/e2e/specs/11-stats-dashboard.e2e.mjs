@@ -74,9 +74,11 @@ export async function run(ctx) {
       "three stat tables (source, chats, authors)",
     );
 
-    // "Top chats": demo · project-chat 4, demo · welcome 2 (count desc).
-    // Label cells are ellipsized, and WebKitDriver returns no visible text
-    // for them — read the accessible `title` attribute instead.
+    // "Busiest folders": demo · project-chat 4, demo · welcome 2 (count
+    // desc). The visible caption reads "Busiest folders"; label cells
+    // are ellipsized, and WebKitDriver returns no visible text for them
+    // — read the accessible `title` attribute instead (it carries the
+    // stored label).
     const chatLabel = async (i) =>
       (await browser.$(`#dashboard .stat-table:nth-of-type(2) tbody tr:nth-of-type(${i}) td.label`))
         .getAttribute("title");

@@ -43,9 +43,14 @@ export async function run(ctx) {
       `detail title is the hit author: ${title} vs ${firstMeta}`,
     );
 
-    // The meta table exposes the archival facts.
+    // The meta table exposes the archival facts. The raw `mbox` label
+    // reads "Mail import" on the surface (the stored label rides along
+    // in the cell's title).
     const table = await card.$(".meta-table").getText();
-    assert.ok(/source\s*\n?\s*mbox/.test(table.replace(/  +/g, " ")), "meta table shows source");
+    assert.ok(
+      /source\s*\n?\s*Mail import/.test(table.replace(/  +/g, " ")),
+      "meta table shows source",
+    );
     assert.includes(table, "e2e-m", "meta table shows the external message id");
 
     // The reading actions are present: copy, copy link, export.

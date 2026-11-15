@@ -7,10 +7,12 @@
 import "./styles/tokens.css";
 import "./styles/app.css";
 
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   folderSummaryLine,
   formatSentAt,
+  friendlySourceLabel,
   humanSize,
   importScopeLabel,
   snippet,
@@ -191,6 +193,10 @@ const importPreviewEl = document.querySelector<HTMLElement>("#import-preview")!;
 const importProgressEl = document.querySelector<HTMLElement>("#import-progress")!;
 const importStatus = document.querySelector<HTMLElement>("#import-status")!;
 const importFollowup = document.querySelector<HTMLElement>("#import-followup")!;
+/** The drag-drop import surfaces (the first-run card and Sources →
+ * Import): static copy whose only dynamic behavior is the highlight
+ * class the Tauri drag-drop events toggle. */
+const dropZones = [...document.querySelectorAll<HTMLElement>(".drop-zone")];
 const sourcesAddButton = document.querySelector<HTMLButtonElement>("#sources-add-btn")!;
 const sourcesAutomaticButton = document.querySelector<HTMLButtonElement>("#sources-automatic-btn")!;
 const addChoiceImportButton = document.querySelector<HTMLButtonElement>("#add-choice-import")!;
@@ -783,16 +789,18 @@ async function refreshLlm(): Promise<void> {
   }
 }
 
-// Local embedding coverage label for the Ask section (incremental job).
+// Local search-index coverage label for the Ask section (incremental
+// job). The index is the embedding store, but the user-facing words say
+// what it does: how much of the archive is indexed for local search.
 function describeEmbedStatus(status: EmbeddingStatus): string {
   if (status.messages === 0) {
-    return "no messages to embed yet";
+    return "no messages to index yet";
   }
   const model = `${status.model}, ${status.dim}d`;
   if (status.pending === 0) {
-    return `local embeddings: all ${status.embedded} embedded (${model})`;
+    return `local search index: all ${status.embedded} messages indexed (${model})`;
   }
-  return `local embeddings: ${status.embedded}/${status.messages} · ${status.pending} pending (${model})`;
+  return `local search index: ${status.embedded} of ${status.messages} messages indexed · ${status.pending} pending (${model})`;
 }
 
 async function refreshEmbedStatus(): Promise<void> {
@@ -812,12 +820,12 @@ async function refreshEmbedStatus(): Promise<void> {
  * queued or running. */
 async function runEmbedJob(): Promise<void> {
   embedButton.disabled = true;
-  embedStatus.textContent = "Embedding… (local, offline, background job)";
+  embedStatus.textContent = "Building the local search index… (local, offline, background job)";
   try {
     await ipc.jobSubmit("embed_messages", {});
     // The panel takes it from here (started/progress/succeeded events).
   } catch (e) {
-    embedStatus.textContent = `Embedding job failed to start: ${e}`;
+    embedStatus.textContent = `Could not start building the local search index: ${e}`;
     embedButton.disabled = false;
   }
 }
@@ -1121,9 +1129,10 @@ async function refreshStats(): Promise<void> {
     lastStats = stats;
     archiveTotal = demoActive ? archiveTotal : stats.total;
     // Thousands-grouped like the source chips beside the line
-    // (renderSourceChips), so the same count reads the same in both.
+    // (renderSourceChips), so the same count reads the same in both;
+    // the raw `mbox` namespace reads as plain words the same way.
     const parts = stats.by_source
-      .map((s) => `${s.source}: ${s.count.toLocaleString()}`)
+      .map((s) => `${friendlySourceLabel(s.source)}: ${s.count.toLocaleString()}`)
       .join(", ");
     statsLabel.textContent =
       stats.total === 0 ? "empty archive" : `${stats.total.toLocaleString()} messages (${parts})`;
@@ -1600,6 +1609,61 @@ let importJob: { id: number; kind: string; path: string | null } | null = null;
  * "Cancelling…" state. Cleared by the terminal event (and whenever a
  * new import or a recovered job takes over the flow). */
 let importCancelRequested = false;
+/** Dropped paths awaiting their bounded preview, in drop order
+ * (whole-window drag-drop import): one at a time through the same
+ * preview → confirm → import flow the picker buttons produce. */
+let dropQueue: string[] = [];
+/** A dropped path's preview round trip is in flight — guards the pump
+ * against starting a second preview before the first resolves (and so
+ * before it can set `pendingImport`). */
+let dropPreviewInFlight = false;
+
+/** Highlight both drop zones while a drag is over the window (the
+ * first-run zone hides with its card; the class is harmless there). */
+function setDropZonesActive(active: boolean): void {
+  for (const zone of dropZones) {
+    zone.classList.toggle("drop-active", active);
+  }
+}
+
+/** The waiting-drops line for #import-status; empty when the queue is
+ * drained (the status line then belongs to the flow's own messages). */
+function dropQueueStatusLine(): string {
+  const n = dropQueue.length;
+  return n > 0 ? `${n} dropped archive${n === 1 ? "" : "s"} waiting.` : "";
+}
+
+/** Route dropped paths (files or folders, in drop order) into the
+ * bounded preview flow — the same entry point the native pickers
+ * produce. Ignored while the demo archive is open, exactly like the
+ * pickers. */
+function handleDroppedPaths(paths: string[]): void {
+  if (demoActive || paths.length === 0) return;
+  dropQueue.push(...paths);
+  pumpDropQueue();
+  // A queue that did not drain (the flow is busy or a preview is up)
+  // says so through the status line; a path that started previewing
+  // already replaced the line with its own "Reading …".
+  if (dropQueue.length > 0) importStatus.textContent = dropQueueStatusLine();
+}
+
+/** Preview the next dropped path when the flow is free: the queue waits
+ * behind a running import (`importBusy`) or an unresolved preview
+ * (`pendingImport`) and advances at the same seams that clear those
+ * guards — preview cancel, submit refusal, and the job terminal events
+ * — plus after each pumped preview settles (a failed preview frees the
+ * slot the same way). */
+function pumpDropQueue(): void {
+  if (dropPreviewInFlight || importBusy || pendingImport !== null || demoActive) return;
+  const path = dropQueue.shift();
+  if (path === undefined) return;
+  dropPreviewInFlight = true;
+  void showPreview(path).finally(() => {
+    dropPreviewInFlight = false;
+    if (dropQueue.length > 0) importStatus.textContent = dropQueueStatusLine();
+    pumpDropQueue();
+  });
+}
 
 /** Map a backend import error to something a first-time importer can
  * act on — no raw errno, no connector vocabulary. */
@@ -1678,6 +1742,7 @@ function cancelPreview(): void {
   pendingImport = null;
   hideImportPreview(importPreviewEl);
   importStatus.textContent = "";
+  pumpDropQueue(); // a cancelled preview frees the flow for the next dropped path
 }
 
 /** Confirm the previewed import: submit it as a background job (the v2
@@ -1710,6 +1775,7 @@ async function confirmImport(): Promise<void> {
     // Refused before any job existed (queue full, demo lockout, moved
     // file): no card, the friendly line says what to do.
     importBusy = false;
+    pumpDropQueue(); // the refusal freed the flow: the next dropped path previews
     importStatus.textContent = friendlyImportError(e, target.path);
   }
 }
@@ -1855,16 +1921,19 @@ function feedImportJobEvent(event: JobEvent): void {
       // and leaving the section wordlessly at its start state.
       importStatus.textContent = "Import finished.";
     }
+    pumpDropQueue(); // the run ended: the next dropped path previews
   } else if (event.type === "cancelled") {
     importJob = null;
     importBusy = false;
     importCancelRequested = false;
     hideImportProgress(importProgressEl);
     importStatus.textContent = "";
+    pumpDropQueue(); // the run ended: the next dropped path previews
   } else if (event.type === "failed") {
     // A new import may start; the failure card stays until dismissed.
     importBusy = false;
     importCancelRequested = false;
+    pumpDropQueue(); // the run ended: the next dropped path previews
   }
 }
 
@@ -2430,7 +2499,7 @@ async function addWatchFolder(path: string): Promise<boolean> {
 async function watchTypedPath(): Promise<void> {
   const path = watchPathInput.value.trim();
   if (!path) {
-    watchStatus.textContent = "Type a folder path first, or use Pick folder…";
+    watchStatus.textContent = "Pick a folder above, or type a folder path here.";
     return;
   }
   watchButton.disabled = true;
@@ -3058,6 +3127,24 @@ exportSelectionButton.addEventListener("click", exportSelectionFromResults);
 clearFiltersButton.addEventListener("click", clearFilters);
 importPickButton.addEventListener("click", () => void pickImportInput(false));
 importFolderButton.addEventListener("click", () => void pickImportInput(true));
+// Whole-window drag-drop import, through the Tauri 2 drag-drop events
+// (the webview DOM drop event exposes no reliable folder paths, and the
+// window's `dragDropEnabled` setting pins the route on). One
+// subscription at boot: dragging over the window highlights both drop
+// zones, leaving or dropping clears the highlight, and a drop enqueues
+// every dropped path — files and folders alike — into the same bounded
+// preview → confirm → import flow the picker buttons produce.
+void getCurrentWebview().onDragDropEvent((event) => {
+  const payload = event.payload;
+  if (payload.type === "enter" || payload.type === "over") {
+    setDropZonesActive(true);
+  } else if (payload.type === "leave") {
+    setDropZonesActive(false);
+  } else if (payload.type === "drop") {
+    setDropZonesActive(false);
+    handleDroppedPaths(payload.paths);
+  }
+});
 demoLeaveButton.addEventListener("click", () => void leaveDemo());
 firstRunImportButton.addEventListener("click", () => {
   workspace.store.setSourcesSection("import");
