@@ -100,6 +100,51 @@ fn signal_export() -> Vec<u8> {
     .to_vec()
 }
 
+/// A bare RFC 5322 mail (no mbox `From ` separator) — the .eml shape.
+fn eml_bytes(id: &str, subject: &str) -> Vec<u8> {
+    format!(
+        "From: Alice Smith <alice@example.com>\n\
+         To: Bob <bob@example.com>\n\
+         Subject: {subject}\n\
+         Date: Sat, 1 Nov 2026 10:00:00 +0100\n\
+         Message-ID: <{id}@example.com>\n\
+         \n\
+         body of {subject}\n"
+    )
+    .into_bytes()
+}
+
+/// One Messenger DYI thread part: `participants` + `messages` with
+/// `sender_name`/`timestamp_ms`/`content` (the minimal parser shape).
+fn messenger_part(messages: &[(&str, i64, &str)]) -> Vec<u8> {
+    let entries: Vec<String> = messages
+        .iter()
+        .map(|(sender, ts, content)| {
+            format!(
+                r#"{{"sender_name": "{sender}", "timestamp_ms": {ts}, "content": "{content}"}}"#
+            )
+        })
+        .collect();
+    format!(
+        r#"{{"participants": [{{"name": "Ana Peric"}}], "title": "Ana Peric", "thread_path": "inbox/anaperic_1234567890", "messages": [{}]}}"#,
+        entries.join(", ")
+    )
+    .into_bytes()
+}
+
+/// The `Imported` summary of the newest event naming `path_fragment`.
+fn imported_summary(
+    watcher: &FolderWatcher,
+    path_fragment: &str,
+) -> Option<vault_core::ingest::IngestSummary> {
+    watcher.snapshot().events.iter().find_map(|e| match e {
+        WatchEvent::Imported { path, summary } if path.contains(path_fragment) => {
+            Some(summary.clone())
+        }
+        _ => None,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -372,6 +417,197 @@ fn vanished_folder_is_reported_and_watcher_survives() {
     assert_eq!(watcher2.snapshot().folders.len(), 1);
     watcher2.shutdown();
     storage.shutdown();
+    watcher.shutdown();
+    storage.shutdown();
+}
+
+#[test]
+fn eml_dropped_into_watched_folder_imports_one_mail() {
+    let tmp = tempfile::tempdir().unwrap();
+    let watched = tmp.path().join("exports");
+    std::fs::create_dir_all(&watched).unwrap();
+
+    let storage = pool(&tmp);
+    let watcher = spawn_watcher(&storage);
+    watcher.add_folder(&watched).unwrap();
+
+    let eml = watched.join("dragged-out.eml");
+    std::fs::write(&eml, eml_bytes("eml-1", "Single mail")).unwrap();
+    assert!(
+        eventually(Duration::from_secs(10), || total(&storage) == 1),
+        "expected 1 mail, got {} (events: {:?})",
+        total(&storage),
+        latest_events(&watcher)
+    );
+    let summary =
+        imported_summary(&watcher, "dragged-out.eml").expect("an Imported event for the .eml");
+    assert_eq!(summary.source, "mbox");
+    assert_eq!(summary.inserted, 1);
+    // Re-settling must not duplicate.
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(total(&storage), 1);
+    watcher.shutdown();
+    storage.shutdown();
+}
+
+#[test]
+fn eml_and_mbox_with_same_message_id_share_one_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    let watched = tmp.path().join("exports");
+    std::fs::create_dir_all(&watched).unwrap();
+
+    let storage = pool(&tmp);
+    let watcher = spawn_watcher(&storage);
+    watcher.add_folder(&watched).unwrap();
+
+    // The same mail as a loose .eml first, then inside an .mbox: one
+    // row (the shared mbox namespace dedups across both spellings).
+    std::fs::write(watched.join("one.eml"), eml_bytes("dup-1", "Same mail")).unwrap();
+    assert!(eventually(Duration::from_secs(10), || total(&storage) == 1));
+    std::fs::write(
+        watched.join("two.mbox"),
+        mbox_bytes(&[("dup-1", "Same mail")]),
+    )
+    .unwrap();
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            imported_summary(&watcher, "two.mbox").is_some()
+        }),
+        "mbox import event missing (events: {:?})",
+        latest_events(&watcher)
+    );
+    assert_eq!(total(&storage), 1, "same Message-ID stored twice");
+    let summary = imported_summary(&watcher, "two.mbox").unwrap();
+    assert_eq!(summary.skipped, 1);
+    assert_eq!(summary.inserted, 0);
+    watcher.shutdown();
+    storage.shutdown();
+}
+
+#[test]
+fn messenger_part_arriving_after_arm_imports_the_thread() {
+    let tmp = tempfile::tempdir().unwrap();
+    let watched = tmp.path().join("exports");
+    // The DYI tree's folders exist before arming (dropping a whole
+    // nested tree in one burst races the backend's per-directory watch
+    // registration — a pre-existing notify limitation, not this
+    // feature); the part file itself lands after the folder is armed.
+    let thread = watched.join("facebook-ana/messages/inbox/anaperic_1234567890");
+    std::fs::create_dir_all(&thread).unwrap();
+
+    let storage = pool(&tmp);
+    let watcher = spawn_watcher(&storage);
+    watcher.add_folder(&watched).unwrap();
+
+    // The part file settles and imports the whole thread.
+    std::fs::write(
+        thread.join("message_1.json"),
+        messenger_part(&[
+            ("Ana Peric", 1762981200000, "zdravo"),
+            ("Ana Peric", 1762981260000, "kako si?"),
+        ]),
+    )
+    .unwrap();
+    assert!(
+        eventually(Duration::from_secs(10), || total(&storage) == 2),
+        "expected 2 thread messages, got {} (events: {:?})",
+        total(&storage),
+        latest_events(&watcher)
+    );
+    let summary =
+        imported_summary(&watcher, "message_1.json").expect("an Imported event for the part file");
+    assert_eq!(summary.source, "messenger");
+    assert_eq!(summary.inserted, 2);
+    watcher.shutdown();
+    storage.shutdown();
+}
+
+#[test]
+fn messenger_part_landing_later_reimports_thread_without_duplicates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let watched = tmp.path().join("exports");
+    // Thread folders pre-exist the arm (see the note in the test
+    // above); the parts themselves arrive through the watcher.
+    let thread = watched.join("facebook-ana/messages/inbox/anaperic_1234567890");
+    std::fs::create_dir_all(&thread).unwrap();
+
+    let storage = pool(&tmp);
+    let watcher = spawn_watcher(&storage);
+    watcher.add_folder(&watched).unwrap();
+
+    // Part 1 arrives: the thread so far is two messages.
+    std::fs::write(
+        thread.join("message_1.json"),
+        messenger_part(&[
+            ("Ana Peric", 1762981200000, "zdravo"),
+            ("Ana Peric", 1762981260000, "kako si?"),
+        ]),
+    )
+    .unwrap();
+    assert!(eventually(Duration::from_secs(10), || total(&storage) == 2));
+
+    // Part 2 lands later: a part arriving means the *thread* changed,
+    // so the whole thread re-imports — the two known messages dedup,
+    // the three new ones store, and the total is the sum.
+    std::fs::write(
+        thread.join("message_2.json"),
+        messenger_part(&[
+            ("Ana Peric", 1762981320000, "dobro"),
+            ("Ana Peric", 1762981380000, "a ti?"),
+            ("Ana Peric", 1762981440000, "odlicno"),
+        ]),
+    )
+    .unwrap();
+    assert!(
+        eventually(Duration::from_secs(10), || total(&storage) == 5),
+        "expected 5 thread messages after part 2, got {} (events: {:?})",
+        total(&storage),
+        latest_events(&watcher)
+    );
+    let summary =
+        imported_summary(&watcher, "message_2.json").expect("an Imported event for part 2");
+    assert_eq!(summary.source, "messenger");
+    assert_eq!(summary.seen, 5);
+    assert_eq!(summary.inserted, 3);
+    assert_eq!(summary.skipped, 2);
+    // No settle pass ever duplicates a row.
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(total(&storage), 5);
+    watcher.shutdown();
+    storage.shutdown();
+}
+
+#[test]
+fn initial_scan_of_populated_messenger_tree_imports_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let watched = tmp.path().join("exports");
+    let thread = watched.join("messages/inbox/ana_1234567890");
+    std::fs::create_dir_all(&thread).unwrap();
+    std::fs::write(
+        thread.join("message_1.json"),
+        messenger_part(&[
+            ("Ana", 1762981200000, "prva"),
+            ("Ana", 1762981260000, "druga"),
+        ]),
+    )
+    .unwrap();
+
+    let storage = pool(&tmp);
+    let watcher = spawn_watcher(&storage);
+    watcher.add_folder(&watched).unwrap();
+
+    // The initial scan imports the tree once; the settle passes that
+    // follow never duplicate it.
+    assert!(
+        eventually(Duration::from_secs(10), || total(&storage) == 2),
+        "expected 2 messages, got {} (events: {:?})",
+        total(&storage),
+        latest_events(&watcher)
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(total(&storage), 2, "initial scan duplicated messages");
+    let summary = imported_summary(&watcher, "message_1.json").unwrap();
+    assert_eq!(summary.source, "messenger");
     watcher.shutdown();
     storage.shutdown();
 }

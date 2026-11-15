@@ -15,7 +15,7 @@ export function watchStatusText(s: WatchSnapshot): string {
   }
   const parts = [`Watching ${n} folder${n === 1 ? "" : "s"}`];
   if (s.pending > 0) parts.push(`${s.pending} file${s.pending === 1 ? "" : "s"} settling`);
-  return `${parts.join(" · ")} — new/modified .mbox, WhatsApp .txt, Telegram and Signal .json files import in the background.`;
+  return `${parts.join(" · ")} — new/modified .mbox / .eml mail files, WhatsApp .txt, Telegram and Signal .json exports, and Messenger message_*.json thread parts import in the background.`;
 }
 
 /** One-line description of a watcher event. */
