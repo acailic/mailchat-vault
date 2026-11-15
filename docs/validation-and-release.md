@@ -129,6 +129,28 @@ Recorded status of the three columns (updated as runs land; keep honest):
 
 The macOS/Windows columns wait on one captain decision, kept visible here rather than resolved by the matrix itself: **(a)** keep the published `v0.1.0` with its honest record and checksums and defer the next tagged candidate until Actions return; **(b)** provide real macOS/Windows machines and run `matrix-macos.sh` / `matrix-windows.ps1` on them (mac/win bundles are then built locally per platform); **(c)** approve temporary Actions for release tags, where `ci.yml` already carries the macOS dmg-smoke and e2e jobs and `release.yml` the three build jobs. Whichever option is chosen, these one-command columns produce the evidence the matrix needs; nothing here presumes the answer. [`scripts/release/prepare-release.sh`](../scripts/release/prepare-release.sh) (M6.5) wraps whichever columns ran into the local draft-release candidate — assets, `SHA256SUMS`, release notes from `CHANGELOG.md`, and the gated publish checklist — without tagging or publishing anything.
 
+### Export and restore candidate proof (GP04)
+
+The matrix above proves the suites and the bundles; it does not bind the export-parity and backup/restore behaviors to a packaged artifact's SHA-256. That binding is what the go-public gate needs, and because no authorized host may exist when the kit lands, it is a one-command procedure that produces the record wherever and whenever a host appears. [`scripts/release/verify-export-restore.sh`](../scripts/release/verify-export-restore.sh) is that command:
+
+| Route | Command | Runs on |
+| --- | --- | --- |
+| docker (default) | `scripts/release/verify-export-restore.sh` | any machine with docker — builds the Linux candidate through the pinned toolchain (`build-linux.sh`), digests the AppImage + deb in `SHA256SUMS` format, extracts the candidate binary from the AppImage (`--appimage-extract`, no FUSE), and runs every leg in the matrix's pinned containers |
+| prebuilt bundles | `… --bundles DIR` | as above, against already-built bundles (the build leg is skipped and reported as such) |
+| explicit binary | `… --binary PATH` | the host itself (the Linux-without-docker route); the WebDriver e2e legs are the Linux-validated route — on macOS/Windows they stay a per-platform concern exactly like the matrix's e2e row |
+
+Legs (per-leg logs; `--skip-*` flags exist for iteration and a certification run uses none — a skipped leg never counts as green):
+
+| Leg | What it proves against the candidate | Items |
+| --- | --- | --- |
+| `export` | filtered export matches the current v2 search contract across pages (selection beyond page one included) | e2e spec `export` (export count == search total, ids in search order, all formats) and spec `search-v2-fixes` (every checked id from beyond page one exported), driven through the harness's `MAILCHAT_E2E_BINARY` override |
+| `restore` | restore opens known messages and files from a verified backup; the return-to-previous-vault journey and the honest prior-recovery status lines | e2e specs `vault-backup` (known messages **and** files in the container; emits `[evidence]` lines carrying the container's SHA-256 and manifest counts — messages, sources, media objects) and `vault-restart` (interrupted-switch startup recovery) |
+| `suites` | the M4.4 interrupt matrix and the export v2 contract rerun at the candidate commit, itemized rather than buried in a full workspace run | `cargo test -p vault-core --test backup` (the `interrupted*` boundary tests are itemized in the record) and `cargo test -p vault-core --test export_v2` |
+
+`--plan` prints the legs and the artifact digests a run would bind without building or executing anything, so the binding is inspectable before it is produced. Each run writes a dated evidence record (artifact digests, commit, environment, per-check status, the `[evidence]` counts, and per-log SHA-256 digests) and copies it to `docs/evidence/export-restore-candidate-<date>.md` for committing. The functional legs compose two proven pieces — the e2e harness binary override inside the e2e container — that had never been composed before GP04, so a first run on a new host may need iteration. The [support matrix](support-matrix.md) backup/restore and export rows flip to verified-on-candidate **only when a green record exists**; a failing leg is recorded honestly with its counts and digests and becomes a defect record for a separate fix decision, never a silent fix inside a proof run.
+
+Recorded status (keep honest): **kit ready, no candidate run yet** — no v0.2.0 candidate artifacts exist (the Release run on tag `v0.2.0` failed before producing a draft; see [#80](https://github.com/acailic/mailchat-vault/issues/80)) and no authorized host has executed the procedure (hosts: [#81](https://github.com/acailic/mailchat-vault/issues/81)). The first executed run replaces this line with its date and record link.
+
 
 ## Troubleshooting and observability
 

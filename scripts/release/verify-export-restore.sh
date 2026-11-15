@@ -176,15 +176,19 @@ print_plan() {
       echo "   $BINARY (NOT FOUND — digest unavailable until the file exists)"
     fi
   else
-    local root="$BUNDLES" ai de would_build="(none found)"
+    local root="$BUNDLES" ai de note="(none found)"
     [[ -z "$root" ]] && root="$repo/target/release/bundle"
     if [[ -z "$BUNDLES" && "$SKIP_BUILD" -eq 0 ]]; then
-      would_build="(would build via scripts/release/build-linux.sh)"
+      note="(none found — a run would build via scripts/release/build-linux.sh first)"
     fi
     ai="$(find_bundle "$root" '*.AppImage')"
     de="$(find_bundle "$root" '*.deb')"
-    if [[ -n "$ai" ]]; then printf '   %s  %s\n' "$(digest_of "$ai")" "$ai"; else echo "   no AppImage under $root $would_build"; fi
-    if [[ -n "$de" ]]; then printf '   %s  %s\n' "$(digest_of "$de")" "$de"; else echo "   no deb under $root $would_build"; fi
+    if [[ -n "$ai" ]]; then printf '   %s  %s\n' "$(digest_of "$ai")" "$ai"; else echo "   no AppImage under $root $note"; fi
+    if [[ -n "$de" ]]; then printf '   %s  %s\n' "$(digest_of "$de")" "$de"; else echo "   no deb under $root $note"; fi
+    if [[ -z "$BUNDLES" && "$SKIP_BUILD" -eq 0 && ( -n "$ai" || -n "$de" ) ]]; then
+      echo "   note: without --skip-build a run REBUILDS first, so its binding will be fresh digests,"
+      echo "   not the ones above (pass --skip-build to bind the existing bundles as-is)."
+    fi
   fi
   echo
   echo "-- legs:"
@@ -437,7 +441,7 @@ interrupt_lines="$(grep '^test interrupted' "$LOGS/suite-backup.log" 2>/dev/null
 {
   echo "# Export & restore candidate proof — $date_iso (GP04)"
   echo
-  echo "Status: **$verdict**. Produced by the one-command procedure \`scripts/release/verify-export-restore.sh\` (runbook: [validation and release](../../validation-and-release.md#export-and-restore-candidate-proof)). Commit \`$short\` ($branch), $(date -u +%Y-%m-%dT%H:%M:%SZ), route: $([[ "$HOST_ROUTE" -eq 1 ]] && echo "host (--binary)" || echo "docker (pinned containers)"). Per-leg logs and log digests live beside this record in the run's log directory."
+  echo "Status: **$verdict**. Produced by the one-command procedure \`scripts/release/verify-export-restore.sh\` (runbook: [validation and release](../../validation-and-release.md#export-and-restore-candidate-proof-gp04)). Commit \`$short\` ($branch), $(date -u +%Y-%m-%dT%H:%M:%SZ), route: $([[ "$HOST_ROUTE" -eq 1 ]] && echo "host (--binary)" || echo "docker (pinned containers)"). Per-leg logs and log digests live beside this record in the run's log directory."
   echo
   echo "## Artifact binding (SHA-256)"
   echo
