@@ -56,6 +56,15 @@ fn write_jsonl(name: &str, contents: &str) -> (tempfile::TempDir, PathBuf) {
     (dir, path)
 }
 
+/// [`write_jsonl`] for byte contents — fixtures with invalid UTF-8
+/// cannot exist as `&str`.
+fn write_jsonl_bytes(name: &str, contents: &[u8]) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(name);
+    std::fs::write(&path, contents).unwrap();
+    (dir, path)
+}
+
 // ---------------------------------------------------------------------------
 // Line parsing: fidelity, ignored id, lenient decode
 // ---------------------------------------------------------------------------
@@ -303,6 +312,63 @@ fn malformed_lines_are_issues_and_the_run_continues() {
     assert_eq!(sink.storage.stats().unwrap().total, 2);
 }
 
+/// A `.jsonl` with a non-UTF-8 row between two valid rows: the bad
+/// row is a durable issue (never a rewritten import), the valid rows
+/// around it land, and a reimport dedups rather than duplicating them.
+#[test]
+fn invalid_utf8_row_is_an_issue_and_neighbors_import() {
+    // Raw bytes: the 0xff inside the second row's body is invalid
+    // UTF-8, so the fixture is built as bytes, not `&str`.
+    let mut bytes: Vec<u8> = Vec::new();
+    bytes.extend_from_slice(row(1, "telegram", "t/1", "first", r#""{}""#).as_bytes());
+    bytes.push(b'\n');
+    bytes.extend_from_slice(
+        b"{\"id\":2,\"source\":\"telegram\",\"external_id\":\"t/2\",\"body\":\"a\xffb\"}\n",
+    );
+    bytes.extend_from_slice(row(3, "telegram", "t/3", "second", r#""{}""#).as_bytes());
+    bytes.push(b'\n');
+    let (_dir, path) = write_jsonl_bytes("badutf8.jsonl", &bytes);
+
+    let source = JsonlSource::new(&path);
+    let storage = Storage::open_in_memory().unwrap();
+    let mut sink = RecordingSink::new(storage);
+    let outcome = BoundedRun::new("badutf8")
+        .run(&source, &mut sink, &|| false, &mut |_, _, _| {})
+        .unwrap();
+    assert_eq!(outcome.summary.seen, 3);
+    assert_eq!(outcome.summary.inserted, 2);
+    assert_eq!(outcome.summary.failed, 1);
+    // The failure is a positioned, durable issue record with a reason
+    // (item ordinal 1: the bad row sits between the two valid rows).
+    let issues = sink.storage.import_issues("badutf8", 0, 100).unwrap();
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].position, 1);
+    assert!(!issues[0].reason.is_empty());
+    // The run completed: no checkpoint behind, both neighbors stored,
+    // and no stored body carries a decoder replacement character.
+    assert_eq!(
+        sink.storage.import_checkpoint("badutf8").unwrap(),
+        None,
+        "completed run clears its checkpoint"
+    );
+    assert_eq!(sink.storage.stats().unwrap().total, 2);
+
+    // Reimport of the same completed import: the valid rows dedup
+    // (skipped, not duplicated); the bad row is re-recorded as an
+    // issue exactly like any malformed line on a reimport.
+    let mut second = RecordingSink {
+        storage: sink.storage,
+        batch_sizes: Vec::new(),
+        batch_issue_counts: Vec::new(),
+    };
+    let second_outcome = BoundedRun::new("badutf8")
+        .run(&source, &mut second, &|| false, &mut |_, _, _| {})
+        .unwrap();
+    assert_eq!(second_outcome.summary.inserted, 0);
+    assert_eq!(second_outcome.summary.skipped, 2);
+    assert_eq!(second.storage.stats().unwrap().total, 2);
+}
+
 #[test]
 fn reimport_reports_every_row_as_duplicate() {
     let (_dir, path) = write_jsonl("twice.jsonl", MIXED_JSONL);
@@ -351,6 +417,25 @@ fn preview_reports_jsonl_kind_counts_and_media_references() {
         .warnings
         .iter()
         .any(|w| w.contains("could not be parsed")));
+}
+
+#[test]
+fn preview_counts_invalid_utf8_rows_through_the_streaming_path() {
+    // A valid row followed by a non-UTF-8 one: the preview reports the
+    // bad row through the same streaming path as the import (a counted
+    // parse failure, not a silently rewritten message).
+    let mut bytes: Vec<u8> = Vec::new();
+    bytes.extend_from_slice(row(1, "telegram", "t/1", "first", r#""{}""#).as_bytes());
+    bytes.push(b'\n');
+    bytes.extend_from_slice(
+        b"{\"id\":2,\"source\":\"telegram\",\"external_id\":\"t/2\",\"body\":\"a\xffb\"}\n",
+    );
+    let (_dir, path) = write_jsonl_bytes("preview-badutf8.jsonl", &bytes);
+    let preview = vault_core::preview::preview_import(&path).unwrap();
+    assert_eq!(preview.kind, "jsonl");
+    assert_eq!(preview.messages_seen, 1);
+    assert_eq!(preview.parse_failures, 1);
+    assert!(preview.scan_complete);
 }
 
 #[test]
