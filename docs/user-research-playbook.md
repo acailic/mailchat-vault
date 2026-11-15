@@ -91,6 +91,8 @@ Report top-1 accuracy, recall@5 for questions with an available labeled answer, 
 
 Enroll after the recovery and platform gates in the success plan. Participants keep original exports/source copies and use an explicitly labeled build. Schedule an onboarding check and follow-ups around days 7 and 30; arrange support without collecting their archive contents.
 
+The runnable form of this section — [U10 pilot kit](evidence/u10-pilot-kit-2026-11-15.md) (2026-11-15): recruitment screener, day-0/7/30 schedule with the support arrangement, participant tracking log, and the gate-readout template with its decision rubric. Its [gate record](evidence/u10-pilot-gate-2026-11-15.md) states the GP03/GP04 preconditions and the rule that no broader promotion happens before the readout.
+
 For each genuine retrieval opportunity, participants may voluntarily record: a random task label, chosen tool, source category, success/failure, approximate time, assistance needed and why they chose that route. Do not request query text, message bodies, contact names, screenshots of private conversations or credentials.
 
 Follow-up prompts:
