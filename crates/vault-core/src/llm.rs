@@ -538,15 +538,30 @@ pub fn validate(storage: &Storage, question: &str, candidate: Result<QueryPlan>)
 
 /// Step 2 of the pipeline: execute a planned query against storage.
 pub fn run_plan(storage: &Storage, planned: &PlannedQuery, limit: u32) -> Result<Vec<Message>> {
+    run_plan_scoped(storage, planned, None, limit)
+}
+
+/// Step 2 of the pipeline under an optional validated workspace scope
+/// ([`crate::search2::ResolvedAskScope`]): the scope constrains retrieval
+/// alongside the plan, intersecting date bounds (never broadening them)
+/// and returning no results when the intersection is empty — never an
+/// unscoped fallback.
+pub fn run_plan_scoped(
+    storage: &Storage,
+    planned: &PlannedQuery,
+    scope: Option<&crate::search2::ResolvedAskScope>,
+    limit: u32,
+) -> Result<Vec<Message>> {
     if planned.plan.match_expr.is_empty() {
         return Ok(Vec::new());
     }
-    storage.search_filtered(
+    storage.search_filtered_scoped(
         &planned.plan.match_expr,
         planned.plan.date_from.as_deref(),
         planned.plan.date_to.as_deref(),
         planned.plan.from.as_deref(),
         planned.plan.has_link.unwrap_or(false),
+        scope,
         limit,
     )
 }
@@ -596,12 +611,37 @@ pub fn rank_hybrid(
     fts_results: &[Message],
     limit: u32,
 ) -> Result<HybridRanking> {
+    rank_hybrid_scoped(
+        storage,
+        embedder,
+        question,
+        planned,
+        fts_results,
+        None,
+        limit,
+    )
+}
+
+/// [`rank_hybrid`] under an optional validated workspace scope: the
+/// vector leg applies exactly the filters the FTS leg applied (including
+/// the plan/scope date intersection), so both legs filter identically
+/// and only in-scope messages can reach the fused ranking — and from
+/// there citations and any consented summary.
+pub fn rank_hybrid_scoped(
+    storage: &Storage,
+    embedder: &dyn Embedder,
+    question: &str,
+    planned: &PlannedQuery,
+    fts_results: &[Message],
+    scope: Option<&crate::search2::ResolvedAskScope>,
+    limit: u32,
+) -> Result<HybridRanking> {
     let counts = storage.embedding_counts(embedder.id())?;
     let vector_ids: Vec<i64> = if counts.embedded == 0 {
         Vec::new()
     } else {
         storage
-            .vector_scan(
+            .vector_scan_scoped(
                 embedder.id(),
                 embedder.dim(),
                 &embedder.embed(question),
@@ -609,6 +649,7 @@ pub fn rank_hybrid(
                 planned.plan.date_to.as_deref(),
                 planned.plan.from.as_deref(),
                 planned.plan.has_link.unwrap_or(false),
+                scope,
                 VECTOR_CANDIDATES.max(limit),
             )?
             .into_iter()
@@ -1486,5 +1527,291 @@ mod tests {
         assert!(!plaintext_http_off_loopback("http://localhost:9"));
         assert!(!plaintext_http_off_loopback("http://[::1]:9"));
         assert!(!plaintext_http_off_loopback("not a url"));
+    }
+
+    // ------------------------------------------------------------------
+    // Workspace scope: retrieval, ranking, and the summary stay inside it
+    // ------------------------------------------------------------------
+
+    use crate::search2::{validate_ask_scope, AskScope};
+    use crate::vector::Embedder as _;
+
+    /// Canonical id of the source instance behind a legacy namespace.
+    fn canonical_id(storage: &Storage, namespace: &str) -> String {
+        storage
+            .connection()
+            .query_row(
+                "SELECT id FROM source_instances WHERE legacy_namespace = ?1",
+                [namespace],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+    }
+
+    /// Both same-label sources' messages answer the question (FTS term
+    /// and embedding text), so any leak must come from missing scoping.
+    const SCOPE_QUESTION: &str = "scoped marker about deploys";
+
+    /// Two source instances sharing one display label ("Same Label"),
+    /// distinct canonical ids, one dated message each (authors differ),
+    /// both embedded with the question text so the vector leg finds both.
+    fn scoped_fixture() -> (Storage, String, String) {
+        let storage = Storage::open_in_memory().unwrap();
+        let embedder = crate::vector::HashEmbedder;
+        for (ns, author, body) in [
+            (
+                "legacy-a",
+                "ana@example.com",
+                "scoped alpha marker about deploys",
+            ),
+            (
+                "legacy-b",
+                "bob@example.com",
+                "scoped beta marker about deploys",
+            ),
+        ] {
+            storage
+                .insert_message(&crate::message::NewMessage::new(
+                    ns,
+                    format!("{ns}-m1"),
+                    author,
+                    "2026-10-05T12:00:00Z",
+                    body,
+                ))
+                .unwrap();
+        }
+        // The UI shows the same label for both; only canonical ids can
+        // tell them apart.
+        storage
+            .connection()
+            .execute("UPDATE source_instances SET label = 'Same Label'", [])
+            .unwrap();
+        let ids: Vec<(i64, Vec<f32>)> = storage
+            .connection()
+            .prepare("SELECT id FROM archive_messages ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+            .into_iter()
+            .map(|id| (id, embedder.embed(SCOPE_QUESTION)))
+            .collect();
+        storage
+            .embed_messages_batch(embedder.id(), embedder.dim(), &ids)
+            .unwrap();
+        let id_a = canonical_id(&storage, "legacy-a");
+        let id_b = canonical_id(&storage, "legacy-b");
+        (storage, id_a, id_b)
+    }
+
+    fn scoped_plan(from: Option<&str>, to: Option<&str>) -> PlannedQuery {
+        PlannedQuery {
+            plan: QueryPlan {
+                match_expr: "\"scoped\"".into(),
+                date_from: from.map(str::to_string),
+                date_to: to.map(str::to_string),
+                from: None,
+                has_link: None,
+                extract_links: false,
+            },
+            source: PlanSource::Llm,
+            notes: Vec::new(),
+        }
+    }
+
+    fn source_scope(id: &str) -> AskScope {
+        AskScope {
+            source_ids: vec![id.to_string()],
+            ..AskScope::default()
+        }
+    }
+
+    #[test]
+    fn scoped_ask_isolates_same_label_sources_by_canonical_id() {
+        let (storage, id_a, id_b) = scoped_fixture();
+        let planned = scoped_plan(None, None);
+
+        // Unscoped, both sources' messages match.
+        let unscoped = run_plan(&storage, &planned, 50).unwrap();
+        assert_eq!(unscoped.len(), 2);
+
+        // Scoped to A's canonical id: only A's message on the FTS leg…
+        let scope = validate_ask_scope(&storage, &source_scope(&id_a)).unwrap();
+        let fts = run_plan_scoped(&storage, &planned, Some(&scope), 50).unwrap();
+        assert_eq!(fts.len(), 1);
+        assert!(fts[0].body.contains("alpha"));
+
+        // …and on the vector/hybrid leg.
+        let embedder = crate::vector::HashEmbedder;
+        let hybrid = rank_hybrid_scoped(
+            &storage,
+            &embedder,
+            SCOPE_QUESTION,
+            &planned,
+            &fts,
+            Some(&scope),
+            50,
+        )
+        .unwrap();
+        assert!(!hybrid.results.is_empty());
+        assert!(
+            hybrid.results.iter().all(|m| m.body.contains("alpha")),
+            "{:?}",
+            hybrid.results
+        );
+
+        // Scoped to B's canonical id: B's message, not A's — the shared
+        // display label never blurs the boundary.
+        let scope_b = validate_ask_scope(&storage, &source_scope(&id_b)).unwrap();
+        let fts_b = run_plan_scoped(&storage, &planned, Some(&scope_b), 50).unwrap();
+        assert_eq!(fts_b.len(), 1);
+        assert!(fts_b[0].body.contains("beta"));
+    }
+
+    #[test]
+    fn scoped_ask_with_out_of_range_dates_returns_nothing_on_both_legs() {
+        let (storage, _id_a, _id_b) = scoped_fixture();
+        let planned = scoped_plan(None, None);
+        // Every fixture message is from 2026-10; a 2027 window is empty.
+        let scope = validate_ask_scope(
+            &storage,
+            &AskScope {
+                from_date: Some("2027-01-01".into()),
+                to_date: Some("2027-01-31".into()),
+                timezone: Some("UTC".into()),
+                ..AskScope::default()
+            },
+        )
+        .unwrap();
+        let fts = run_plan_scoped(&storage, &planned, Some(&scope), 50).unwrap();
+        assert!(fts.is_empty(), "{fts:?}");
+        let embedder = crate::vector::HashEmbedder;
+        let hybrid = rank_hybrid_scoped(
+            &storage,
+            &embedder,
+            SCOPE_QUESTION,
+            &planned,
+            &fts,
+            Some(&scope),
+            50,
+        )
+        .unwrap();
+        assert!(hybrid.results.is_empty(), "{:?}", hybrid.results);
+    }
+
+    #[test]
+    fn empty_plan_scope_date_intersection_returns_no_results_without_fallback() {
+        let (storage, _id_a, _id_b) = scoped_fixture();
+        // The plan narrows to October, the scope to November: the archive
+        // answers the plan unscoped, so any row here would mean a
+        // fallback to unscoped retrieval.
+        let planned = scoped_plan(Some("2026-10-01"), Some("2026-10-31"));
+        let scope = validate_ask_scope(
+            &storage,
+            &AskScope {
+                from_date: Some("2026-11-01".into()),
+                to_date: Some("2026-11-30".into()),
+                timezone: Some("UTC".into()),
+                ..AskScope::default()
+            },
+        )
+        .unwrap();
+        assert!(!run_plan(&storage, &planned, 50).unwrap().is_empty());
+        let fts = run_plan_scoped(&storage, &planned, Some(&scope), 50).unwrap();
+        assert!(fts.is_empty(), "{fts:?}");
+        let embedder = crate::vector::HashEmbedder;
+        let hybrid = rank_hybrid_scoped(
+            &storage,
+            &embedder,
+            SCOPE_QUESTION,
+            &planned,
+            &fts,
+            Some(&scope),
+            50,
+        )
+        .unwrap();
+        assert!(hybrid.results.is_empty(), "{:?}", hybrid.results);
+    }
+
+    #[test]
+    fn scope_author_intersects_plan_from_conjunctively() {
+        let (storage, _id_a, _id_b) = scoped_fixture();
+        let mut planned = scoped_plan(None, None);
+        planned.plan.from = Some("ana".into());
+
+        // Plan alone: ana's message.
+        assert_eq!(run_plan(&storage, &planned, 50).unwrap().len(), 1);
+
+        // Scope author combines as a conjunction: ana ∩ bob is empty…
+        let disjoint = validate_ask_scope(
+            &storage,
+            &AskScope {
+                author: Some("bob".into()),
+                ..AskScope::default()
+            },
+        )
+        .unwrap();
+        assert!(run_plan_scoped(&storage, &planned, Some(&disjoint), 50)
+            .unwrap()
+            .is_empty());
+
+        // …while ana ∩ example.com keeps exactly ana's message.
+        let overlapping = validate_ask_scope(
+            &storage,
+            &AskScope {
+                author: Some("example.com".into()),
+                ..AskScope::default()
+            },
+        )
+        .unwrap();
+        let results = run_plan_scoped(&storage, &planned, Some(&overlapping), 50).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].author, "ana@example.com");
+    }
+
+    #[test]
+    fn scoped_summary_prompt_carries_only_in_scope_messages() {
+        let (storage, id_a, _id_b) = scoped_fixture();
+        // The same composition run_ask uses: translate → validate →
+        // scoped run + rank → summarize. The provider may only ever see
+        // the scoped rows.
+        let llm = MockLlm::with_replies([
+            "{\"match\": \"scoped\"}".to_string(),
+            "summary [1].".to_string(),
+        ]);
+        let planned = validate(
+            &storage,
+            SCOPE_QUESTION,
+            translate(&llm, SCOPE_QUESTION, today()),
+        );
+        let scope = validate_ask_scope(&storage, &source_scope(&id_a)).unwrap();
+        let fts = run_plan_scoped(&storage, &planned, Some(&scope), 50).unwrap();
+        assert_eq!(fts.len(), 1);
+        let embedder = crate::vector::HashEmbedder;
+        let hybrid = rank_hybrid_scoped(
+            &storage,
+            &embedder,
+            SCOPE_QUESTION,
+            &planned,
+            &fts,
+            Some(&scope),
+            50,
+        )
+        .unwrap();
+        let summarized = summarize_results(
+            &llm,
+            SCOPE_QUESTION,
+            &hybrid.results,
+            DEFAULT_SUMMARIZE_TOP,
+            &[],
+        );
+        assert_eq!(summarized.answer.as_deref(), Some("summary [1]."));
+        let user = &llm.prompts()[1].1;
+        assert!(user.contains("alpha"), "in-scope row missing: {user}");
+        assert!(
+            !user.contains("beta"),
+            "out-of-scope row leaked into the summary prompt: {user}"
+        );
     }
 }

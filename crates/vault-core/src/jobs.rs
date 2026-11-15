@@ -80,8 +80,8 @@ use crate::imap::{ImapConfig, SyncFailure, SyncStorage};
 use crate::message::NewMessage;
 use crate::storage::{
     BatchFailure, ConnectorIdentity, ImportBatchCounts, ImportIssueRecord, JobLedgerEntry,
-    JobLedgerRow, JOB_LEDGER_KEEP, MailBatchItem, MailBatchOutcome, NewSourceInstance, Occurrence,
-    Storage,
+    JobLedgerRow, MailBatchItem, MailBatchOutcome, NewSourceInstance, Occurrence, Storage,
+    JOB_LEDGER_KEEP,
 };
 use crate::{Error, Result};
 
