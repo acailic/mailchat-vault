@@ -63,6 +63,25 @@ export async function openView(browser, view) {
 }
 
 /**
+ * Activate a workspace tab (search | ask) through the real tab button
+ * and wait for data-workspace-section to settle. The two tabpanels stay
+ * mounted but only the selected one is displayed (app.css hides the
+ * other), so helpers/specs must activate the tab before touching
+ * controls inside its panel — a click on a hidden summary hangs the
+ * same way a closed fold does. Idempotent, like openView.
+ */
+export async function activateWorkspaceSection(browser, section) {
+  const app = await browser.$("#app");
+  if ((await app.getAttribute("data-workspace-section")) === section) return;
+  const button = await browser.$(`#tab-${section}`);
+  await button.click();
+  await browser.waitUntil(
+    async () => (await app.getAttribute("data-workspace-section")) === section,
+    { timeout: 5_000, timeoutMsg: `workspace section "${section}" never activated` },
+  );
+}
+
+/**
  * Open the Filters fold in the workspace toolbar (the user's path: a
  * click on the summary). The advanced filter controls — author, dates,
  * attachment presence, import scope — live inside a closed <details>
@@ -72,6 +91,7 @@ export async function openView(browser, view) {
  */
 export async function openFilters(browser) {
   await openView(browser, "workspace"); // the toolbar is view-scoped
+  await activateWorkspaceSection(browser, "search"); // the toolbar is tab-scoped
   const isOpen = async () =>
     (await browser.execute(() => document.querySelector("#filters")?.open ?? false));
   if (!(await isOpen())) {
@@ -93,6 +113,9 @@ export async function openFilters(browser) {
  */
 export async function openAsk(browser) {
   await openView(browser, "workspace"); // the Ask section is view-scoped
+  await activateWorkspaceSection(browser, "ask"); // …and tab-scoped: the
+  // panel (fold summary included) stays display:none until the Ask tab
+  // is selected, so activate the tab before waiting on the summary.
   const isOpen = async () =>
     (await browser.execute(() => document.querySelector("#ask-fold")?.open ?? false));
   if (!(await isOpen())) {
@@ -114,6 +137,7 @@ export async function openAsk(browser) {
  */
 export async function openExportMenu(browser) {
   await openView(browser, "workspace"); // the picker is view-scoped
+  await activateWorkspaceSection(browser, "search"); // …and tab-scoped
   const isOpen = async () =>
     (await browser.execute(() => document.querySelector("#export-menu")?.open ?? false));
   if (!(await isOpen())) {
@@ -380,6 +404,7 @@ export async function seedDemo(browser) {
 /** Submit a search (Enter in the query box), return the settled status line. */
 export async function search(browser, text) {
   await openView(browser, "workspace"); // search lives in the workspace view
+  await activateWorkspaceSection(browser, "search"); // …and in its tabpanel
   const input = await browser.$("#search");
   await input.click();
   await input.setValue(text);
