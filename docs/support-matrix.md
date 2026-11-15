@@ -30,7 +30,7 @@ Kept unchanged: the in-app AI consent note ("nothing leaves this machine" when a
 | Media store / export / external open | implemented (code) | M4.1/M4.3; [features](features.md) | Acceptance records still open (roadmap M4 checkbox) |
 | Background keep-alive (tray, autostart, single instance) | implemented | M7 / D10 amendment (2026-11-11) | Default off; GNOME-without-appindicator tray limitation recorded there |
 | Three-platform installers + SHA256SUMS | implemented | D11 amendment; [release](release.md) | Unsigned → [#78](https://github.com/acailic/mailchat-vault/issues/78); execution route undecided → [#80](https://github.com/acailic/mailchat-vault/issues/80); native host evidence → [#81](https://github.com/acailic/mailchat-vault/issues/81) |
-| License / CONTRIBUTING / SECURITY | missing | Cargo workspace declares `UNLICENSED` | → [#79](https://github.com/acailic/mailchat-vault/issues/79) (gate G0) |
+| License / CONTRIBUTING / SECURITY | implemented | LICENSE, CONTRIBUTING.md, SECURITY.md merged in PR #84; `GPL-3.0-only` declared in Cargo.toml (D13) | tests/retrieval/Cargo.toml and tests/perf/Cargo.toml still declare `UNLICENSED` |
 | Artifact attestations / authenticated provenance | missing | review finding S6 (attestations need an executing workflow and eligible plan) | Depends on [#80](https://github.com/acailic/mailchat-vault/issues/80) |
 
 ## Open blockers
@@ -38,7 +38,7 @@ Kept unchanged: the in-app AI consent note ("nothing leaves this machine" when a
 | Issue | Blocker | Blocks |
 | --- | --- | --- |
 | [#78](https://github.com/acailic/mailchat-vault/issues/78) | Signing/notarization accounts and eligibility (Apple enrollment; Windows route) | G1 |
-| [#79](https://github.com/acailic/mailchat-vault/issues/79) | License decision and rights audit (D13 variant, dependency/asset inventory, history scan) | G0 |
+| [#79](https://github.com/acailic/mailchat-vault/issues/79) | Rights audit (dependency and asset inventory, public-history scan); the license decision itself is recorded as D13 in [decisions](decisions.md) | G0 |
 | [#80](https://github.com/acailic/mailchat-vault/issues/80) | Release execution route (Actions disabled by decision; attestations need an executing workflow) | Release evidence, provenance |
 | [#81](https://github.com/acailic/mailchat-vault/issues/81) | Native macOS/Windows verification hosts | G1 |
 | [#82](https://github.com/acailic/mailchat-vault/issues/82) | Gmail public OAuth client decision | Consumer Gmail onboarding (not the file-import pilot) |
