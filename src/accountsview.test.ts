@@ -15,6 +15,7 @@ import {
   passwordStoreNote,
   renderSourcesList,
   sourceChipRows,
+  sourceChipStatus,
   sourceIcon,
   sourcesEmptyLine,
   syncFailureText,
@@ -263,6 +264,101 @@ describe("labels and status lines", () => {
   });
 });
 
+describe("sourceChipStatus (the chip's short per-source status)", () => {
+  const noCredentials = {
+    host: "imap.gmail.com",
+    port: 993,
+    username: "ana@gmail.com",
+    folders: [],
+    has_password: false,
+    has_oauth: false,
+  };
+
+  it("a live sync outranks every derived state", () => {
+    // Even a paused, credential-less, never-synced account reads as
+    // syncing while its sync runs — the chip's live truth.
+    const mess = imapAccount({
+      excluded: true,
+      state: "disconnected",
+      last_success_at: null,
+      imap: noCredentials,
+    });
+    expect(sourceChipStatus(mess, true)).toBe("Syncing…");
+    expect(sourceChipStatus(imapAccount(), true)).toBe("Syncing…");
+  });
+
+  it("no stored credentials read as needing sign-in, ahead of pause", () => {
+    const bare = imapAccount({ excluded: true, last_success_at: null, imap: noCredentials });
+    expect(sourceChipStatus(bare, false)).toBe("Needs sign-in");
+  });
+
+  it("a recorded credential failure reads as needing sign-in, ahead of the generic failure line", () => {
+    const rejected = imapAccount({
+      last_error:
+        "the server rejected the login — check the username and password (Gmail requires an app password, not the account password)",
+      last_error_at: "2026-11-09 23:00:00",
+    });
+    expect(sourceChipStatus(rejected, false)).toBe("Needs sign-in");
+    expect(
+      sourceChipStatus(
+        imapAccount({ last_error: "no password stored for this account — enter one" }),
+        false,
+      ),
+    ).toBe("Needs sign-in");
+    expect(
+      sourceChipStatus(
+        imapAccount({
+          last_error: "no Google sign-in stored for this account — use “Sign in with Google” first",
+        }),
+        false,
+      ),
+    ).toBe("Needs sign-in");
+  });
+
+  it("other recorded failures quote their reason", () => {
+    const failed = imapAccount({
+      last_error:
+        "nothing answered at that host and port — check the server address and port (993 for IMAP over TLS)",
+      last_error_at: "2026-11-09 23:00:00",
+    });
+    expect(sourceChipStatus(failed, false)).toBe(
+      "Sync failed — nothing answered at that host and port — check the server address and port (993 for IMAP over TLS)",
+    );
+  });
+
+  it("a failure outranks pause; pause outranks the last-success line", () => {
+    const pausedAndFailed = imapAccount({
+      excluded: true,
+      last_error: "the server did not respond in time",
+    });
+    expect(sourceChipStatus(pausedAndFailed, false)).toBe(
+      "Sync failed — the server did not respond in time",
+    );
+    expect(sourceChipStatus(imapAccount({ excluded: true }), false)).toBe("Paused");
+  });
+
+  it("connected email carries the last success; never synced says so", () => {
+    expect(sourceChipStatus(imapAccount(), false)).toBe("Last synced 2026-01-02 10:00:05");
+    expect(sourceChipStatus(imapAccount({ last_success_at: null }), false)).toBe("Never synced");
+  });
+
+  it("an imap row without a parsed identity skips the credential probe", () => {
+    expect(sourceChipStatus(imapAccount({ imap: null }), false)).toBe(
+      "Last synced 2026-01-02 10:00:05",
+    );
+  });
+
+  it("imports carry their import time; the syncing flag never applies to them", () => {
+    expect(sourceChipStatus(importAccount({ last_attempt_at: "2026-01-03 09:00:00" }), false)).toBe(
+      "Imported 2026-01-03 09:00:00",
+    );
+    expect(sourceChipStatus(importAccount(), false)).toBe("Imported");
+    expect(
+      sourceChipStatus(importAccount({ last_attempt_at: "2026-01-03 09:00:00" }), true),
+    ).toBe("Imported 2026-01-03 09:00:00");
+  });
+});
+
 describe("renderSourcesList", () => {
   function render(accounts: AccountView[]) {
     const el = document.createElement("ul");
@@ -452,9 +548,37 @@ describe("sourceChipRows", () => {
     // The raw `mbox` namespace reads as "Mail import" on the chip (the
     // stored label stays the identity — friendlySourceLabel).
     expect(rows).toEqual([
-      { id: "a", label: "Mail import", count: 3, icon: "file" },
-      { id: "b", label: "demo", count: 5, icon: "file" },
+      { id: "a", label: "Mail import", count: 3, icon: "file", status: "Imported" },
+      { id: "b", label: "demo", count: 5, icon: "file", status: "Imported" },
     ]);
+  });
+
+  it("fills each chip's status from its account row; a missing row renders none", () => {
+    // The status lands where users ask "what state is this source in?":
+    // derived from the account row, with the live syncing set flipping
+    // a chip to "Syncing…" regardless of its derived state.
+    const rows = sourceChipRows(
+      [inst("a", "imap.gmail.com-ana", "imap"), inst("b", "mbox"), inst("x", "solo")],
+      [
+        { ...imap("a", "imap.gmail.com-ana", "ana@gmail.com", "imap.gmail.com"), last_success_at: "2026-01-02 10:00:05" },
+        { ...imp("b", "mbox"), last_attempt_at: "2026-01-03 09:00:00" },
+      ],
+      [
+        { source: "imap.gmail.com-ana", count: 12 },
+        { source: "mbox", count: 3 },
+        { source: "solo", count: 1 },
+      ],
+      new Set(["a"]),
+    );
+    expect(rows.map((r) => r.status)).toEqual(["Syncing…", "Imported 2026-01-03 09:00:00", ""]);
+    // Without the live flag the email chip reads its derived line.
+    expect(
+      sourceChipRows(
+        [inst("a", "imap.gmail.com-ana", "imap")],
+        [{ ...imap("a", "imap.gmail.com-ana", "ana@gmail.com", "imap.gmail.com"), last_success_at: "2026-01-02 10:00:05" }],
+        [{ source: "imap.gmail.com-ana", count: 12 }],
+      ).map((r) => r.status),
+    ).toEqual(["Last synced 2026-01-02 10:00:05"]);
   });
 
   it("carries the taxonomy icon per chip (mail/chat/file)", () => {
@@ -499,7 +623,7 @@ describe("sourceChipRows", () => {
 
   it("instances without an account row still appear (id, label, label count)", () => {
     const rows = sourceChipRows([inst("x", "solo")], [], [{ source: "solo", count: 1 }]);
-    expect(rows).toEqual([{ id: "x", label: "solo", count: 1, icon: "file" }]);
+    expect(rows).toEqual([{ id: "x", label: "solo", count: 1, icon: "file", status: "" }]);
   });
 
   it("imap twins sharing label, username, and host get numbered chip labels", () => {

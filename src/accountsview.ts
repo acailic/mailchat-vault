@@ -128,6 +128,43 @@ export function describeAccountSync(account: AccountView): string {
   return parts.join(" · ");
 }
 
+/** Whether a recorded sync failure is about the credentials themselves
+ * (none stored, a rejected login, an unusable Google sign-in) — the
+ * chip then asks for sign-in instead of quoting the failure. */
+function isCredentialFailure(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    m.includes("password") ||
+    m.includes("credential") ||
+    m.includes("sign in") ||
+    m.includes("sign-in") ||
+    m.includes("login") ||
+    m.includes("log in") ||
+    m.includes("oauth")
+  );
+}
+
+/** The compact per-source status for the navigation chip: the same
+ * inputs as `describeAccountSync` above, a shorter line, plus the live
+ * `syncing` flag. Precedence: a running sync, then sign-in trouble (no
+ * credentials stored, or the last failure was about them), then any
+ * other recorded failure, then paused, then the last-success line.
+ * Imports carry their import time — nothing of theirs syncs. */
+export function sourceChipStatus(account: AccountView, syncing: boolean): string {
+  if (account.kind !== "imap") {
+    return account.last_attempt_at ? `Imported ${account.last_attempt_at}` : "Imported";
+  }
+  if (syncing) return "Syncing…";
+  const noCredentials =
+    account.imap !== null && !account.imap.has_password && !account.imap.has_oauth;
+  if (noCredentials || (account.last_error !== null && isCredentialFailure(account.last_error))) {
+    return "Needs sign-in";
+  }
+  if (account.last_error) return `Sync failed — ${account.last_error}`;
+  if (account.excluded) return "Paused";
+  return account.last_success_at ? `Last synced ${account.last_success_at}` : "Never synced";
+}
+
 /** The empty-state line when no source exists yet. */
 export function sourcesEmptyLine(): string {
   return "No sources yet — import an export or connect an email account and it appears here.";
@@ -185,6 +222,10 @@ export interface SourceChipRow {
   /** The source's taxonomy icon (mail / chat / file). Decorative —
    * the label carries the meaning for assistive tech. */
   icon: IconName;
+  /** Short per-source status ("Syncing…", "Needs sign-in", "Paused",
+   * "Last synced …", "Imported …"); empty when no account row backs
+   * the chip — a missing row must not guess a status. */
+  status: string;
 }
 
 /** Build the navigation chip rows from the canonical instances, the
@@ -192,11 +233,13 @@ export interface SourceChipRow {
  * is by stable id; two sources that share a display label stay
  * independent and get distinct labels. Only sources whose label is
  * present in the counts (≥1 message) get a chip: an empty archive or a
- * not-yet-loaded stats keeps the chip bar empty. */
+ * not-yet-loaded stats keeps the chip bar empty. `syncing` carries the
+ * source ids with a sync in flight, so live rows read "Syncing…". */
 export function sourceChipRows(
   instances: SourceInstance[],
   accounts: AccountView[],
   counts: SourceCount[],
+  syncing: ReadonlySet<string> = new Set(),
 ): SourceChipRow[] {
   const accountById = new Map(accounts.map((a) => [a.source_id, a]));
   const countByLabel = new Map(counts.map((c) => [c.source, c.count]));
@@ -214,6 +257,12 @@ export function sourceChipRows(
     const account = accountById.get(id);
     return account ? sourceIcon(account) : "file";
   }
+  /** The chip's status line: derived from the account row (plus the
+   * live syncing set); a missing row renders no status at all. */
+  function statusOf(id: string): string {
+    const account = accountById.get(id);
+    return account ? sourceChipStatus(account, syncing.has(id)) : "";
+  }
   return present.map((s) => {
     const duplicated = (labelCounts.get(s.label) ?? 0) > 1;
     if (!duplicated) {
@@ -222,6 +271,7 @@ export function sourceChipRows(
         label: friendlySourceLabel(s.label),
         count: countByLabel.get(s.label) ?? null,
         icon: iconOf(s.id),
+        status: statusOf(s.id),
       };
     }
     // Email vs import is the instance's own kind; the account row only
@@ -244,7 +294,7 @@ export function sourceChipRows(
       importSeen.set(base, n);
       label = n === 1 ? `${base} · import` : `${base} · import ${n}`;
     }
-    return { id: s.id, label, count: null, icon: iconOf(s.id) };
+    return { id: s.id, label, count: null, icon: iconOf(s.id), status: statusOf(s.id) };
   });
 }
 
