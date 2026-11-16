@@ -3841,6 +3841,26 @@ mod tests {
     }
 
     #[test]
+    fn import_fallback_source_prefers_destination_then_the_picked_name() {
+        // Archive health: a failed import that never resolved its source
+        // name attributes to the explicitly chosen destination source
+        // (trimmed), else the picked file's own name — the overview can
+        // still say which pick failed, and when.
+        assert_eq!(
+            import_fallback_source(Some("  Work chats "), "/anywhere/chat.zip"),
+            "Work chats"
+        );
+        // A blank destination is as good as none: fall back to the name.
+        assert_eq!(
+            import_fallback_source(Some("   "), "/home/you/Downloads/chat.zip"),
+            "chat.zip"
+        );
+        assert_eq!(import_fallback_source(None, "export.txt"), "export.txt");
+        // A bare file name (no directory component) is its own name.
+        assert_eq!(import_fallback_source(None, "chat.zip"), "chat.zip");
+    }
+
+    #[test]
     fn last_switch_view_merges_origin_with_startup_recovery() {
         // U05 restart UX: the journal says where the switch came from;
         // only this session's startup recovery knows whether a restart
