@@ -219,9 +219,11 @@ impl From<Error> for JobError {
                     message: e.to_string(),
                 }
             }
-            Error::Settings(_) | Error::Embedding(_) | Error::Jobs(_) => JobError::Invalid {
-                message: e.to_string(),
-            },
+            Error::Settings(_) | Error::Embedding(_) | Error::Jobs(_) | Error::SavedSearch(_) => {
+                JobError::Invalid {
+                    message: e.to_string(),
+                }
+            }
             Error::OAuth(_) => JobError::Network {
                 message: e.to_string(),
             },
