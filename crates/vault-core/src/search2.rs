@@ -655,9 +655,9 @@ impl std::error::Error for AppError {}
 impl From<Error> for AppError {
     fn from(err: Error) -> Self {
         match &err {
-            Error::InvalidQuery(message) | Error::InvalidExport(message) => {
-                AppError::invalid_input(message.clone(), None)
-            }
+            Error::InvalidQuery(message)
+            | Error::InvalidExport(message)
+            | Error::InvalidCollection(message) => AppError::invalid_input(message.clone(), None),
             Error::InvalidDate(message) => {
                 AppError::invalid_input(message.clone(), Some("from_date/to_date"))
             }
