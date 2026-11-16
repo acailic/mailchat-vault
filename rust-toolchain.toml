@@ -1,0 +1,8 @@
+# The vault crates compile on this pinned toolchain. The newest stable
+# rustc (1.100 at the time of pinning) rejects unchanged main with 28
+# "not general enough" trait-solver errors; until those are fixed, this
+# file keeps every runner and CI on a known-good compiler. Keep the
+# version in sync with the runner image toolchain.
+[toolchain]
+channel = "1.98.1"
+profile = "minimal"
