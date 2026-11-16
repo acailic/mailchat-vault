@@ -1534,7 +1534,6 @@ mod tests {
     // ------------------------------------------------------------------
 
     use crate::search2::{validate_ask_scope, AskScope};
-    use crate::vector::Embedder as _;
 
     /// Canonical id of the source instance behind a legacy namespace.
     fn canonical_id(storage: &Storage, namespace: &str) -> String {

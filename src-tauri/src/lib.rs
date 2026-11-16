@@ -1141,7 +1141,15 @@ fn run_ask(
             .map_err(|e| e.to_string())?;
         let hybrid = vault
             .with_read(|s| {
-                llm::rank_hybrid_scoped(s, embedder, question, &planned, &fts_results, scope.as_ref(), limit)
+                llm::rank_hybrid_scoped(
+                    s,
+                    embedder,
+                    question,
+                    &planned,
+                    &fts_results,
+                    scope.as_ref(),
+                    limit,
+                )
             })
             .map_err(|e| e.to_string())?;
         (hybrid.results, hybrid.ranking)

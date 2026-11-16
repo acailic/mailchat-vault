@@ -1686,6 +1686,7 @@ impl Storage {
     /// author filter applies conjunctively with `from_filter`, and its
     /// source/import/attachment/honesty filters reuse the v2 search
     /// predicate SQL so plain search and Ask filter identically.
+    #[allow(clippy::too_many_arguments)] // mirrors `search_filtered`'s parameter list + the scope
     pub fn search_filtered_scoped(
         &self,
         match_query: &str,
