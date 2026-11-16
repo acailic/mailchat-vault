@@ -876,7 +876,9 @@ fn finished_jobs_survive_a_restart() {
         // A live job submitted in the new session allocates above the
         // restored band, so it lists first and can never collide with a
         // restored id (the client keys its record map by id).
-        let live = pool.submit_job("seed_demo", |_ctx| Ok(Value::Null)).unwrap();
+        let live = pool
+            .submit_job("seed_demo", |_ctx| Ok(Value::Null))
+            .unwrap();
         assert!(live.0 > vault_core::jobs::RESTORED_JOB_ID_BASE);
         wait_terminal(&pool, live);
         let jobs = pool.jobs();
