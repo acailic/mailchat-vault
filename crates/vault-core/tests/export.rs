@@ -9,11 +9,13 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use rusqlite::{params, Connection};
 use vault_core::export::{export_chat, export_search, ExportFormat, ExportSummary};
 use vault_core::mbox::parse_mbox;
 use vault_core::message::{Message, NewMessage};
 use vault_core::query::SearchQuery;
-use vault_core::storage::Storage;
+use vault_core::search2::SearchArchiveRequest;
+use vault_core::storage::{ConnectorIdentity, NewSourceInstance, Occurrence, Storage};
 
 /// An email-shaped row with the `raw_json` extras the mail parsers write.
 /// The `Date` header is derived from `sent_at` (rendered at a fixed +01:00
@@ -151,7 +153,7 @@ fn assert_same_ignoring_ids(a: &[Message], b: &[Message]) {
 }
 
 /// Clear `source_key` before a comparison: the portable source identity
-/// is export-only metadata (populated by the two JSON export streams,
+/// is export-only metadata (populated by the JSON export streams,
 /// empty on rows built by every other query), so it is deliberately
 /// absent from the paginated search API's rows.
 fn strip_export_only_source_key(messages: Vec<Message>) -> Vec<Message> {
@@ -1103,6 +1105,283 @@ fn chat_export_of_same_label_conversations_stays_distinct() {
     let (summary, rows) = chat_rows(&storage, id_by_body(&storage, "poruka jedan"));
     assert_eq!(summary.written, 3);
     assert!(!rows.iter().any(|m| m.body.contains("drugi chat")));
+}
+
+// ---------------------------------------------------------------------------
+// Portable source identity in the whole-chat JSON Lines export
+// ---------------------------------------------------------------------------
+
+/// One connector-owned (IMAP) source instance — the only production
+/// write path that stores rows under a connector-owned instance — with
+/// one mail row sharing `external_id` across calls, the same-label
+/// collision shape of tests/export_v2.rs. Returns the instance id.
+fn imap_mail(storage: &Storage, connector_key: &str, external_id: &str, body: &str) -> String {
+    let instance = storage
+        .ensure_source_instance(&NewSourceInstance {
+            kind: "imap",
+            label: "Shared mailbox",
+            connector_key,
+            config_json: "{}",
+        })
+        .unwrap();
+    let m = NewMessage::new("imap", external_id, "Ana", "2026-01-01T12:00:00Z", body);
+    storage
+        .insert_mail_message(
+            &instance,
+            &m,
+            "Subject",
+            &ConnectorIdentity {
+                namespace: "imap",
+                external_key: external_id,
+                revision_hash: &format!("revision-{connector_key}"),
+            },
+            &Occurrence {
+                scope: "INBOX",
+                provider_item_id: "1",
+                uidvalidity: Some(1),
+            },
+        )
+        .unwrap();
+    instance
+}
+
+/// A file-backed storage plus a second raw connection on the same
+/// database (WAL allows the concurrent writer), the canonical-table
+/// fixture pattern of tests/conversations.rs.
+fn scratch_storage(name: &str) -> (Storage, Connection) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join(format!("{name}.db"));
+    let storage = Storage::open(&db).unwrap();
+    std::mem::forget(dir);
+    let raw = Connection::open(&db).unwrap();
+    (storage, raw)
+}
+
+/// Give `instance`'s messages their own conversation — the canonical
+/// shape `resolve_email_thread` writes. Connector mail is stored
+/// conversationless today, so the whole-thread export fixture for
+/// connector-owned instances needs the row attached here.
+fn attach_conversation(raw: &Connection, instance: &str, message_ids: &[i64]) {
+    let conversation = format!("conv-{instance}");
+    raw.execute(
+        "INSERT INTO conversations
+             (id, source_instance_id, provider_key, label, kind, confidence)
+         VALUES (?1, ?2, ?3, 'Shared mailbox', 'email', 'verified')",
+        params![&conversation, instance, format!("email:thread:{instance}")],
+    )
+    .unwrap();
+    for id in message_ids {
+        raw.execute(
+            "UPDATE archive_messages SET conversation_id = ?1 WHERE id = ?2",
+            params![&conversation, id],
+        )
+        .unwrap();
+    }
+}
+
+/// The P1 regression on the whole-conversation entry point: two
+/// connector-owned instances share a display label and a mail
+/// `Message-ID`. Before the portable source identity reached this
+/// stream, both exported rows carried only `source: "Shared mailbox"`
+/// and the JSON Lines importer deduped the second conversation onto the
+/// first — a successful transfer that silently dropped one instance's
+/// message. With `source_key` both conversation exports round-trip
+/// through the production bounded importer with both bodies retained
+/// and stay idempotent.
+#[test]
+fn chat_jsonl_export_keeps_same_label_instances_distinct_through_the_bounded_importer() {
+    let (storage, raw) = scratch_storage("chat-jsonl-source-key");
+    let mut anchors = Vec::new();
+    for key in ["account-a", "account-b"] {
+        let instance = imap_mail(
+            &storage,
+            key,
+            "same-message-id",
+            &format!("body from {key}"),
+        );
+        let id = id_by_body(&storage, &format!("body from {key}"));
+        attach_conversation(&raw, &instance, &[id]);
+        anchors.push(id);
+    }
+    assert_eq!(storage.stats().unwrap().total, 2);
+
+    // Export each conversation (whole-thread branch) as JSON Lines.
+    let dir = tempfile::tempdir().unwrap();
+    let mut files = Vec::new();
+    let mut exported_keys = Vec::new();
+    for (index, anchor) in anchors.iter().enumerate() {
+        let mut buf = Vec::new();
+        let summary = export_chat(&storage, *anchor, ExportFormat::Json, &mut buf)
+            .unwrap()
+            .expect("message exists");
+        assert_eq!(summary.written, 1, "one row per conversation");
+        let rows: Vec<Message> = String::from_utf8(buf.clone())
+            .unwrap()
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows[0].source, "Shared mailbox");
+        exported_keys.push(rows[0].source_key.clone());
+        let path = dir.path().join(format!("conversation-{index}.jsonl"));
+        std::fs::write(&path, buf).unwrap();
+        files.push(path);
+    }
+    assert_eq!(
+        exported_keys,
+        vec!["instance:imap:account-a", "instance:imap:account-b"],
+        "each conversation exports under its own machine key"
+    );
+
+    // Import both files, one after the other, into an empty vault
+    // through the production bounded path.
+    let mut target = Storage::open_in_memory().unwrap();
+    for path in &files {
+        let outcome = vault_core::chat_export::import_bounded(
+            &mut target,
+            path,
+            false,
+            None,
+            &|| false,
+            &mut |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                outcome.summary.inserted,
+                outcome.summary.skipped,
+                outcome.summary.failed
+            ),
+            (1, 0, 0),
+            "{} inserts; none collapses onto the other",
+            path.display()
+        );
+    }
+    assert_eq!(target.stats().unwrap().total, 2);
+
+    // Both bodies survive, each under its own destination instance,
+    // and the instances carry the exporting vault's display label.
+    let instances = target.list_source_instances().unwrap();
+    assert_eq!(instances.len(), 2, "one destination instance per key");
+    assert!(instances
+        .iter()
+        .all(|i| i.kind == "legacy" && i.label == "Shared mailbox"));
+    let mut bodies = Vec::new();
+    for instance in &instances {
+        let page = target
+            .search_archive(&SearchArchiveRequest {
+                source_ids: vec![instance.id.clone()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.total, 1);
+        let body = target
+            .message_detail(page.hits[0].id)
+            .unwrap()
+            .map(|detail| detail.body)
+            .unwrap_or_default();
+        bodies.push(body);
+    }
+    bodies.sort();
+    assert_eq!(
+        bodies,
+        vec!["body from account-a", "body from account-b"],
+        "both bodies retained under distinct sources"
+    );
+
+    // Re-importing each file inserts nothing and skips its row.
+    for path in &files {
+        let again = vault_core::chat_export::import_bounded(
+            &mut target,
+            path,
+            false,
+            None,
+            &|| false,
+            &mut |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                again.summary.inserted,
+                again.summary.skipped,
+                again.summary.failed
+            ),
+            (0, 1, 0)
+        );
+    }
+    assert_eq!(target.stats().unwrap().total, 2);
+
+    // The cycle is stable: re-exporting each message from the
+    // destination (its rows are standalone, so this walks the export's
+    // single-row branch) emits the same portable keys again.
+    let mut rekeys = Vec::new();
+    for body in ["body from account-a", "body from account-b"] {
+        let (_, rows) = chat_rows(&target, id_by_body(&target, body));
+        rekeys.push(rows[0].source_key.clone());
+    }
+    rekeys.sort();
+    assert_eq!(
+        rekeys, exported_keys,
+        "destination instances export under the same machine keys"
+    );
+}
+
+/// The same connector-owned message exported through a search stream
+/// and through the chat export yields the same nonempty portable source
+/// identity — the standalone (conversationless) row included, since
+/// connector mail has no conversation yet.
+#[test]
+fn chat_export_rows_carry_the_same_source_key_as_the_search_export() {
+    let storage = Storage::open_in_memory().unwrap();
+    imap_mail(&storage, "account-a", "parity-1@example.com", "parity body");
+
+    let (_, bytes) = export_to_vec(&storage, &SearchQuery::default(), ExportFormat::Json);
+    let search_rows: Vec<Message> = String::from_utf8(bytes)
+        .unwrap()
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert_eq!(search_rows.len(), 1);
+    assert_eq!(search_rows[0].source_key, "instance:imap:account-a");
+
+    let (summary, exported) = chat_rows(&storage, id_by_body(&storage, "parity body"));
+    assert_eq!(summary.written, 1, "standalone rows export as one row");
+    assert!(!exported[0].source_key.is_empty());
+    assert_eq!(
+        exported[0].source_key, search_rows[0].source_key,
+        "search and chat exports agree on the portable identity"
+    );
+    assert_eq!(exported[0].source, "Shared mailbox");
+}
+
+/// Renaming an instance's display label never changes its exported
+/// identity: re-registering the connector with a new label and
+/// re-exporting yields the same key, only the label moves.
+#[test]
+fn renaming_a_source_label_leaves_the_chat_export_identity_unchanged() {
+    let storage = Storage::open_in_memory().unwrap();
+    imap_mail(&storage, "account-a", "rename-1@example.com", "rename body");
+    let id = id_by_body(&storage, "rename body");
+
+    let (_, before) = chat_rows(&storage, id);
+    assert_eq!(before[0].source, "Shared mailbox");
+
+    storage
+        .ensure_source_instance(&NewSourceInstance {
+            kind: "imap",
+            label: "Renamed mailbox",
+            connector_key: "account-a",
+            config_json: "{}",
+        })
+        .unwrap();
+    let (_, after) = chat_rows(&storage, id);
+    assert_eq!(after[0].source, "Renamed mailbox");
+    assert_eq!(
+        after[0].source_key, before[0].source_key,
+        "the machine key does not move with the label"
+    );
+    assert_eq!(after[0].source_key, "instance:imap:account-a");
 }
 
 // ---------------------------------------------------------------------------

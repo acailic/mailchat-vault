@@ -2010,6 +2010,11 @@ impl Storage {
     /// instants order by id, matching the legacy ordering exactly
     /// (COALESCE maps the unknown NULL instant to the legacy
     /// empty-string position).
+    ///
+    /// Every row carries the portable source identity
+    /// ([`SOURCE_KEY_COLUMN`]), exactly like the search export streams,
+    /// so a JSON Lines archive transfers between vaults without
+    /// collapsing same-labelled sources.
     pub fn conversation_thread_stream(
         &self,
         id: i64,
@@ -2025,26 +2030,46 @@ impl Storage {
             |row| row.get(0),
         )?;
         if !has_conversation {
-            return match self.get(id)? {
+            return match self.get_for_export(id)? {
                 Some(m) => sink(&m),
                 None => Ok(()),
             };
         }
 
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
-             m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), m.body, m.raw_json \
+             m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), m.body, m.raw_json, \
+             {SOURCE_KEY_COLUMN} \
              FROM archive_messages AS m \
              JOIN source_instances AS si ON si.id = m.source_instance_id \
              WHERE m.conversation_id = ( \
                  SELECT conversation_id FROM archive_messages WHERE id = ?1) \
              ORDER BY COALESCE(m.sent_instant, '') ASC, m.id ASC",
-        )?;
+        ))?;
         let mut rows = stmt.query(params![id])?;
         while let Some(row) = rows.next()? {
-            sink(&message_from_row(row)?)?;
+            sink(&export_message_from_row(row)?)?;
         }
         Ok(())
+    }
+
+    /// One message by row id on the export shape: the nine
+    /// [`message_from_row`] columns plus [`SOURCE_KEY_COLUMN`], so the
+    /// whole-conversation export stream's standalone rows carry the same
+    /// portable source identity as its thread rows. Private — the
+    /// public [`Storage::get`] keeps its 9-column contract.
+    fn get_for_export(&self, id: i64) -> Result<Option<Message>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
+             m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), m.body, m.raw_json, \
+             {SOURCE_KEY_COLUMN} \
+             FROM archive_messages AS m \
+             JOIN source_instances AS si ON si.id = m.source_instance_id \
+             WHERE m.id = ?1",
+        ))?;
+        stmt.query_row(params![id], export_message_from_row)
+            .optional()
+            .map_err(Into::into)
     }
 
     /// Archive counts: total and per source.
@@ -3536,9 +3561,10 @@ pub(crate) const SOURCE_KEY_COLUMN: &str = "CASE WHEN si.connector_key IS NOT NU
      ELSE COALESCE(si.legacy_namespace, '') END";
 
 /// Build an export row from a 10-column selection: the nine
-/// [`message_from_row`] columns plus [`SOURCE_KEY_COLUMN`]. Only the two
-/// JSON export streams select that extra column; every other query keeps
-/// the 9-column shape and an empty key.
+/// [`message_from_row`] columns plus [`SOURCE_KEY_COLUMN`]. Only the JSON
+/// export streams — search and whole-conversation alike — select that
+/// extra column; every other query keeps the 9-column shape and an empty
+/// key.
 pub(crate) fn export_message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
     let mut message = message_from_row(row)?;
     message.source_key = row.get(9)?;
