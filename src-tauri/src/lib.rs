@@ -67,7 +67,15 @@
 //!   (the M2.3 coordinator round over every configured, non-excluded
 //!   IMAP source, credentials resolved per source from the keyring),
 //!   `backup_create` and `restore_preview` (M4.4: the versioned backup
-//!   container writer and the staged, journaled restore validation).
+//!   container writer and the staged, journaled restore validation), and
+//!   `prepare_ask_v2` / `generate_answer_v2` (M5.2 part 1: the job-backed
+//!   ask flow — prepare runs the local search leg under the active
+//!   workspace scope and returns the exact bounded payload plus its
+//!   SHA-256 digest for approval, with zero network; generate re-checks
+//!   the approved digest — stale on question/filters/endpoint/result
+//!   changes — and sends only that approved snapshot; both are
+//!   cancellable between pipeline steps with progress events, and both
+//!   keep working under the demo routing).
 //! - `seed_demo` — insert the built-in sample messages (idempotent).
 //! - `demo_enter` / `demo_leave` / `demo_status` — the isolated sample
 //!   archive (U02): `demo_enter` opens a private in-memory vault seeded
@@ -138,7 +146,8 @@ use vault_core::jobs::{
     DbPool, JobContext, JobError, JobEventsPage, JobId, JobRecord, PoolConfig, PoolSink, PoolSync,
 };
 use vault_core::llm::{
-    self, AnthropicLlm, AskOutcome, LlmStatus, PlanSource, PlannedQuery, QueryPlan,
+    self, AnthropicLlm, AskOutcome, AskV2Error, LlmStatus, PlanSource, PlannedQuery,
+    PreparedAskRegistry, PreparedEndpoint, QueryPlan,
 };
 use vault_core::oauth::{self, OAuthConfig};
 use vault_core::object_store::{MediaUsage, ObjectStore, ReconcileReport};
@@ -242,6 +251,10 @@ struct AppState {
     /// writes refuse, and the personal `vault.db` is never touched.
     /// Dropping the handle on `demo_leave` discards the whole demo.
     demo: Arc<Mutex<Option<Arc<Mutex<Storage>>>>>,
+    /// M5.2: the session's single pending prepared ask (preview →
+    /// approve → generate). In-memory only, mirroring the session-scoped
+    /// consent decision: an approval never survives a restart.
+    prepared_asks: Arc<PreparedAskRegistry>,
 }
 
 /// The vault read commands run against: the personal pool, or the
@@ -2316,6 +2329,28 @@ enum JobSpec {
     RestorePreview {
         archive: String,
     },
+    /// M5.2: prepare one ask — run the fully local search leg under the
+    /// active workspace scope and register the exact bounded payload
+    /// plus its digest for approval (zero network; cancellable with
+    /// progress).
+    PrepareAsk {
+        question: String,
+        scope: Option<search2::AskScope>,
+        limit: u32,
+        provider: Option<String>,
+    },
+    /// M5.2: generate the answer for one approved prepared ask —
+    /// re-checks the approved digest (stale on question, filters,
+    /// endpoint/config, or result-snapshot changes) and sends only the
+    /// approved snapshot.
+    GenerateAnswer {
+        prepared_id: u64,
+        digest: String,
+        /// The same provider selection prepare used (profile id, `env`,
+        /// or `local`); re-resolved and compared against the prepared
+        /// endpoint, so a mismatch refuses instead of sending.
+        provider: Option<String>,
+    },
 }
 
 impl JobSpec {
@@ -2330,6 +2365,8 @@ impl JobSpec {
             JobSpec::ImapSyncAll => "imap_sync_all",
             JobSpec::BackupCreate { .. } => "backup_create",
             JobSpec::RestorePreview { .. } => "restore_preview",
+            JobSpec::PrepareAsk { .. } => "prepare_ask_v2",
+            JobSpec::GenerateAnswer { .. } => "generate_answer_v2",
         }
     }
 
@@ -2417,10 +2454,69 @@ impl JobSpec {
             "restore_preview" => Ok(JobSpec::RestorePreview {
                 archive: string_field("archive")?,
             }),
+            // M5.2: the v2 job-backed ask flow. `question` follows the
+            // `llm_ask` contract (non-blank, ≤ 2000 characters); `scope`
+            // is the optional workspace-filter snapshot; `limit` mirrors
+            // `llm_ask`'s clamp; `provider` picks the same menu.
+            "prepare_ask_v2" => {
+                let question = string_field("question")?.trim().to_string();
+                if question.is_empty() {
+                    return Err("params.question must not be blank".into());
+                }
+                if question.chars().count() > 2000 {
+                    return Err("params.question is too long (max 2000 characters)".into());
+                }
+                let scope = match params.get("scope") {
+                    None | Some(Value::Null) => None,
+                    Some(value) => Some(
+                        serde_json::from_value::<search2::AskScope>(value.clone())
+                            .map_err(|e| format!("params.scope is invalid: {e}"))?,
+                    ),
+                };
+                let limit = params
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(50)
+                    .clamp(1, 200) as u32;
+                let provider = params
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                Ok(JobSpec::PrepareAsk {
+                    question,
+                    scope,
+                    limit,
+                    provider,
+                })
+            }
+            "generate_answer_v2" => {
+                let prepared_id = params
+                    .get("prepared_id")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| "params.prepared_id is required".to_string())?;
+                let digest = string_field("digest")?;
+                let digest = digest.to_ascii_lowercase();
+                if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err("params.digest must be a 64-character SHA-256 hex string".into());
+                }
+                let provider = params
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                Ok(JobSpec::GenerateAnswer {
+                    prepared_id,
+                    digest,
+                    provider,
+                })
+            }
             other => Err(format!(
                 "unknown job kind “{other}” (supported: seed_demo, import_mbox, \
                  import_chat_export, embed_messages, imap_sync, imap_sync_all, \
-                 backup_create, restore_preview)"
+                 backup_create, restore_preview, prepare_ask_v2, generate_answer_v2)"
             )),
         }
     }
@@ -2510,6 +2606,18 @@ fn job_submit(
     submit_job_spec(&app, &state, secrets.inner(), spec)
 }
 
+/// What the M5.2 ask job kinds need beyond the shared pool: demo-aware
+/// read routing (asks keep answering from the open sample archive — they
+/// are read-only, so they may run under the demo), the provider registry
+/// (the selection is re-resolved inside the job body so no registry lock
+/// is ever held across a network round trip), and the session's pending
+/// prepared ask.
+struct AskJobDeps {
+    vault: ActiveVault,
+    registry: Arc<Mutex<LlmRegistry>>,
+    prepared: Arc<PreparedAskRegistry>,
+}
+
 /// Submit one validated [`JobSpec`] through the shared job engine —
 /// the single submission path behind `job_submit` and the tray's
 /// *Sync now* (M7), so both take the same demo lockout, queue, and
@@ -2521,15 +2629,28 @@ fn submit_job_spec(
     secrets: &Arc<secrets::Secrets>,
     spec: JobSpec,
 ) -> Result<JobHandle, String> {
-    // Every job kind writes the personal vault (imports, syncs, seeds,
-    // embeddings, backups, restores) — none may run under the demo.
-    state.refuse_in_demo()?;
+    // Every job kind besides the asks writes the personal vault
+    // (imports, syncs, seeds, embeddings, backups, restores) — none of
+    // those may run under the demo. The M5.2 ask jobs are read-only
+    // over the active vault, so they stay available while the demo is
+    // open and read from it.
+    if !matches!(
+        spec,
+        JobSpec::PrepareAsk { .. } | JobSpec::GenerateAnswer { .. }
+    ) {
+        state.refuse_in_demo()?;
+    }
     let pool = Arc::clone(&state.pool);
     let embedder = state.embedder;
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let job_pool = Arc::clone(&pool);
     let secrets = Arc::clone(secrets);
     let switch_gate = Arc::clone(&state.switch_gate);
+    let asks = AskJobDeps {
+        vault: ActiveVault::from(state),
+        registry: Arc::clone(&state.registry),
+        prepared: Arc::clone(&state.prepared_asks),
+    };
     pool.try_submit_job(spec.kind(), move |ctx: &JobContext| {
         run_job_spec(
             ctx,
@@ -2539,6 +2660,7 @@ fn submit_job_spec(
             &data_dir,
             &secrets,
             &switch_gate,
+            &asks,
         )
     })
     .map(|id| JobHandle { id })
@@ -2566,6 +2688,7 @@ fn run_job_spec(
     data_dir: &Path,
     secrets: &Arc<secrets::Secrets>,
     switch_gate: &SwitchGate,
+    asks: &AskJobDeps,
 ) -> std::result::Result<Value, JobError> {
     match spec {
         JobSpec::SeedDemo => {
@@ -2674,6 +2797,177 @@ fn run_job_spec(
         JobSpec::RestorePreview { archive } => {
             run_restore_preview(ctx, switch_gate, data_dir, Path::new(archive))
         }
+        JobSpec::PrepareAsk {
+            question,
+            scope,
+            limit,
+            provider,
+        } => run_prepare_ask(
+            ctx,
+            asks,
+            embedder,
+            question,
+            scope.as_ref(),
+            *limit,
+            provider.as_deref(),
+        ),
+        JobSpec::GenerateAnswer {
+            prepared_id,
+            digest,
+            provider,
+        } => run_generate_answer(ctx, asks, *prepared_id, digest, provider.as_deref()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// M5.2: the job-backed ask flow (prepare → approve → generate)
+// ---------------------------------------------------------------------------
+
+/// The endpoint fingerprint of one resolved provider selection: what the
+/// prepared digest binds (a local selection has no endpoint — nothing
+/// would ever be sent). The API key is deliberately absent: rotating a
+/// key must not invalidate an approved payload.
+fn prepared_endpoint(selection: &Selection) -> PreparedEndpoint {
+    match selection {
+        Selection::Provider { config, .. } => PreparedEndpoint {
+            base_url: config.base_url.clone(),
+            model: config.model.clone(),
+        },
+        Selection::Local { .. } => PreparedEndpoint::local(),
+    }
+}
+
+/// Map a v2 ask-flow refusal to its job error kind: cancellations are
+/// cancellations, approval refusals are invalid input (the client must
+/// prepare again), scope/storage faults are storage, provider faults are
+/// network.
+fn ask_v2_job_error(error: AskV2Error) -> JobError {
+    match error {
+        AskV2Error::Cancelled => JobError::Cancelled,
+        AskV2Error::NoPendingPreparedAsk | AskV2Error::StaleDigest | AskV2Error::ArchiveChanged => {
+            JobError::Invalid {
+                message: error.to_string(),
+            }
+        }
+        AskV2Error::Vault(message) => JobError::Storage { message },
+        AskV2Error::Provider(message) => JobError::Network { message },
+    }
+}
+
+/// The `prepare_ask_v2` job body: resolve the provider selection (its
+/// endpoint fingerprint is what the digest binds), then run the fully
+/// local prepare leg — scope validation, scoped retrieval, hybrid
+/// ranking, exact payload build, digest — with cooperative cancellation
+/// and progress between the pipeline steps. Zero network by
+/// construction: no provider client is ever built here, so nothing can
+/// leave the machine before the user approves the payload.
+fn run_prepare_ask(
+    ctx: &JobContext,
+    asks: &AskJobDeps,
+    embedder: HashEmbedder,
+    question: &str,
+    scope: Option<&search2::AskScope>,
+    limit: u32,
+    provider: Option<&str>,
+) -> std::result::Result<Value, JobError> {
+    if ctx.is_cancelled() {
+        return Err(JobError::Cancelled);
+    }
+    // Resolve the endpoint and the summarize window under the registry
+    // lock, and release it before anything else runs (the config is
+    // cloned out — same pattern as `llm_ask`).
+    let (endpoint, summarize_top): (PreparedEndpoint, usize) = {
+        let registry = asks.registry.lock().map_err(|e| JobError::Internal {
+            message: format!("registry lock poisoned: {e}"),
+        })?;
+        (
+            prepared_endpoint(&registry.select(provider)),
+            registry.settings().options.summarize_top as usize,
+        )
+    };
+    let cancel = || ctx.is_cancelled();
+    let mut progress = |done: u64, total: u64, message: &str| ctx.progress(done, total, message);
+    let outcome = asks.vault.with_read(|s| {
+        llm::prepare_scoped_ask(
+            s,
+            &embedder,
+            &asks.prepared,
+            &endpoint,
+            question,
+            scope,
+            limit,
+            summarize_top,
+            &cancel,
+            &mut progress,
+        )
+    });
+    match outcome {
+        Ok(outcome) => Ok(serde_json::to_value(&outcome).unwrap_or(Value::Null)),
+        Err(e) => Err(ask_v2_job_error(e)),
+    }
+}
+
+/// The `generate_answer_v2` job body: re-resolve the provider selection
+/// (a changed endpoint/config refuses the stale approval inside the
+/// generate leg), consume the digest-bound approval under a short-lived
+/// read, then send only the approved payload — the network round trip
+/// runs on the job thread with no storage held (the pool's rule), with
+/// cooperative cancellation and progress between the steps. The digest
+/// approval itself is the explicit consent for this one send — no
+/// session-consent flag is involved.
+fn run_generate_answer(
+    ctx: &JobContext,
+    asks: &AskJobDeps,
+    prepared_id: u64,
+    digest: &str,
+    provider: Option<&str>,
+) -> std::result::Result<Value, JobError> {
+    if ctx.is_cancelled() {
+        return Err(JobError::Cancelled);
+    }
+    let selection = {
+        let registry = asks.registry.lock().map_err(|e| JobError::Internal {
+            message: format!("registry lock poisoned: {e}"),
+        })?;
+        registry.select(provider)
+    };
+    let endpoint = prepared_endpoint(&selection);
+    let backend = match &selection {
+        Selection::Provider { config, .. } => Some(AnthropicLlm::new(config.clone())),
+        Selection::Local { .. } => None,
+    };
+    let cancel = || ctx.is_cancelled();
+    let mut progress = |done: u64, total: u64, message: &str| ctx.progress(done, total, message);
+    // Local phase (approval consumption + staleness re-checks) under a
+    // short-lived read; nothing network-shaped happens inside it.
+    let prepared = asks
+        .vault
+        .with_read(|s| {
+            llm::take_approved_ask(
+                s,
+                &asks.prepared,
+                &endpoint,
+                prepared_id,
+                digest,
+                &cancel,
+                &mut progress,
+            )
+        })
+        .map_err(ask_v2_job_error)?;
+    // Cooperative checkpoint between the re-check and the send.
+    if ctx.is_cancelled() {
+        return Err(JobError::Cancelled);
+    }
+    // Network phase on the job thread: only the approved snapshot.
+    let answer = llm::send_approved_payload(
+        &prepared,
+        backend.as_ref().map(|b| b as &dyn llm::Llm),
+        &cancel,
+        &mut progress,
+    );
+    match answer {
+        Ok(answer) => Ok(serde_json::to_value(&answer).unwrap_or(Value::Null)),
+        Err(e) => Err(ask_v2_job_error(e)),
     }
 }
 
@@ -3772,6 +4066,7 @@ pub fn run() {
                 switch_gate: Arc::new(SwitchGate::default()),
                 startup_recovery,
                 demo: Arc::new(Mutex::new(None)),
+                prepared_asks: Arc::new(PreparedAskRegistry::new()),
             });
             app.manage(Arc::clone(&secrets));
             // M7: with keep-alive saved on, the tray must exist from the
@@ -4218,6 +4513,127 @@ mod tests {
         let err = JobSpec::parse("make_coffee", &params(json!({}))).unwrap_err();
         assert!(err.contains("unknown job kind"), "{err}");
         assert!(err.contains("imap_sync"), "{err}");
+    }
+
+    #[test]
+    fn job_spec_parses_the_v2_ask_kinds() {
+        // Prepare: minimal form (no scope, no provider, default limit).
+        assert_eq!(
+            JobSpec::parse("prepare_ask_v2", &params(json!({"question": "  vault?  "}))).unwrap(),
+            JobSpec::PrepareAsk {
+                question: "vault?".into(),
+                scope: None,
+                limit: 50,
+                provider: None,
+            }
+        );
+        // Full form: scope snapshot, explicit limit, provider pick.
+        assert_eq!(
+            JobSpec::parse(
+                "prepare_ask_v2",
+                &params(json!({
+                    "question": "vault?",
+                    "scope": { "author": "ana", "from_date": "2026-10-01", "timezone": "UTC" },
+                    "limit": 8,
+                    "provider": "env"
+                }))
+            )
+            .unwrap(),
+            JobSpec::PrepareAsk {
+                question: "vault?".into(),
+                scope: Some(search2::AskScope {
+                    author: Some("ana".into()),
+                    from_date: Some("2026-10-01".into()),
+                    timezone: Some("UTC".into()),
+                    ..search2::AskScope::default()
+                }),
+                limit: 8,
+                provider: Some("env".into()),
+            }
+        );
+        // The limit mirrors llm_ask's clamp, not a refusal.
+        assert_eq!(
+            JobSpec::parse(
+                "prepare_ask_v2",
+                &params(json!({"question": "q", "limit": 99999}))
+            )
+            .unwrap(),
+            JobSpec::PrepareAsk {
+                question: "q".into(),
+                scope: None,
+                limit: 200,
+                provider: None,
+            }
+        );
+        // A null scope is the explicit "entire archive".
+        assert_eq!(
+            JobSpec::parse(
+                "prepare_ask_v2",
+                &params(json!({"question": "q", "scope": null}))
+            )
+            .unwrap()
+            .scope,
+            None
+        );
+        // Question validation follows the llm_ask contract.
+        let err = JobSpec::parse("prepare_ask_v2", &params(json!({}))).unwrap_err();
+        assert!(err.contains("params.question"), "{err}");
+        let err =
+            JobSpec::parse("prepare_ask_v2", &params(json!({"question": "   "}))).unwrap_err();
+        assert!(err.contains("params.question"), "{err}");
+        let err = JobSpec::parse(
+            "prepare_ask_v2",
+            &params(json!({"question": "x".repeat(2001)})),
+        )
+        .unwrap_err();
+        assert!(err.contains("2000"), "{err}");
+        let err = JobSpec::parse(
+            "prepare_ask_v2",
+            &params(json!({"question": "q", "scope": { "author": 5 }})),
+        )
+        .unwrap_err();
+        assert!(err.contains("params.scope"), "{err}");
+
+        // Generate: id + approved digest, optional provider echo.
+        const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            JobSpec::parse(
+                "generate_answer_v2",
+                &params(json!({"prepared_id": 3, "digest": DIGEST}))
+            )
+            .unwrap(),
+            JobSpec::GenerateAnswer {
+                prepared_id: 3,
+                digest: DIGEST.into(),
+                provider: None,
+            }
+        );
+        // Uppercase hex is normalized to the registry's lowercase form.
+        let spec = JobSpec::parse(
+            "generate_answer_v2",
+            &params(json!({"prepared_id": 3, "digest": DIGEST.to_ascii_uppercase()})),
+        )
+        .unwrap();
+        assert_eq!(
+            spec,
+            JobSpec::GenerateAnswer {
+                prepared_id: 3,
+                digest: DIGEST.into(),
+                provider: None,
+            }
+        );
+        // The digest must be a 64-char hex string; prepared_id is required.
+        for bad in ["", "abc", &DIGEST[..63], &format!("{DIGEST}zz")] {
+            let err = JobSpec::parse(
+                "generate_answer_v2",
+                &params(json!({"prepared_id": 3, "digest": bad})),
+            )
+            .unwrap_err();
+            assert!(err.contains("params.digest"), "{bad}: {err}");
+        }
+        let err =
+            JobSpec::parse("generate_answer_v2", &params(json!({"digest": DIGEST}))).unwrap_err();
+        assert!(err.contains("params.prepared_id"), "{err}");
     }
 
     #[test]
