@@ -218,6 +218,7 @@ fn all_v2_filters_and_timezone_bounds_survive_export_while_pagination_is_ignored
         sort: SearchSort::Newest,
         limit: Some(1),
         offset: Some(1),
+        cursor: None,
     };
     let page = storage.search_archive(&request).unwrap();
     assert_eq!(page.total, 2);
