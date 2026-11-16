@@ -623,7 +623,7 @@ async fn media_reconcile_detail(
     // Resolution reads stored rows only: affected-message pages plus
     // the unlinked-file registry's provenance.
     ActiveVault::from(&state)
-        .with_read(|s| {
+        .with_read(|s| -> CoreResult<MediaReconcileDetail> {
             let registered: HashMap<String, RegisteredMediaObject> = s
                 .unlinked_media_objects()?
                 .into_iter()
