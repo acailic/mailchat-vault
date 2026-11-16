@@ -985,11 +985,11 @@ pub struct PreparedAsk {
     pub archive_revision: u64,
 }
 
-/// SHA-256 over everything the approval must bind: the endpoint (base URL
-/// + model), the question, the canonical workspace scope, and the exact
-/// payload bytes (`None` payload = nothing would be sent). Fields are
-/// U+001F-joined (the `content_hash` convention) so no field boundary is
-/// ambiguous; changing any one of them changes the digest.
+/// SHA-256 over everything the approval must bind: the endpoint (base
+/// URL + model), the question, the canonical workspace scope, and the
+/// exact payload bytes (`None` payload = nothing would be sent). Fields
+/// are U+001F-joined (the `content_hash` convention) so no field
+/// boundary is ambiguous; changing any one of them changes the digest.
 pub fn prepared_ask_digest(
     endpoint: &PreparedEndpoint,
     question: &str,
@@ -2440,7 +2440,7 @@ mod tests {
             ..AskScope::default()
         };
         let cancel = || false;
-        let mut progress = |_, _, _| {};
+        let mut progress = |_: u64, _: u64, _: &str| {};
         let outcome = prepare_scoped_ask(
             &storage,
             &embedder,
@@ -2485,7 +2485,7 @@ mod tests {
             ..AskScope::default()
         };
         let cancel = || false;
-        let mut progress = |_, _, _| {};
+        let mut progress = |_: u64, _: u64, _: &str| {};
         let err = prepare_scoped_ask(
             &storage,
             &embedder,
@@ -2513,7 +2513,7 @@ mod tests {
             model: "m1".into(),
         };
         let cancel = || false;
-        let mut progress = |_, _, _| {};
+        let mut progress = |_: u64, _: u64, _: &str| {};
         let prepared = prepare_scoped_ask(
             &storage,
             &embedder,
@@ -2564,7 +2564,7 @@ mod tests {
         let registry = PreparedAskRegistry::new();
         let endpoint = PreparedEndpoint::local();
         let cancel = || false;
-        let mut progress = |_, _, _| {};
+        let mut progress = |_: u64, _: u64, _: &str| {};
         let prepared = prepare_scoped_ask(
             &storage,
             &embedder,
@@ -2618,7 +2618,7 @@ mod tests {
             model: "m1".into(),
         };
         let cancel = || false;
-        let mut progress = |_, _, _| {};
+        let mut progress = |_: u64, _: u64, _: &str| {};
         let prepared = prepare_scoped_ask(
             &storage,
             &embedder,
@@ -2666,7 +2666,7 @@ mod tests {
             model: "m1".into(),
         };
         let cancel = || false;
-        let mut progress = |_, _, _| {};
+        let mut progress = |_: u64, _: u64, _: &str| {};
         let prepared = prepare_scoped_ask(
             &storage,
             &embedder,
@@ -2706,7 +2706,7 @@ mod tests {
         let embedder = crate::vector::HashEmbedder;
         let registry = PreparedAskRegistry::new();
         let cancel = || false;
-        let mut progress = |_, _, _| {};
+        let mut progress = |_: u64, _: u64, _: &str| {};
         // Local-only selection with results: no answer, nothing sent.
         let prepared = prepare_scoped_ask(
             &storage,

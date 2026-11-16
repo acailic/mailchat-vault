@@ -2046,7 +2046,8 @@ impl Storage {
         // never reaches the returned page).
         let fetch = query.limit as i64 + 1;
         let offset_paging = cursor.is_none();
-        let mut has_more = false;        let mut last_rank: Option<f64> = None;
+        let has_more;
+        let mut last_rank: Option<f64> = None;
 
         let total: u64 = {
             let (sql, bind) = if query.text.trim().is_empty() {
@@ -2172,16 +2173,15 @@ impl Storage {
                 .last()
                 .expect("a following page implies a full page was read");
             let cursor = match order_mode {
-                crate::search2::CursorOrderMode::Browse => {
-                    crate::search2::SearchCursor::Browse {
-                        sent: if last.message.sent_at.is_empty() {
-                            None
-                        } else {
-                            Some(last.message.sent_at.clone())
-                        },
-                        id: last.message.id,
-                    }
-                }                crate::search2::CursorOrderMode::Relevance => {
+                crate::search2::CursorOrderMode::Browse => crate::search2::SearchCursor::Browse {
+                    sent: if last.message.sent_at.is_empty() {
+                        None
+                    } else {
+                        Some(last.message.sent_at.clone())
+                    },
+                    id: last.message.id,
+                },
+                crate::search2::CursorOrderMode::Relevance => {
                     crate::search2::SearchCursor::Relevance {
                         rank_bits: last_rank
                             .expect("a following relevance page carries its rank")

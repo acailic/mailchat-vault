@@ -2780,6 +2780,7 @@ fn submit_sync_now(app: &AppHandle) -> Result<JobHandle, String> {
 /// access goes through the pool; every kind reports progress and a JSON
 /// result summary. (Unit-tested through `JobSpec::parse`; execution is
 /// covered end-to-end by vault-core's jobs and coordinator tests.)
+#[allow(clippy::too_many_arguments)] // the job kinds need the app's shared deps
 fn run_job_spec(
     ctx: &JobContext,
     spec: &JobSpec,
@@ -4704,15 +4705,14 @@ mod tests {
             }
         );
         // A null scope is the explicit "entire archive".
-        assert_eq!(
+        assert!(matches!(
             JobSpec::parse(
                 "prepare_ask_v2",
                 &params(json!({"question": "q", "scope": null}))
             )
-            .unwrap()
-            .scope,
-            None
-        );
+            .unwrap(),
+            JobSpec::PrepareAsk { scope: None, .. }
+        ));
         // Question validation follows the llm_ask contract.
         let err = JobSpec::parse("prepare_ask_v2", &params(json!({}))).unwrap_err();
         assert!(err.contains("params.question"), "{err}");
