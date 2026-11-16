@@ -756,7 +756,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         "#,
     ),
     (
-        18,
+        19,
         // Vault-local collections (the organization layer, part 1 of
         // the collections slice): user-named sets referencing canonical
         // messages across source instances. Additive, metadata-only —
@@ -3057,7 +3057,7 @@ impl Storage {
     }
 
     // ------------------------------------------------------------------
-    // Collections (user organization, migration 18)
+    // Collections (user organization, migration 19)
     // ------------------------------------------------------------------
 
     /// Create a collection with the given name (trimmed; empty after
@@ -4319,7 +4319,7 @@ pub struct MediaDigestReferences {
     pub references: Vec<MediaMessageReference>,
 }
 
-/// A vault-local collection (migration 18): a user-named set of
+/// A vault-local collection (migration 19): a user-named set of
 /// references to canonical messages. Organization metadata only — the
 /// name, timestamps, and membership count; source content, provenance,
 /// and identity live on the referenced rows and are never copied.

@@ -1,4 +1,4 @@
-//! Collections backend (migration 18, part 1 of the collections slice):
+//! Collections backend (migration 19, part 1 of the collections slice):
 //! vault-local sets of references to canonical messages. The contracts
 //! proven here mirror the slice's acceptance behavior —
 //!
@@ -254,8 +254,8 @@ fn reimport_of_an_archived_message_preserves_memberships() {
 }
 
 /// Build a database in the exact shape the previous release (schema
-/// version 17) left behind: full current schema minus migration 18's
-/// tables, bookkeeping row 18 absent. Reopening it with this build is
+/// version 17) left behind: full current schema minus migration 19's
+/// tables, bookkeeping row 19 absent. Reopening it with this build is
 /// the "existing vault upgrades in place" path. Returns the archived
 /// message's row id.
 fn version17_db(db: &std::path::Path) -> i64 {
@@ -267,7 +267,7 @@ fn version17_db(db: &std::path::Path) -> i64 {
     conn.execute_batch(
         "DROP TABLE collection_members;
          DROP TABLE collections;
-         DELETE FROM schema_migrations WHERE version = 18;",
+         DELETE FROM schema_migrations WHERE version = 19;",
     )
     .unwrap();
     id
@@ -279,10 +279,10 @@ fn reopen_after_migration_keeps_the_archive_and_carries_organization_forward() {
     let db = dir.path().join("vault.db");
     let pre = version17_db(&db);
 
-    // Reopening with the current build applies migration 18 (through
+    // Reopening with the current build applies migration 19 (through
     // the safe-migration snapshot path) and the archive survives.
     let s = Storage::open(&db).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 18);
+    assert_eq!(s.schema_version().unwrap(), 19);
     assert_eq!(s.stats().unwrap().total, 1);
     assert_eq!(
         s.get(pre).unwrap().unwrap().body,
@@ -299,7 +299,7 @@ fn reopen_after_migration_keeps_the_archive_and_carries_organization_forward() {
 
     // A further reopen applies nothing new and keeps the organization.
     let s = Storage::open(&db).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 18);
+    assert_eq!(s.schema_version().unwrap(), 19);
     let detail = s.collection_detail(&renovation.id).unwrap().unwrap();
     assert_eq!(member_ids(&detail), vec![id]);
     assert!(detail.members[0].available);

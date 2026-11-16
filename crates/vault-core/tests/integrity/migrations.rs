@@ -14,7 +14,10 @@ use crate::util::{migrations_table, msg, raw, version1_db_with_data};
 
 /// The schema version this build knows; bump expectation when a migration
 /// is added (the assertions below are version-agnostic where possible).
-const KNOWN_VERSION: i64 = 18;
+const KNOWN_VERSION: i64 = 19;
+// Migration 18 is reserved for the parallel saved-searches slice, so the
+// applied ledger is not contiguous: 1-17 plus 19 (collections).
+const APPLIED_VERSIONS: &[i64] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19];
 
 fn migrations_rows(db: &std::path::Path) -> Vec<i64> {
     let conn = raw(db);
@@ -60,7 +63,7 @@ fn fresh_database_applies_every_migration_exactly_once() {
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
     assert_eq!(
         migrations_rows(&db),
-        (1..=KNOWN_VERSION).collect::<Vec<_>>()
+        APPLIED_VERSIONS.to_vec()
     );
 
     // The migrated schema is immediately functional.
@@ -75,7 +78,7 @@ fn fresh_database_applies_every_migration_exactly_once() {
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
     assert_eq!(
         migrations_rows(&db),
-        (1..=KNOWN_VERSION).collect::<Vec<_>>(),
+        APPLIED_VERSIONS.to_vec(),
         "no duplicate bookkeeping rows"
     );
     assert_eq!(s.stats().unwrap().total, 1);
@@ -97,7 +100,7 @@ fn version0_database_upgrades_in_place() {
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
     assert_eq!(
         migrations_rows(&db),
-        (1..=KNOWN_VERSION).collect::<Vec<_>>()
+        APPLIED_VERSIONS.to_vec()
     );
     // Migration 17's cleanup holds on the upgraded schema: migration 15's
     // composite stays, and the single-column index it made redundant
@@ -142,7 +145,7 @@ fn v1_database_with_data_upgrades_in_place_to_current() {
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
     assert_eq!(
         migrations_rows(&db),
-        (1..=KNOWN_VERSION).collect::<Vec<_>>()
+        APPLIED_VERSIONS.to_vec()
     );
 
     // The v1 archive is fully intact and searchable (through the canonical
@@ -243,7 +246,7 @@ fn v1_database_with_data_upgrades_in_place_to_current() {
     assert_eq!(s.schema_version().unwrap(), KNOWN_VERSION);
     assert_eq!(
         migrations_rows(&db),
-        (1..=KNOWN_VERSION).collect::<Vec<_>>()
+        APPLIED_VERSIONS.to_vec()
     );
     assert_eq!(s.stats().unwrap().total, 7);
     let state = s
