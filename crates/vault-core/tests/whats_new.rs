@@ -82,7 +82,7 @@ fn counts_messages_archived_since_grouped_by_source() {
         .collect();
     assert_eq!(
         pairs,
-        vec![("tg".to_string(), 1), ("wa".to_string(), 2)],
+        vec![("wa".to_string(), 2), ("tg".to_string(), 1)],
         "heaviest first, label joined, at-cutoff rows excluded"
     );
     // Every row carries a stable, non-empty, distinct instance id.
