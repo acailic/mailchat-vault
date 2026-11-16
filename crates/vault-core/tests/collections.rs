@@ -18,7 +18,9 @@ use std::path::PathBuf;
 use rusqlite::Connection;
 use vault_core::backup::{self, RestoreOptions};
 use vault_core::message::{InsertOutcome, NewMessage};
-use vault_core::storage::{Collection, CollectionDetail, Storage, VaultFingerprint};
+use vault_core::storage::{
+    Collection, CollectionDetail, Storage, VaultFingerprint, SUPPORTED_SCHEMA_VERSION,
+};
 
 fn msg(source: &str, external_id: &str, body: &str) -> NewMessage {
     NewMessage::new(source, external_id, "ana", "2026-11-01T09:00:00Z", body)
@@ -300,6 +302,7 @@ fn version17_db(db: &std::path::Path) -> i64 {
          DROP TABLE person_identity_links;
          DROP TABLE people;
          DROP TABLE saved_searches;
+         DROP INDEX IF EXISTS idx_archive_messages_created_source;
          DELETE FROM schema_migrations WHERE version >= 18;",
     )
     .unwrap();
@@ -312,10 +315,11 @@ fn reopen_after_migration_keeps_the_archive_and_carries_organization_forward() {
     let db = dir.path().join("vault.db");
     let pre = version17_db(&db);
 
-    // Reopening with the current build applies migration 19 (through
-    // the safe-migration snapshot path) and the archive survives.
+    // Reopening with the current build applies the pending migrations
+    // (19 through the safe-migration snapshot path, 20 after it) and
+    // the archive survives.
     let s = Storage::open(&db).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 20);
+    assert_eq!(s.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
     assert_eq!(s.stats().unwrap().total, 1);
     assert_eq!(
         s.get(pre).unwrap().unwrap().body,
@@ -335,7 +339,7 @@ fn reopen_after_migration_keeps_the_archive_and_carries_organization_forward() {
 
     // A further reopen applies nothing new and keeps the organization.
     let s = Storage::open(&db).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 20);
+    assert_eq!(s.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
     let detail = s.collection_detail(&renovation.id).unwrap().unwrap();
     assert_eq!(member_ids(&detail), vec![id]);
     assert!(detail.members[0].available);

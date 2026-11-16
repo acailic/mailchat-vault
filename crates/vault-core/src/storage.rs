@@ -63,7 +63,7 @@ use crate::query::{
 };
 use crate::safe_migration::{self, MigrationFailPoint, OpenOptions};
 use crate::search2::SearchArchiveRequest;
-use crate::stats::{ArchiveStats, AuthorCount, ChatCount, DayCount};
+use crate::stats::{ArchiveStats, AuthorCount, ChatCount, DayCount, SourceNewCount};
 use crate::vector::VectorHit;
 use crate::{Error, Result};
 
@@ -825,11 +825,9 @@ const MIGRATIONS: &[(i64, &str)] = &[
         20,
         // People and user-confirmed identity links (the unified person
         // view, storage slice). Additive DDL only: no archived row is
-        // read or changed. Numbering: 19 (collections) is in the ledger
-        // above; 18 arrives with the parallel saved-searches slice, so
-        // until it lands this branch's ledger skips 18 — the
-        // append-only rule and `MAX(version)` open logic make the gap
-        // harmless.
+        // read or changed. Numbering: 18 (saved searches) and 19
+        // (collections) are in the ledger above; the what's-new index
+        // follows as 21.
         //
         // The anchoring model (see the identity contract in
         // docs/data-and-api-contracts.md): every link anchors to a
@@ -873,6 +871,24 @@ const MIGRATIONS: &[(i64, &str)] = &[
         );
         CREATE INDEX idx_person_identity_links_person
             ON person_identity_links (person_id);
+        "#,
+    ),
+    (
+        21,
+        // The what's-new boot digest's message half (M7 follow-up;
+        // renumbered 20 -> 21 for the merge: the people slice was
+        // first in the queue and keeps 20)
+        // counts newly archived messages per source since the last
+        // visit (`Storage::messages_archived_since`). Without an index
+        // whose leading column is `created_at`, that filter's query
+        // plan is a full table scan — on a million-message vault the
+        // scan would blow the boot budget every time the window shows.
+        // The composite carries `source_instance_id` second so the
+        // count query is covered by the index alone (the per-row table
+        // lookup is what the bare-column index would still pay).
+        r#"
+        CREATE INDEX idx_archive_messages_created_source
+            ON archive_messages (created_at, source_instance_id);
         "#,
     ),
 ];
@@ -1265,6 +1281,38 @@ impl Storage {
              LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(JobLedgerRow {
+                job_id: row.get::<_, i64>(0)?.max(0) as u64,
+                kind: row.get(1)?,
+                submitted_at: row.get(2)?,
+                finished_at: row.get(3)?,
+                state: row.get(4)?,
+                summary: row.get(5)?,
+                payload: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Terminal ledger rows whose `finished_at` is strictly newer than
+    /// `since` (an RFC 3339 UTC instant in the same form the ledger
+    /// stamps carry, so the comparison is a plain string compare),
+    /// newest first, at most `limit`. The what's-new boot digest's job
+    /// half reads this and filters to its own kinds and outcomes (see
+    /// [`crate::whats_new`]); the ledger itself stays bounded at
+    /// [`JOB_LEDGER_KEEP`] rows, so this is never a large read.
+    pub fn job_ledger_since(&self, since: &str, limit: u32) -> Result<Vec<JobLedgerRow>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id, kind, submitted_at, finished_at, state, summary, payload
+             FROM job_ledger
+             WHERE finished_at > ?1
+             ORDER BY id DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since, limit as i64], |row| {
             Ok(JobLedgerRow {
                 job_id: row.get::<_, i64>(0)?.max(0) as u64,
                 kind: row.get(1)?,
@@ -1912,10 +1960,94 @@ impl Storage {
     /// browse ordering and the filters, and `LIMIT`/`OFFSET` bound every
     /// response. The `source` facet filters by legacy namespace via the
     /// unique `source_instances.legacy_namespace` index.
+    ///
+    /// Pages start at `offset`, or — when the query carries a keyset
+    /// cursor from a previous page's `next_cursor` — strictly after the
+    /// cursor row's sort position (the cursor wins), so deep pages cost
+    /// the same as the first page. The cursor follows the v2 search
+    /// contract ([`crate::search2::SearchCursor`]): bound to the order
+    /// mode it was issued under (browse for empty text, relevance
+    /// otherwise), rejected with `InvalidQuery` when malformed or from
+    /// another mode.
     pub fn search_page(&self, query: &SearchQuery) -> Result<SearchPage> {
         let mut query = query.clone();
         query.normalize()?;
         let filters = QueryFilters::build(&query)?;
+
+        // Cursor validation mirrors search2: the wire form and the
+        // order-mode binding are shared; v1 has no explicit sort, so
+        // empty text is browse and any text query is relevance.
+        let order_mode = if query.text.trim().is_empty() {
+            crate::search2::CursorOrderMode::Browse
+        } else {
+            crate::search2::CursorOrderMode::Relevance
+        };
+        let cursor = match &query.cursor {
+            None => None,
+            Some(raw) => {
+                let decoded = crate::search2::decode_search_cursor(raw)?;
+                if decoded.mode() != order_mode {
+                    return Err(Error::InvalidQuery(format!(
+                        "cursor was issued for {} order, not {} order",
+                        decoded.mode().as_str(),
+                        order_mode.as_str()
+                    )));
+                }
+                Some(decoded)
+            }
+        };
+        // Keyset fragment (over alias `m`): rows strictly after the
+        // cursor's sort position. Browse orders `sent_instant DESC,
+        // id DESC` with unknown instants last (SQLite NULLs sort last
+        // in DESC); relevance orders by the bm25 rank then id. Same
+        // compound-predicate shapes as the v2 page.
+        let (keyset_sql, keyset_bind): (String, Vec<SqlValue>) = match &cursor {
+            None => (String::new(), Vec::new()),
+            Some(crate::search2::SearchCursor::Browse { sent, id }) => match sent {
+                Some(instant) => (
+                    " AND (m.sent_instant IS NULL \
+                       OR m.sent_instant < ? \
+                       OR (m.sent_instant = ? AND m.id < ?))"
+                        .to_string(),
+                    vec![
+                        SqlValue::from(instant.clone()),
+                        SqlValue::from(instant.clone()),
+                        SqlValue::Integer(*id),
+                    ],
+                ),
+                None => (
+                    " AND (m.sent_instant IS NULL AND m.id < ?)".to_string(),
+                    vec![SqlValue::Integer(*id)],
+                ),
+            },
+            Some(crate::search2::SearchCursor::Relevance { rank_bits, id }) => {
+                let rank = f64::from_bits(*rank_bits);
+                let expr = crate::search2::bm25_rank_expr();
+                (
+                    format!(" AND ({expr} > ? OR ({expr} = ? AND m.id > ?))"),
+                    vec![
+                        SqlValue::Real(rank),
+                        SqlValue::Real(rank),
+                        SqlValue::Integer(*id),
+                    ],
+                )
+            }
+            // A "newest"-mode cursor cannot be issued by the v1 page;
+            // the mode check above already rejected it.
+            Some(other @ crate::search2::SearchCursor::Newest { .. }) => {
+                return Err(Error::InvalidQuery(format!(
+                    "cursor was issued for {} order, not {} order",
+                    other.mode().as_str(),
+                    order_mode.as_str()
+                )));
+            }
+        };
+        // One row past the page detects a following page (the probe row
+        // never reaches the returned page).
+        let fetch = query.limit as i64 + 1;
+        let offset_paging = cursor.is_none();
+        let mut has_more = false;
+        let mut last_rank: Option<f64> = None;
 
         let total: u64 = {
             let (sql, bind) = if query.text.trim().is_empty() {
@@ -1950,60 +2082,132 @@ impl Storage {
 
         let hits: Vec<SearchHit> = if query.text.trim().is_empty() {
             let mut bind = filters.bind();
-            bind.push(SqlValue::Integer(query.limit as i64));
-            bind.push(SqlValue::Integer(query.offset as i64));
+            bind.extend(keyset_bind);
+            bind.push(SqlValue::Integer(fetch));
+            if offset_paging {
+                bind.push(SqlValue::Integer(query.offset as i64));
+            }
             let sql = format!(
                 "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
                  m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
                  m.body, m.raw_json, NULL \
                  FROM archive_messages AS m \
                  JOIN source_instances AS si ON si.id = m.source_instance_id \
-                 WHERE 1=1 {} \
-                 ORDER BY m.sent_instant DESC, m.id DESC LIMIT ? OFFSET ?",
-                filters.sql
+                 WHERE 1=1 {} {} \
+                 ORDER BY m.sent_instant DESC, m.id DESC {}",
+                filters.sql,
+                keyset_sql,
+                if offset_paging {
+                    "LIMIT ? OFFSET ?"
+                } else {
+                    "LIMIT ?"
+                }
             );
             let mut stmt = self.conn.prepare(&sql)?;
-            let rows: Vec<SearchHit> = stmt
+            let mut rows: Vec<SearchHit> = stmt
                 .query_map(params_from_iter(bind), hit_from_row)?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
+            has_more = rows.len() > query.limit as usize;
+            rows.truncate(query.limit as usize);
             rows
         } else {
             // Order follows the ? placeholders in the SQL text: the two
             // snippet() markers in the SELECT, then the MATCH expression,
-            // then the filter bindings, then LIMIT/OFFSET.
+            // then the filter bindings, the keyset values, then the page
+            // tail. The trailing column is the row's bm25 rank — the
+            // sort position `next_cursor` must carry.
             let mut bind = vec![
                 SqlValue::from(SNIPPET_OPEN_MARK.to_string()),
                 SqlValue::from(SNIPPET_CLOSE_MARK.to_string()),
                 SqlValue::from(crate::search::build_match_query(&query.text)),
             ];
             bind.extend(filters.bind());
-            bind.push(SqlValue::Integer(query.limit as i64));
-            bind.push(SqlValue::Integer(query.offset as i64));
+            bind.extend(keyset_bind);
+            bind.push(SqlValue::Integer(fetch));
+            if offset_paging {
+                bind.push(SqlValue::Integer(query.offset as i64));
+            }
             let sql = format!(
                 "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
                  m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
                  m.body, m.raw_json, \
-                 snippet(archive_fts, 0, ?1, ?2, '…', 16) \
+                 snippet(archive_fts, 0, ?1, ?2, '…', 16), \
+                 {} \
                  FROM archive_fts \
                  JOIN archive_messages AS m ON m.id = archive_fts.rowid \
                  JOIN source_instances AS si ON si.id = m.source_instance_id \
-                 WHERE archive_fts MATCH ?3 {} \
+                 WHERE archive_fts MATCH ?3 {} {} \
                  ORDER BY bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, \
-                               {BM25_WEIGHT_SUBJECT}), m.id LIMIT ? OFFSET ?",
-                filters.sql
+                               {BM25_WEIGHT_SUBJECT}), m.id {}",
+                crate::search2::bm25_rank_expr(),
+                filters.sql,
+                keyset_sql,
+                if offset_paging {
+                    "LIMIT ? OFFSET ?"
+                } else {
+                    "LIMIT ?"
+                }
             );
             let mut stmt = self.conn.prepare(&sql)?;
-            let rows: Vec<SearchHit> = stmt
-                .query_map(params_from_iter(bind), hit_from_row)?
+            let mut rows: Vec<(SearchHit, f64)> = stmt
+                .query_map(params_from_iter(bind), |row| {
+                    let hit = hit_from_row(row)?;
+                    let rank: f64 = row.get(10)?;
+                    Ok((hit, rank))
+                })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            rows
+            has_more = rows.len() > query.limit as usize;
+            if has_more {
+                last_rank = Some(rows[query.limit as usize - 1].1);
+            }
+            rows.truncate(query.limit as usize);
+            rows.into_iter().map(|(hit, _)| hit).collect()
+        };
+
+        // next_cursor continues the list at the cursor row's position
+        // whenever the probe row said more rows follow. The v1 message
+        // keeps unknown instants as "" — the cursor keeps the explicit
+        // None flag so the NULL boundary stays exact.
+        let next_cursor = if has_more {
+            let last = hits
+                .last()
+                .expect("a following page implies a full page was read");
+            let cursor = match order_mode {
+                crate::search2::CursorOrderMode::Browse => crate::search2::SearchCursor::Browse {
+                    sent: if last.message.sent_at.is_empty() {
+                        None
+                    } else {
+                        Some(last.message.sent_at.clone())
+                    },
+                    id: last.message.id,
+                },
+                crate::search2::CursorOrderMode::Relevance => {
+                    crate::search2::SearchCursor::Relevance {
+                        rank_bits: last_rank
+                            .expect("a following relevance page carries its rank")
+                            .to_bits(),
+                        id: last.message.id,
+                    }
+                }
+                crate::search2::CursorOrderMode::Newest => {
+                    return Err(Error::InvalidQuery(
+                        "v1 search has no text-newest order mode".into(),
+                    ));
+                }
+            };
+            Some(crate::search2::encode_search_cursor(&cursor)?)
+        } else {
+            None
         };
 
         Ok(SearchPage {
             hits,
             total,
             limit: query.limit,
-            offset: query.offset,
+            // A cursor page has no meaningful offset; the continuation
+            // is the cursor itself.
+            offset: if offset_paging { query.offset } else { 0 },
+            next_cursor,
         })
     }
 
@@ -2259,6 +2463,45 @@ impl Storage {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let total = by_source.iter().map(|s| s.count).sum();
         Ok(Stats { total, by_source })
+    }
+
+    /// Newly archived messages per source instance since an instant
+    /// (the what's-new boot digest's message half). `since` is an
+    /// instant in the `archive_messages.created_at` column's own format
+    /// (`YYYY-MM-DD HH:MM:SS` UTC — [`crate::whats_new::sqlite_instant`]
+    /// converts the RFC 3339 record form); rows strictly newer count, so
+    /// a message that re-imports and dedups keeps its original
+    /// `created_at` and never counts twice — the numbers mean newly
+    /// archived messages, not re-sightings. Grouped by source instance
+    /// and joined to the same label the stats chips show, heaviest
+    /// first. Rides `idx_archive_messages_created_source` (migration
+    /// 21 on the merged ledger; originally numbered 20): the range
+    /// above `since` is a covered index seek, never a scan, so the
+    /// digest answers within the boot budget on million-message
+    /// archives. The seek is pinned with INDEXED BY: without it the
+    /// planner may prefer migration 15's source/channel index for the
+    /// GROUP BY order and fall back to a full index scan — exactly
+    /// what the boot budget cannot afford (caught by the EXPLAIN plan
+    /// test in tests/whats_new.rs, first executed on the tier B host).
+    pub fn messages_archived_since(&self, since: &str) -> Result<Vec<SourceNewCount>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT si.id, COALESCE(si.legacy_namespace, si.label, si.id), COUNT(*)
+             FROM archive_messages AS m INDEXED BY idx_archive_messages_created_source
+             JOIN source_instances AS si ON si.id = m.source_instance_id
+             WHERE m.created_at > ?1
+             GROUP BY m.source_instance_id
+             ORDER BY COUNT(*) DESC, si.id",
+        )?;
+        let counts = stmt
+            .query_map([since], |row| {
+                Ok(SourceNewCount {
+                    source_id: row.get(0)?,
+                    label: row.get(1)?,
+                    count: row.get::<_, i64>(2)?.max(0) as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(counts)
     }
 
     /// Per-account overview counts for the multi-account UI (roadmap: the

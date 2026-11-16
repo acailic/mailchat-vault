@@ -23,8 +23,18 @@
 //!   recorded as a [`WatchEvent`] visible in the UI; the watch loop never
 //!   panics and keeps running. A folder that vanishes mid-session is
 //!   silently disarmed until the next start (see the re-arm path below).
-//! - **Status**: [`WatchSnapshot`] (watched folders, pending files, recent
-//!   events) is published on every change for the UI to render.
+//! - **Retry after failure**: a failed import is never requeued
+//!   automatically (a permanently broken input must not spin the loop),
+//!   but [`FolderWatcher::retry`] re-enqueues it through the same settle
+//!   window once the user has resolved the cause — revalidated against
+//!   the folders still watched, under the file's unchanged import
+//!   identity, so committed rows stay single. The snapshot carries a
+//!   per-import-unit status (pending/running/succeeded/failed) so the
+//!   UI can offer Retry on failed units and suppress it while a unit is
+//!   already queued or running.
+//! - **Status**: [`WatchSnapshot`] (watched folders, pending files,
+//!   per-unit import statuses, recent events) is published on every
+//!   change for the UI to render.
 //!
 //! This module has no UI dependencies; the Tauri shell maps snapshots to
 //! window events and the commands to `watch_*` IPC commands. Since M2.1
@@ -72,6 +82,12 @@ const WATCHED_EXTENSIONS: [&str; 4] = ["mbox", "eml", "txt", "json"];
 /// How deep the initial folder scan descends (guards against symlink
 /// cycles).
 const SCAN_DEPTH_LIMIT: usize = 64;
+
+/// How many per-unit import statuses the snapshot keeps (newest first;
+/// the oldest entry is dropped first). The map exists to drive Retry —
+/// losing an entry only means a retry may re-enqueue work the dedup
+/// contract then makes a no-op, so a modest bound is enough.
+const MAX_UNIT_STATUSES: usize = 200;
 
 /// Tuning knobs of the watch loop. Tests use a short `settle`.
 #[derive(Debug, Clone)]
@@ -128,6 +144,34 @@ impl WatchEvent {
     }
 }
 
+/// Where one bounded import unit stands. The unit is the settled file
+/// itself, or — for a Messenger `message_*.json` part — its thread
+/// folder (see [`import_source_for`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WatchUnitStatus {
+    /// Queued behind the settle window: a retry for this unit is
+    /// ignored (it is already on its way).
+    Pending,
+    /// Being imported right now: a retry for this unit is ignored.
+    Running,
+    /// The last import of this unit completed (imported, or skipped as
+    /// a non-export: nothing to retry).
+    Succeeded,
+    /// The last import of this unit failed: a retry is offered.
+    Failed,
+}
+
+/// One entry of the snapshot's per-unit status list (newest first).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WatchUnit {
+    /// The import unit's key: the file's canonical path, or the
+    /// Messenger thread folder for `message_*.json` parts.
+    pub key: String,
+    /// Where that unit's last (or current) import stands.
+    pub status: WatchUnitStatus,
+}
+
 /// A point-in-time view of the watcher for the UI.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct WatchSnapshot {
@@ -137,6 +181,9 @@ pub struct WatchSnapshot {
     pub folders: Vec<String>,
     /// Import candidates waiting for their settle deadline.
     pub pending: u64,
+    /// Import-unit statuses, newest first (bounded by
+    /// [`MAX_UNIT_STATUSES`]).
+    pub units: Vec<WatchUnit>,
     /// Recent events, newest first (bounded by [`WatchConfig::max_events`]).
     pub events: Vec<WatchEvent>,
 }
@@ -148,6 +195,10 @@ enum Command {
         ack: Sender<Result<(), String>>,
     },
     RemoveFolder {
+        path: PathBuf,
+        ack: Sender<Result<(), String>>,
+    },
+    Retry {
         path: PathBuf,
         ack: Sender<Result<(), String>>,
     },
@@ -232,6 +283,30 @@ impl FolderWatcher {
         ack_rx
             .recv()
             .map_err(|_| "watch loop stopped while removing the folder".to_string())?
+    }
+
+    /// Re-enqueue a failed import of `path` through the ordinary settle
+    /// window, under the file's unchanged import identity (the bounded
+    /// run's checkpoint reuses `import_id_for("watch", …)`, and the
+    /// ingest dedup contract keeps already committed rows single).
+    ///
+    /// The path must still sit inside a watched folder — a retry left
+    /// over from a folder the user has since removed is rejected as a
+    /// stale action. A unit that is already queued or importing is left
+    /// alone (a successful no-op), so repeated retries never enqueue
+    /// duplicate work. A missing path reports its error; retrying again
+    /// later stays possible.
+    pub fn retry(&self, path: impl AsRef<Path>) -> Result<(), String> {
+        let (ack, ack_rx) = std::sync::mpsc::channel();
+        self.control
+            .send(Command::Retry {
+                path: path.as_ref().to_path_buf(),
+                ack,
+            })
+            .map_err(|_| "watch loop is not running".to_string())?;
+        ack_rx
+            .recv()
+            .map_err(|_| "watch loop stopped while retrying the import".to_string())?
     }
 
     /// The current watcher status.
@@ -556,6 +631,14 @@ fn run_loop(
                     publish(&snapshot, &pending, &on_change);
                     let _ = ack.send(result);
                 }
+                Command::Retry { path, ack } => {
+                    let result = {
+                        let mut snap = lock_snap(&snapshot);
+                        retry_import(&mut snap, &mut pending, &config, &path)
+                    };
+                    publish(&snapshot, &pending, &on_change);
+                    let _ = ack.send(result);
+                }
             }
         }
 
@@ -676,12 +759,89 @@ fn remove_folder(
     Ok(())
 }
 
+/// The import unit a candidate path belongs to: the file itself, or —
+/// for a Messenger `message_*.json` part — its thread folder, mirroring
+/// the key [`import_source_for`] picks but decided by the filename rule
+/// alone so the check never has to read the file (a part may be the
+/// very thing that could not be opened).
+fn unit_key_for(path: &Path) -> PathBuf {
+    if is_message_file(path) {
+        if let Some(thread) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            return thread.to_path_buf();
+        }
+    }
+    path.to_path_buf()
+}
+
+/// Record a unit's status in the snapshot: newest first, one entry per
+/// unit, bounded by [`MAX_UNIT_STATUSES`].
+fn set_unit_status(snap: &mut WatchSnapshot, unit: &Path, status: WatchUnitStatus) {
+    let key = unit.display().to_string();
+    snap.units.retain(|u| u.key != key);
+    snap.units.insert(0, WatchUnit { key, status });
+    snap.units.truncate(MAX_UNIT_STATUSES);
+}
+
+/// Whether the unit's import is already on its way: its recorded status
+/// is pending/running, or any settle-window candidate maps to the same
+/// unit (a re-armed file, or a sibling Messenger part of the thread).
+fn unit_in_flight(snap: &WatchSnapshot, pending: &HashMap<PathBuf, Instant>, unit: &Path) -> bool {
+    snap.units.iter().any(|u| {
+        Path::new(&u.key) == unit
+            && matches!(
+                u.status,
+                WatchUnitStatus::Pending | WatchUnitStatus::Running
+            )
+    }) || pending.keys().any(|p| unit_key_for(p) == unit)
+}
+
+/// Retry a failed import (command handler): revalidate that the path is
+/// still a file inside an enabled watched folder, then requeue it
+/// through the ordinary settle window — never by importing on the
+/// command path — so the loop debounces it like any sighting, and the
+/// bounded run resumes under the same `import_id_for("watch", unit)`
+/// checkpoint the failed attempt used. A unit already queued or running
+/// is left alone; a path outside every watched folder (its folder was
+/// removed since the failure) is a stale action.
+fn retry_import(
+    snap: &mut WatchSnapshot,
+    pending: &mut HashMap<PathBuf, Instant>,
+    config: &WatchConfig,
+    path: &Path,
+) -> Result<(), String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if !snap
+        .folders
+        .iter()
+        .any(|f| canonical.starts_with(Path::new(f)))
+    {
+        return Err(format!(
+            "{} is not in a watched folder anymore",
+            canonical.display()
+        ));
+    }
+    if !canonical.is_file() {
+        return Err(format!("{} is not a file", canonical.display()));
+    }
+    let unit = unit_key_for(&canonical);
+    if unit_in_flight(snap, pending, &unit) {
+        return Ok(()); // already queued or importing — not duplicated
+    }
+    pending.insert(canonical, Instant::now() + config.settle);
+    set_unit_status(snap, &unit, WatchUnitStatus::Pending);
+    Ok(())
+}
+
 /// Import one settled file through the bounded streaming pipeline (M2.2):
 /// the file is parsed on this watcher thread one item at a time, batches
 /// commit atomically through the pool's write queue with checkpoint
 /// advancement, and an interrupted import (app closed mid-file) resumes
 /// from its committed position on the next sighting of the same file.
-/// All failures become events, never panics.
+/// All failures become events, never panics. The unit's status is
+/// published as `running` before the run and its terminal state after,
+/// so a retry for a unit mid-import can be suppressed.
 fn import_file(
     pool: &Arc<DbPool>,
     snapshot: &Arc<Mutex<WatchSnapshot>>,
@@ -690,6 +850,14 @@ fn import_file(
     path: &Path,
 ) {
     let display = path.display().to_string();
+    let unit = unit_key_for(path);
+    {
+        let mut snap = lock_snap(snapshot);
+        set_unit_status(&mut snap, &unit, WatchUnitStatus::Running);
+        let changed = snap.clone();
+        drop(snap);
+        on_change(&changed);
+    }
     let event = match import_source_for(path) {
         Ok(Some(candidate)) => {
             // The checkpoint keys on the source the run streams (the
@@ -725,8 +893,15 @@ fn import_file(
             error: e,
         },
     };
+    // A skip completed the unit's processing (nothing to retry); only a
+    // run/open failure leaves the unit retryable.
+    let status = match &event {
+        WatchEvent::Failed { .. } => WatchUnitStatus::Failed,
+        _ => WatchUnitStatus::Succeeded,
+    };
     let changed = {
         let mut snap = lock_snap(snapshot);
+        set_unit_status(&mut snap, &unit, status);
         push_event(&mut snap, event, config.max_events);
         snap.clone()
     };
@@ -1129,5 +1304,88 @@ mod tests {
         assert_eq!(snap.events.len(), 3);
         assert_eq!(snap.events[0].path(), "/f4");
         assert_eq!(snap.events[2].path(), "/f2");
+    }
+
+    #[test]
+    fn unit_key_is_the_file_except_for_messenger_parts() {
+        let file = Path::new("/exports/mail.mbox");
+        assert_eq!(unit_key_for(file), PathBuf::from("/exports/mail.mbox"));
+        let part = Path::new("/exports/messages/inbox/ana_1/message_2.json");
+        assert_eq!(
+            unit_key_for(part),
+            PathBuf::from("/exports/messages/inbox/ana_1")
+        );
+        // A part without a parent (bare filename) falls back to itself.
+        assert_eq!(
+            unit_key_for(Path::new("message_1.json")),
+            PathBuf::from("message_1.json")
+        );
+    }
+
+    #[test]
+    fn unit_status_is_newest_first_and_bounded() {
+        let mut snap = WatchSnapshot::default();
+        let a = Path::new("/w/a.mbox");
+        let b = Path::new("/w/b.mbox");
+        set_unit_status(&mut snap, a, WatchUnitStatus::Pending);
+        set_unit_status(&mut snap, b, WatchUnitStatus::Failed);
+        assert_eq!(
+            snap.units,
+            vec![
+                WatchUnit {
+                    key: "/w/b.mbox".into(),
+                    status: WatchUnitStatus::Failed
+                },
+                WatchUnit {
+                    key: "/w/a.mbox".into(),
+                    status: WatchUnitStatus::Pending
+                },
+            ]
+        );
+        // An update moves the unit to the front, still one entry.
+        set_unit_status(&mut snap, a, WatchUnitStatus::Running);
+        assert_eq!(snap.units.len(), 2);
+        assert_eq!(snap.units[0].key, "/w/a.mbox");
+        assert_eq!(snap.units[0].status, WatchUnitStatus::Running);
+        // The ring drops the oldest beyond the bound.
+        for i in 0..MAX_UNIT_STATUSES {
+            set_unit_status(
+                &mut snap,
+                &PathBuf::from(format!("/w/{i}.mbox")),
+                WatchUnitStatus::Failed,
+            );
+        }
+        assert_eq!(snap.units.len(), MAX_UNIT_STATUSES);
+        assert_eq!(
+            snap.units[0].key,
+            format!("/w/{}.mbox", MAX_UNIT_STATUSES - 1)
+        );
+        assert!(!snap.units.iter().any(|u| u.key == "/w/a.mbox"));
+    }
+
+    #[test]
+    fn in_flight_units_are_the_queued_and_pending_ones() {
+        let settle = Duration::from_millis(10);
+        let mut snap = WatchSnapshot::default();
+        let mut pending: HashMap<PathBuf, Instant> = HashMap::new();
+        let thread = PathBuf::from("/w/messages/inbox/ana_1");
+        let part = thread.join("message_2.json");
+
+        // A recorded pending/running unit is in flight; a failed one is not.
+        set_unit_status(&mut snap, &thread, WatchUnitStatus::Failed);
+        assert!(!unit_in_flight(&snap, &pending, &thread));
+        set_unit_status(&mut snap, &thread, WatchUnitStatus::Pending);
+        assert!(unit_in_flight(&snap, &pending, &thread));
+
+        // A settle-window candidate maps to its unit even without a
+        // recorded status: any part of the thread makes the thread busy.
+        snap.units.clear();
+        arm(&mut pending, &part, settle);
+        assert!(unit_in_flight(&snap, &pending, &thread));
+        assert!(!unit_in_flight(
+            &snap,
+            &pending,
+            &PathBuf::from("/w/other.mbox")
+        ));
     }
 }

@@ -24,6 +24,9 @@ export interface SearchArchiveRequest {
   sort: SearchSort;
   limit?: number;
   offset?: number;
+  /** Opaque keyset cursor from a previous page's next_cursor. Wins over
+   *  offset when both are set; deep pages cost the same as the first. */
+  cursor?: string | null;
 }
 
 /** The time-confidence labels the canonical store records. */
@@ -61,6 +64,10 @@ export interface SearchArchivePage {
   offset: number;
   /** Bumped by every content-changing commit; differs ⇒ offer refresh. */
   archive_revision: number;
+  /** Keyset cursor to the next page (the last row's sort position);
+   *  null when this page reaches the end. Pass back as the request's
+   *  cursor to continue at first-page cost regardless of depth. */
+  next_cursor: string | null;
 }
 
 /** One attachment/media reference on a message. */
