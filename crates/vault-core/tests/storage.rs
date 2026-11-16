@@ -433,7 +433,12 @@ fn date_bounds_are_canonicalized_before_text_comparison() {
 // Finished-jobs ledger (migration 16)
 // ---------------------------------------------------------------------------
 
-fn ledger_entry(n: u64, kind: &str, state: &str, summary: &str) -> vault_core::storage::JobLedgerEntry {
+fn ledger_entry(
+    n: u64,
+    kind: &str,
+    state: &str,
+    summary: &str,
+) -> vault_core::storage::JobLedgerEntry {
     vault_core::storage::JobLedgerEntry {
         job_id: n,
         kind: kind.into(),
@@ -450,8 +455,13 @@ fn job_ledger_roundtrips_newest_first() {
     let s = storage();
     s.record_job_ledger(&ledger_entry(1, "import_mbox", "succeeded", "10 new"))
         .unwrap();
-    s.record_job_ledger(&ledger_entry(2, "imap_sync", "failed", "connection refused"))
-        .unwrap();
+    s.record_job_ledger(&ledger_entry(
+        2,
+        "imap_sync",
+        "failed",
+        "connection refused",
+    ))
+    .unwrap();
     s.record_job_ledger(&ledger_entry(3, "seed_demo", "cancelled", ""))
         .unwrap();
 

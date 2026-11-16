@@ -1073,7 +1073,7 @@ fn decode_entity(bytes: &[u8]) -> Option<(char, usize)> {
         let code = u32::from_str_radix(&digits, if hex { 16 } else { 10 }).ok()?;
         let ch = char::from_u32(code)?;
         // The markers and controls are not text a snippet should carry.
-        if matches!(code, 0 | 1 | 2) {
+        if matches!(code, 0..=2) {
             return None;
         }
         return Some((ch, i + 1));
