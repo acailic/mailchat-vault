@@ -1863,7 +1863,7 @@ impl Storage {
                                 &html_to_snippet_text(&raw),
                                 MAX_SNIPPET_CHARS,
                             )),
-                        ),
+                        )?,
                         rank,
                     ))
                 })?

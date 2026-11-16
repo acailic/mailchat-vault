@@ -65,6 +65,7 @@ fn instance_ids_keep_same_named_sources_independent_and_legacy_export_compatible
     }
     for (index, source) in sources.iter().enumerate() {
         let request = SearchArchiveRequest {
+            cursor: None,
             source_ids: vec![source.clone()],
             ..Default::default()
         };
@@ -79,6 +80,7 @@ fn instance_ids_keep_same_named_sources_independent_and_legacy_export_compatible
         export_json(
             &storage,
             &SearchArchiveRequest {
+                cursor: None,
                 source_ids: sources.clone(),
                 ..Default::default()
             }
@@ -91,6 +93,7 @@ fn instance_ids_keep_same_named_sources_independent_and_legacy_export_compatible
         export_json(
             &storage,
             &SearchArchiveRequest {
+                cursor: None,
                 source_ids: vec!["unknown-instance".into()],
                 ..Default::default()
             }
@@ -123,6 +126,7 @@ fn instance_ids_keep_same_named_sources_independent_and_legacy_export_compatible
     let (_, exported) = export_json(
         &storage,
         &SearchArchiveRequest {
+            cursor: None,
             source_ids: sources.clone(),
             ..Default::default()
         },
@@ -192,6 +196,7 @@ fn all_v2_filters_and_timezone_bounds_survive_export_while_pagination_is_ignored
         .unwrap();
     let conversation = storage
         .search_archive(&SearchArchiveRequest {
+            cursor: None,
             text: "contract".into(),
             source_ids: vec![source.id.clone()],
             ..Default::default()
@@ -203,6 +208,7 @@ fn all_v2_filters_and_timezone_bounds_survive_export_while_pagination_is_ignored
         .unwrap()
         .conversation_id;
     let request = SearchArchiveRequest {
+        cursor: None,
         text: "contract".into(),
         source_ids: vec![source.id],
         conversation_id: conversation,
@@ -233,6 +239,7 @@ fn all_v2_filters_and_timezone_bounds_survive_export_while_pagination_is_ignored
     );
     assert_eq!(exported[1].id, page.hits[0].id);
     let without_files = SearchArchiveRequest {
+        cursor: None,
         has_attachment: Some(false),
         ..request
     };
@@ -266,6 +273,7 @@ fn exports_match_relevance_and_newest_order_including_undated_messages() {
     for text in ["", "needle"] {
         for sort in [SearchSort::Relevance, SearchSort::Newest] {
             let request = SearchArchiveRequest {
+                cursor: None,
                 text: text.into(),
                 sort,
                 ..Default::default()
@@ -323,6 +331,7 @@ fn export_is_not_capped_at_a_search_page_and_propagates_sink_failures() {
         .commit_import_batch("large", "mbox", &rows, &[], &[], 0, true)
         .unwrap();
     let request = SearchArchiveRequest {
+        cursor: None,
         limit: Some(1),
         offset: Some(250),
         ..Default::default()
@@ -392,6 +401,7 @@ fn same_label_instances_round_trip_through_the_bounded_importer() {
     let (summary, exported) = export_json(
         &storage,
         &SearchArchiveRequest {
+            cursor: None,
             source_ids: sources.clone(),
             ..Default::default()
         },
@@ -412,6 +422,7 @@ fn same_label_instances_round_trip_through_the_bounded_importer() {
     let summary = export_search_v2(
         &storage,
         &SearchArchiveRequest {
+            cursor: None,
             source_ids: sources.clone(),
             ..Default::default()
         },
@@ -454,6 +465,7 @@ fn same_label_instances_round_trip_through_the_bounded_importer() {
     for instance in &instances {
         let page = target
             .search_archive(&SearchArchiveRequest {
+                cursor: None,
                 source_ids: vec![instance.id.clone()],
                 ..Default::default()
             })
@@ -518,6 +530,7 @@ fn same_label_instances_round_trip_through_the_bounded_importer() {
     let (_, renamed) = export_json(
         &storage,
         &SearchArchiveRequest {
+            cursor: None,
             source_ids: sources.clone(),
             ..Default::default()
         },
