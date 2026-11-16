@@ -16,7 +16,7 @@
 - Gmail server/port (and folders) sit behind an "Advanced" disclosure; Google sign-in remains offered per `oauth_status` (no new gating logic).
 - Auto-sync stays one shared opt-in option (off by default, 15-minute default interval) — relocated into Sources → "Automatic imports", not redesigned.
 - Disconnect = stop future sync (`source_set_excluded(id, true)`) + remove credentials (`account_forget_credentials(id)`); the local archive always stays; **no new archive-deletion UI**.
-- Settings has three pages: General / Storage & backup / AI assistance. The persisted `ai_enabled` switch is **Phase 4** — this phase only relocates the provider configuration.
+- Settings has three pages: General / Storage & backup / AI assistance. The persisted `ai_enabled` switch is **Phase 4** — this phase only relocates the provider configuration. *(Amendment, 2026-11-16: the persisted `ai_enabled` switch is superseded by product decision — [#181](https://github.com/acailic/mailchat-vault/issues/181); consent is session-scoped and never persisted, so Phase 4 no longer includes an `ai_enabled` setting.)*
 - Source selection switches from display-name mapping to stable source-instance ids everywhere (`state.sources`, chips, filters).
 - Preserve: reading-pane survival across view switches (`WorkspaceStore.setView` keeps `reading`), `SequenceGuard` stale-response protection, textContent-only dynamic strings (never innerHTML), English UI copy, `aria-current` for active destinations, both themes, all layout breakpoints.
 - Gates after every task: `npm run check` (tsc --noEmit) clean and `npx vitest run` green. E2e specs are updated in Task 8 but are **not** run on this host (standing WebKitWebDriver limitation, recorded in the roadmap) — never claim a local e2e pass.
