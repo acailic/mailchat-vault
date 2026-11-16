@@ -1270,6 +1270,7 @@ fn chat_jsonl_export_keeps_same_label_instances_distinct_through_the_bounded_imp
     for instance in &instances {
         let page = target
             .search_archive(&SearchArchiveRequest {
+                cursor: None,
                 source_ids: vec![instance.id.clone()],
                 ..Default::default()
             })

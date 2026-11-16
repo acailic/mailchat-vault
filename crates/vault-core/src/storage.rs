@@ -39,6 +39,16 @@
 //! snapshots the file, converts in a single transaction, validates the
 //! indexes, and — on any failure — restores the original from the
 //! snapshot (kept next to the database). See [`Storage::open_with`].
+//!
+//! Since schema version 20 the vault also holds **people and
+//! user-confirmed identity links** ([`Storage::create_person`],
+//! [`Storage::link_person_identity`]): an explicit, reversible
+//! navigation layer over the archive. Links anchor to a source
+//! instance plus a stable author key or a source-scoped author name —
+//! never a display name matched across sources — and no linking,
+//! unlinking, renaming, or deleting ever rewrites an archived author,
+//! message, or conversation (see the identity contract in
+//! docs/data-and-api-contracts.md).
 
 use std::path::{Path, PathBuf};
 
@@ -52,7 +62,8 @@ use crate::query::{
     ChatContext, SearchHit, SearchPage, SearchQuery, SNIPPET_CLOSE_MARK, SNIPPET_OPEN_MARK,
 };
 use crate::safe_migration::{self, MigrationFailPoint, OpenOptions};
-use crate::stats::{ArchiveStats, AuthorCount, ChatCount, DayCount};
+use crate::search2::SearchArchiveRequest;
+use crate::stats::{ArchiveStats, AuthorCount, ChatCount, DayCount, SourceNewCount};
 use crate::vector::VectorHit;
 use crate::{Error, Result};
 
@@ -756,6 +767,30 @@ const MIGRATIONS: &[(i64, &str)] = &[
         "#,
     ),
     (
+        18,
+        // Saved searches (the Archive workspace's recurring searches).
+        // One row per named definition: `request_json` holds the serde
+        // JSON of a v2 `SearchArchiveRequest` — the *dynamic* query and
+        // its complete filter semantics (canonical source ids, author,
+        // explicit day bounds plus timezone, attachment/honesty filters,
+        // import scope, sort), with `limit`/`offset` stripped before
+        // persisting because pagination is per-execution, not part of
+        // the definition. Source references stay canonical source ids
+        // inside the stored request, so display-label renames or
+        // duplicate labels never redirect a saved search. Rename and
+        // delete are single-row operations on this table and never
+        // touch archived messages.
+        r#"
+        CREATE TABLE saved_searches (
+            id           TEXT PRIMARY KEY,
+            name         TEXT NOT NULL UNIQUE,
+            request_json TEXT NOT NULL,
+            created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        "#,
+    ),
+    (
         19,
         // Vault-local collections (the organization layer, part 1 of
         // the collections slice): user-named sets referencing canonical
@@ -784,6 +819,76 @@ const MIGRATIONS: &[(i64, &str)] = &[
             PRIMARY KEY (collection_id, message_id)
         );
         CREATE INDEX idx_collection_members_message ON collection_members (message_id);
+        "#,
+    ),
+    (
+        20,
+        // People and user-confirmed identity links (the unified person
+        // view, storage slice). Additive DDL only: no archived row is
+        // read or changed. Numbering: 18 (saved searches) and 19
+        // (collections) are in the ledger above; the what's-new index
+        // follows as 21.
+        //
+        // The anchoring model (see the identity contract in
+        // docs/data-and-api-contracts.md): every link anchors to a
+        // canonical `source_instance_id` plus one of
+        // - `stable_key`: a stable, source-scoped author key (an email
+        //   address, a provider user id) where the source provides one,
+        //   case-folded at link time;
+        // - `author_name`: the verbatim author string where the source
+        //   provides nothing stable — inherently ambiguous (two humans
+        //   can share a display name), therefore scoped to its source
+        //   instance exactly to bound that ambiguity.
+        // The UNIQUE constraint is the "one identity, one person" rule:
+        // an anchor belongs to at most one person, and reassigning it
+        // is always an explicit unlink-then-link — the storage API
+        // refuses conflicting assignments with an explanation instead
+        // of silently moving the link. Deleting a person cascades its
+        // links and nothing else; messages, authors, and conversations
+        // are never rewritten, merged, or re-attributed.
+        r#"
+        CREATE TABLE people (
+            id         TEXT PRIMARY KEY,
+            name       TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE person_identity_links (
+            id                 TEXT PRIMARY KEY,
+            person_id          TEXT NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+            source_instance_id TEXT NOT NULL,
+            -- 'stable_key' (stable author key, case-folded) or
+            -- 'author_name' (verbatim display name, ambiguous by
+            -- nature and source-scoped).
+            anchor_kind        TEXT NOT NULL CHECK (anchor_kind IN ('stable_key', 'author_name')),
+            anchor_value       TEXT NOT NULL,
+            -- Rendered label for the link UI; display only, never part
+            -- of the anchor.
+            display_label      TEXT NOT NULL DEFAULT '',
+            linked_at          TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (source_instance_id, anchor_kind, anchor_value)
+        );
+        CREATE INDEX idx_person_identity_links_person
+            ON person_identity_links (person_id);
+        "#,
+    ),
+    (
+        21,
+        // The what's-new boot digest's message half (M7 follow-up;
+        // renumbered 20 -> 21 for the merge: the people slice was
+        // first in the queue and keeps 20)
+        // counts newly archived messages per source since the last
+        // visit (`Storage::messages_archived_since`). Without an index
+        // whose leading column is `created_at`, that filter's query
+        // plan is a full table scan — on a million-message vault the
+        // scan would blow the boot budget every time the window shows.
+        // The composite carries `source_instance_id` second so the
+        // count query is covered by the index alone (the per-row table
+        // lookup is what the bare-column index would still pay).
+        r#"
+        CREATE INDEX idx_archive_messages_created_source
+            ON archive_messages (created_at, source_instance_id);
         "#,
     ),
 ];
@@ -1176,6 +1281,38 @@ impl Storage {
              LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(JobLedgerRow {
+                job_id: row.get::<_, i64>(0)?.max(0) as u64,
+                kind: row.get(1)?,
+                submitted_at: row.get(2)?,
+                finished_at: row.get(3)?,
+                state: row.get(4)?,
+                summary: row.get(5)?,
+                payload: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Terminal ledger rows whose `finished_at` is strictly newer than
+    /// `since` (an RFC 3339 UTC instant in the same form the ledger
+    /// stamps carry, so the comparison is a plain string compare),
+    /// newest first, at most `limit`. The what's-new boot digest's job
+    /// half reads this and filters to its own kinds and outcomes (see
+    /// [`crate::whats_new`]); the ledger itself stays bounded at
+    /// [`JOB_LEDGER_KEEP`] rows, so this is never a large read.
+    pub fn job_ledger_since(&self, since: &str, limit: u32) -> Result<Vec<JobLedgerRow>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id, kind, submitted_at, finished_at, state, summary, payload
+             FROM job_ledger
+             WHERE finished_at > ?1
+             ORDER BY id DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since, limit as i64], |row| {
             Ok(JobLedgerRow {
                 job_id: row.get::<_, i64>(0)?.max(0) as u64,
                 kind: row.get(1)?,
@@ -1823,10 +1960,93 @@ impl Storage {
     /// browse ordering and the filters, and `LIMIT`/`OFFSET` bound every
     /// response. The `source` facet filters by legacy namespace via the
     /// unique `source_instances.legacy_namespace` index.
+    ///
+    /// Pages start at `offset`, or — when the query carries a keyset
+    /// cursor from a previous page's `next_cursor` — strictly after the
+    /// cursor row's sort position (the cursor wins), so deep pages cost
+    /// the same as the first page. The cursor follows the v2 search
+    /// contract ([`crate::search2::SearchCursor`]): bound to the order
+    /// mode it was issued under (browse for empty text, relevance
+    /// otherwise), rejected with `InvalidQuery` when malformed or from
+    /// another mode.
     pub fn search_page(&self, query: &SearchQuery) -> Result<SearchPage> {
         let mut query = query.clone();
         query.normalize()?;
         let filters = QueryFilters::build(&query)?;
+
+        // Cursor validation mirrors search2: the wire form and the
+        // order-mode binding are shared; v1 has no explicit sort, so
+        // empty text is browse and any text query is relevance.
+        let order_mode = if query.text.trim().is_empty() {
+            crate::search2::CursorOrderMode::Browse
+        } else {
+            crate::search2::CursorOrderMode::Relevance
+        };
+        let cursor = match &query.cursor {
+            None => None,
+            Some(raw) => {
+                let decoded = crate::search2::decode_search_cursor(raw)?;
+                if decoded.mode() != order_mode {
+                    return Err(Error::InvalidQuery(format!(
+                        "cursor was issued for {} order, not {} order",
+                        decoded.mode().as_str(),
+                        order_mode.as_str()
+                    )));
+                }
+                Some(decoded)
+            }
+        };
+        // Keyset fragment (over alias `m`): rows strictly after the
+        // cursor's sort position. Browse orders `sent_instant DESC,
+        // id DESC` with unknown instants last (SQLite NULLs sort last
+        // in DESC); relevance orders by the bm25 rank then id. Same
+        // compound-predicate shapes as the v2 page.
+        let (keyset_sql, keyset_bind): (String, Vec<SqlValue>) = match &cursor {
+            None => (String::new(), Vec::new()),
+            Some(crate::search2::SearchCursor::Browse { sent, id }) => match sent {
+                Some(instant) => (
+                    " AND (m.sent_instant IS NULL \
+                       OR m.sent_instant < ? \
+                       OR (m.sent_instant = ? AND m.id < ?))"
+                        .to_string(),
+                    vec![
+                        SqlValue::from(instant.clone()),
+                        SqlValue::from(instant.clone()),
+                        SqlValue::Integer(*id),
+                    ],
+                ),
+                None => (
+                    " AND (m.sent_instant IS NULL AND m.id < ?)".to_string(),
+                    vec![SqlValue::Integer(*id)],
+                ),
+            },
+            Some(crate::search2::SearchCursor::Relevance { rank_bits, id }) => {
+                let rank = f64::from_bits(*rank_bits);
+                let expr = crate::search2::bm25_rank_expr();
+                (
+                    format!(" AND ({expr} > ? OR ({expr} = ? AND m.id > ?))"),
+                    vec![
+                        SqlValue::Real(rank),
+                        SqlValue::Real(rank),
+                        SqlValue::Integer(*id),
+                    ],
+                )
+            }
+            // A "newest"-mode cursor cannot be issued by the v1 page;
+            // the mode check above already rejected it.
+            Some(other @ crate::search2::SearchCursor::Newest { .. }) => {
+                return Err(Error::InvalidQuery(format!(
+                    "cursor was issued for {} order, not {} order",
+                    other.mode().as_str(),
+                    order_mode.as_str()
+                )));
+            }
+        };
+        // One row past the page detects a following page (the probe row
+        // never reaches the returned page).
+        let fetch = query.limit as i64 + 1;
+        let offset_paging = cursor.is_none();
+        let mut has_more = false;        let mut last_rank: Option<f64> = None;
 
         let total: u64 = {
             let (sql, bind) = if query.text.trim().is_empty() {
@@ -1861,60 +2081,133 @@ impl Storage {
 
         let hits: Vec<SearchHit> = if query.text.trim().is_empty() {
             let mut bind = filters.bind();
-            bind.push(SqlValue::Integer(query.limit as i64));
-            bind.push(SqlValue::Integer(query.offset as i64));
+            bind.extend(keyset_bind);
+            bind.push(SqlValue::Integer(fetch));
+            if offset_paging {
+                bind.push(SqlValue::Integer(query.offset as i64));
+            }
             let sql = format!(
                 "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
                  m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
                  m.body, m.raw_json, NULL \
                  FROM archive_messages AS m \
                  JOIN source_instances AS si ON si.id = m.source_instance_id \
-                 WHERE 1=1 {} \
-                 ORDER BY m.sent_instant DESC, m.id DESC LIMIT ? OFFSET ?",
-                filters.sql
+                 WHERE 1=1 {} {} \
+                 ORDER BY m.sent_instant DESC, m.id DESC {}",
+                filters.sql,
+                keyset_sql,
+                if offset_paging {
+                    "LIMIT ? OFFSET ?"
+                } else {
+                    "LIMIT ?"
+                }
             );
             let mut stmt = self.conn.prepare(&sql)?;
-            let rows: Vec<SearchHit> = stmt
+            let mut rows: Vec<SearchHit> = stmt
                 .query_map(params_from_iter(bind), hit_from_row)?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
+            has_more = rows.len() > query.limit as usize;
+            rows.truncate(query.limit as usize);
             rows
         } else {
             // Order follows the ? placeholders in the SQL text: the two
             // snippet() markers in the SELECT, then the MATCH expression,
-            // then the filter bindings, then LIMIT/OFFSET.
+            // then the filter bindings, the keyset values, then the page
+            // tail. The trailing column is the row's bm25 rank — the
+            // sort position `next_cursor` must carry.
             let mut bind = vec![
                 SqlValue::from(SNIPPET_OPEN_MARK.to_string()),
                 SqlValue::from(SNIPPET_CLOSE_MARK.to_string()),
                 SqlValue::from(crate::search::build_match_query(&query.text)),
             ];
             bind.extend(filters.bind());
-            bind.push(SqlValue::Integer(query.limit as i64));
-            bind.push(SqlValue::Integer(query.offset as i64));
+            bind.extend(keyset_bind);
+            bind.push(SqlValue::Integer(fetch));
+            if offset_paging {
+                bind.push(SqlValue::Integer(query.offset as i64));
+            }
             let sql = format!(
                 "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
                  m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
                  m.body, m.raw_json, \
-                 snippet(archive_fts, 0, ?1, ?2, '…', 16) \
+                 snippet(archive_fts, 0, ?1, ?2, '…', 16), \
+                 {} \
                  FROM archive_fts \
                  JOIN archive_messages AS m ON m.id = archive_fts.rowid \
                  JOIN source_instances AS si ON si.id = m.source_instance_id \
-                 WHERE archive_fts MATCH ?3 {} \
+                 WHERE archive_fts MATCH ?3 {} {} \
                  ORDER BY bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, \
-                               {BM25_WEIGHT_SUBJECT}), m.id LIMIT ? OFFSET ?",
-                filters.sql
+                               {BM25_WEIGHT_SUBJECT}), m.id {}",
+                crate::search2::bm25_rank_expr(),
+                filters.sql,
+                keyset_sql,
+                if offset_paging {
+                    "LIMIT ? OFFSET ?"
+                } else {
+                    "LIMIT ?"
+                }
             );
             let mut stmt = self.conn.prepare(&sql)?;
-            let rows: Vec<SearchHit> = stmt
-                .query_map(params_from_iter(bind), hit_from_row)?
+            let mut rows: Vec<(SearchHit, f64)> = stmt
+                .query_map(params_from_iter(bind), |row| {
+                    let hit = hit_from_row(row)?;
+                    let rank: f64 = row.get(10)?;
+                    Ok((hit, rank))
+                })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            rows
+            has_more = rows.len() > query.limit as usize;
+            if has_more {
+                last_rank = Some(rows[query.limit as usize - 1].1);
+            }
+            rows.truncate(query.limit as usize);
+            rows.into_iter().map(|(hit, _)| hit).collect()
+        };
+
+        // next_cursor continues the list at the cursor row's position
+        // whenever the probe row said more rows follow. The v1 message
+        // keeps unknown instants as "" — the cursor keeps the explicit
+        // None flag so the NULL boundary stays exact.
+        let next_cursor = if has_more {
+            let last = hits
+                .last()
+                .expect("a following page implies a full page was read");
+            let cursor = match order_mode {
+                crate::search2::CursorOrderMode::Browse => {
+                    crate::search2::SearchCursor::Browse {
+                        sent: if last.message.sent_at.is_empty() {
+                            None
+                        } else {
+                            Some(last.message.sent_at.clone())
+                        },
+                        id: last.message.id,
+                    }
+                }                crate::search2::CursorOrderMode::Relevance => {
+                    crate::search2::SearchCursor::Relevance {
+                        rank_bits: last_rank
+                            .expect("a following relevance page carries its rank")
+                            .to_bits(),
+                        id: last.message.id,
+                    }
+                }
+                crate::search2::CursorOrderMode::Newest => {
+                    return Err(Error::InvalidQuery(
+                        "v1 search has no text-newest order mode".into(),
+                    ));
+                }
+            };
+            Some(crate::search2::encode_search_cursor(&cursor)?)
+        } else {
+            None
         };
 
         Ok(SearchPage {
             hits,
             total,
             limit: query.limit,
-            offset: query.offset,
+            // A cursor page has no meaningful offset; the continuation
+            // is the cursor itself.
+            offset: if offset_paging { query.offset } else { 0 },
+            next_cursor,
         })
     }
 
@@ -2170,6 +2463,45 @@ impl Storage {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let total = by_source.iter().map(|s| s.count).sum();
         Ok(Stats { total, by_source })
+    }
+
+    /// Newly archived messages per source instance since an instant
+    /// (the what's-new boot digest's message half). `since` is an
+    /// instant in the `archive_messages.created_at` column's own format
+    /// (`YYYY-MM-DD HH:MM:SS` UTC — [`crate::whats_new::sqlite_instant`]
+    /// converts the RFC 3339 record form); rows strictly newer count, so
+    /// a message that re-imports and dedups keeps its original
+    /// `created_at` and never counts twice — the numbers mean newly
+    /// archived messages, not re-sightings. Grouped by source instance
+    /// and joined to the same label the stats chips show, heaviest
+    /// first. Rides `idx_archive_messages_created_source` (migration
+    /// 21 on the merged ledger; originally numbered 20): the range
+    /// above `since` is a covered index seek, never a scan, so the
+    /// digest answers within the boot budget on million-message
+    /// archives. The seek is pinned with INDEXED BY: without it the
+    /// planner may prefer migration 15's source/channel index for the
+    /// GROUP BY order and fall back to a full index scan — exactly
+    /// what the boot budget cannot afford (caught by the EXPLAIN plan
+    /// test in tests/whats_new.rs, first executed on the tier B host).
+    pub fn messages_archived_since(&self, since: &str) -> Result<Vec<SourceNewCount>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT si.id, COALESCE(si.legacy_namespace, si.label, si.id), COUNT(*)
+             FROM archive_messages AS m INDEXED BY idx_archive_messages_created_source
+             JOIN source_instances AS si ON si.id = m.source_instance_id
+             WHERE m.created_at > ?1
+             GROUP BY m.source_instance_id
+             ORDER BY COUNT(*) DESC, si.id",
+        )?;
+        let counts = stmt
+            .query_map([since], |row| {
+                Ok(SourceNewCount {
+                    source_id: row.get(0)?,
+                    label: row.get(1)?,
+                    count: row.get::<_, i64>(2)?.max(0) as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(counts)
     }
 
     /// Per-account overview counts for the multi-account UI (roadmap: the
@@ -3155,6 +3487,347 @@ impl Storage {
     }
 
     // ------------------------------------------------------------------
+    // People and user-confirmed identity links (migration 20)
+    // ------------------------------------------------------------------
+
+    /// Create a person record. Purely a navigation layer: nothing about
+    /// archived messages changes (see the identity contract in
+    /// docs/data-and-api-contracts.md — a person exists only to hold
+    /// user-confirmed identity links).
+    pub fn create_person(&self, name: &str) -> Result<Person> {
+        let name = normalize_person_name(name)?;
+        let id = new_uuid();
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO people (id, name) VALUES (?1, ?2)",
+            params![id, name],
+        )?;
+        let person = tx
+            .query_row(
+                "SELECT id, name, created_at, updated_at FROM people WHERE id = ?1",
+                params![id],
+                person_from_row,
+            )
+            .optional()?;
+        tx.commit()?;
+        person.ok_or_else(|| Error::Sqlite(rusqlite::Error::QueryReturnedNoRows))
+    }
+
+    /// Rename a person (display only — a person's name is never identity
+    /// evidence). Unknown ids are refused with [`Error::PersonNotFound`].
+    pub fn rename_person(&self, id: &str, name: &str) -> Result<()> {
+        let name = normalize_person_name(name)?;
+        let updated = self.conn.execute(
+            "UPDATE people SET name = ?2, updated_at = datetime('now')
+             WHERE id = ?1",
+            params![id, name],
+        )?;
+        if updated == 0 {
+            return Err(Error::PersonNotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Delete a person and — via the schema's `ON DELETE CASCADE` —
+    /// exactly their identity-link rows. Archived content is untouched:
+    /// no message, author, or conversation row changes.
+    pub fn delete_person(&self, id: &str) -> Result<()> {
+        let deleted = self
+            .conn
+            .execute("DELETE FROM people WHERE id = ?1", params![id])?;
+        if deleted == 0 {
+            return Err(Error::PersonNotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Every person, oldest first (deterministic: creation time, then
+    /// id as the tiebreaker).
+    pub fn list_people(&self) -> Result<Vec<Person>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, created_at, updated_at
+             FROM people ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map([], person_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Explicitly link one author identity to a person.
+    ///
+    /// The anchor is a canonical source instance plus a stable author
+    /// key ([`PersonAnchorKind::StableKey`], case-folded) or a
+    /// source-scoped author display string
+    /// ([`PersonAnchorKind::AuthorName`], verbatim — ambiguous by
+    /// nature, which is why it never escapes its source instance).
+    /// Linking is the *only* way an identity joins a person; nothing is
+    /// ever inferred.
+    ///
+    /// Re-linking the exact anchor to the same person is an idempotent
+    /// no-op. Linking an anchor that already belongs to another person
+    /// is refused with [`Error::IdentityLinkConflict`] naming the
+    /// current owner — reassignment is always an explicit
+    /// unlink-then-link, never a silent move.
+    pub fn link_person_identity(
+        &self,
+        person_id: &str,
+        link: &NewPersonIdentityLink<'_>,
+    ) -> Result<()> {
+        let anchor_value = normalize_anchor_value(link.anchor_kind, link.anchor_value)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let person: Option<String> = tx
+            .query_row(
+                "SELECT id FROM people WHERE id = ?1",
+                params![person_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if person.is_none() {
+            return Err(Error::PersonNotFound(person_id.to_string()));
+        }
+        let owner: Option<(String, String)> = tx
+            .query_row(
+                "SELECT p.id, p.name
+                 FROM person_identity_links AS l JOIN people AS p ON p.id = l.person_id
+                 WHERE l.source_instance_id = ?1
+                   AND l.anchor_kind = ?2
+                   AND l.anchor_value = ?3",
+                params![
+                    link.source_instance_id,
+                    link.anchor_kind.as_str(),
+                    anchor_value
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match owner {
+            Some((owner_id, owner_name)) if owner_id != person_id => {
+                return Err(Error::IdentityLinkConflict {
+                    source_instance_id: link.source_instance_id.to_string(),
+                    anchor_kind: link.anchor_kind.as_str().to_string(),
+                    anchor_value,
+                    owner_id,
+                    owner_name,
+                });
+            }
+            // Already linked to this person: idempotent no-op.
+            Some(_) => {}
+            None => {
+                tx.execute(
+                    "INSERT INTO person_identity_links
+                         (id, person_id, source_instance_id, anchor_kind,
+                          anchor_value, display_label)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        new_uuid(),
+                        person_id,
+                        link.source_instance_id,
+                        link.anchor_kind.as_str(),
+                        anchor_value,
+                        link.display_label
+                    ],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Remove one identity link (by its row id). Only the association
+    /// row is deleted — the person, the source instance, and every
+    /// archived message are untouched, and the anchor is immediately
+    /// linkable again (reversibility). Unknown link ids — and links
+    /// belonging to a different person — are refused with
+    /// [`Error::IdentityLinkNotFound`] / [`Error::PersonNotFound`].
+    pub fn unlink_person_identity(&self, person_id: &str, link_id: &str) -> Result<()> {
+        let removed = self.conn.execute(
+            "DELETE FROM person_identity_links WHERE id = ?1 AND person_id = ?2",
+            params![link_id, person_id],
+        )?;
+        if removed == 0 {
+            // Distinguish "no such link" from "someone else's link" so
+            // the caller gets an explanation, not a bare failure.
+            let owner: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT person_id FROM person_identity_links WHERE id = ?1",
+                    params![link_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            return match owner {
+                Some(other) if other != person_id => Err(Error::IdentityLinkNotFound(format!(
+                    "link {link_id} belongs to person {other}, not {person_id}"
+                ))),
+                _ => Err(Error::IdentityLinkNotFound(link_id.to_string())),
+            };
+        }
+        Ok(())
+    }
+
+    /// The identity links of one person, oldest first (deterministic:
+    /// link time, then id).
+    pub fn person_identity_links(&self, person_id: &str) -> Result<Vec<PersonIdentityLink>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, person_id, source_instance_id, anchor_kind,
+                    anchor_value, display_label, linked_at
+             FROM person_identity_links
+             WHERE person_id = ?1
+             ORDER BY linked_at, id",
+        )?;
+        let rows = stmt.query_map(params![person_id], person_link_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Resolve an identity anchor to its person, if the user has linked
+    /// one. This is the lookup the person view rides: a message's
+    /// (source instance, author anchor) resolves through it, so new
+    /// imports under an already-linked stable key join the person's
+    /// message set automatically, while the archived rows keep their
+    /// original author strings. `anchor_value` is normalized exactly as
+    /// [`Storage::link_person_identity`] normalizes it.
+    pub fn person_for_anchor(
+        &self,
+        source_instance_id: &str,
+        anchor_kind: PersonAnchorKind,
+        anchor_value: &str,
+    ) -> Result<Option<Person>> {
+        let anchor_value = normalize_anchor_value(anchor_kind, anchor_value)?;
+        let person = self
+            .conn
+            .query_row(
+                "SELECT p.id, p.name, p.created_at, p.updated_at
+                 FROM person_identity_links AS l JOIN people AS p ON p.id = l.person_id
+                 WHERE l.source_instance_id = ?1
+                   AND l.anchor_kind = ?2
+                   AND l.anchor_value = ?3",
+                params![source_instance_id, anchor_kind.as_str(), anchor_value],
+                person_from_row,
+            )
+            .optional()?;
+        Ok(person)
+    }
+
+    // ------------------------------------------------------------------
+    // Saved searches (migration 18)
+    // ------------------------------------------------------------------
+
+    /// The saved-search definitions, oldest first (same-second ties
+    /// broken by name) — the order the Archive workspace lists them in.
+    /// Each definition is a dynamic v2 request: executing it re-runs the
+    /// search, so newly imported matching messages appear, and source
+    /// references are canonical source ids, so label renames and
+    /// duplicate labels never redirect a saved search.
+    pub fn saved_searches(&self) -> Result<Vec<SavedSearch>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, request_json, created_at, updated_at
+             FROM saved_searches ORDER BY created_at, name",
+        )?;
+        let rows = stmt.query_map([], saved_search_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Create or update one saved-search definition:
+    ///
+    /// - `id` `None` creates a new definition under `name` — a name
+    ///   another definition already holds is refused, not silently
+    ///   overwritten;
+    /// - `id` `Some(id)` updates that definition in place: a new name
+    ///   (rename), a new request (update from the current search), or
+    ///   both. Renaming onto a name another definition holds is
+    ///   refused; an unknown `id` is refused.
+    ///
+    /// The request is validated by normalizing it (bad text length, day
+    /// bounds, or timezone refuse the save), then persisted as serde
+    /// JSON with `limit`/`offset` stripped — pagination is
+    /// per-execution, not part of the definition. Only the
+    /// `saved_searches` row is touched; archived messages never are.
+    pub fn upsert_saved_search(
+        &self,
+        id: Option<&str>,
+        name: &str,
+        request: &SearchArchiveRequest,
+    ) -> Result<SavedSearch> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::SavedSearch(
+                "a saved search needs a name".to_string(),
+            ));
+        }
+        if name.chars().count() > SAVED_SEARCH_MAX_NAME_CHARS {
+            return Err(Error::SavedSearch(format!(
+                "saved-search name exceeds {SAVED_SEARCH_MAX_NAME_CHARS} characters"
+            )));
+        }
+        // Refuse to store a request that could not execute: normalize
+        // (validate) it and drop the resolved form.
+        request.normalize()?;
+
+        // Pagination never persists: strip it before serializing.
+        let mut stored = request.clone();
+        stored.limit = None;
+        stored.offset = None;
+        let request_json = serde_json::to_string(&stored)?;
+
+        let tx = self.conn.unchecked_transaction()?;
+        let taken: bool = tx.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM saved_searches
+                 WHERE name = ?1 AND (?2 IS NULL OR id != ?2)
+             )",
+            params![name, id],
+            |row| row.get(0),
+        )?;
+        if taken {
+            return Err(Error::SavedSearch(format!(
+                "a saved search named {name:?} already exists"
+            )));
+        }
+        let row_id = match id {
+            None => {
+                let new_id = new_uuid();
+                tx.execute(
+                    "INSERT INTO saved_searches (id, name, request_json)
+                     VALUES (?1, ?2, ?3)",
+                    params![new_id, name, request_json],
+                )?;
+                new_id
+            }
+            Some(id) => {
+                let updated = tx.execute(
+                    "UPDATE saved_searches
+                     SET name = ?2, request_json = ?3,
+                         updated_at = datetime('now')
+                     WHERE id = ?1",
+                    params![id, name, request_json],
+                )?;
+                if updated == 0 {
+                    return Err(Error::SavedSearch(format!("no saved search with id {id}")));
+                }
+                id.to_string()
+            }
+        };
+        let stored = tx.query_row(
+            "SELECT id, name, request_json, created_at, updated_at
+             FROM saved_searches WHERE id = ?1",
+            params![row_id],
+            saved_search_from_row,
+        )?;
+        tx.commit()?;
+        Ok(stored)
+    }
+
+    /// Delete one saved-search definition. Returns whether a row was
+    /// removed (deleting an unknown id is not an error). Only the
+    /// definition goes — archived messages, sources, and every other
+    /// definition are untouched.
+    pub fn delete_saved_search(&self, id: &str) -> Result<bool> {
+        let removed = self
+            .conn
+            .execute("DELETE FROM saved_searches WHERE id = ?1", params![id])?;
+        Ok(removed > 0)
+    }
+
+    // ------------------------------------------------------------------
     // Collections (user organization, migration 19)
     // ------------------------------------------------------------------
 
@@ -4015,6 +4688,141 @@ pub struct NewSourceInstance<'a> {
     pub config_json: &'a str,
 }
 
+/// What a user-confirmed identity link anchors to (migration 20). See
+/// the identity contract in docs/data-and-api-contracts.md: the anchor
+/// is always a source instance plus one of these, never a bare display
+/// name matched across sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonAnchorKind {
+    /// A stable, source-scoped author key where the source provides one
+    /// (an email address for mail sources, a provider user id for chat
+    /// exports that carry one). Case-folded at link time.
+    StableKey,
+    /// The verbatim author display string where the source provides
+    /// nothing stable. Inherently ambiguous (two humans can share a
+    /// display name), hence scoped to its source instance.
+    AuthorName,
+}
+
+impl PersonAnchorKind {
+    /// The stored `anchor_kind` token.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PersonAnchorKind::StableKey => "stable_key",
+            PersonAnchorKind::AuthorName => "author_name",
+        }
+    }
+
+    /// Parse a stored `anchor_kind` token; `None` for anything else.
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s {
+            "stable_key" => Some(PersonAnchorKind::StableKey),
+            "author_name" => Some(PersonAnchorKind::AuthorName),
+            _ => None,
+        }
+    }
+}
+
+/// A user-created person record (migration 20). Purely a navigation
+/// layer over the archive: nothing about archived messages changes when
+/// a person is created, renamed, or deleted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Person {
+    pub id: String,
+    /// Display name; never identity evidence.
+    pub name: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// The identity-to-person association a caller asks to create (see
+/// [`Storage::link_person_identity`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewPersonIdentityLink<'a> {
+    /// The canonical source instance the identity lives in.
+    pub source_instance_id: &'a str,
+    /// What `anchor_value` holds — see [`PersonAnchorKind`].
+    pub anchor_kind: PersonAnchorKind,
+    /// The stable author key (case-folded on storage) or the verbatim
+    /// author display string (trimmed).
+    pub anchor_value: &'a str,
+    /// Rendered label for the link UI (e.g. the address as the user
+    /// saw it); display only, never part of the anchor.
+    pub display_label: &'a str,
+}
+
+/// One stored user-confirmed identity link (see
+/// [`Storage::person_identity_links`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonIdentityLink {
+    pub id: String,
+    pub person_id: String,
+    pub source_instance_id: String,
+    pub anchor_kind: PersonAnchorKind,
+    pub anchor_value: String,
+    pub display_label: String,
+    pub linked_at: String,
+}
+
+/// Validate and normalize a person name: trimmed and non-empty.
+fn normalize_person_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(Error::InvalidPersonInput(
+            "person name must not be empty".into(),
+        ));
+    }
+    Ok(name.to_string())
+}
+
+/// Normalize an anchor value for storage and lookup: stable keys are
+/// trimmed and case-folded (email convention — addresses and provider
+/// keys are case-insensitive in practice); author-name anchors keep
+/// their verbatim case (display strings are matched exactly) and are
+/// only trimmed. Empty anchors never identify anyone.
+fn normalize_anchor_value(kind: PersonAnchorKind, value: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(Error::InvalidPersonInput(
+            "anchor value must not be empty".into(),
+        ));
+    }
+    Ok(match kind {
+        PersonAnchorKind::StableKey => trimmed.to_lowercase(),
+        PersonAnchorKind::AuthorName => trimmed.to_string(),
+    })
+}
+
+fn person_from_row(row: &Row<'_>) -> rusqlite::Result<Person> {
+    Ok(Person {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        created_at: row.get(2)?,
+        updated_at: row.get(3)?,
+    })
+}
+
+fn person_link_from_row(row: &Row<'_>) -> rusqlite::Result<PersonIdentityLink> {
+    let kind_raw: String = row.get(3)?;
+    let anchor_kind = PersonAnchorKind::from_str_opt(&kind_raw).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Text,
+            format!("invalid anchor_kind: {kind_raw}").into(),
+        )
+    })?;
+    Ok(PersonIdentityLink {
+        id: row.get(0)?,
+        person_id: row.get(1)?,
+        source_instance_id: row.get(2)?,
+        anchor_kind,
+        anchor_value: row.get(4)?,
+        display_label: row.get(5)?,
+        linked_at: row.get(6)?,
+    })
+}
+
 /// A durable source instance as stored (see
 /// [`Storage::list_source_instances`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4325,6 +5133,41 @@ pub struct ImportBatchCounts {
 /// How many finished jobs the ledger keeps (migration 16). A write prunes
 /// to this many newest rows; the panel renders at most its top 20 anyway.
 pub const JOB_LEDGER_KEEP: usize = 50;
+
+/// Upper bound for a saved-search name (Unicode characters), mirroring
+/// the bounded text fields of the v2 request it stores.
+pub const SAVED_SEARCH_MAX_NAME_CHARS: usize = 200;
+
+/// One stored saved-search definition (migration 18): a name plus the
+/// dynamic v2 request it re-executes. See [`Storage::upsert_saved_search`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedSearch {
+    /// Canonical row id (a UUID); stable across renames.
+    pub id: String,
+    pub name: String,
+    /// The stored request, `limit`/`offset` stripped (pagination is
+    /// per-execution, not part of the definition).
+    pub request: SearchArchiveRequest,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Map one `saved_searches` row to its [`SavedSearch`]. A row whose
+/// request JSON cannot deserialize into the current request model
+/// surfaces as an error rather than being silently dropped or widened.
+fn saved_search_from_row(row: &Row<'_>) -> rusqlite::Result<SavedSearch> {
+    let request_json: String = row.get(2)?;
+    let request = serde_json::from_str(&request_json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    Ok(SavedSearch {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        request,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+    })
+}
 
 /// One terminal job to append to the finished-jobs ledger (see
 /// [`Storage::record_job_ledger`]). Owned: the entry crosses thread

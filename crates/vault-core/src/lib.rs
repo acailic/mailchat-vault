@@ -75,6 +75,10 @@
 //! - [`query`]: paged/filtered search requests and chat-thread context.
 //! - [`stats`]: archive statistics for the dashboard (totals, date range,
 //!   counts by source/day/chat/author).
+//! - [`whats_new`]: the "what's new since your last visit" boot digest
+//!   (the M7 follow-up) — the vault-scoped last-visit record plus the
+//!   derivation of new messages per source and finished/failed import
+//!   and sync jobs since it.
 //! - [`export`]: export search results or whole chats to CSV / JSON Lines /
 //!   MBOX.
 //! - [`staged_write`]: staged file publication for exports — the export
@@ -123,6 +127,7 @@ pub mod telegram;
 pub mod util;
 pub mod vector;
 pub mod watch;
+pub mod whats_new;
 pub mod whatsapp;
 
 use thiserror::Error;
@@ -159,6 +164,8 @@ pub enum Error {
     InvalidServerName(#[from] rustls::pki_types::InvalidDnsNameError),
     #[error("invalid query: {0}")]
     InvalidQuery(String),
+    #[error("saved search error: {0}")]
+    SavedSearch(String),
     #[error("embedding error: {0}")]
     Embedding(String),
     #[error("jobs error: {0}")]
@@ -183,4 +190,18 @@ pub enum Error {
     InsufficientSpace { needed: u64, available: u64 },
     #[error("migration failure injected at {0}")]
     MigrationFault(&'static str),
+    #[error("person not found: {0}")]
+    PersonNotFound(String),
+    #[error("invalid person input: {0}")]
+    InvalidPersonInput(String),
+    #[error("identity link conflict: {source_instance_id}:{anchor_kind}:{anchor_value} is already linked to person {owner_name} ({owner_id}); unlink it there first")]
+    IdentityLinkConflict {
+        source_instance_id: String,
+        anchor_kind: String,
+        anchor_value: String,
+        owner_id: String,
+        owner_name: String,
+    },
+    #[error("identity link not found: {0}")]
+    IdentityLinkNotFound(String),
 }

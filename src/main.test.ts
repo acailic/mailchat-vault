@@ -177,7 +177,7 @@ function summary(
 }
 
 function pageOf(hits: MessageSummary[], total: number, offset = 0, revision = 4): SearchArchivePage {
-  return { hits, total, limit: 50, offset, archive_revision: revision };
+  return { hits, total, limit: 50, offset, archive_revision: revision, next_cursor: null };
 }
 
 const HITS: MessageSummary[] = [

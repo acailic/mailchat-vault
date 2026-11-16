@@ -51,10 +51,13 @@
 //!   failed-item rows, last-sync stamps, pause (exclusion) state, and
 //!   which credential kinds are stored; and the removal action that
 //!   forgets one account's keyring secrets while keeping its archive.
-//! - `watch_add_folder` / `watch_remove_folder` / `watch_status` —
-//!   automatic folder watching: new/modified export files in user-chosen
-//!   folders are imported in the background; the UI is kept current via
-//!   `watch-status` window events.
+//! - `watch_add_folder` / `watch_remove_folder` / `watch_retry` /
+//!   `watch_status` — automatic folder watching: new/modified export
+//!   files in user-chosen folders are imported in the background, a
+//!   failed import can be retried once its cause is resolved (the
+//!   file must still be under a watched folder; already stored rows
+//!   stay single); the UI is kept current via `watch-status` window
+//!   events (including per-unit import states for the retry affordance).
 //! - `oauth_gmail_login` — run the Gmail Google sign-in (browser OAuth2
 //!   flow with PKCE) and store the refresh token in the OS keyring.
 //! - `oauth_status` — Gmail sign-in availability for the UI (configured?
@@ -88,6 +91,11 @@
 //! - `stats` — archive counts per source (drives the source filter chips).
 //! - `archive_stats` — dashboard aggregates: totals, date range, counts by
 //!   source/day, top chats and top authors.
+//! - `whats_new_digest` — the "what's new since your last visit" boot
+//!   digest (M7 follow-up): new messages per source plus finished or
+//!   failed imports and syncs since the previous read; one call derives
+//!   the digest and advances the vault-scoped last-visit cutoff exactly
+//!   once (first visit: a quiet, empty digest).
 //! - `backup_inspect` / `restore_commit` / `recovery_status` /
 //!   `recovery_forget` / `return_to_previous_vault` — the M4.4
 //!   backup/restore surface: quick container inspection, the commit
@@ -104,6 +112,15 @@
 //!   the active filters) to a user-chosen file as CSV, JSON Lines or MBOX.
 //! - `export_chat` — write the whole chat thread of one message to a
 //!   user-chosen file in the same formats.
+//! - `saved_searches_list` / `saved_searches_save` /
+//!   `saved_searches_delete` — the Archive workspace's saved searches:
+//!   named dynamic v2 search requests (query, canonical source ids,
+//!   date bounds with explicit timezone, attachment/honesty filters,
+//!   import scope, sort — pagination stripped). Saving creates a
+//!   definition or updates one in place (rename and/or new request);
+//!   deleting removes the definition only, never archived messages.
+//!   Definitions are personal-vault state: reads and writes target the
+//!   personal pool and writes refuse while the sample archive is open.
 //!
 //! Desktop notifications for new mail (the Tauri notification plugin,
 //! registered here, drives macOS/Windows/Linux natively) live in the
@@ -128,7 +145,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
@@ -159,15 +176,16 @@ use vault_core::search2::{
 };
 use vault_core::settings::{self, Options, Settings, SETTINGS_VERSION};
 use vault_core::staged_write::{staged_write, staged_write_opt};
-use vault_core::stats::{ArchiveStats, DEFAULT_TOP};
+use vault_core::stats::{ArchiveStats, WhatsNewDigest, DEFAULT_TOP};
 use vault_core::storage::{
-    FailedItem, MediaMessageReference, RegisteredMediaObject, SourceInstance, Storage,
+    FailedItem, MediaMessageReference, RegisteredMediaObject, SavedSearch, SourceInstance, Storage,
     UnlinkedMediaPage, UnlinkedMediaPageRequest,
 };
 use vault_core::vector::{
     self, EmbedJobSummary, Embedder, EmbeddingStatus, HashEmbedder, EMBED_BODY_PREFIX_CHARS,
 };
 use vault_core::watch::{FolderWatcher, WatchSnapshot};
+use vault_core::whats_new;
 use vault_core::{demo, message, Error, Result as CoreResult};
 
 mod media_proto;
@@ -436,6 +454,71 @@ fn conversation_context_v2(
 fn list_import_scopes_v2(state: State<AppState>) -> Result<Vec<ImportScope>, AppError> {
     ActiveVault::from(&state)
         .with_read(|s| s.import_scopes())
+        .map_err(AppError::from)
+}
+
+// ---------------------------------------------------------------------------
+// Saved searches (schema 18)
+// ---------------------------------------------------------------------------
+
+/// What one `saved_searches_save` writes: `id` `None` creates a new
+/// definition under `name`; `Some(id)` updates that definition in place
+/// — a new name (rename), a new request (update from the current
+/// search), or both.
+#[derive(Debug, Deserialize)]
+struct SavedSearchSave {
+    id: Option<String>,
+    name: String,
+    request: SearchArchiveRequest,
+}
+
+/// The vault's saved-search definitions, oldest first. Definitions are
+/// personal-vault state: this always reads the personal pool, even
+/// while the isolated sample archive is open — the demo never serves
+/// (or absorbs) definitions.
+#[tauri::command]
+fn saved_searches_list(state: State<AppState>) -> Result<Vec<SavedSearch>, AppError> {
+    state
+        .pool
+        .with_read(|s| s.saved_searches())
+        .map_err(AppError::from)
+}
+
+/// Save the current search under a name (create), or update an existing
+/// definition (rename and/or replace its request). The stored request is
+/// the dynamic v2 request minus pagination, so reopening re-executes the
+/// search and newly imported matching messages appear. Writes touch the
+/// definition row only, never archived messages, and refuse while the
+/// sample archive is open (personal-vault mutation guard).
+#[tauri::command]
+fn saved_searches_save(
+    state: State<AppState>,
+    definition: SavedSearchSave,
+) -> Result<SavedSearch, AppError> {
+    state
+        .refuse_in_demo()
+        .map_err(|e| AppError::invalid_input(e, None))?;
+    let pool = Arc::clone(&state.pool);
+    pool.submit_write(move |s| {
+        s.upsert_saved_search(
+            definition.id.as_deref(),
+            &definition.name,
+            &definition.request,
+        )
+    })
+    .map_err(AppError::from)
+}
+
+/// Delete one saved-search definition (idempotent: deleting an unknown
+/// id succeeds). Only the definition goes — archived messages are never
+/// touched. Refuses while the sample archive is open.
+#[tauri::command]
+fn saved_searches_delete(state: State<AppState>, id: String) -> Result<(), AppError> {
+    state
+        .refuse_in_demo()
+        .map_err(|e| AppError::invalid_input(e, None))?;
+    let pool = Arc::clone(&state.pool);
+    pool.submit_write(move |s| s.delete_saved_search(&id).map(|_| ()))
         .map_err(AppError::from)
 }
 
@@ -2281,6 +2364,23 @@ fn watch_remove_folder(state: State<AppState>, path: String) -> Result<WatchSnap
     Ok(state.watcher.snapshot())
 }
 
+/// Re-run a failed watched-folder import: the file must still sit under
+/// an enabled watched folder; it is re-enqueued through the watcher's
+/// settle window under its unchanged import identity, so already stored
+/// messages stay single. Returns the fresh status (its per-unit states
+/// tell the UI which units are retryable). A unit that is pending or
+/// running is left alone — repeated calls never duplicate work.
+#[tauri::command]
+fn watch_retry(state: State<AppState>, path: String) -> Result<WatchSnapshot, String> {
+    state.refuse_in_demo()?;
+    let path = path.trim();
+    if path.is_empty() {
+        return Err("path is required".into());
+    }
+    state.watcher.retry(path)?;
+    Ok(state.watcher.snapshot())
+}
+
 /// Current watcher status: watched folders, pending files, recent events.
 #[tauri::command]
 fn watch_status(state: State<AppState>) -> WatchSnapshot {
@@ -3723,6 +3823,39 @@ fn archive_stats(state: State<AppState>, top: Option<u32>) -> Result<ArchiveStat
         .map_err(|e| e.to_string())
 }
 
+/// The "what's new since your last visit" boot digest (the M7
+/// follow-up): new messages per source plus finished or failed imports
+/// and syncs since the previous read — what changed while the app was
+/// closed or hidden in the tray. One call is one visit: the digest is
+/// derived through a pool read connection (WAL — it never queues
+/// behind writes), and the new last-visit timestamp is recorded on the
+/// write queue, so each read advances the cutoff exactly once and the
+/// next call counts only newer changes. The first visit (no stored
+/// record) is a quiet, deliberately empty digest. The last-visit
+/// record lives in the personal vault's own `archive_meta`, so it is
+/// vault-scoped — switching or restoring a vault never crosses digests
+/// (which is also why this reads the personal pool directly, not the
+/// demo-routed active vault). Message counts mean newly archived
+/// messages: re-imports that dedup keep their original `created_at`
+/// and never count twice. If the advance write fails the call errors
+/// and the old cutoff stays — the next call would repeat the same
+/// digest, never lose one.
+#[tauri::command]
+async fn whats_new_digest(state: State<'_, AppState>) -> Result<WhatsNewDigest, String> {
+    let pool = Arc::clone(&state.pool);
+    tauri::async_runtime::spawn_blocking(move || {
+        let now = Utc::now().to_rfc3339();
+        let digest = pool
+            .with_read(|s| whats_new::read_digest(s, &now))
+            .map_err(|e| e.to_string())?;
+        pool.submit_write(move |s| whats_new::record_last_visit(s, &now))
+            .map_err(|e| e.to_string())?;
+        Ok(digest)
+    })
+    .await
+    .map_err(|e| format!("what's-new task failed: {e}"))?
+}
+
 /// The built-in demo messages as an ingest source: the tiny
 /// whole-archive helper stays for tests; the job path streams (the demo
 /// set is six messages, so both paths are equally bounded in practice).
@@ -4145,6 +4278,7 @@ pub fn run() {
             sync_schedule_set,
             watch_add_folder,
             watch_remove_folder,
+            watch_retry,
             watch_status,
             oauth_gmail_login,
             oauth_status,
@@ -4160,6 +4294,7 @@ pub fn run() {
             preview_import,
             stats,
             archive_stats,
+            whats_new_digest,
             export_search,
             export_search_v2,
             export_chat,
@@ -4167,6 +4302,9 @@ pub fn run() {
             message_detail_v2,
             conversation_context_v2,
             list_import_scopes_v2,
+            saved_searches_list,
+            saved_searches_save,
+            saved_searches_delete,
             export_messages_v2,
             save_text,
             media_reconcile,

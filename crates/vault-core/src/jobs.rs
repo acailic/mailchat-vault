@@ -219,7 +219,15 @@ impl From<Error> for JobError {
                     message: e.to_string(),
                 }
             }
-            Error::Settings(_) | Error::Embedding(_) | Error::Jobs(_) => JobError::Invalid {
+            Error::Settings(_) | Error::Embedding(_) | Error::Jobs(_) | Error::SavedSearch(_) => {
+                JobError::Invalid {
+                    message: e.to_string(),
+                }
+            }
+            Error::PersonNotFound(_)
+            | Error::InvalidPersonInput(_)
+            | Error::IdentityLinkConflict { .. }
+            | Error::IdentityLinkNotFound(_) => JobError::Invalid {
                 message: e.to_string(),
             },
             Error::OAuth(_) => JobError::Network {
