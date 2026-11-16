@@ -510,6 +510,31 @@ describe("copy text", () => {
     const future = messageToText({ ...detail, time_confidence: "some_future_token" });
     expect(future).toContain("(some_future_token)");
   });
+
+  it("Signal media renders like email attachments: stored, missing, unaccounted", () => {
+    // Signal-shaped v2 detail attachments (M4.3 parity): a stored
+    // entry carries the real size, a missing one and an unaccounted
+    // array's single honest row carry 0 — same lines, same honesty.
+    const text = messageToText({
+      ...detail,
+      source_label: "signal",
+      attachments: [
+        {
+          name: "signal-2023-11-01-110050.jpg",
+          kind: "image",
+          size: 48_213,
+          available: true,
+          path: "media/fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210.jpg",
+        },
+        { name: "gone.jpg", kind: "image", size: 0, available: false, path: null },
+        { name: "signal-2024-03-05-091241.pdf", kind: "document", size: 0, available: false, path: null },
+      ],
+    });
+    expect(text).toContain("Attachments:");
+    expect(text).toContain("signal-2023-11-01-110050.jpg [image] (available, 48213 bytes)");
+    expect(text).toContain("gone.jpg [image] (not preserved, 0 bytes)");
+    expect(text).toContain("signal-2024-03-05-091241.pdf [document] (not preserved, 0 bytes)");
+  });
 });
 
 describe("reading-pane context model", () => {
