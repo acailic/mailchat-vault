@@ -172,4 +172,18 @@ pub enum Error {
     InsufficientSpace { needed: u64, available: u64 },
     #[error("migration failure injected at {0}")]
     MigrationFault(&'static str),
+    #[error("person not found: {0}")]
+    PersonNotFound(String),
+    #[error("invalid person input: {0}")]
+    InvalidPersonInput(String),
+    #[error("identity link conflict: {source_instance_id}:{anchor_kind}:{anchor_value} is already linked to person {owner_name} ({owner_id}); unlink it there first")]
+    IdentityLinkConflict {
+        source_instance_id: String,
+        anchor_kind: String,
+        anchor_value: String,
+        owner_id: String,
+        owner_name: String,
+    },
+    #[error("identity link not found: {0}")]
+    IdentityLinkNotFound(String),
 }
