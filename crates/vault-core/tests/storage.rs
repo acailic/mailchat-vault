@@ -4,6 +4,7 @@ use vault_core::query::SearchQuery;
 use vault_core::search::build_match_query;
 use vault_core::storage::{
     ConnectorIdentity, MailInsertOutcome, NewSourceInstance, Occurrence, Storage,
+    SUPPORTED_SCHEMA_VERSION,
 };
 
 fn msg(external_id: &str, author: &str, body: &str) -> NewMessage {
@@ -29,11 +30,11 @@ fn migrations_apply_and_are_idempotent() {
     let db = dir.path().join("vault.db");
 
     let s = Storage::open(&db).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 19);
+    assert_eq!(s.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
 
     // Reopening the same file applies nothing new and keeps the data.
     let s2 = Storage::open(&db).unwrap();
-    assert_eq!(s2.schema_version().unwrap(), 19);
+    assert_eq!(s2.schema_version().unwrap(), SUPPORTED_SCHEMA_VERSION);
     s.insert_message(&msg("a", "x", "hello vault")).unwrap();
     assert_eq!(s2.stats().unwrap().total, 1);
 }
