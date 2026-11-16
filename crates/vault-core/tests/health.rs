@@ -6,9 +6,9 @@
 
 use vault_core::bounded::BoundedOutcome;
 use vault_core::health::{
-    import_source_records, media_verification, record_import_attempt,
-    record_media_verification, ImportAttempt, ImportCounts, MediaVerificationSummary,
-    SourceImportRecord, IMPORTS_KEY, MEDIA_VERIFICATION_KEY,
+    import_source_records, media_verification, record_import_attempt, record_media_verification,
+    ImportAttempt, ImportCounts, MediaVerificationSummary, SourceImportRecord, IMPORTS_KEY,
+    MEDIA_VERIFICATION_KEY,
 };
 use vault_core::ingest::IngestSummary;
 use vault_core::object_store::ReconcileReport;
@@ -59,7 +59,8 @@ fn media_verification_summary_round_trips_and_overwrites() {
 
     // A malformed stored record must not take the panel down: it reads
     // as not checked, and the next finished verification overwrites it.
-    s.set_archive_meta(MEDIA_VERIFICATION_KEY, "not json").unwrap();
+    s.set_archive_meta(MEDIA_VERIFICATION_KEY, "not json")
+        .unwrap();
     assert!(media_verification(&s).unwrap().is_none());
     record_media_verification(&s, &first).unwrap();
     assert_eq!(media_verification(&s).unwrap(), Some(first));
@@ -275,7 +276,10 @@ fn failed_attempt_leaves_the_previous_success_time_intact() {
     .unwrap();
     let record = &import_source_records(&s).unwrap()[0];
     assert_eq!(record.last_attempt_at, "2026-11-03T12:00:00Z");
-    assert!(matches!(record.last_attempt, ImportAttempt::Cancelled { .. }));
+    assert!(matches!(
+        record.last_attempt,
+        ImportAttempt::Cancelled { .. }
+    ));
     assert_eq!(
         record.last_success.as_ref().unwrap().at,
         "2026-11-01T10:00:00Z"

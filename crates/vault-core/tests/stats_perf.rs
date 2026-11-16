@@ -73,6 +73,7 @@ fn fixture() -> Storage {
         };
         msgs.push(NewMessage {
             source: source.into(),
+            source_label: String::new(),
             external_id: format!("gen-{i}"),
             channel: if source == "mbox" || source.starts_with("imap:") {
                 "email"

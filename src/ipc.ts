@@ -234,6 +234,80 @@ export function lastBackup(): Promise<LastBackupView | null> {
   return invoke<LastBackupView | null>("last_backup");
 }
 
+// ---------------------------------------------------------------------------
+// Archive health evidence (persisted, read-only)
+// ---------------------------------------------------------------------------
+
+/** Mirrors the `last_media_verification` command's record: when the
+ *  media store was last reconciled and the coverage counts that pass
+ *  saw. Counts only — the live `mediaReconcile` report stays the full
+ *  enumeration. */
+export interface MediaVerificationSummary {
+  /** RFC 3339 UTC — when the reconciliation finished. */
+  checked_at: string;
+  objects: number;
+  referenced: number;
+  /** Referenced digests with no object in the store (external damage). */
+  missing: number;
+  /** Stored objects nothing references. */
+  orphans: number;
+  /** Objects whose content hash ≠ their name digest. */
+  corrupt: number;
+  stale_staging: number;
+  foreign: number;
+}
+
+/** One import run's counts: seen === inserted + skipped + failed. */
+export interface ImportCounts {
+  seen: number;
+  inserted: number;
+  skipped: number;
+  /** Items that failed to parse; a finished run with failed > 0 is a
+   *  partial import. */
+  failed: number;
+}
+
+/** The terminal outcome of one import attempt (mirrors the backend's
+ *  tagged enum). */
+export type ImportAttempt =
+  | { outcome: "succeeded"; counts: ImportCounts }
+  | { outcome: "cancelled"; counts: ImportCounts }
+  | { outcome: "failed"; error: string };
+
+/** The last run that drove a source to completion. */
+export interface ImportSuccess {
+  /** RFC 3339 UTC — when that run finished. */
+  at: string;
+  counts: ImportCounts;
+}
+
+/** One import source's persisted last-import evidence: last attempt
+ *  (any outcome) kept distinct from last success, so a failed or
+ *  cancelled recent attempt never reads as a successful refresh nor
+ *  overwrites the recorded success time. */
+export interface SourceImportRecord {
+  /** The import's dedup namespace. */
+  source: string;
+  /** RFC 3339 UTC — when the last attempt finished. */
+  last_attempt_at: string;
+  last_attempt: ImportAttempt;
+  /** null until a run completes on this source. */
+  last_success: ImportSuccess | null;
+}
+
+/** The persisted media verification summary of the personal vault.
+ *  `null` is the explicit not-checked answer — no reconciliation has
+ *  finished (or the stored record is unreadable). */
+export function lastMediaVerification(): Promise<MediaVerificationSummary | null> {
+  return invoke<MediaVerificationSummary | null>("last_media_verification");
+}
+
+/** Every import source's last-import evidence (sorted by source).
+ *  Empty when no import has finished. */
+export function lastImports(): Promise<SourceImportRecord[]> {
+  return invoke<SourceImportRecord[]>("last_imports");
+}
+
 /** Explicitly forget one previous-vault slot. */
 export function recoveryForget(slotId: string): Promise<void> {
   return invoke<void>("recovery_forget", { slotId });
