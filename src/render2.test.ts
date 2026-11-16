@@ -175,6 +175,47 @@ describe("flat results", () => {
     expect(el.querySelector(".badge.conflict")?.textContent).toBe("revisions");
   });
 
+  it("Signal media badges read the same counts as email attachments", () => {
+    // The badge is source-agnostic: a Signal row whose raw_json media
+    // pass stored one of two attachments, one whose array the pass did
+    // not account for (one honest unavailable row), and one fully
+    // preserved render exactly the email/WhatsApp badges (M4.3 parity).
+    const el = document.createElement("div");
+    renderFlatResults(el, {
+      hits: [
+        hit({
+          source_label: "signal",
+          attachment_count: 2,
+          available_attachment_count: 1,
+        }),
+        hit({
+          source_label: "signal",
+          attachment_count: 1,
+          available_attachment_count: 0,
+        }),
+        hit({
+          source_label: "signal",
+          attachment_count: 3,
+          available_attachment_count: 3,
+        }),
+      ],
+      activeIndex: -1,
+      selectedId: null,
+      selection: new Set(),
+      terms: [],
+      onOpen: () => {},
+      onToggleSelect: () => {},
+    });
+    const badges = [...el.querySelectorAll(".badge.attachments")] as HTMLElement[];
+    expect(badges.length).toBe(3);
+    expect(badges[0].textContent).toBe("1 of 2 files kept");
+    expect(badges[0].getAttribute("aria-label")).toBe("attachments: 1 of 2");
+    expect(badges[0].title).toBe("2 attachment references, 1 preserved");
+    expect(badges[1].textContent).toBe("0 of 1 files kept");
+    expect(badges[2].textContent).toBe("3 files");
+    expect(badges[2].title).toBe("3 attachments");
+  });
+
   it("unknown time never renders a fabricated timestamp", () => {
     expect(timeLabel(hit({ sent_at: null, time_confidence: "missing" }))).toBe("unknown time");
     expect(timeLabel(hit({ time_confidence: "legacy_assumed" }))).toContain("(assumed)");
