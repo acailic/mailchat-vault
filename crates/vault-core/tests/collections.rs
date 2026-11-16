@@ -79,7 +79,10 @@ fn collections_create_rename_delete_and_list() {
     assert!(s.rename_collection(&old_id, " ").is_err());
 
     // Listing is oldest first.
-    assert_eq!(names(&s.list_collections().unwrap()), ["Apartment renovation", "Taxes 2026"]);
+    assert_eq!(
+        names(&s.list_collections().unwrap()),
+        ["Apartment renovation", "Taxes 2026"]
+    );
 
     // Delete removes the collection (and only it); a second delete is
     // a no-op.
@@ -95,14 +98,19 @@ fn one_message_joins_collections_across_sources_without_duplicating_content() {
     let mail = inserted_id(&s, &msg("email-a", "m1", "quote for the tiles"));
     let chat = inserted_id(
         &s,
-        &chat_msg("telegram-export", "424242/8", "painter confirmed for monday"),
+        &chat_msg(
+            "telegram-export",
+            "424242/8",
+            "painter confirmed for monday",
+        ),
     );
     let archive_total = s.stats().unwrap().total;
 
     let renovation = s.create_collection("Apartment renovation").unwrap();
     let quotes = s.create_collection("Quotes").unwrap();
     assert_eq!(
-        s.add_collection_members(&renovation.id, &[mail, chat]).unwrap(),
+        s.add_collection_members(&renovation.id, &[mail, chat])
+            .unwrap(),
         2
     );
     assert_eq!(s.add_collection_members(&quotes.id, &[mail]).unwrap(), 1);
@@ -143,7 +151,10 @@ fn one_message_joins_collections_across_sources_without_duplicating_content() {
     assert_eq!(chat_row.source_label.as_deref(), Some("telegram-export"));
     let conversation_id = chat_row.conversation_id.clone();
     assert!(conversation_id.is_some());
-    assert_eq!(chat_row.conversation_label.as_deref(), Some("renovation crew"));
+    assert_eq!(
+        chat_row.conversation_label.as_deref(),
+        Some("renovation crew")
+    );
 
     // A member can be removed from one collection while the other — and
     // the archive row — keep it.
@@ -170,13 +181,21 @@ fn membership_adds_are_idempotent_and_refuse_unresolvable_references() {
     // A message that is not in the archive is refused, not stored as an
     // unavailable reference (absence surfaces only after the fact).
     let err = s.add_collection_members(&c.id, &[id, 999999]).unwrap_err();
-    assert!(matches!(err, vault_core::Error::InvalidCollection(_)), "{err}");
+    assert!(
+        matches!(err, vault_core::Error::InvalidCollection(_)),
+        "{err}"
+    );
     let detail = s.collection_detail(&c.id).unwrap().unwrap();
     assert_eq!(member_ids(&detail), vec![id], "refused batch added nothing");
 
     // Unknown collection ids are refused even for an empty batch.
-    let err = s.add_collection_members("no-such-collection", &[]).unwrap_err();
-    assert!(matches!(err, vault_core::Error::InvalidCollection(_)), "{err}");
+    let err = s
+        .add_collection_members("no-such-collection", &[])
+        .unwrap_err();
+    assert!(
+        matches!(err, vault_core::Error::InvalidCollection(_)),
+        "{err}"
+    );
 
     // Removing is idempotent: true once, then false.
     assert!(s.remove_collection_member(&c.id, id).unwrap());
@@ -200,8 +219,14 @@ fn collection_deletion_removes_organization_only() {
 
     // The archive is untouched: rows, bodies, and FTS all still there.
     assert_eq!(s.stats().unwrap().total, 2);
-    assert_eq!(s.get(mail).unwrap().unwrap().body, "the floor plan attached");
-    assert_eq!(s.get(chat).unwrap().unwrap().body, "carpenter starts tuesday");
+    assert_eq!(
+        s.get(mail).unwrap().unwrap().body,
+        "the floor plan attached"
+    );
+    assert_eq!(
+        s.get(chat).unwrap().unwrap().body,
+        "carpenter starts tuesday"
+    );
     assert_eq!(
         s.search_filtered("\"floor plan\"", None, None, None, false, 10)
             .unwrap()
@@ -242,7 +267,8 @@ fn reimport_of_an_archived_message_preserves_memberships() {
         assert!(detail.members[0].available);
     }
     assert_eq!(
-        s.list_collections().unwrap()
+        s.list_collections()
+            .unwrap()
             .iter()
             .map(|c| c.message_count)
             .collect::<Vec<_>>(),
@@ -260,7 +286,10 @@ fn reimport_of_an_archived_message_preserves_memberships() {
 /// message's row id.
 fn version17_db(db: &std::path::Path) -> i64 {
     let s = Storage::open(db).unwrap();
-    let id = inserted_id(&s, &msg("email-a", "pre-migration", "archived before collections"));
+    let id = inserted_id(
+        &s,
+        &msg("email-a", "pre-migration", "archived before collections"),
+    );
     drop(s);
 
     let conn = Connection::open(db).unwrap();
@@ -290,7 +319,10 @@ fn reopen_after_migration_keeps_the_archive_and_carries_organization_forward() {
     );
 
     // The upgraded schema is immediately functional.
-    let id = inserted_id(&s, &msg("email-a", "post-migration", "archived after the upgrade"));
+    let id = inserted_id(
+        &s,
+        &msg("email-a", "post-migration", "archived after the upgrade"),
+    );
     let renovation = s.create_collection("Apartment renovation").unwrap();
     s.add_collection_members(&renovation.id, &[id]).unwrap();
     let detail = s.collection_detail(&renovation.id).unwrap().unwrap();
@@ -328,7 +360,11 @@ fn an_absent_membership_message_surfaces_as_unavailable() {
     let detail = s.collection_detail(&c.id).unwrap().unwrap();
     assert_eq!(member_ids(&detail), vec![keep, lose], "membership stays");
 
-    let missing = detail.members.iter().find(|m| m.message_id == lose).unwrap();
+    let missing = detail
+        .members
+        .iter()
+        .find(|m| m.message_id == lose)
+        .unwrap();
     assert!(!missing.available);
     assert_eq!(missing.source_label, None);
     assert_eq!(missing.source_id, None);
@@ -338,7 +374,11 @@ fn an_absent_membership_message_surfaces_as_unavailable() {
     assert_eq!(missing.subject, None);
     assert_eq!(missing.sent_at, None);
 
-    let present = detail.members.iter().find(|m| m.message_id == keep).unwrap();
+    let present = detail
+        .members
+        .iter()
+        .find(|m| m.message_id == keep)
+        .unwrap();
     assert!(present.available);
     assert_eq!(present.source_label.as_deref(), Some("email-a"));
 
@@ -395,7 +435,8 @@ fn backup_restore_round_trips_memberships() {
         );
         let renovation = s.create_collection("Apartment renovation").unwrap();
         let quotes = s.create_collection("Quotes").unwrap();
-        s.add_collection_members(&renovation.id, &[mail, chat]).unwrap();
+        s.add_collection_members(&renovation.id, &[mail, chat])
+            .unwrap();
         s.add_collection_members(&quotes.id, &[mail]).unwrap();
     });
 
@@ -419,7 +460,8 @@ fn backup_restore_round_trips_memberships() {
     sb.with_storage(|s| {
         let listed = s.list_collections().unwrap();
         assert_eq!(listed.len(), 2);
-        s.rename_collection(&listed[1].id, "Renamed after backup").unwrap();
+        s.rename_collection(&listed[1].id, "Renamed after backup")
+            .unwrap();
         s.remove_collection_member(&listed[0].id, listed_members(s, &listed[0].id)[0])
             .unwrap();
         s.create_collection("Added after backup").unwrap();

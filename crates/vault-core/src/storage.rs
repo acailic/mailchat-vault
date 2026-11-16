@@ -3072,8 +3072,8 @@ impl Storage {
             "INSERT INTO collections (id, name) VALUES (?1, ?2)",
             params![id, name],
         )?;
-        let collection = collection_row(&tx, &id)?
-            .expect("just-inserted collection must read back");
+        let collection =
+            collection_row(&tx, &id)?.expect("just-inserted collection must read back");
         tx.commit()?;
         Ok(collection)
     }
@@ -3226,13 +3226,12 @@ impl Storage {
         }
         let mut added = 0u64;
         for &message_id in message_ids {
-            added += tx
-                .execute(
-                    "INSERT INTO collection_members (collection_id, message_id)
+            added += tx.execute(
+                "INSERT INTO collection_members (collection_id, message_id)
                      VALUES (?1, ?2)
                      ON CONFLICT (collection_id, message_id) DO NOTHING",
-                    params![id, message_id],
-                )? as u64;
+                params![id, message_id],
+            )? as u64;
         }
         if added > 0 {
             tx.execute(
@@ -4414,13 +4413,10 @@ fn ensure_collection_exists(conn: &Connection, id: &str) -> Result<()> {
         )
         .optional()?;
     if present.is_none() {
-        return Err(Error::InvalidCollection(format!(
-            "no collection {id}"
-        )));
+        return Err(Error::InvalidCollection(format!("no collection {id}")));
     }
     Ok(())
 }
-
 
 /// Filter SQL fragments (`AND ...` clauses referencing table aliases `m`
 /// and `si`) plus the bound values for them, shared by the page and count
