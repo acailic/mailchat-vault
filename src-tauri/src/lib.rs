@@ -1209,6 +1209,13 @@ fn save_text(path: String, contents: String) -> Result<(), String> {
 /// provider only when it is explicitly `true`. Without consent (the
 /// default, `None`/`false`) a network selection is downgraded to a fully
 /// local ask before any LLM object exists — see [`run_ask`].
+///
+/// `scope` optionally narrows the ask to the active workspace filters
+/// (canonical source ids, author, local date bounds with timezone,
+/// attachment state, import id, honesty filters). It is validated
+/// against the vault first; an invalid scope fails the command before
+/// any retrieval. `None` (or absent) asks over the entire archive, so
+/// existing callers keep working.
 #[tauri::command]
 fn llm_ask(
     state: State<AppState>,
@@ -1216,6 +1223,7 @@ fn llm_ask(
     limit: Option<u32>,
     provider: Option<String>,
     consent: Option<bool>,
+    scope: Option<search2::AskScope>,
 ) -> Result<AskOutcome, String> {
     let question = question.trim();
     if question.is_empty() {
@@ -1245,6 +1253,7 @@ fn llm_ask(
         selection,
         provider.is_some(),
         question,
+        scope,
         limit,
         summarize_top,
         today,
@@ -1262,6 +1271,13 @@ fn llm_ask(
 /// can go out and nothing leaves the machine without the user's agreement.
 /// A free function (not a command) so tests can drive it against a mock
 /// endpoint and prove the no-consent case makes zero network calls.
+///
+/// An optional workspace `scope` is validated *before* the gate — an
+/// invalid scope fails the ask with a validation error before any
+/// retrieval or network round trip — and then constrains both retrieval
+/// legs: the plan can only narrow it (intersected date bounds), never
+/// broaden it, and an empty date intersection yields no results without
+/// ever falling back to unscoped retrieval.
 #[allow(clippy::too_many_arguments)] // mirrors vault_core::llm::ask's step list
 fn run_ask(
     vault: &ActiveVault,
@@ -1269,11 +1285,23 @@ fn run_ask(
     selection: Selection,
     provider_requested: bool,
     question: &str,
+    scope: Option<search2::AskScope>,
     limit: u32,
     summarize_top: usize,
     today: chrono::NaiveDate,
     consent: bool,
 ) -> Result<AskOutcome, String> {
+    // Scope validation first: a malformed or unknown-referencing scope
+    // fails the command before anything else happens (local read only).
+    let scope = match scope {
+        Some(raw) => Some(
+            vault
+                .with_read(|s| search2::validate_ask_scope(s, &raw))
+                .map_err(|e| e.to_string())?,
+        ),
+        None => None,
+    };
+
     // AI-consent gate: without explicit consent a network selection
     // becomes local-only. (A local selection was already local; its note
     // explains why, unchanged from pre-M5 behavior.)
@@ -1317,10 +1345,20 @@ fn run_ask(
     };
     let (results, ranking) = {
         let fts_results = vault
-            .with_read(|s| llm::run_plan(s, &planned, limit))
+            .with_read(|s| llm::run_plan_scoped(s, &planned, scope.as_ref(), limit))
             .map_err(|e| e.to_string())?;
         let hybrid = vault
-            .with_read(|s| llm::rank_hybrid(s, embedder, question, &planned, &fts_results, limit))
+            .with_read(|s| {
+                llm::rank_hybrid_scoped(
+                    s,
+                    embedder,
+                    question,
+                    &planned,
+                    &fts_results,
+                    scope.as_ref(),
+                    limit,
+                )
+            })
             .map_err(|e| e.to_string())?;
         (hybrid.results, hybrid.ranking)
     };
@@ -4231,6 +4269,7 @@ mod tests {
             recorder_selection(base_url),
             true,
             "consent marker vault?",
+            None,
             50,
             8,
             ask_today(),
@@ -4281,6 +4320,7 @@ mod tests {
             recorder_selection(base_url),
             true,
             "consent marker vault?",
+            None,
             50,
             8,
             ask_today(),
@@ -4335,6 +4375,7 @@ mod tests {
             recorder_selection(base_url),
             true,
             "collect all consent links",
+            None,
             50,
             8,
             ask_today(),
@@ -4370,6 +4411,7 @@ mod tests {
             selection,
             true,
             "consent marker vault",
+            None,
             50,
             8,
             ask_today(),

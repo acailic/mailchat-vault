@@ -31,6 +31,7 @@
 //! instant are excluded from any bounded search (they have no position on
 //! the timeline) and sort last in unbounded browse.
 
+use chrono::NaiveDate;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -171,64 +172,9 @@ impl SearchArchiveRequest {
         source_ids.retain(|s| !s.is_empty());
         source_ids.dedup();
 
-        // An explicit request timezone wins. Otherwise the fallback walks
-        // the POSIX TZ environment variable before the OS-configured zone:
-        // chrono's `Local` (the v1 filter path) resolves day bounds in TZ
-        // when it is set, while iana-time-zone reads only /etc/localtime
-        // and /etc/timezone — so skipping TZ made v2 silently disagree
-        // with both v1 and the webview (whose Intl timezone follows TZ)
-        // on any machine where TZ overrides the system zone. A TZ value
-        // that is not a named zone (e.g. a path or a POSIX spec string)
-        // falls through to the OS zone rather than erroring the search.
-        let tz_label = if !self.timezone.trim().is_empty() {
-            self.timezone.trim().to_string()
-        } else {
-            match std::env::var("TZ")
-                .ok()
-                .map(|raw| raw.trim().to_string())
-                .filter(|raw| !raw.is_empty())
-            {
-                Some(raw) if raw.parse::<chrono_tz::Tz>().is_ok() => raw,
-                _ => iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string()),
-            }
-        };
-        let tz: chrono_tz::Tz = tz_label
-            .parse()
-            .map_err(|_| Error::InvalidQuery(format!("unknown timezone {tz_label:?}")))?;
-
-        let from = match &self.from_date {
-            None => None,
-            Some(raw) => {
-                let raw = raw.trim();
-                if raw.is_empty() {
-                    None
-                } else {
-                    Some(parse_day(raw).ok_or_else(|| {
-                        Error::InvalidQuery(format!("from_date must be YYYY-MM-DD, got {raw:?}"))
-                    })?)
-                }
-            }
-        };
-        let to = match &self.to_date {
-            None => None,
-            Some(raw) => {
-                let raw = raw.trim();
-                if raw.is_empty() {
-                    None
-                } else {
-                    Some(parse_day(raw).ok_or_else(|| {
-                        Error::InvalidQuery(format!("to_date must be YYYY-MM-DD, got {raw:?}"))
-                    })?)
-                }
-            }
-        };
-        if let (Some(from), Some(to)) = (from, to) {
-            if from > to {
-                return Err(Error::InvalidQuery(format!(
-                    "reversed date bounds: from_date {from} is after to_date {to}"
-                )));
-            }
-        }
+        let tz = resolve_timezone(&self.timezone)?;
+        let (from_instant, to_instant_exclusive) =
+            resolve_day_bounds(&tz, self.from_date.as_deref(), self.to_date.as_deref())?;
 
         Ok(NormalizedSearch {
             text: self.text.trim().to_string(),
@@ -246,28 +192,8 @@ impl SearchArchiveRequest {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
             author: self.author.trim().to_string(),
-            // Inclusive whole local days: from local midnight of the from
-            // day to (exclusive) local midnight of the day after to.
-            from_instant: match from {
-                None => None,
-                Some(day) => Some(day_instant_utc(&tz, day)?),
-            },
-            to_instant_exclusive: match to {
-                None => None,
-                Some(day) => {
-                    // Keep the bound inside year 9999: instants format as
-                    // fixed `%Y` so text comparison stays time order.
-                    let max_day =
-                        chrono::NaiveDate::from_ymd_opt(9999, 12, 31).expect("valid date");
-                    let next = day
-                        .checked_add_days(chrono::Days::new(1))
-                        .filter(|next| *next <= max_day)
-                        .ok_or_else(|| {
-                            Error::InvalidDate(format!("to_date out of range: {day}"))
-                        })?;
-                    Some(day_instant_utc(&tz, next)?)
-                }
-            },
+            from_instant,
+            to_instant_exclusive,
             has_attachment: self.has_attachment,
             time_assumed: self.time_assumed,
             grouping_unverified: self.grouping_unverified,
@@ -277,6 +203,81 @@ impl SearchArchiveRequest {
             offset: self.offset.unwrap_or(0).min(MAX_OFFSET),
         })
     }
+}
+
+/// Resolve the timezone a request's day bounds are interpreted in. An
+/// explicit label wins. Otherwise the fallback walks the POSIX TZ
+/// environment variable before the OS-configured zone: chrono's `Local`
+/// (the v1 filter path) resolves day bounds in TZ when it is set, while
+/// iana-time-zone reads only /etc/localtime and /etc/timezone — so
+/// skipping TZ made v2 silently disagree with both v1 and the webview
+/// (whose Intl timezone follows TZ) on any machine where TZ overrides
+/// the system zone. A TZ value that is not a named zone (e.g. a path or
+/// a POSIX spec string) falls through to the OS zone rather than
+/// erroring the search.
+fn resolve_timezone(label: &str) -> Result<chrono_tz::Tz> {
+    let tz_label = if !label.trim().is_empty() {
+        label.trim().to_string()
+    } else {
+        match std::env::var("TZ")
+            .ok()
+            .map(|raw| raw.trim().to_string())
+            .filter(|raw| !raw.is_empty())
+        {
+            Some(raw) if raw.parse::<chrono_tz::Tz>().is_ok() => raw,
+            _ => iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string()),
+        }
+    };
+    tz_label
+        .parse()
+        .map_err(|_| Error::InvalidQuery(format!("unknown timezone {tz_label:?}")))
+}
+
+/// Resolve optional `YYYY-MM-DD` day bounds to the UTC instants the
+/// storage layer binds: inclusive whole local days in `tz` — from local
+/// midnight of the from day to (exclusive) local midnight of the day
+/// after to. Rejects malformed days and reversed bounds.
+fn resolve_day_bounds(
+    tz: &chrono_tz::Tz,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> Result<(Option<String>, Option<String>)> {
+    let parse = |raw: Option<&str>, field: &str| -> Result<Option<NaiveDate>> {
+        match raw.map(str::trim) {
+            None | Some("") => Ok(None),
+            Some(raw) => Some(parse_day(raw).ok_or_else(|| {
+                Error::InvalidQuery(format!("{field} must be YYYY-MM-DD, got {raw:?}"))
+            }))
+            .transpose(),
+        }
+    };
+    let from = parse(from, "from_date")?;
+    let to = parse(to, "to_date")?;
+    if let (Some(from), Some(to)) = (from, to) {
+        if from > to {
+            return Err(Error::InvalidQuery(format!(
+                "reversed date bounds: from_date {from} is after to_date {to}"
+            )));
+        }
+    }
+    let from_instant = match from {
+        None => None,
+        Some(day) => Some(day_instant_utc(tz, day)?),
+    };
+    let to_instant_exclusive = match to {
+        None => None,
+        Some(day) => {
+            // Keep the bound inside year 9999: instants format as
+            // fixed `%Y` so text comparison stays time order.
+            let max_day = chrono::NaiveDate::from_ymd_opt(9999, 12, 31).expect("valid date");
+            let next = day
+                .checked_add_days(chrono::Days::new(1))
+                .filter(|next| *next <= max_day)
+                .ok_or_else(|| Error::InvalidDate(format!("to_date out of range: {day}")))?;
+            Some(day_instant_utc(tz, next)?)
+        }
+    };
+    Ok((from_instant, to_instant_exclusive))
 }
 
 /// The clamped/validated form of a [`SearchArchiveRequest`].
@@ -296,6 +297,150 @@ pub struct NormalizedSearch {
     pub sort: SearchSort,
     pub limit: u32,
     pub offset: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Ask workspace scope (Ask retrieval inside the active filters)
+// ---------------------------------------------------------------------------
+
+/// The active workspace scope one Ask carries: the non-text filters of a
+/// [`SearchArchiveRequest`] as a snapshot taken when the ask starts.
+/// Optional on the ask command — `None`/absent means the entire archive,
+/// so existing callers keep working unchanged. All fields are optional
+/// and conjunctive; an all-empty scope still means "entire archive".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AskScope {
+    /// Source instance ids (canonical UUIDs); empty = all sources.
+    #[serde(default)]
+    pub source_ids: Vec<String>,
+    /// Restrict to messages first observed by one bounded import run.
+    #[serde(default)]
+    pub import_job_id: Option<String>,
+    /// Case-insensitive (Unicode-folded) substring on the author.
+    #[serde(default)]
+    pub author: Option<String>,
+    /// Inclusive lower day bound (`YYYY-MM-DD`) in `timezone`.
+    #[serde(default)]
+    pub from_date: Option<String>,
+    /// Inclusive upper day bound (`YYYY-MM-DD`) in `timezone`.
+    #[serde(default)]
+    pub to_date: Option<String>,
+    /// IANA timezone the day bounds are interpreted in; `None`/empty =
+    /// the search default (TZ variable, else OS zone, else UTC).
+    #[serde(default)]
+    pub timezone: Option<String>,
+    /// `Some(true)` = only messages with attachment references,
+    /// `Some(false)` = only without, `None` = no filter.
+    #[serde(default)]
+    pub has_attachment: Option<bool>,
+    /// The "dates assumed" honesty filter (see
+    /// [`SearchArchiveRequest::time_assumed`]).
+    #[serde(default)]
+    pub time_assumed: Option<bool>,
+    /// The grouping honesty filter (see
+    /// [`SearchArchiveRequest::grouping_unverified`]).
+    #[serde(default)]
+    pub grouping_unverified: Option<bool>,
+    /// The byte-preservation honesty filter (see
+    /// [`SearchArchiveRequest::files_missing`]).
+    #[serde(default)]
+    pub files_missing: Option<bool>,
+}
+
+/// An [`AskScope`] validated against one vault: source ids verified to
+/// exist, day bounds resolved to UTC instants in the scope's timezone.
+/// This is the form the retrieval legs constrain both FTS and vector
+/// candidates with — the ask pipeline treats it as read-only, and no
+/// later step (including the model's query plan) may broaden it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAskScope {
+    pub source_ids: Vec<String>,
+    pub import_job_id: Option<String>,
+    pub author: Option<String>,
+    pub from_instant: Option<String>,
+    pub to_instant_exclusive: Option<String>,
+    pub has_attachment: Option<bool>,
+    pub time_assumed: Option<bool>,
+    pub grouping_unverified: Option<bool>,
+    pub files_missing: Option<bool>,
+}
+
+impl ResolvedAskScope {
+    /// The scope as one v2 filter set, reusing [`search_archive`]'s
+    /// predicate SQL verbatim (source/import/author/date/attachment/
+    /// honesty) so the ask legs and plain search filter identically.
+    pub(crate) fn v2_filters(&self) -> V2Filters {
+        V2Filters::build(&NormalizedSearch {
+            text: String::new(),
+            source_ids: self.source_ids.clone(),
+            conversation_id: None,
+            import_job_id: self.import_job_id.clone(),
+            author: self.author.clone().unwrap_or_default(),
+            from_instant: self.from_instant.clone(),
+            to_instant_exclusive: self.to_instant_exclusive.clone(),
+            has_attachment: self.has_attachment,
+            time_assumed: self.time_assumed,
+            grouping_unverified: self.grouping_unverified,
+            files_missing: self.files_missing,
+            sort: SearchSort::Relevance,
+            limit: DEFAULT_LIMIT,
+            offset: 0,
+        })
+    }
+}
+
+/// Validate an [`AskScope`] against the vault: every source id must name
+/// an existing source instance, day bounds must be well formed (and in
+/// order), and the timezone must parse. An invalid scope fails the ask
+/// *before* any retrieval — a malformed scope is never silently ignored,
+/// because that would mean asking over more than the user narrowed to.
+pub fn validate_ask_scope(storage: &Storage, scope: &AskScope) -> Result<ResolvedAskScope> {
+    let mut source_ids: Vec<String> = scope
+        .source_ids
+        .iter()
+        .map(|s| s.trim().to_string())
+        .collect();
+    source_ids.retain(|s| !s.is_empty());
+    source_ids.dedup();
+    if !source_ids.is_empty() {
+        let known: std::collections::HashSet<String> = storage
+            .list_source_instances()?
+            .into_iter()
+            .map(|instance| instance.id)
+            .collect();
+        let unknown: Vec<&str> = source_ids
+            .iter()
+            .filter(|id| !known.contains(*id))
+            .map(String::as_str)
+            .collect();
+        if !unknown.is_empty() {
+            return Err(Error::InvalidQuery(format!(
+                "unknown source id(s): {}",
+                unknown.join(", ")
+            )));
+        }
+    }
+    let tz = resolve_timezone(scope.timezone.as_deref().unwrap_or(""))?;
+    let (from_instant, to_instant_exclusive) =
+        resolve_day_bounds(&tz, scope.from_date.as_deref(), scope.to_date.as_deref())?;
+    let trimmed = |value: &Option<String>| {
+        value
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    Ok(ResolvedAskScope {
+        source_ids,
+        import_job_id: trimmed(&scope.import_job_id),
+        author: trimmed(&scope.author),
+        from_instant,
+        to_instant_exclusive,
+        has_attachment: scope.has_attachment,
+        time_assumed: scope.time_assumed,
+        grouping_unverified: scope.grouping_unverified,
+        files_missing: scope.files_missing,
+    })
 }
 
 /// One flat search result row: identity, metadata, bounded snippet, and
@@ -1101,14 +1246,15 @@ fn decode_entity(bytes: &[u8]) -> Option<(char, usize)> {
 
 /// `AND …` fragments over aliases `m` (archive_messages), `si`
 /// (source_instances), bound in order. Shared by the count and the page
-/// statements of one search and the all-results export.
-struct V2Filters {
-    sql: String,
-    values: Vec<SqlValue>,
+/// statements of one search, the all-results export, and the Ask legs'
+/// scope filters.
+pub(crate) struct V2Filters {
+    pub(crate) sql: String,
+    pub(crate) values: Vec<SqlValue>,
 }
 
 impl V2Filters {
-    fn build(req: &NormalizedSearch) -> Result<Self> {
+    fn build(req: &NormalizedSearch) -> Self {
         let mut sql = String::new();
         let mut values: Vec<SqlValue> = Vec::new();
 
@@ -1171,10 +1317,10 @@ impl V2Filters {
                 sql.push_str(predicate);
             }
         }
-        Ok(Self { sql, values })
+        Self { sql, values }
     }
 
-    fn bind_values(&self) -> Vec<SqlValue> {
+    pub(crate) fn bind_values(&self) -> Vec<SqlValue> {
         self.values.clone()
     }
 }
@@ -1242,7 +1388,7 @@ impl Storage {
     /// page carries that snapshot's [`archive_revision`](Self::archive_revision).
     pub fn search_archive(&self, request: &SearchArchiveRequest) -> Result<SearchArchivePage> {
         let req = request.normalize()?;
-        let filters = V2Filters::build(&req)?;
+        let filters = V2Filters::build(&req);
         // Empty text browses newest regardless of the requested sort.
         let newest_order = req.text.is_empty() || req.sort == SearchSort::Newest;
         let order = archive_order(&req);
@@ -1403,7 +1549,7 @@ impl Storage {
         sink: &mut dyn FnMut(&Message) -> Result<()>,
     ) -> Result<u64> {
         let req = request.normalize()?;
-        let filters = V2Filters::build(&req)?;
+        let filters = V2Filters::build(&req);
         let order = archive_order(&req);
         let columns = format!(
             "m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
@@ -3095,6 +3241,102 @@ mod tests {
         assert!(text.contains("(some_future_token)"), "{text}");
         assert!(text.contains("Conversation: oldgroup\n"), "{text}");
         assert!(!text.contains("()"), "{text}");
+    }
+
+    // --------------------------------------------------------------
+    // Ask workspace scope validation
+    // --------------------------------------------------------------
+
+    fn canonical_id(s: &Storage, namespace: &str) -> String {
+        s.connection()
+            .query_row(
+                "SELECT id FROM source_instances WHERE legacy_namespace = ?1",
+                [namespace],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn ask_scope_validation_accepts_existing_source_ids() {
+        let s = seeded();
+        let scope = validate_ask_scope(
+            &s,
+            &AskScope {
+                source_ids: vec![canonical_id(&s, "demo")],
+                ..AskScope::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(scope.source_ids.len(), 1);
+        assert_eq!(scope.author, None);
+        assert_eq!(scope.from_instant, None);
+    }
+
+    #[test]
+    fn ask_scope_validation_rejects_unknown_source_ids() {
+        let s = seeded();
+        let err = validate_ask_scope(
+            &s,
+            &AskScope {
+                source_ids: vec!["no-such-canonical-id".into()],
+                ..AskScope::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown source id"), "{err}");
+    }
+
+    #[test]
+    fn ask_scope_validation_rejects_malformed_dates_timezones_and_order() {
+        let s = seeded();
+        let with_dates = |from: Option<&str>, to: Option<&str>, tz: Option<&str>| AskScope {
+            from_date: from.map(str::to_string),
+            to_date: to.map(str::to_string),
+            timezone: tz.map(str::to_string),
+            ..AskScope::default()
+        };
+        // Malformed days.
+        let err = validate_ask_scope(&s, &with_dates(Some("2026-13-01"), None, None)).unwrap_err();
+        assert!(err.to_string().contains("from_date"), "{err}");
+        let err = validate_ask_scope(&s, &with_dates(None, Some("October"), None)).unwrap_err();
+        assert!(err.to_string().contains("to_date"), "{err}");
+        // Reversed bounds.
+        let err = validate_ask_scope(
+            &s,
+            &with_dates(Some("2026-02-01"), Some("2026-01-01"), None),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("reversed"), "{err}");
+        // Unknown timezone.
+        let err = validate_ask_scope(
+            &s,
+            &with_dates(Some("2026-01-01"), None, Some("Mars/Olympus")),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown timezone"), "{err}");
+    }
+
+    #[test]
+    fn ask_scope_validation_resolves_day_bounds_in_the_scope_timezone() {
+        let s = seeded();
+        // UTC+14: local midnight of Oct 5 is Oct 4 10:00 UTC; the whole
+        // local day Oct 5 ends at Oct 5 10:00 UTC.
+        let scope = validate_ask_scope(
+            &s,
+            &AskScope {
+                from_date: Some("2026-10-05".into()),
+                to_date: Some("2026-10-05".into()),
+                timezone: Some("Pacific/Kiritimati".into()),
+                ..AskScope::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(scope.from_instant.as_deref(), Some("2026-10-04T10:00:00Z"));
+        assert_eq!(
+            scope.to_instant_exclusive.as_deref(),
+            Some("2026-10-05T10:00:00Z")
+        );
     }
 }
 
