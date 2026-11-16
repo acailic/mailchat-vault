@@ -4,11 +4,13 @@ import {
   consentPromptText,
   consentStatusLine,
   describePlan,
+  evidenceScopeCaption,
   linksToJson,
   linksToText,
   privacyNote,
   privacyNoteFor,
   splitCitations,
+  unsupportedCitationNote,
   type AskOutcome,
   type LlmStatus,
 } from "./llmview";
@@ -224,6 +226,27 @@ describe("splitCitations", () => {
       { cite: 10 },
       " c",
     ]);
+  });
+});
+
+describe("evidenceScopeCaption", () => {
+  it("pluralizes the message count", () => {
+    expect(evidenceScopeCaption(1)).toBe("Based on 1 matching message");
+    expect(evidenceScopeCaption(6)).toBe("Based on 6 matching messages");
+  });
+});
+
+describe("unsupportedCitationNote", () => {
+  it("names a single unsupported marker", () => {
+    expect(unsupportedCitationNote([3])).toBe(
+      "Citation [3] has no matching source and stays plain text.",
+    );
+  });
+
+  it("names several unsupported markers", () => {
+    expect(unsupportedCitationNote([3, 9])).toBe(
+      "Citations [3], [9] have no matching source and stay plain text.",
+    );
   });
 });
 
