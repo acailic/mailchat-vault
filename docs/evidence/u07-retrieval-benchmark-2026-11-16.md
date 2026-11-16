@@ -15,7 +15,8 @@ The U07 instrument (`tests/retrieval`: 36 labeled questions — 30 answerable + 
 Linux x86_64 container, 16 CPUs, rustc 1.100.0 (stable), LTO release profile. Actions is down for billing (the standing [CI cutoff](../testing.md#continuous-integration)), so the record is a local run per the interim protocol. The host image ships no C toolchain; the build used a portable `zig cc` (glibc 2.36 target) as compiler/linker for both the harness workspace and `vault-core` — no product code was modified by that setup.
 
 - `cargo test -p vault-core --test retrieval_eval` (the in-CI ranking-floors companion): **6/6 passed**.
-- Harness workspace: `cargo fmt --all -- --check` clean; `cargo clippy --all-targets -- -D warnings` clean.
+- Harness workspace: `cargo fmt --all -- --check` clean; `cargo clippy --all-targets -- -D warnings` clean; `cargo build --release --locked` clean (the refreshed lockfile is consistent).
+- Root `cargo fmt --all -- --check` clean; `cargo test -p vault-core --test stats_perf --test collections` pass (1 + 8) after fixing a pre-existing duplicate-field compile error in `stats_perf.rs` that had broken `cargo test -p vault-core` on the baseline; `cargo clippy -p vault-core --all-targets -- -D warnings` still fails on pre-existing drift in `tests/collections.rs` (unused binding, dead field — untouched per scope, fails identically on the baseline). The full `cargo test -p vault-core` and the npm legs were not run on this machine within this slice's window; they are unchanged by it (no product or frontend code touched).
 - `vault-retrieval bench --count 10000 --gate` (seed 42): **gate OK**; corpus 4536 mbox / 3036 whatsapp / 2428 telegram in 8.5 s, embeddings 0.3 s.
 - `vault-retrieval bench --count 50000` (seed 42, informational): reproduces the baseline's scale finding.
 
@@ -40,5 +41,7 @@ Unchanged from the baseline record and now wired into the [support matrix](../su
 ## What remains (follow-ups, not this slice)
 
 - `tests/perf/Cargo.toml` still declares `UNLICENSED` (support-matrix caveat updated to name only that file).
+- `tests/retrieval/Cargo.lock` had drifted stale against vault-core's dependency graph (missing packages; unnoticed because the workflow does not build `--locked`) — refreshed here and verified consistent; `tests/perf/Cargo.lock` likely has the same drift.
+- Pre-existing `cargo clippy -p vault-core --all-targets -- -D warnings` failures in `tests/collections.rs` (see the verification record).
 - Retrieval-improvement work (learned embedder, query expansion, deeper vector candidates) stays out of scope by the benchmark's own design and must re-run the harness as acceptance evidence.
 - The hybrid leg's 6/6 no-answer false confidence is a standing finding: any UI copy change that downgrades it to an empty state is a product decision, tracked by the open [#189](https://github.com/acailic/mailchat-vault/issues/189) track.
