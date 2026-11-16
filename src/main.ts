@@ -44,10 +44,12 @@ import {
   consentPromptText,
   consentStatusLine,
   describePlan,
+  evidenceScopeCaption,
   linksToJson,
   linksToText,
   privacyNoteFor,
   splitCitations,
+  unsupportedCitationNote,
   type AskOutcome,
   type CollectedLink,
   type LlmStatus,
@@ -224,6 +226,8 @@ const askStatus = document.querySelector<HTMLElement>("#ask-status")!;
 const askSummary = document.querySelector<HTMLElement>("#ask-summary")!;
 const llmNote = document.querySelector<HTMLElement>("#llm-note")!;
 const answerBox = document.querySelector<HTMLElement>("#answer")!;
+const answerScope = document.querySelector<HTMLElement>("#answer-scope")!;
+const answerUnsupported = document.querySelector<HTMLElement>("#answer-unsupported")!;
 const askNotes = document.querySelector<HTMLElement>("#ask-notes")!;
 const askResults = document.querySelector<HTMLUListElement>("#ask-results")!;
 const askCollected = document.querySelector<HTMLElement>("#ask-collected")!;
@@ -430,13 +434,23 @@ function renderAskResults(list: HTMLUListElement, messages: Message[]): void {
  * citation `n` opens result `n - 1` — the archived message the summary
  * was built from — in its conversation context. Markers beyond `maxCite`
  * (the summary window: the model never saw those rows) and out-of-range
- * markers (a row not in the results) stay plain text. */
-function renderAnswerLinked(answer: string, sources: Message[], maxCite: number): void {
+ * markers (a row not in the results) stay plain text, never dead links;
+ * the unsupported marker numbers are returned so the caller can show the
+ * visible unsupported-citation note. */
+function renderAnswerLinked(answer: string, sources: Message[], maxCite: number): number[] {
+  const unsupported: number[] = [];
   answerBox.replaceChildren(
     ...splitCitations(answer).map((part) => {
       if (typeof part !== "string") {
         const target = part.cite <= maxCite ? sources[part.cite - 1] : undefined;
-        if (!target) return document.createTextNode(`[${part.cite}]`);
+        if (!target) {
+          if (!unsupported.includes(part.cite)) unsupported.push(part.cite);
+          const span = document.createElement("span");
+          span.className = "citation-unsupported";
+          span.title = `Citation [${part.cite}] has no matching source in this ask's results`;
+          span.textContent = `[${part.cite}]`;
+          return span;
+        }
         const cite = document.createElement("button");
         cite.type = "button";
         cite.className = "citation";
@@ -449,13 +463,23 @@ function renderAnswerLinked(answer: string, sources: Message[], maxCite: number)
       return document.createTextNode(part);
     }),
   );
+  return unsupported;
 }
 
 function renderAsk(outcome: AskOutcome): void {
   const sources = outcome.results as Message[];
   if (outcome.answer) {
-    renderAnswerLinked(outcome.answer, sources, llmStatus?.summarize_top ?? 8);
+    const maxCite = llmStatus?.summarize_top ?? 8;
+    const unsupported = renderAnswerLinked(outcome.answer, sources, maxCite);
     answerBox.hidden = false;
+    // Evidence honesty (M5.3): every answer states how many matching
+    // messages it is based on — the summarize step sends only the top
+    // rows, so the used count is capped by the summary window — and
+    // markers that cannot be linked get a visible note.
+    answerScope.textContent = evidenceScopeCaption(Math.min(sources.length, maxCite));
+    answerScope.hidden = false;
+    answerUnsupported.textContent = unsupportedCitationNote(unsupported);
+    answerUnsupported.hidden = unsupported.length === 0;
     // The answer is the point of the ask: when it lands below the ask
     // panel's fold (tall consent/provider controls above it) it must be
     // brought into view, or it arrives invisibly. Same nearest-block
@@ -463,6 +487,8 @@ function renderAsk(outcome: AskOutcome): void {
     answerBox.scrollIntoView({ block: "nearest" });
   } else {
     answerBox.hidden = true;
+    answerScope.hidden = true;
+    answerUnsupported.hidden = true;
   }
   askNotes.textContent = outcome.notes.join(" · ");
   askNotes.hidden = outcome.notes.length === 0;
