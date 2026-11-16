@@ -150,6 +150,8 @@ pub enum Error {
     InvalidServerName(#[from] rustls::pki_types::InvalidDnsNameError),
     #[error("invalid query: {0}")]
     InvalidQuery(String),
+    #[error("saved search error: {0}")]
+    SavedSearch(String),
     #[error("embedding error: {0}")]
     Embedding(String),
     #[error("jobs error: {0}")]

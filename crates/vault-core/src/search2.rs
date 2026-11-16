@@ -658,6 +658,7 @@ impl From<Error> for AppError {
             Error::InvalidQuery(message) | Error::InvalidExport(message) => {
                 AppError::invalid_input(message.clone(), None)
             }
+            Error::SavedSearch(message) => AppError::invalid_input(message.clone(), None),
             Error::InvalidDate(message) => {
                 AppError::invalid_input(message.clone(), Some("from_date/to_date"))
             }

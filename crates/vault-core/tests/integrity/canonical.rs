@@ -309,7 +309,7 @@ fn old_schema_fixture_migrates_without_loss() {
     assert_eq!(legacy.len(), 6);
 
     let s = Storage::open(&db).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 17);
+    assert_eq!(s.schema_version().unwrap(), 18);
     assert_eq!(
         raw(&db)
             .prepare("SELECT version FROM schema_migrations ORDER BY version")
@@ -842,7 +842,7 @@ fn v3_database_upgrades_and_carries_embeddings_to_canonical() {
     }
 
     let s = Storage::open(&db).unwrap();
-    assert_eq!(s.schema_version().unwrap(), 17);
+    assert_eq!(s.schema_version().unwrap(), 18);
     let counts = s.embedding_counts("test-model").unwrap();
     assert_eq!(counts.embedded, 1, "the v3 vector survives the migration");
     assert_eq!(counts.messages, 1, "the legacy row migrated");
