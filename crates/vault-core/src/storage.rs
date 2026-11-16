@@ -1666,6 +1666,37 @@ impl Storage {
         require_link: bool,
         limit: u32,
     ) -> Result<Vec<Message>> {
+        self.search_filtered_scoped(
+            match_query,
+            date_from,
+            date_to,
+            from_filter,
+            require_link,
+            None,
+            limit,
+        )
+    }
+
+    /// [`Storage::search_filtered`] plus an optional validated Ask
+    /// workspace scope ([`crate::search2::ResolvedAskScope`]).
+    ///
+    /// The scope can only narrow: its date bounds are intersected with
+    /// the plan's (later lower bound, earlier upper bound — an empty
+    /// intersection returns no rows, never an unscoped fallback), its
+    /// author filter applies conjunctively with `from_filter`, and its
+    /// source/import/attachment/honesty filters reuse the v2 search
+    /// predicate SQL so plain search and Ask filter identically.
+    #[allow(clippy::too_many_arguments)] // mirrors `search_filtered`'s parameter list + the scope
+    pub fn search_filtered_scoped(
+        &self,
+        match_query: &str,
+        date_from: Option<&str>,
+        date_to: Option<&str>,
+        from_filter: Option<&str>,
+        require_link: bool,
+        scope: Option<&crate::search2::ResolvedAskScope>,
+        limit: u32,
+    ) -> Result<Vec<Message>> {
         let from = match parse_date_bound(date_from, "date_from")? {
             Some(day) => Some(crate::query::local_day_instant_utc(day)?),
             None => None,
@@ -1683,6 +1714,27 @@ impl Storage {
             }
             None => None,
         };
+        let Some((from, to_exclusive)) = intersected_bounds(from, to_exclusive, scope) else {
+            return Ok(Vec::new());
+        };
+        // The scope predicates reference the same `m`/`si` aliases the
+        // base query binds (plus `c` for the grouping filter, joined only
+        // under a scope).
+        let (extra_sql, extra_values) = scope_filter_sql(scope);
+        let scope_join = if scope.is_some() {
+            "LEFT JOIN conversations AS c ON c.id = m.conversation_id"
+        } else {
+            ""
+        };
+        let mut bind: Vec<rusqlite::types::Value> = vec![
+            SqlValue::Text(match_query.to_string()),
+            from.into(),
+            to_exclusive.into(),
+            from_filter.map(str::to_string).into(),
+            (require_link as i64).into(),
+        ];
+        bind.extend(extra_values);
+        bind.push((limit as i64).into());
         let mut stmt = self.conn.prepare(&format!(
             r#"
             SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id,
@@ -1691,28 +1743,20 @@ impl Storage {
             FROM archive_fts
             JOIN archive_messages AS m ON m.id = archive_fts.rowid
             JOIN source_instances AS si ON si.id = m.source_instance_id
+            {scope_join}
             WHERE archive_fts MATCH ?1
               AND (?2 IS NULL OR m.sent_instant >= ?2)
               AND (?3 IS NULL OR m.sent_instant < ?3)
               AND ((?2 IS NULL AND ?3 IS NULL) OR m.sent_instant IS NOT NULL)
               AND (?4 IS NULL OR m.author LIKE '%' || ?4 || '%')
               AND (?5 = 0 OR m.body LIKE '%http%://%')
+              {extra_sql}
             ORDER BY bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, {BM25_WEIGHT_SUBJECT}), m.id
-            LIMIT ?6
-            "#,
+            LIMIT ?
+            "#
         ))?;
         let rows = stmt
-            .query_map(
-                params![
-                    match_query,
-                    from,
-                    to_exclusive,
-                    from_filter,
-                    require_link,
-                    limit
-                ],
-                message_from_row,
-            )?
+            .query_map(rusqlite::params_from_iter(bind), message_from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
     }
@@ -2582,6 +2626,37 @@ impl Storage {
         require_link: bool,
         limit: u32,
     ) -> Result<Vec<VectorHit>> {
+        self.vector_scan_scoped(
+            model,
+            dim,
+            query,
+            date_from,
+            date_to,
+            from_filter,
+            require_link,
+            None,
+            limit,
+        )
+    }
+
+    /// [`Storage::vector_scan`] plus an optional validated Ask workspace
+    /// scope, applying exactly the filters the FTS leg applies (including
+    /// the date-bound intersection with the plan — see
+    /// [`Storage::search_filtered_scoped`]), so both hybrid legs always
+    /// filter identically.
+    #[allow(clippy::too_many_arguments)]
+    pub fn vector_scan_scoped(
+        &self,
+        model: &str,
+        dim: u16,
+        query: &[f32],
+        date_from: Option<&str>,
+        date_to: Option<&str>,
+        from_filter: Option<&str>,
+        require_link: bool,
+        scope: Option<&crate::search2::ResolvedAskScope>,
+        limit: u32,
+    ) -> Result<Vec<VectorHit>> {
         if query.len() != dim as usize {
             return Err(Error::Embedding(format!(
                 "query has {} floats, expected {dim}",
@@ -2604,44 +2679,59 @@ impl Storage {
             }
             None => None,
         };
+        let Some((from, to_exclusive)) = intersected_bounds(from, to_exclusive, scope) else {
+            return Ok(Vec::new());
+        };
 
         // Same bound-parameter shape as search_filtered: the date bounds
         // and sender/link filters are values, never spliced into the SQL
         // text. Without any filter the scan skips the messages join
         // entirely (the embedding table alone answers it); with one the
-        // join applies the same filters as the FTS leg.
-        let (sql, has_filters) =
-            if from.is_some() || to_exclusive.is_some() || from_filter.is_some() || require_link {
-                (
+        // join applies the same filters as the FTS leg — a scope adds the
+        // same v2 predicates (over `m`/`si`, plus the conversations join
+        // the grouping filter needs).
+        let has_filters = from.is_some()
+            || to_exclusive.is_some()
+            || from_filter.is_some()
+            || require_link
+            || scope.is_some();
+        let (sql, bind): (String, Vec<rusqlite::types::Value>) = if has_filters {
+            let (extra_sql, mut bind) = scope_filter_sql(scope);
+            bind.insert(0, SqlValue::Text(model.to_string()));
+            bind.insert(1, from.into());
+            bind.insert(2, to_exclusive.into());
+            bind.insert(3, from_filter.map(str::to_string).into());
+            bind.insert(4, (require_link as i64).into());
+            let scope_joins = if scope.is_some() {
+                "JOIN source_instances AS si ON si.id = m.source_instance_id \
+                 LEFT JOIN conversations AS c ON c.id = m.conversation_id"
+            } else {
+                ""
+            };
+            (
+                format!(
                     "SELECT e.message_id, e.embedding
                  FROM message_embeddings AS e
                  JOIN archive_messages AS m ON m.id = e.message_id
+                 {scope_joins}
                  WHERE e.model = ?1
                    AND (?2 IS NULL OR m.sent_instant >= ?2)
                    AND (?3 IS NULL OR m.sent_instant < ?3)
                    AND ((?2 IS NULL AND ?3 IS NULL) OR m.sent_instant IS NOT NULL)
                    AND (?4 IS NULL OR m.author LIKE '%' || ?4 || '%')
-                   AND (?5 = 0 OR m.body LIKE '%http%://%')",
-                    true,
-                )
-            } else {
-                (
-                    "SELECT message_id, embedding FROM message_embeddings WHERE model = ?1",
-                    false,
-                )
-            };
-        let mut stmt = self.conn.prepare(sql)?;
-        let mut rows = if has_filters {
-            stmt.query(params![
-                model,
-                from,
-                to_exclusive,
-                from_filter,
-                require_link
-            ])?
+                   AND (?5 = 0 OR m.body LIKE '%http%://%')
+                   {extra_sql}"
+                ),
+                bind,
+            )
         } else {
-            stmt.query(params![model])?
+            (
+                "SELECT message_id, embedding FROM message_embeddings WHERE model = ?1".into(),
+                vec![SqlValue::Text(model.to_string())],
+            )
         };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(bind))?;
         let mut hits: Vec<VectorHit> = Vec::new();
         let quantized_query = crate::vector::quantize_query_i8(query);
         while let Some(row) = rows.next()? {
@@ -3806,6 +3896,53 @@ fn parse_date_bound(value: Option<&str>, field: &str) -> Result<Option<NaiveDate
     }
 }
 
+/// Intersect plan-level sent-date bounds (already resolved to UTC
+/// instant strings) with an optional validated Ask scope's bounds: the
+/// later lower bound and the earlier upper bound win, so the plan can
+/// only narrow the user's scope — never broaden it. `None` means the
+/// intersection is empty (no message can satisfy both); callers must
+/// then return zero results, never fall back to unscoped retrieval.
+///
+/// Both sides are RFC 3339 UTC strings in the fixed `%Y` format, so
+/// lexicographic comparison is chronological.
+fn intersected_bounds(
+    from: Option<String>,
+    to_exclusive: Option<String>,
+    scope: Option<&crate::search2::ResolvedAskScope>,
+) -> Option<(Option<String>, Option<String>)> {
+    let Some(scope) = scope else {
+        return Some((from, to_exclusive));
+    };
+    let from = match (from, scope.from_instant.clone()) {
+        (Some(plan), Some(scope)) => Some(plan.max(scope)),
+        (plan, scope) => plan.or(scope),
+    };
+    let to_exclusive = match (to_exclusive, scope.to_instant_exclusive.clone()) {
+        (Some(plan), Some(scope)) => Some(plan.min(scope)),
+        (plan, scope) => plan.or(scope),
+    };
+    match (&from, &to_exclusive) {
+        (Some(from), Some(to)) if from >= to => None,
+        _ => Some((from, to_exclusive)),
+    }
+}
+
+/// The v2 predicate SQL and bind values of an optional Ask scope, ready
+/// to append to a retrieval statement that binds the `m`/`si` aliases
+/// (plus `c`, which the caller joins under a scope). Reuses
+/// [`Storage::search_archive`]'s filter SQL verbatim.
+fn scope_filter_sql(
+    scope: Option<&crate::search2::ResolvedAskScope>,
+) -> (String, Vec<rusqlite::types::Value>) {
+    match scope {
+        None => (String::new(), Vec::new()),
+        Some(scope) => {
+            let crate::search2::V2Filters { sql, values } = scope.v2_filters();
+            (sql, values)
+        }
+    }
+}
+
 fn hit_from_row(row: &Row<'_>) -> rusqlite::Result<SearchHit> {
     Ok(SearchHit {
         message: message_from_row(row)?,
@@ -4726,6 +4863,188 @@ mod tests {
             .unwrap();
         assert_eq!(linked.len(), 1);
         assert_eq!(linked[0].message_id, 1);
+    }
+
+    #[test]
+    fn scoped_legs_apply_import_and_honesty_filters_identically() {
+        use crate::search2::{validate_ask_scope, AskScope};
+        use crate::vector::Embedder as _;
+        use std::collections::HashSet;
+
+        let s = Storage::open_in_memory().unwrap();
+        // imp-1: one message with a stored media reference, one plain;
+        // imp-2: one plain message plus one undated message whose media
+        // reference is a missing marker (assumed time + missing bytes).
+        let mut with_media = crate::message::NewMessage::new(
+            "legacy-scope",
+            "m1",
+            "ana",
+            "2026-05-01T00:00:00Z",
+            "alpha media body",
+        );
+        with_media.raw_json = r#"{"media":[{"sha256":"a","path":"media/a.jpg","name":"a.jpg","kind":"image","size":1}]}"#.to_string();
+        let plain = crate::message::NewMessage::new(
+            "legacy-scope",
+            "m2",
+            "ana",
+            "2026-05-02T00:00:00Z",
+            "alpha plain body",
+        );
+        let other = crate::message::NewMessage::new(
+            "legacy-scope",
+            "m3",
+            "bo",
+            "2026-05-03T00:00:00Z",
+            "alpha other body",
+        );
+        let mut undated_missing =
+            crate::message::NewMessage::new("legacy-scope", "m4", "bo", "", "alpha undated body");
+        undated_missing.raw_json =
+            r#"{"media":[{"name":"gone.pdf","kind":"document","missing":true,"reason":"not-in-export"}]}"#
+                .to_string();
+        s.commit_import_batch(
+            "imp-1",
+            "legacy-scope",
+            &[with_media, plain],
+            &[],
+            &[],
+            2,
+            true,
+        )
+        .unwrap();
+        s.commit_import_batch(
+            "imp-2",
+            "legacy-scope",
+            &[other, undated_missing],
+            &[],
+            &[],
+            2,
+            true,
+        )
+        .unwrap();
+
+        // Embed every message with the query text so cosine is maximal
+        // and vector-leg membership reflects only the filters.
+        let embedder = crate::vector::HashEmbedder;
+        let query_text = "alpha shared body";
+        let ids: Vec<(i64, Vec<f32>)> = s
+            .connection()
+            .prepare("SELECT id FROM archive_messages ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, i64>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+            .into_iter()
+            .map(|id| (id, embedder.embed(query_text)))
+            .collect();
+        s.embed_messages_batch(embedder.id(), embedder.dim(), &ids)
+            .unwrap();
+
+        let scopes = [
+            (
+                "import",
+                AskScope {
+                    import_job_id: Some("imp-1".into()),
+                    ..AskScope::default()
+                },
+            ),
+            (
+                "attachments",
+                AskScope {
+                    has_attachment: Some(true),
+                    ..AskScope::default()
+                },
+            ),
+            (
+                "no attachments",
+                AskScope {
+                    has_attachment: Some(false),
+                    ..AskScope::default()
+                },
+            ),
+            (
+                "assumed times",
+                AskScope {
+                    time_assumed: Some(true),
+                    ..AskScope::default()
+                },
+            ),
+            (
+                "exact times",
+                AskScope {
+                    time_assumed: Some(false),
+                    ..AskScope::default()
+                },
+            ),
+            (
+                "files missing",
+                AskScope {
+                    files_missing: Some(true),
+                    ..AskScope::default()
+                },
+            ),
+            (
+                "import ∩ attachments",
+                AskScope {
+                    import_job_id: Some("imp-1".into()),
+                    has_attachment: Some(true),
+                    ..AskScope::default()
+                },
+            ),
+        ];
+        for (name, scope) in scopes {
+            let resolved = validate_ask_scope(&s, &scope).unwrap();
+            let fts: HashSet<i64> = s
+                .search_filtered_scoped("alpha", None, None, None, false, Some(&resolved), 50)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.id)
+                .collect();
+            let vector: HashSet<i64> = s
+                .vector_scan_scoped(
+                    embedder.id(),
+                    embedder.dim(),
+                    &embedder.embed(query_text),
+                    None,
+                    None,
+                    None,
+                    false,
+                    Some(&resolved),
+                    50,
+                )
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.message_id)
+                .collect();
+            // Ground truth: plain v2 search with the same filters.
+            let request = crate::search2::SearchArchiveRequest {
+                text: "alpha".into(),
+                import_job_id: scope.import_job_id.clone(),
+                has_attachment: scope.has_attachment,
+                time_assumed: scope.time_assumed,
+                grouping_unverified: scope.grouping_unverified,
+                files_missing: scope.files_missing,
+                ..Default::default()
+            };
+            let archive: HashSet<i64> = s
+                .search_archive(&request)
+                .unwrap()
+                .hits
+                .into_iter()
+                .map(|hit| hit.id)
+                .collect();
+            // The legacy import path records every fixture stamp as
+            // assumed, so the "exact times" scope legitimately matches
+            // nothing — the legs must still agree on that (empty == empty).
+            let may_be_empty = name == "exact times";
+            assert!(
+                may_be_empty || !archive.is_empty(),
+                "fixture must match for {name}"
+            );
+            assert_eq!(fts, archive, "FTS leg diverged for {name}");
+            assert_eq!(vector, archive, "vector leg diverged for {name}");
+        }
     }
 }
 

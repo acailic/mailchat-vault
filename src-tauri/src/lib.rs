@@ -115,7 +115,6 @@
 //! hidden unreachable process can never exist). See `src/tray.rs`.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -150,6 +149,7 @@ use vault_core::search2::{
     SearchArchiveRequest, SelectionExportSummary, SelectionFormat,
 };
 use vault_core::settings::{self, Options, Settings, SETTINGS_VERSION};
+use vault_core::staged_write::{staged_write, staged_write_opt};
 use vault_core::stats::{ArchiveStats, DEFAULT_TOP};
 use vault_core::storage::{
     FailedItem, MediaMessageReference, RegisteredMediaObject, SourceInstance, Storage,
@@ -647,9 +647,12 @@ async fn media_reconcile_detail(
     .map_err(|e| e.to_string())?;
 
     // Resolution reads stored rows only: affected-message pages plus
-    // the unlinked-file registry's provenance.
+    // the unlinked-file registry's provenance. (The closure's return
+    // type is annotated like every other `with_read` call in this file:
+    // the `?` operators inside only bound the error type, they do not
+    // pin it, and the outer `map_err` needs it known.)
     ActiveVault::from(&state)
-        .with_read(|s| {
+        .with_read(|s| -> CoreResult<MediaReconcileDetail> {
             let registered: HashMap<String, RegisteredMediaObject> = s
                 .unlinked_media_objects()?
                 .into_iter()
@@ -1235,9 +1238,9 @@ async fn export_messages_v2(
     tauri::async_runtime::spawn_blocking(move || {
         vault
             .with_read(|s| -> CoreResult<SelectionExportSummary> {
-                let file = std::fs::File::create(&path).map_err(Error::from)?;
-                let mut out = BufWriter::new(file);
-                search2::export_selection(s, &ids, format, &mut out)
+                staged_write(Path::new(&path), |out| {
+                    search2::export_selection(s, &ids, format, out)
+                })
             })
             .map_err(AppError::from)
     })
@@ -1270,6 +1273,13 @@ fn save_text(path: String, contents: String) -> Result<(), String> {
 /// provider only when it is explicitly `true`. Without consent (the
 /// default, `None`/`false`) a network selection is downgraded to a fully
 /// local ask before any LLM object exists — see [`run_ask`].
+///
+/// `scope` optionally narrows the ask to the active workspace filters
+/// (canonical source ids, author, local date bounds with timezone,
+/// attachment state, import id, honesty filters). It is validated
+/// against the vault first; an invalid scope fails the command before
+/// any retrieval. `None` (or absent) asks over the entire archive, so
+/// existing callers keep working.
 #[tauri::command]
 fn llm_ask(
     state: State<AppState>,
@@ -1277,6 +1287,7 @@ fn llm_ask(
     limit: Option<u32>,
     provider: Option<String>,
     consent: Option<bool>,
+    scope: Option<search2::AskScope>,
 ) -> Result<AskOutcome, String> {
     let question = question.trim();
     if question.is_empty() {
@@ -1306,6 +1317,7 @@ fn llm_ask(
         selection,
         provider.is_some(),
         question,
+        scope,
         limit,
         summarize_top,
         today,
@@ -1323,6 +1335,13 @@ fn llm_ask(
 /// can go out and nothing leaves the machine without the user's agreement.
 /// A free function (not a command) so tests can drive it against a mock
 /// endpoint and prove the no-consent case makes zero network calls.
+///
+/// An optional workspace `scope` is validated *before* the gate — an
+/// invalid scope fails the ask with a validation error before any
+/// retrieval or network round trip — and then constrains both retrieval
+/// legs: the plan can only narrow it (intersected date bounds), never
+/// broaden it, and an empty date intersection yields no results without
+/// ever falling back to unscoped retrieval.
 #[allow(clippy::too_many_arguments)] // mirrors vault_core::llm::ask's step list
 fn run_ask(
     vault: &ActiveVault,
@@ -1330,11 +1349,23 @@ fn run_ask(
     selection: Selection,
     provider_requested: bool,
     question: &str,
+    scope: Option<search2::AskScope>,
     limit: u32,
     summarize_top: usize,
     today: chrono::NaiveDate,
     consent: bool,
 ) -> Result<AskOutcome, String> {
+    // Scope validation first: a malformed or unknown-referencing scope
+    // fails the command before anything else happens (local read only).
+    let scope = match scope {
+        Some(raw) => Some(
+            vault
+                .with_read(|s| search2::validate_ask_scope(s, &raw))
+                .map_err(|e| e.to_string())?,
+        ),
+        None => None,
+    };
+
     // AI-consent gate: without explicit consent a network selection
     // becomes local-only. (A local selection was already local; its note
     // explains why, unchanged from pre-M5 behavior.)
@@ -1378,10 +1409,20 @@ fn run_ask(
     };
     let (results, ranking) = {
         let fts_results = vault
-            .with_read(|s| llm::run_plan(s, &planned, limit))
+            .with_read(|s| llm::run_plan_scoped(s, &planned, scope.as_ref(), limit))
             .map_err(|e| e.to_string())?;
         let hybrid = vault
-            .with_read(|s| llm::rank_hybrid(s, embedder, question, &planned, &fts_results, limit))
+            .with_read(|s| {
+                llm::rank_hybrid_scoped(
+                    s,
+                    embedder,
+                    question,
+                    &planned,
+                    &fts_results,
+                    scope.as_ref(),
+                    limit,
+                )
+            })
             .map_err(|e| e.to_string())?;
         (hybrid.results, hybrid.ranking)
     };
@@ -3253,7 +3294,9 @@ fn job_cancel(state: State<AppState>, id: JobId) -> bool {
 /// only email-channel rows and reports the rest as `skipped`. Rows stream
 /// through a `BufWriter` (never all in memory) off the UI thread; since
 /// M2.1 the stream reads from a read connection, so imports and syncs
-/// keep committing while a large export writes.
+/// keep committing while a large export writes. The output is staged in
+/// a temp sibling of `path` and renamed into place only once complete —
+/// a failed export never truncates a previously valid file.
 #[tauri::command]
 async fn export_search(
     state: State<'_, AppState>,
@@ -3266,11 +3309,9 @@ async fn export_search(
     tauri::async_runtime::spawn_blocking(move || {
         vault
             .with_read(|s| -> CoreResult<ExportSummary> {
-                let file = std::fs::File::create(&path).map_err(Error::from)?;
-                let mut out = BufWriter::new(file);
-                let summary = export::export_search(s, &query, format, &mut out)
-                    .and_then(|s| out.flush().map(|_| s).map_err(Error::from))?;
-                Ok(summary)
+                staged_write(Path::new(&path), |out| {
+                    export::export_search(s, &query, format, out)
+                })
             })
             .map_err(|e: Error| e.to_string())
     })
@@ -3295,11 +3336,9 @@ async fn export_search_v2(
     tauri::async_runtime::spawn_blocking(move || {
         vault
             .with_read(|s| -> CoreResult<ExportSummary> {
-                let file = std::fs::File::create(&path).map_err(Error::from)?;
-                let mut out = BufWriter::new(file);
-                let summary = export::export_search_v2(s, &request, format, &mut out)?;
-                out.flush().map_err(Error::from)?;
-                Ok(summary)
+                staged_write(Path::new(&path), |out| {
+                    export::export_search_v2(s, &request, format, out)
+                })
             })
             .map_err(AppError::from)
     })
@@ -3324,14 +3363,15 @@ async fn export_chat(
             .with_read(|s| -> CoreResult<Option<ExportSummary>> {
                 // Existence is checked before the destination is touched: an
                 // unknown id (message deleted between list render and export
-                // click) must leave no file at the user-chosen path.
+                // click) must leave no file at the user-chosen path. The
+                // staged write re-checks through `export_chat` itself and
+                // declines to publish if the anchor vanished meanwhile.
                 if s.get(id)?.is_none() {
                     return Ok(None);
                 }
-                let file = std::fs::File::create(&path).map_err(Error::from)?;
-                let mut out = BufWriter::new(file);
-                export::export_chat(s, id, format, &mut out)
-                    .and_then(|s| out.flush().map(|_| s).map_err(Error::from))
+                staged_write_opt(Path::new(&path), |out| {
+                    export::export_chat(s, id, format, out)
+                })
             })
             .map_err(|e| e.to_string())
     })
@@ -4376,6 +4416,7 @@ mod tests {
             recorder_selection(base_url),
             true,
             "consent marker vault?",
+            None,
             50,
             8,
             ask_today(),
@@ -4426,6 +4467,7 @@ mod tests {
             recorder_selection(base_url),
             true,
             "consent marker vault?",
+            None,
             50,
             8,
             ask_today(),
@@ -4480,6 +4522,7 @@ mod tests {
             recorder_selection(base_url),
             true,
             "collect all consent links",
+            None,
             50,
             8,
             ask_today(),
@@ -4515,6 +4558,7 @@ mod tests {
             selection,
             true,
             "consent marker vault",
+            None,
             50,
             8,
             ask_today(),

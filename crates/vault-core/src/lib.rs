@@ -73,6 +73,10 @@
 //!   counts by source/day/chat/author).
 //! - [`export`]: export search results or whole chats to CSV / JSON Lines /
 //!   MBOX.
+//! - [`staged_write`]: staged file publication for exports — the export
+//!   streams into a private temp sibling of the destination and only a
+//!   fully written, flushed, fsynced file is renamed into place, so a
+//!   failed export never replaces a previously valid user file.
 //! - [`health`]: persisted archive-health evidence — the media
 //!   verification summary and per-import-source last-import records the
 //!   health overview reads (absent records read as not checked).
@@ -107,6 +111,7 @@ pub mod search;
 pub mod search2;
 pub mod settings;
 pub mod signal;
+pub mod staged_write;
 pub mod stats;
 pub mod storage;
 pub mod telegram;
