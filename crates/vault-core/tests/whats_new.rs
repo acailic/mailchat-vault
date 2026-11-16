@@ -90,10 +90,7 @@ fn counts_messages_archived_since_grouped_by_source() {
     assert_ne!(counts[0].source_id, counts[1].source_id);
 
     // Nothing newer than a future cutoff.
-    assert!(s
-        .messages_archived_since("2026-11-13 00:00:00")
-        .unwrap()
-        .is_empty());
+    assert!(s.messages_archived_since("2026-11-13 00:00:00").unwrap().is_empty());
 }
 
 #[test]
@@ -140,9 +137,7 @@ fn ledger_rows_since_are_strictly_newer_newest_first() {
 
     // The cutoff itself is excluded; rows newer than it come back
     // newest first.
-    let rows = s
-        .job_ledger_since("2026-11-10T10:00:00+00:00", 10)
-        .unwrap();
+    let rows = s.job_ledger_since("2026-11-10T10:00:00+00:00", 10).unwrap();
     assert_eq!(
         rows.iter().map(|r| r.job_id).collect::<Vec<_>>(),
         vec![3, 2],
@@ -150,18 +145,10 @@ fn ledger_rows_since_are_strictly_newer_newest_first() {
     );
 
     // The limit caps the read.
-    assert_eq!(s
-        .job_ledger_since("2026-11-01T00:00:00+00:00", 1)
-        .unwrap()
-        .len(), 1);
-    assert!(s
-        .job_ledger_since("2026-11-01T00:00:00+00:00", 0)
-        .unwrap()
-        .is_empty());
-    assert!(s
-        .job_ledger_since("2026-11-13T00:00:00+00:00", 10)
-        .unwrap()
-        .is_empty());
+    let limited = s.job_ledger_since("2026-11-01T00:00:00+00:00", 1).unwrap();
+    assert_eq!(limited.len(), 1);
+    assert!(s.job_ledger_since("2026-11-01T00:00:00+00:00", 0).unwrap().is_empty());
+    assert!(s.job_ledger_since("2026-11-13T00:00:00+00:00", 10).unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -318,11 +305,7 @@ fn digest_reports_new_messages_and_import_sync_jobs_since_the_visit() {
     let mut labels: Vec<_> = digest.new_messages.iter().map(|m| &m.label).collect();
     labels.sort();
     assert_eq!(labels, vec!["tg", "wa"]);
-    let wa = digest
-        .new_messages
-        .iter()
-        .find(|m| m.label == "wa")
-        .unwrap();
+    let wa = digest.new_messages.iter().find(|m| m.label == "wa").unwrap();
     assert_eq!(wa.count, 2, "the pre-visit message never counts");
 
     assert_eq!(
@@ -389,11 +372,8 @@ fn one_read_advances_the_cutoff_exactly_once() {
 #[test]
 fn a_malformed_timestamp_reads_as_first_visit_and_self_heals() {
     let s = storage();
-    s.set_archive_meta(
-        LAST_VISIT_KEY,
-        "{\"last_visit_at\":\"not a timestamp\"}",
-    )
-    .unwrap();
+    let junk = "{\"last_visit_at\":\"not a timestamp\"}";
+    s.set_archive_meta(LAST_VISIT_KEY, junk).unwrap();
     put(&s, "wa", "a1");
 
     let digest = whats_new::read_and_advance(&s, "2026-11-16T10:00:00+00:00").unwrap();

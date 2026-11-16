@@ -74,11 +74,7 @@ pub struct LastVisitRecord {
 pub fn sqlite_instant(rfc3339: &str) -> Option<String> {
     DateTime::parse_from_rfc3339(rfc3339)
         .ok()
-        .map(|at| {
-            at.with_timezone(&Utc)
-                .format("%Y-%m-%d %H:%M:%S")
-                .to_string()
-        })
+        .map(|at| at.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S").to_string())
 }
 
 /// Read the persisted last-visit record. `Ok(None)` when the digest
