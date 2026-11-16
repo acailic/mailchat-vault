@@ -47,6 +47,14 @@ pub struct SearchQuery {
     pub limit: u32,
     /// Page offset, clamped to `0..`.
     pub offset: u32,
+    /// Opaque keyset cursor from a previous page's `next_cursor`.
+    /// When set, the page starts strictly after the cursor row's sort
+    /// position instead of at `offset` (the cursor wins), so deep pages
+    /// cost the same as the first page. A malformed cursor — or one
+    /// issued under a different sort mode — is rejected with
+    /// `InvalidQuery`.
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 impl Default for SearchQuery {
@@ -59,6 +67,7 @@ impl Default for SearchQuery {
             to_date: String::new(),
             limit: DEFAULT_LIMIT,
             offset: 0,
+            cursor: None,
         }
     }
 }
@@ -108,7 +117,14 @@ pub struct SearchPage {
     /// Rows matching the query ignoring `limit`/`offset`.
     pub total: u64,
     pub limit: u32,
+    /// The page's `offset` for offset pages; `0` for cursor pages (the
+    /// cursor names the start; `next_cursor` continues the list).
     pub offset: u32,
+    /// Keyset cursor to the next page: the last row's sort position
+    /// under the query's order mode (browse or relevance). `None` when
+    /// this page reaches the end of the result set. Pass it back as the
+    /// query's `cursor` to page one deeper at first-page cost.
+    pub next_cursor: Option<String>,
 }
 
 /// A message together with its adjacent messages in the same chat thread.

@@ -364,7 +364,7 @@ impl CursorOrderMode {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Browse => "browse",
             Self::Newest => "newest",
@@ -413,7 +413,7 @@ pub enum SearchCursor {
 }
 
 impl SearchCursor {
-    fn mode(&self) -> CursorOrderMode {
+    pub(crate) fn mode(&self) -> CursorOrderMode {
         match self {
             Self::Browse { .. } => CursorOrderMode::Browse,
             Self::Newest { .. } => CursorOrderMode::Newest,
@@ -437,7 +437,7 @@ struct CursorWire {
 /// Cursor format version this build reads and writes.
 const CURSOR_VERSION: u32 = 1;
 
-fn encode_search_cursor(cursor: &SearchCursor) -> Result<String> {
+pub(crate) fn encode_search_cursor(cursor: &SearchCursor) -> Result<String> {
     let wire = match cursor {
         SearchCursor::Browse { sent, id } => CursorWire {
             v: CURSOR_VERSION,
@@ -468,8 +468,9 @@ fn encode_search_cursor(cursor: &SearchCursor) -> Result<String> {
 
 /// Parse and validate an incoming cursor string. Every failure is
 /// [`Error::InvalidQuery`] — a malformed cursor is never silently
-/// ignored (that would restart pagination mid-list).
-fn decode_search_cursor(raw: &str) -> Result<SearchCursor> {
+/// ignored (that would restart pagination mid-list). Shared by the v1
+/// and v2 search pages so both paths read the same wire form.
+pub(crate) fn decode_search_cursor(raw: &str) -> Result<SearchCursor> {
     let malformed = |detail: &str| Error::InvalidQuery(format!("malformed cursor: {detail}"));
     let json = CURSOR_BASE64
         .decode(raw.trim())
@@ -1610,8 +1611,8 @@ fn archive_order(req: &NormalizedSearch) -> String {
 /// The bm25 rank expression of the relevance order, as one fragment —
 /// the ORDER BY and the relevance keyset predicate must rank with
 /// exactly the same expression, or a cursor's bound rank would compare
-/// against a different ranking.
-fn bm25_rank_expr() -> String {
+/// against a different ranking. Shared with the v1 search page.
+pub(crate) fn bm25_rank_expr() -> String {
     format!(
         "bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, \
          {BM25_WEIGHT_SUBJECT})"
