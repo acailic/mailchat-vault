@@ -31,6 +31,8 @@
 //! instant are excluded from any bounded search (they have no position on
 //! the timeline) and sort last in unbounded browse.
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as CURSOR_BASE64;
+use base64::Engine;
 use chrono::NaiveDate;
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -128,8 +130,16 @@ pub struct SearchArchiveRequest {
     pub sort: SearchSort,
     /// Default 50, clamped to `1..=200`.
     pub limit: Option<u32>,
-    /// Clamped to `0..=1_000_000`.
+    /// Clamped to `0..=1_000_000`. Ignored when `cursor` is set (the
+    /// cursor wins and names the page start directly).
     pub offset: Option<u32>,
+    /// Opaque keyset cursor from a previous page's `next_cursor`.
+    /// When set, the page starts strictly after the cursor row's sort
+    /// position instead of at `offset`, so deep pages cost the same as
+    /// the first page. A malformed cursor — or one issued under a
+    /// different sort mode — is rejected with `InvalidQuery`.
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 impl Default for SearchArchiveRequest {
@@ -150,6 +160,7 @@ impl Default for SearchArchiveRequest {
             sort: SearchSort::Relevance,
             limit: Some(DEFAULT_LIMIT),
             offset: Some(0),
+            cursor: None,
         }
     }
 }
@@ -176,8 +187,28 @@ impl SearchArchiveRequest {
         let (from_instant, to_instant_exclusive) =
             resolve_day_bounds(&tz, self.from_date.as_deref(), self.to_date.as_deref())?;
 
+        let text = self.text.trim().to_string();
+        // A cursor is bound to the order mode it was issued under; a
+        // cursor from another mode positions a different sort and is
+        // rejected loudly, never silently reinterpreted.
+        let order_mode = CursorOrderMode::of(&text, self.sort);
+        let cursor = match &self.cursor {
+            None => None,
+            Some(raw) => {
+                let decoded = decode_search_cursor(raw)?;
+                if decoded.mode() != order_mode {
+                    return Err(Error::InvalidQuery(format!(
+                        "cursor was issued for {} order, not {} order",
+                        decoded.mode().as_str(),
+                        order_mode.as_str()
+                    )));
+                }
+                Some(decoded)
+            }
+        };
+
         Ok(NormalizedSearch {
-            text: self.text.trim().to_string(),
+            text,
             source_ids,
             conversation_id: self
                 .conversation_id
@@ -201,6 +232,7 @@ impl SearchArchiveRequest {
             sort: self.sort,
             limit: self.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT),
             offset: self.offset.unwrap_or(0).min(MAX_OFFSET),
+            cursor,
         })
     }
 }
@@ -297,6 +329,199 @@ pub struct NormalizedSearch {
     pub sort: SearchSort,
     pub limit: u32,
     pub offset: u32,
+    /// Validated keyset cursor; `None` pages by `offset`.
+    pub cursor: Option<SearchCursor>,
+}
+
+// ---------------------------------------------------------------------------
+// Keyset cursors (deep pages)
+// ---------------------------------------------------------------------------
+
+/// The effective order mode a page runs under — what a keyset cursor is
+/// bound to. Empty text browses newest regardless of the requested sort
+/// (that is `Browse`, distinct from a text query that explicitly chooses
+/// [`SearchSort::Newest`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorOrderMode {
+    /// Empty text: newest-first browse.
+    Browse,
+    /// Text query sorted newest.
+    Newest,
+    /// Text query sorted by relevance.
+    Relevance,
+}
+
+impl CursorOrderMode {
+    /// The order mode one request runs under. `text` is the trimmed
+    /// request text (empty browses newest regardless of `sort`).
+    fn of(text: &str, sort: SearchSort) -> Self {
+        if text.is_empty() {
+            Self::Browse
+        } else if sort == SearchSort::Newest {
+            Self::Newest
+        } else {
+            Self::Relevance
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Browse => "browse",
+            Self::Newest => "newest",
+            Self::Relevance => "relevance",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "browse" => Some(Self::Browse),
+            "newest" => Some(Self::Newest),
+            "relevance" => Some(Self::Relevance),
+            _ => None,
+        }
+    }
+}
+
+/// A validated keyset cursor: the last row's sort position (sort key
+/// plus message id) for one [`CursorOrderMode`]. The wire form is an
+/// opaque base64 string ([`encode_search_cursor`]); clients treat it as
+/// opaque and pass it back as `cursor`.
+///
+/// - `Browse`/`Newest` order by `sent_instant DESC, id DESC` with
+///   unknown instants last, so the cursor carries the instant (or the
+///   unknown flag) and the id. The unknown-instant flag keeps the
+///   compound predicate exact across the NULL boundary.
+/// - `Relevance` orders by the shared BM25F `bm25()` rank then
+///   ascending id, so the cursor carries the rank (as exact IEEE-754
+///   bit patterns — JSON float formatting never touches it) and the id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SearchCursor {
+    Browse {
+        /// The cursor row's resolved instant; `None` = unknown.
+        sent: Option<String>,
+        id: i64,
+    },
+    Newest {
+        sent: Option<String>,
+        id: i64,
+    },
+    Relevance {
+        /// `f64::to_bits` of the cursor row's bm25 rank.
+        rank_bits: u64,
+        id: i64,
+    },
+}
+
+impl SearchCursor {
+    pub(crate) fn mode(&self) -> CursorOrderMode {
+        match self {
+            Self::Browse { .. } => CursorOrderMode::Browse,
+            Self::Newest { .. } => CursorOrderMode::Newest,
+            Self::Relevance { .. } => CursorOrderMode::Relevance,
+        }
+    }
+}
+
+/// Wire form of a cursor (serialized to JSON, then base64). `v` guards
+/// future format changes; a cursor from an unknown version is malformed
+/// and rejected.
+#[derive(Serialize, Deserialize)]
+struct CursorWire {
+    v: u32,
+    mode: String,
+    sent: Option<String>,
+    rank_bits: Option<u64>,
+    id: i64,
+}
+
+/// Cursor format version this build reads and writes.
+const CURSOR_VERSION: u32 = 1;
+
+pub(crate) fn encode_search_cursor(cursor: &SearchCursor) -> Result<String> {
+    let wire = match cursor {
+        SearchCursor::Browse { sent, id } => CursorWire {
+            v: CURSOR_VERSION,
+            mode: CursorOrderMode::Browse.as_str().to_string(),
+            sent: sent.clone(),
+            rank_bits: None,
+            id: *id,
+        },
+        SearchCursor::Newest { sent, id } => CursorWire {
+            v: CURSOR_VERSION,
+            mode: CursorOrderMode::Newest.as_str().to_string(),
+            sent: sent.clone(),
+            rank_bits: None,
+            id: *id,
+        },
+        SearchCursor::Relevance { rank_bits, id } => CursorWire {
+            v: CURSOR_VERSION,
+            mode: CursorOrderMode::Relevance.as_str().to_string(),
+            sent: None,
+            rank_bits: Some(*rank_bits),
+            id: *id,
+        },
+    };
+    let json = serde_json::to_string(&wire)
+        .map_err(|err| Error::InvalidQuery(format!("malformed cursor: {err}")))?;
+    Ok(CURSOR_BASE64.encode(json))
+}
+
+/// Parse and validate an incoming cursor string. Every failure is
+/// [`Error::InvalidQuery`] — a malformed cursor is never silently
+/// ignored (that would restart pagination mid-list). Shared by the v1
+/// and v2 search pages so both paths read the same wire form.
+pub(crate) fn decode_search_cursor(raw: &str) -> Result<SearchCursor> {
+    let malformed = |detail: &str| Error::InvalidQuery(format!("malformed cursor: {detail}"));
+    let json = CURSOR_BASE64
+        .decode(raw.trim())
+        .map_err(|_| malformed("not valid cursor text"))?;
+    let wire: CursorWire = serde_json::from_slice(&json)
+        .map_err(|_| malformed("not valid cursor text"))?;
+    if wire.v != CURSOR_VERSION {
+        return Err(malformed("unknown cursor version"));
+    }
+    // Shape is mode-specific: newest/browse carry the instant (or the
+    // unknown flag), relevance carries the rank bits.
+    match CursorOrderMode::parse(&wire.mode) {
+        Some(CursorOrderMode::Browse) => match (&wire.sent, wire.rank_bits) {
+            (Some(sent), None) if !sent.is_empty() => Ok(SearchCursor::Browse {
+                sent: Some(sent.clone()),
+                id: wire.id,
+            }),
+            (None, None) => Ok(SearchCursor::Browse {
+                sent: None,
+                id: wire.id,
+            }),
+            _ => Err(malformed("browse/newest cursor must not carry a rank")),
+        },
+        Some(CursorOrderMode::Newest) => match (&wire.sent, wire.rank_bits) {
+            (Some(sent), None) if !sent.is_empty() => Ok(SearchCursor::Newest {
+                sent: Some(sent.clone()),
+                id: wire.id,
+            }),
+            (None, None) => Ok(SearchCursor::Newest {
+                sent: None,
+                id: wire.id,
+            }),
+            _ => Err(malformed("browse/newest cursor must not carry a rank")),
+        },
+        Some(CursorOrderMode::Relevance) => match (&wire.sent, wire.rank_bits) {
+            (None, Some(rank_bits)) => {
+                if f64::from_bits(rank_bits).is_finite() {
+                    Ok(SearchCursor::Relevance {
+                        rank_bits,
+                        id: wire.id,
+                    })
+                } else {
+                    Err(malformed("relevance cursor rank is not finite"))
+                }
+            }
+            _ => Err(malformed(
+                "relevance cursor must carry a rank and no instant",
+            )),
+        },
+        None => Err(malformed("unknown cursor order mode")),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +610,7 @@ impl ResolvedAskScope {
             sort: SearchSort::Relevance,
             limit: DEFAULT_LIMIT,
             offset: 0,
+            cursor: None,
         })
     }
 }
@@ -479,8 +705,15 @@ pub struct SearchArchivePage {
     pub hits: Vec<MessageSummary>,
     pub total: u64,
     pub limit: u32,
+    /// The page's `offset` for offset pages; `0` for cursor pages (the
+    /// cursor names the start; `next_cursor` continues the list).
     pub offset: u32,
     pub archive_revision: u64,
+    /// Keyset cursor to the next page: the last row's sort position
+    /// under the request's order mode. `None` when this page reaches
+    /// the end of the result set. Pass it back as the request's
+    /// `cursor` to page one deeper at first-page cost.
+    pub next_cursor: Option<String>,
 }
 
 /// One attachment/media reference on a message, with what the archive
@@ -1372,10 +1605,72 @@ fn archive_order(req: &NormalizedSearch) -> String {
     if req.text.is_empty() || req.sort == SearchSort::Newest {
         "(m.sent_instant IS NULL) ASC, m.sent_instant DESC, m.id DESC".to_string()
     } else {
-        format!(
-            "bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, \
-             {BM25_WEIGHT_SUBJECT}), m.id"
-        )
+        format!("{}, m.id", bm25_rank_expr())
+    }
+}
+
+/// The bm25 rank expression of the relevance order, as one fragment —
+/// the ORDER BY and the relevance keyset predicate must rank with
+/// exactly the same expression, or a cursor's bound rank would compare
+/// against a different ranking. Shared with the v1 search page.
+pub(crate) fn bm25_rank_expr() -> String {
+    format!(
+        "bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, \
+         {BM25_WEIGHT_SUBJECT})"
+    )
+}
+
+/// The keyset WHERE fragment (over alias `m`) that keeps only rows
+/// strictly **after** the cursor's sort position, plus its bound values
+/// in text order (empty pair when the request carries no cursor — the
+/// fragment is a leading ` AND …`, so offset paging SQL is unchanged).
+///
+/// The newest/browse form mirrors the ORDER BY
+/// `(sent_instant IS NULL) ASC, sent_instant DESC, id DESC` with unknown
+/// instants last: rows after a dated cursor row are the strictly older
+/// dated rows, every unknown-instant row (unknowns sort last), and the
+/// equal-instant rows past the cursor id; rows after an unknown-instant
+/// cursor row are only the lower-id unknown rows — the cursor's NULL
+/// flag keeps the compound predicate exact across the NULL boundary (a
+/// bare `sent_instant < NULL` never matches). The compound sent/id
+/// comparison follows the conversation_context precedent (this file's
+/// context paging). Relevance order is rank then ascending id, so rows
+/// after the cursor are strictly higher-ranked-or-equal with a higher
+/// id — the id disjunct carries tied bm25 scores.
+fn archive_keyset(req: &NormalizedSearch) -> (String, Vec<SqlValue>) {
+    match &req.cursor {
+        None => (String::new(), Vec::new()),
+        Some(SearchCursor::Browse { sent, id } | SearchCursor::Newest { sent, id }) => {
+            match sent {
+                Some(instant) => (
+                    " AND (m.sent_instant IS NULL \
+                       OR m.sent_instant < ? \
+                       OR (m.sent_instant = ? AND m.id < ?))"
+                        .to_string(),
+                    vec![
+                        SqlValue::from(instant.clone()),
+                        SqlValue::from(instant.clone()),
+                        SqlValue::Integer(*id),
+                    ],
+                ),
+                None => (
+                    " AND (m.sent_instant IS NULL AND m.id < ?)".to_string(),
+                    vec![SqlValue::Integer(*id)],
+                ),
+            }
+        }
+        Some(SearchCursor::Relevance { rank_bits, id }) => {
+            let rank = f64::from_bits(*rank_bits);
+            let expr = bm25_rank_expr();
+            (
+                format!(" AND ({expr} > ? OR ({expr} = ? AND m.id > ?))"),
+                vec![
+                    SqlValue::Real(rank),
+                    SqlValue::Real(rank),
+                    SqlValue::Integer(*id),
+                ],
+            )
+        }
     }
 }
 
@@ -1387,12 +1682,31 @@ impl Storage {
     /// Paged, filtered v2 search over the canonical store. Count and rows
     /// are read inside one deferred transaction (one snapshot), and the
     /// page carries that snapshot's [`archive_revision`](Self::archive_revision).
+    ///
+    /// Pages start at `offset`, or — when the request carries a
+    /// [`SearchCursor`] — strictly after the cursor row's sort position
+    /// (the cursor wins; see [`archive_keyset`]). Either way each page
+    /// probes one row past its size and reports the continuation as
+    /// `next_cursor`, so deep pages cost the same as the first page
+    /// instead of degrading linearly with offset.
     pub fn search_archive(&self, request: &SearchArchiveRequest) -> Result<SearchArchivePage> {
         let req = request.normalize()?;
         let filters = V2Filters::build(&req);
         // Empty text browses newest regardless of the requested sort.
         let newest_order = req.text.is_empty() || req.sort == SearchSort::Newest;
         let order = archive_order(&req);
+        let order_mode = CursorOrderMode::of(&req.text, req.sort);
+        let (keyset_sql, keyset_bind) = archive_keyset(&req);
+        // One row past the page detects a following page (the
+        // conversation_context has-more probe); the extra row never
+        // reaches the returned page.
+        let fetch = req.limit as i64 + 1;
+        let offset_paging = req.cursor.is_none();
+        let page_tail = if offset_paging {
+            "LIMIT ? OFFSET ?"
+        } else {
+            "LIMIT ?"
+        };
 
         let tx = self.conn.unchecked_transaction()?;
 
@@ -1421,6 +1735,12 @@ impl Storage {
             stmt.query_row(rusqlite::params_from_iter(bind), |row| row.get(0))?
         };
 
+        // Set by the winning branch when the probe row existed; drives
+        // `next_cursor`. The relevance branch also keeps the last row's
+        // bm25 rank (a summary does not carry it).
+        let mut has_more = false;
+        let mut last_rank: Option<f64> = None;
+
         let hits: Vec<MessageSummary> = if req.text.is_empty() {
             // Browse: newest first — resolved instant descending, then id
             // descending; unknown instants last, deterministically by id.
@@ -1431,22 +1751,27 @@ impl Storage {
             // pass (which strips that markup) needs enough left over to
             // fill BROWSE_SNIPPET_CHARS of actual text.
             let mut bind = filters.bind_values();
-            bind.push(SqlValue::Integer(req.limit as i64));
-            bind.push(SqlValue::Integer(req.offset as i64));
+            bind.extend(keyset_bind);
+            bind.push(SqlValue::Integer(fetch));
+            if offset_paging {
+                bind.push(SqlValue::Integer(req.offset as i64));
+            }
             let sql = format!(
                 "SELECT {SUMMARY_COLUMNS}, substr(m.body, 1, 4000) {SUMMARY_JOINS} \
-                 WHERE 1=1 {} \
+                 WHERE 1=1 {} {} \
                  ORDER BY {order} \
-                 LIMIT ? OFFSET ?",
-                filters.sql
+                 {page_tail}",
+                filters.sql, keyset_sql
             );
             let mut stmt = tx.prepare(&sql)?;
-            let rows: Vec<MessageSummary> = stmt
+            let mut rows: Vec<MessageSummary> = stmt
                 .query_map(rusqlite::params_from_iter(bind), |row| {
                     let raw: String = row.get(11)?;
                     summary_from_row(row, Some(browse_snippet(&raw)))
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
+            has_more = rows.len() > req.limit as usize;
+            rows.truncate(req.limit as usize);
             rows
         } else if newest_order {
             // Text query explicitly sorted newest: same order as browse,
@@ -1459,8 +1784,11 @@ impl Storage {
                 SqlValue::from(crate::search::build_match_query(&req.text)),
             ];
             bind.extend(filters.bind_values());
-            bind.push(SqlValue::Integer(req.limit as i64));
-            bind.push(SqlValue::Integer(req.offset as i64));
+            bind.extend(keyset_bind);
+            bind.push(SqlValue::Integer(fetch));
+            if offset_paging {
+                bind.push(SqlValue::Integer(req.offset as i64));
+            }
             let sql = format!(
                 "SELECT {SUMMARY_COLUMNS}, \
                  snippet(archive_fts, 0, ?1, ?2, '…', 16) \
@@ -1468,13 +1796,13 @@ impl Storage {
                  JOIN archive_messages AS m ON m.id = archive_fts.rowid \
                  JOIN source_instances AS si ON si.id = m.source_instance_id \
                  LEFT JOIN conversations AS c ON c.id = m.conversation_id \
-                 WHERE archive_fts MATCH ?3 {} \
+                 WHERE archive_fts MATCH ?3 {} {} \
                  ORDER BY {order} \
-                 LIMIT ? OFFSET ?",
-                filters.sql
+                 {page_tail}",
+                filters.sql, keyset_sql
             );
             let mut stmt = tx.prepare(&sql)?;
-            let rows: Vec<MessageSummary> = stmt
+            let mut rows: Vec<MessageSummary> = stmt
                 .query_map(rusqlite::params_from_iter(bind), |row| {
                     let raw: String = row.get(11)?;
                     summary_from_row(
@@ -1486,46 +1814,91 @@ impl Storage {
                     )
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
+            has_more = rows.len() > req.limit as usize;
+            rows.truncate(req.limit as usize);
             rows
         } else {
             // Relevance: the shared BM25F weights (subject boosted over
             // body/author — the same consts the storage.rs ranking sites
             // use), then ascending id — the stable flat order. Bind order
             // follows the SQL text: the two snippet markers, the MATCH
-            // expression, the filters, then LIMIT/OFFSET.
+            // expression, the filters, the keyset values, then the page
+            // tail. The trailing column is the row's bm25 rank — the
+            // sort position `next_cursor` must carry (a summary does not
+            // expose it).
             let mut bind = vec![
                 SqlValue::from(crate::query::SNIPPET_OPEN_MARK.to_string()),
                 SqlValue::from(crate::query::SNIPPET_CLOSE_MARK.to_string()),
                 SqlValue::from(crate::search::build_match_query(&req.text)),
             ];
             bind.extend(filters.bind_values());
-            bind.push(SqlValue::Integer(req.limit as i64));
-            bind.push(SqlValue::Integer(req.offset as i64));
+            bind.extend(keyset_bind);
+            bind.push(SqlValue::Integer(fetch));
+            if offset_paging {
+                bind.push(SqlValue::Integer(req.offset as i64));
+            }
             let sql = format!(
                 "SELECT {SUMMARY_COLUMNS}, \
-                 snippet(archive_fts, 0, ?1, ?2, '…', 16) \
+                 snippet(archive_fts, 0, ?1, ?2, '…', 16), \
+                 {} \
                  FROM archive_fts \
                  JOIN archive_messages AS m ON m.id = archive_fts.rowid \
                  JOIN source_instances AS si ON si.id = m.source_instance_id \
                  LEFT JOIN conversations AS c ON c.id = m.conversation_id \
-                 WHERE archive_fts MATCH ?3 {} \
-                 ORDER BY {order} LIMIT ? OFFSET ?",
-                filters.sql
+                 WHERE archive_fts MATCH ?3 {} {} \
+                 ORDER BY {order} {page_tail}",
+                bm25_rank_expr(),
+                filters.sql,
+                keyset_sql
             );
             let mut stmt = tx.prepare(&sql)?;
-            let rows: Vec<MessageSummary> = stmt
+            let mut rows: Vec<(MessageSummary, f64)> = stmt
                 .query_map(rusqlite::params_from_iter(bind), |row| {
                     let raw: String = row.get(11)?;
-                    summary_from_row(
-                        row,
-                        Some(truncate_chars(
-                            &html_to_snippet_text(&raw),
-                            MAX_SNIPPET_CHARS,
-                        )),
-                    )
+                    let rank: f64 = row.get(12)?;
+                    Ok((
+                        summary_from_row(
+                            row,
+                            Some(truncate_chars(
+                                &html_to_snippet_text(&raw),
+                                MAX_SNIPPET_CHARS,
+                            )),
+                        ),
+                        rank,
+                    ))
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            rows
+            has_more = rows.len() > req.limit as usize;
+            if has_more {
+                last_rank = Some(rows[req.limit as usize - 1].1);
+            }
+            rows.truncate(req.limit as usize);
+            rows.into_iter().map(|(summary, _)| summary).collect()
+        };
+
+        let next_cursor = if has_more {
+            let last = hits
+                .last()
+                .expect("a following page implies a full page was read");
+            let cursor = match order_mode {
+                CursorOrderMode::Browse => SearchCursor::Browse {
+                    sent: last.sent_at.clone(),
+                    id: last.id,
+                },
+                CursorOrderMode::Newest => SearchCursor::Newest {
+                    sent: last.sent_at.clone(),
+                    id: last.id,
+                },
+                CursorOrderMode::Relevance => SearchCursor::Relevance {
+                    rank_bits: last_rank
+                        .expect("a following relevance page carries its rank")
+                        .to_bits(),
+                    id: last.id,
+                },
+            };
+            Some(encode_search_cursor(&cursor)?)
+        } else {
+            None
         };
 
         let archive_revision = read_archive_revision(&tx)?;
@@ -1535,8 +1908,11 @@ impl Storage {
             hits,
             total,
             limit: req.limit,
-            offset: req.offset,
+            // A cursor page has no meaningful offset; the continuation
+            // is the cursor itself.
+            offset: if offset_paging { req.offset } else { 0 },
             archive_revision,
+            next_cursor,
         })
     }
 
@@ -2514,6 +2890,408 @@ mod tests {
             "pages never overlap or repeat rows"
         );
         assert_eq!(unique.len(), 7);
+    }
+
+    // --------------------------------------------------------------
+    // Keyset cursors (deep pages)
+    // --------------------------------------------------------------
+
+    /// A mixed fixture for cursor paging: dated rows with two shared
+    /// instants (the id tiebreak), unknown-time rows (the NULL
+    /// boundary), and a row that does not match the text term.
+    fn cursor_seeded() -> Storage {
+        let s = Storage::open_in_memory().unwrap();
+        // (external key, sent instant, body): ids 1..=10 in insert order.
+        let rows = [
+            ("r1", "2026-01-01T10:00:00Z", "needle body one"),
+            ("r2", "2026-01-02T10:00:00Z", "needle body two"),
+            ("r3", "2026-01-02T10:00:00Z", "needle body three ties r2"),
+            ("r4", "2026-01-03T10:00:00Z", "needle body four"),
+            ("r5", "2026-01-03T10:00:00Z", "needle body five ties r4"),
+            ("r6", "2026-01-04T10:00:00Z", "needle body six"),
+            ("r7", "", "needle body seven no time"),
+            ("r8", "", "needle body eight no time"),
+            ("r9", "", "needle body nine no time"),
+            ("r10", "2026-01-05T10:00:00Z", "unrelated filler text"),
+        ];
+        for (key, sent, body) in rows {
+            s.insert_message(&NewMessage::new("demo", key, "Ana", sent, body))
+                .unwrap();
+        }
+        s
+    }
+
+    /// The id sequence each order mode pages through (ground truth the
+    /// cursor walk must reproduce exactly).
+    fn offset_walk(s: &Storage, base: &SearchArchiveRequest, limit: u32) -> (Vec<Vec<i64>>, u64) {
+        let mut pages = Vec::new();
+        let mut offset = 0;
+        let mut total = 0;
+        loop {
+            let page = s
+                .search_archive(&SearchArchiveRequest {
+                    limit: Some(limit),
+                    offset: Some(offset),
+                    ..base.clone()
+                })
+                .unwrap();
+            total = page.total;
+            pages.push(page.hits.iter().map(|h| h.id).collect::<Vec<i64>>());
+            if page.hits.is_empty() || offset as u64 + page.hits.len() as u64 >= total {
+                break;
+            }
+            offset += limit;
+        }
+        (pages, total)
+    }
+
+    fn cursor_walk(
+        s: &Storage,
+        base: &SearchArchiveRequest,
+        limit: u32,
+    ) -> (Vec<Vec<i64>>, Vec<Option<String>>) {
+        let mut pages = Vec::new();
+        let mut cursors = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = s
+                .search_archive(&SearchArchiveRequest {
+                    limit: Some(limit),
+                    cursor,
+                    ..base.clone()
+                })
+                .unwrap();
+            pages.push(page.hits.iter().map(|h| h.id).collect::<Vec<i64>>());
+            cursors.push(page.next_cursor.clone());
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        (pages, cursors)
+    }
+
+    #[test]
+    fn cursor_paging_matches_offset_pages_in_every_order_mode() {
+        let s = cursor_seeded();
+        let modes = [
+            ("browse", SearchArchiveRequest::default()),
+            (
+                "relevance",
+                SearchArchiveRequest {
+                    text: "needle".into(),
+                    ..SearchArchiveRequest::default()
+                },
+            ),
+            (
+                "newest",
+                SearchArchiveRequest {
+                    text: "needle".into(),
+                    sort: SearchSort::Newest,
+                    ..SearchArchiveRequest::default()
+                },
+            ),
+        ];
+        for (label, base) in modes {
+            let (offset_pages, total) = offset_walk(&s, &base, 3);
+            let (cursor_pages, cursors) = cursor_walk(&s, &base, 3);
+            assert_eq!(cursor_pages, offset_pages, "{label}: identical pages");
+            assert!(
+                !cursors.is_empty() && cursors.last().unwrap().is_none(),
+                "{label}: the walk ends without a next cursor"
+            );
+            assert!(
+                cursors.iter().any(|c| c.is_some()),
+                "{label}: the walk crossed at least one cursor"
+            );
+            // The exact total rides every cursor page, not just the first.
+            for page in 0..cursor_pages.len() {
+                let p = s
+                    .search_archive(&SearchArchiveRequest {
+                        limit: Some(3),
+                        cursor: if page == 0 {
+                            None
+                        } else {
+                            cursors[page - 1].clone()
+                        },
+                        ..base.clone()
+                    })
+                    .unwrap();
+                assert_eq!(p.total, total, "{label}: total on page {page}");
+                assert_eq!(p.offset, 0, "{label}: cursor pages carry no offset");
+                assert_eq!(p.limit, 3);
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_wins_when_both_cursor_and_offset_are_sent() {
+        let s = cursor_seeded();
+        let p1 = s
+            .search_archive(&SearchArchiveRequest {
+                limit: Some(3),
+                ..SearchArchiveRequest::default()
+            })
+            .unwrap();
+        let next = p1.next_cursor.clone().unwrap();
+        // offset 9_999 alone would page past the end (10 rows total);
+        // with a cursor it must be ignored.
+        let page = s
+            .search_archive(&SearchArchiveRequest {
+                limit: Some(3),
+                offset: Some(9_999),
+                cursor: Some(next),
+                ..SearchArchiveRequest::default()
+            })
+            .unwrap();
+        let ids: Vec<i64> = page.hits.iter().map(|h| h.id).collect();
+        assert_eq!(ids, vec![4, 3, 2], "the cursor names the page start");
+        assert_eq!(page.total, 10);
+    }
+
+    #[test]
+    fn cursor_past_the_last_row_is_an_empty_page_without_next_cursor() {
+        let s = cursor_seeded();
+        // Browse: last row = id 7 (the lowest unknown-instant id).
+        let cursor = encode_search_cursor(&SearchCursor::Browse {
+            sent: None,
+            id: 7,
+        })
+        .unwrap();
+        let page = s
+            .search_archive(&SearchArchiveRequest {
+                cursor: Some(cursor),
+                ..SearchArchiveRequest::default()
+            })
+            .unwrap();
+        assert!(page.hits.is_empty());
+        assert_eq!(page.total, 10, "the total still counts the whole set");
+        assert!(page.next_cursor.is_none());
+
+        // Newest: last row = id 7 again (dated matches end at id 1).
+        let cursor = encode_search_cursor(&SearchCursor::Newest {
+            sent: None,
+            id: 7,
+        })
+        .unwrap();
+        let page = s
+            .search_archive(&SearchArchiveRequest {
+                text: "needle".into(),
+                sort: SearchSort::Newest,
+                cursor: Some(cursor),
+                ..SearchArchiveRequest::default()
+            })
+            .unwrap();
+        assert!(page.hits.is_empty());
+        assert_eq!(page.total, 9);
+        assert!(page.next_cursor.is_none());
+
+        // Relevance: the last row's rank read from the index itself.
+        let expr = bm25_rank_expr();
+        let last = s
+            .search_archive(&SearchArchiveRequest {
+                text: "needle".into(),
+                limit: Some(MAX_LIMIT),
+                ..SearchArchiveRequest::default()
+            })
+            .unwrap()
+            .hits
+            .last()
+            .cloned()
+            .unwrap();
+        let rank: f64 = s
+            .connection()
+            .query_row(
+                &format!(
+                    "SELECT {expr} FROM archive_fts \
+                     WHERE archive_fts MATCH 'needle' AND rowid = ?1"
+                ),
+                [last.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let cursor = encode_search_cursor(&SearchCursor::Relevance {
+            rank_bits: rank.to_bits(),
+            id: last.id,
+        })
+        .unwrap();
+        let page = s
+            .search_archive(&SearchArchiveRequest {
+                text: "needle".into(),
+                cursor: Some(cursor),
+                ..SearchArchiveRequest::default()
+            })
+            .unwrap();
+        assert!(page.hits.is_empty());
+        assert_eq!(page.total, 9);
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn browse_cursor_crosses_the_unknown_time_boundary_exactly() {
+        let s = cursor_seeded();
+        // limit 2 makes the boundary land inside pages: the cursor after
+        // [3, 2] sits on a dated row, so its page [1, 9] must include
+        // the older dated row and cross into the unknowns; the cursor
+        // after id 9 (unknown) continues by id alone: [8, 7].
+        let (pages, _cursors) = cursor_walk(
+            &s,
+            &SearchArchiveRequest {
+                ..SearchArchiveRequest::default()
+            },
+            2,
+        );
+        assert_eq!(
+            pages,
+            vec![
+                vec![10, 6],
+                vec![5, 4],
+                vec![3, 2],
+                vec![1, 9], // dated row 1, then the unknowns begin
+                vec![8, 7], // cursor at unknown id 9 continues by id
+            ],
+            "no row skipped or repeated across the NULL boundary"
+        );
+    }
+
+    #[test]
+    fn relevance_cursor_survives_tied_bm25_via_the_id_tiebreak() {
+        let s = Storage::open_in_memory().unwrap();
+        // Five byte-identical bodies (same author, no subject): FTS5
+        // scores them identically, so the order is the id tiebreak alone.
+        let mut tied_ids = Vec::new();
+        for i in 0..5 {
+            tied_ids.push(
+                match s.insert_message(&NewMessage::new(
+                    "demo",
+                    format!("tie{i}"),
+                    "Ana",
+                    format!("2026-01-0{}T10:00:00Z", i + 1),
+                    "identical tie body mentioning needle",
+                ))
+                .unwrap()
+                {
+                    InsertOutcome::Inserted(id) | InsertOutcome::Duplicate(id) => id,
+                },
+            );
+        }
+        // Filler so "needle" carries a real idf.
+        s.insert_message(&NewMessage::new(
+            "demo",
+            "filler",
+            "Ana",
+            "2026-02-01T10:00:00Z",
+            "completely unrelated words",
+        ))
+        .unwrap();
+
+        let base = SearchArchiveRequest {
+            text: "needle".into(),
+            ..SearchArchiveRequest::default()
+        };
+        let (pages, cursors) = cursor_walk(&s, &base, 2);
+        assert_eq!(
+            pages,
+            vec![
+                tied_ids[0..2].to_vec(),
+                tied_ids[2..4].to_vec(),
+                vec![tied_ids[4]],
+            ],
+            "tied ranks page by the id tiebreak"
+        );
+        assert!(cursors.last().unwrap().is_none());
+    }
+
+    #[test]
+    fn cursor_from_a_wrong_sort_mode_is_rejected() {
+        let s = cursor_seeded();
+        let first = |req: SearchArchiveRequest| {
+            s.search_archive(&SearchArchiveRequest {
+                limit: Some(3),
+                ..req
+            })
+            .unwrap()
+            .next_cursor
+            .unwrap()
+        };
+        let browse = first(SearchArchiveRequest::default());
+        let newest = first(SearchArchiveRequest {
+            text: "needle".into(),
+            sort: SearchSort::Newest,
+            ..SearchArchiveRequest::default()
+        });
+        // A browse cursor under a relevance query — and vice versa, a
+        // newest cursor under a relevance query.
+        for (cursor, req, label) in [
+            (
+                browse.clone(),
+                SearchArchiveRequest {
+                    text: "needle".into(),
+                    ..SearchArchiveRequest::default()
+                },
+                "browse cursor under relevance",
+            ),
+            (
+                newest,
+                SearchArchiveRequest {
+                    text: "needle".into(),
+                    ..SearchArchiveRequest::default()
+                },
+                "newest cursor under relevance",
+            ),
+            (
+                browse,
+                SearchArchiveRequest {
+                    text: "needle".into(),
+                    sort: SearchSort::Newest,
+                    ..SearchArchiveRequest::default()
+                },
+                "browse cursor under text-newest",
+            ),
+        ] {
+            let err = s
+                .search_archive(&SearchArchiveRequest {
+                    cursor: Some(cursor),
+                    ..req
+                })
+                .unwrap_err();
+            assert!(matches!(err, Error::InvalidQuery(_)), "{label}: {err}");
+            assert!(err.to_string().contains("cursor was issued"), "{label}");
+        }
+    }
+
+    #[test]
+    fn malformed_cursors_are_rejected() {
+        let s = cursor_seeded();
+        for (raw, label) in [
+            ("not-a-cursor".to_string(), "garbage text"),
+            (String::new(), "empty"),
+            (
+                CURSOR_BASE64.encode(r#"{"v":9,"mode":"browse","sent":null,"rank_bits":null,"id":1}"#),
+                "unknown version",
+            ),
+            (
+                CURSOR_BASE64.encode(r#"{"v":1,"mode":"relevance","sent":null,"rank_bits":null,"id":3}"#),
+                "relevance cursor without a rank",
+            ),
+            (
+                CURSOR_BASE64.encode(r#"{"v":1,"mode":"browse","sent":"2026-01-01T10:00:00Z","rank_bits":5,"id":3}"#),
+                "browse cursor carrying a rank",
+            ),
+            (
+                CURSOR_BASE64.encode(r#"{"v":1,"mode":"chrono","sent":null,"rank_bits":null,"id":3}"#),
+                "unknown order mode",
+            ),
+        ] {
+            let err = s
+                .search_archive(&SearchArchiveRequest {
+                    cursor: Some(raw),
+                    ..SearchArchiveRequest::default()
+                })
+                .unwrap_err();
+            assert!(matches!(err, Error::InvalidQuery(_)), "{label}: {err}");
+            assert!(err.to_string().contains("malformed cursor"), "{label}");
+        }
     }
 
     #[test]

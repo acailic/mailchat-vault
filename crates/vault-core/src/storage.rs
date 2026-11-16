@@ -1848,10 +1848,94 @@ impl Storage {
     /// browse ordering and the filters, and `LIMIT`/`OFFSET` bound every
     /// response. The `source` facet filters by legacy namespace via the
     /// unique `source_instances.legacy_namespace` index.
+    ///
+    /// Pages start at `offset`, or — when the query carries a keyset
+    /// cursor from a previous page's `next_cursor` — strictly after the
+    /// cursor row's sort position (the cursor wins), so deep pages cost
+    /// the same as the first page. The cursor follows the v2 search
+    /// contract ([`crate::search2::SearchCursor`]): bound to the order
+    /// mode it was issued under (browse for empty text, relevance
+    /// otherwise), rejected with `InvalidQuery` when malformed or from
+    /// another mode.
     pub fn search_page(&self, query: &SearchQuery) -> Result<SearchPage> {
         let mut query = query.clone();
         query.normalize()?;
         let filters = QueryFilters::build(&query)?;
+
+        // Cursor validation mirrors search2: the wire form and the
+        // order-mode binding are shared; v1 has no explicit sort, so
+        // empty text is browse and any text query is relevance.
+        let order_mode = if query.text.trim().is_empty() {
+            crate::search2::CursorOrderMode::Browse
+        } else {
+            crate::search2::CursorOrderMode::Relevance
+        };
+        let cursor = match &query.cursor {
+            None => None,
+            Some(raw) => {
+                let decoded = crate::search2::decode_search_cursor(raw)?;
+                if decoded.mode() != order_mode {
+                    return Err(Error::InvalidQuery(format!(
+                        "cursor was issued for {} order, not {} order",
+                        decoded.mode().as_str(),
+                        order_mode.as_str()
+                    )));
+                }
+                Some(decoded)
+            }
+        };
+        // Keyset fragment (over alias `m`): rows strictly after the
+        // cursor's sort position. Browse orders `sent_instant DESC,
+        // id DESC` with unknown instants last (SQLite NULLs sort last
+        // in DESC); relevance orders by the bm25 rank then id. Same
+        // compound-predicate shapes as the v2 page.
+        let (keyset_sql, keyset_bind): (String, Vec<SqlValue>) = match &cursor {
+            None => (String::new(), Vec::new()),
+            Some(crate::search2::SearchCursor::Browse { sent, id }) => match sent {
+                Some(instant) => (
+                    " AND (m.sent_instant IS NULL \
+                       OR m.sent_instant < ? \
+                       OR (m.sent_instant = ? AND m.id < ?))"
+                        .to_string(),
+                    vec![
+                        SqlValue::from(instant.clone()),
+                        SqlValue::from(instant.clone()),
+                        SqlValue::Integer(*id),
+                    ],
+                ),
+                None => (
+                    " AND (m.sent_instant IS NULL AND m.id < ?)".to_string(),
+                    vec![SqlValue::Integer(*id)],
+                ),
+            },
+            Some(crate::search2::SearchCursor::Relevance { rank_bits, id }) => {
+                let rank = f64::from_bits(*rank_bits);
+                let expr = crate::search2::bm25_rank_expr();
+                (
+                    format!(" AND ({expr} > ? OR ({expr} = ? AND m.id > ?))"),
+                    vec![
+                        SqlValue::Real(rank),
+                        SqlValue::Real(rank),
+                        SqlValue::Integer(*id),
+                    ],
+                )
+            }
+            // A "newest"-mode cursor cannot be issued by the v1 page;
+            // the mode check above already rejected it.
+            Some(other @ crate::search2::SearchCursor::Newest { .. }) => {
+                return Err(Error::InvalidQuery(format!(
+                    "cursor was issued for {} order, not {} order",
+                    other.mode().as_str(),
+                    order_mode.as_str()
+                )));
+            }
+        };
+        // One row past the page detects a following page (the probe row
+        // never reaches the returned page).
+        let fetch = query.limit as i64 + 1;
+        let offset_paging = cursor.is_none();
+        let mut has_more = false;
+        let mut last_rank: Option<f64> = None;
 
         let total: u64 = {
             let (sql, bind) = if query.text.trim().is_empty() {
@@ -1886,60 +1970,134 @@ impl Storage {
 
         let hits: Vec<SearchHit> = if query.text.trim().is_empty() {
             let mut bind = filters.bind();
-            bind.push(SqlValue::Integer(query.limit as i64));
-            bind.push(SqlValue::Integer(query.offset as i64));
+            bind.extend(keyset_bind);
+            bind.push(SqlValue::Integer(fetch));
+            if offset_paging {
+                bind.push(SqlValue::Integer(query.offset as i64));
+            }
             let sql = format!(
                 "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
                  m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
                  m.body, m.raw_json, NULL \
                  FROM archive_messages AS m \
                  JOIN source_instances AS si ON si.id = m.source_instance_id \
-                 WHERE 1=1 {} \
-                 ORDER BY m.sent_instant DESC, m.id DESC LIMIT ? OFFSET ?",
-                filters.sql
+                 WHERE 1=1 {} {} \
+                 ORDER BY m.sent_instant DESC, m.id DESC {}",
+                filters.sql,
+                keyset_sql,
+                if offset_paging {
+                    "LIMIT ? OFFSET ?"
+                } else {
+                    "LIMIT ?"
+                }
             );
             let mut stmt = self.conn.prepare(&sql)?;
-            let rows: Vec<SearchHit> = stmt
+            let mut rows: Vec<SearchHit> = stmt
                 .query_map(params_from_iter(bind), hit_from_row)?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
+            has_more = rows.len() > query.limit as usize;
+            rows.truncate(query.limit as usize);
             rows
         } else {
             // Order follows the ? placeholders in the SQL text: the two
             // snippet() markers in the SELECT, then the MATCH expression,
-            // then the filter bindings, then LIMIT/OFFSET.
+            // then the filter bindings, the keyset values, then the page
+            // tail. The trailing column is the row's bm25 rank — the
+            // sort position `next_cursor` must carry.
             let mut bind = vec![
                 SqlValue::from(SNIPPET_OPEN_MARK.to_string()),
                 SqlValue::from(SNIPPET_CLOSE_MARK.to_string()),
                 SqlValue::from(crate::search::build_match_query(&query.text)),
             ];
             bind.extend(filters.bind());
-            bind.push(SqlValue::Integer(query.limit as i64));
-            bind.push(SqlValue::Integer(query.offset as i64));
+            bind.extend(keyset_bind);
+            bind.push(SqlValue::Integer(fetch));
+            if offset_paging {
+                bind.push(SqlValue::Integer(query.offset as i64));
+            }
             let sql = format!(
                 "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
                  m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), \
                  m.body, m.raw_json, \
-                 snippet(archive_fts, 0, ?1, ?2, '…', 16) \
+                 snippet(archive_fts, 0, ?1, ?2, '…', 16), \
+                 {} \
                  FROM archive_fts \
                  JOIN archive_messages AS m ON m.id = archive_fts.rowid \
                  JOIN source_instances AS si ON si.id = m.source_instance_id \
-                 WHERE archive_fts MATCH ?3 {} \
+                 WHERE archive_fts MATCH ?3 {} {} \
                  ORDER BY bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, \
-                               {BM25_WEIGHT_SUBJECT}), m.id LIMIT ? OFFSET ?",
-                filters.sql
+                               {BM25_WEIGHT_SUBJECT}), m.id {}",
+                crate::search2::bm25_rank_expr(),
+                filters.sql,
+                keyset_sql,
+                if offset_paging {
+                    "LIMIT ? OFFSET ?"
+                } else {
+                    "LIMIT ?"
+                }
             );
             let mut stmt = self.conn.prepare(&sql)?;
-            let rows: Vec<SearchHit> = stmt
-                .query_map(params_from_iter(bind), hit_from_row)?
+            let mut rows: Vec<(SearchHit, f64)> = stmt
+                .query_map(params_from_iter(bind), |row| {
+                    let hit = hit_from_row(row)?;
+                    let rank: f64 = row.get(10)?;
+                    Ok((hit, rank))
+                })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
-            rows
+            has_more = rows.len() > query.limit as usize;
+            if has_more {
+                last_rank = Some(rows[query.limit as usize - 1].1);
+            }
+            rows.truncate(query.limit as usize);
+            rows.into_iter().map(|(hit, _)| hit).collect()
+        };
+
+        // next_cursor continues the list at the cursor row's position
+        // whenever the probe row said more rows follow. The v1 message
+        // keeps unknown instants as "" — the cursor keeps the explicit
+        // None flag so the NULL boundary stays exact.
+        let next_cursor = if has_more {
+            let last = hits
+                .last()
+                .expect("a following page implies a full page was read");
+            let cursor = match order_mode {
+                crate::search2::CursorOrderMode::Browse => {
+                    crate::search2::SearchCursor::Browse {
+                        sent: if last.message.sent_at.is_empty() {
+                            None
+                        } else {
+                            Some(last.message.sent_at.clone())
+                        },
+                        id: last.message.id,
+                    }
+                }
+                crate::search2::CursorOrderMode::Relevance => {
+                    crate::search2::SearchCursor::Relevance {
+                        rank_bits: last_rank
+                            .expect("a following relevance page carries its rank")
+                            .to_bits(),
+                        id: last.message.id,
+                    }
+                }
+                crate::search2::CursorOrderMode::Newest => {
+                    return Err(Error::InvalidQuery(
+                        "v1 search has no text-newest order mode".into(),
+                    ));
+                }
+            };
+            Some(crate::search2::encode_search_cursor(&cursor)?)
+        } else {
+            None
         };
 
         Ok(SearchPage {
             hits,
             total,
             limit: query.limit,
-            offset: query.offset,
+            // A cursor page has no meaningful offset; the continuation
+            // is the cursor itself.
+            offset: if offset_paging { query.offset } else { 0 },
+            next_cursor,
         })
     }
 
