@@ -62,7 +62,7 @@ fn collections_create_rename_delete_and_list() {
     assert!(s.create_collection("   ").is_err());
     assert!(s.create_collection("").is_err());
 
-    let second = s.create_collection("Taxes").unwrap();
+    let _second = s.create_collection("Taxes").unwrap();
 
     // Rename preserves the id and refreshes updated_at.
     let second = s.list_collections().unwrap()[1].clone();
@@ -402,6 +402,7 @@ fn an_absent_membership_message_surfaces_as_unavailable() {
 /// One temp workspace shaped like the backup suite's: a `vault/` data
 /// directory plus scratch space for the container.
 struct Sandbox {
+    #[allow(dead_code)]
     keeper: tempfile::TempDir,
     root: PathBuf,
 }

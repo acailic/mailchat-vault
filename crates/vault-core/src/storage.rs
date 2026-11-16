@@ -2046,7 +2046,7 @@ impl Storage {
         // never reaches the returned page).
         let fetch = query.limit as i64 + 1;
         let offset_paging = cursor.is_none();
-        let mut has_more = false;
+        let has_more;
         let mut last_rank: Option<f64> = None;
 
         let total: u64 = {

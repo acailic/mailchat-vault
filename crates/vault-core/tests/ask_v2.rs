@@ -178,7 +178,7 @@ fn prepare_makes_zero_wire_requests() {
     };
 
     let cancel = || false;
-    let mut progress = |_, _, _| {};
+    let mut progress = |_: u64, _: u64, _: &str| {};
     let outcome = prepare_scoped_ask(
         &storage,
         &HashEmbedder::new(),
@@ -223,7 +223,7 @@ fn generate_sends_exactly_the_approved_payload_bytes() {
     let backend = AnthropicLlm::new(config);
 
     let cancel = || false;
-    let mut progress = |_, _, _| {};
+    let mut progress = |_: u64, _: u64, _: &str| {};
     let prepared = prepare_scoped_ask(
         &storage,
         &HashEmbedder::new(),
@@ -300,7 +300,7 @@ fn stale_digest_refusals_leave_nothing_sent() {
     let endpoint = endpoint_of(backend.config());
 
     let cancel = || false;
-    let mut progress = |_, _, _| {};
+    let mut progress = |_: u64, _: u64, _: &str| {};
     let prepared = prepare_scoped_ask(
         &storage,
         &HashEmbedder::new(),
@@ -438,7 +438,7 @@ fn cancelled_between_steps_sends_nothing() {
     let endpoint = endpoint_of(backend.config());
 
     let cancel = || false;
-    let mut progress = |_, _, _| {};
+    let mut progress = |_: u64, _: u64, _: &str| {};
     let prepared = prepare_scoped_ask(
         &storage,
         &HashEmbedder::new(),
@@ -492,7 +492,7 @@ fn prepare_respects_the_active_workspace_scope() {
         ..AskScope::default()
     };
     let cancel = || false;
-    let mut progress = |_, _, _| {};
+    let mut progress = |_: u64, _: u64, _: &str| {};
     let outcome = prepare_scoped_ask(
         &storage,
         &HashEmbedder::new(),
