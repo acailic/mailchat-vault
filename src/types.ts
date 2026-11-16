@@ -157,6 +157,9 @@ export interface SearchQuery {
   to_date: string;
   limit: number;
   offset: number;
+  /** Opaque keyset cursor from a previous page's next_cursor. Wins over
+   *  offset when both are set; deep pages cost the same as the first. */
+  cursor?: string | null;
 }
 
 export interface SearchHit {
@@ -170,6 +173,8 @@ export interface SearchPage {
   total: number;
   limit: number;
   offset: number;
+  /** Keyset cursor to the next page; null when this page reaches the end. */
+  next_cursor: string | null;
 }
 
 export interface ChatContext {
