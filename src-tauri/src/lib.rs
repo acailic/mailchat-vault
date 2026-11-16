@@ -621,9 +621,12 @@ async fn media_reconcile_detail(
     .map_err(|e| e.to_string())?;
 
     // Resolution reads stored rows only: affected-message pages plus
-    // the unlinked-file registry's provenance.
+    // the unlinked-file registry's provenance. (The closure's return
+    // type is annotated like every other `with_read` call in this file:
+    // the `?` operators inside only bound the error type, they do not
+    // pin it, and the outer `map_err` needs it known.)
     ActiveVault::from(&state)
-        .with_read(|s| {
+        .with_read(|s| -> CoreResult<MediaReconcileDetail> {
             let registered: HashMap<String, RegisteredMediaObject> = s
                 .unlinked_media_objects()?
                 .into_iter()
