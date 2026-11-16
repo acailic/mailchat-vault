@@ -30,6 +30,7 @@ use vault_core::storage::{SavedSearch, Storage, SAVED_SEARCH_MAX_NAME_CHARS};
 
 fn request(text: &str, author: &str) -> SearchArchiveRequest {
     SearchArchiveRequest {
+        cursor: None,
         text: text.into(),
         author: author.into(),
         ..SearchArchiveRequest::default()
@@ -116,6 +117,7 @@ fn crud_round_trip_strips_pagination_and_refuses_conflicts() {
     // date bounds with an explicit timezone, the honesty filters, import
     // scope, and sort order all round-trip verbatim.
     let req = SearchArchiveRequest {
+        cursor: None,
         text: "invoice".into(),
         source_ids: vec!["11111111-1111-1111-1111-111111111111".into()],
         conversation_id: Some("22222222-2222-2222-2222-222222222222".into()),
@@ -131,7 +133,6 @@ fn crud_round_trip_strips_pagination_and_refuses_conflicts() {
         sort: SearchSort::Newest,
         limit: Some(7),
         offset: Some(40),
-        cursor: None,
     };
     let saved = s.upsert_saved_search(None, "Invoices 2024", &req).unwrap();
     assert_eq!(saved.name, "Invoices 2024");
@@ -170,15 +171,18 @@ fn crud_round_trip_strips_pagination_and_refuses_conflicts() {
     // bad day format, unknown timezone).
     for bad in [
         SearchArchiveRequest {
+            cursor: None,
             from_date: Some("2024-12-31".into()),
             to_date: Some("2024-01-01".into()),
             ..request("x", "")
         },
         SearchArchiveRequest {
+            cursor: None,
             from_date: Some("31.12.2024".into()),
             ..request("x", "")
         },
         SearchArchiveRequest {
+            cursor: None,
             timezone: "Not/AZone".into(),
             ..request("x", "")
         },
@@ -286,6 +290,7 @@ fn definitions_survive_reopen_and_stay_dynamic() {
         .source_id;
 
     let req = SearchArchiveRequest {
+        cursor: None,
         text: "invoice".into(),
         source_ids: vec![a_id.clone()],
         from_date: Some("2024-01-01".into()),

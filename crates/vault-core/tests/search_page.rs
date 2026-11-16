@@ -583,7 +583,7 @@ fn chat_context_missing_message_is_none() {
 fn offset_walk_v1(s: &Storage, base: &SearchQuery, limit: u32) -> (Vec<Vec<i64>>, u64) {
     let mut pages = Vec::new();
     let mut offset = 0;
-    let mut total;
+    let mut total = 0;
     loop {
         let page = s
             .search_page(&SearchQuery {
