@@ -2787,6 +2787,79 @@ impl Storage {
         Ok(digests)
     }
 
+    /// Resolve one media digest to the archived messages that reference
+    /// it — the affected-message side of a reconciliation finding: when
+    /// [`crate::object_store::ObjectStore::reconcile`] names a digest
+    /// missing or corrupt, this is the route from the damaged object
+    /// back to every message it affects. The same scan
+    /// [`Storage::message_media_digests`] walks, keeping message
+    /// identity and conversation/date context instead of discarding it.
+    ///
+    /// One row per message (oldest message id first, the first matching
+    /// entry's display name), returned in bounded pages: `limit` is
+    /// clamped like the search surface ([`crate::query::MAX_LIMIT`])
+    /// and `total` carries the full affected count for pagination. A
+    /// digest referenced by no message (a registered unlinked file —
+    /// see [`Storage::unlinked_media_objects`] for its provenance)
+    /// resolves to an empty page with `total == 0`. Read-only: a pure
+    /// SELECT over stored rows.
+    pub fn media_digest_references(
+        &self,
+        sha256: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<MediaDigestReferences> {
+        let mut all = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT m.id, COALESCE(c.label, ''), m.chat_id, m.author,
+                        COALESCE(m.sent_instant, m.original_timestamp, ''), m.raw_json
+                 FROM archive_messages m
+                 LEFT JOIN conversations c ON c.id = m.conversation_id
+                 WHERE m.raw_json LIKE '%\"media\"%'
+                 ORDER BY m.id",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let id: i64 = row.get(0)?;
+                let raw: String = row.get(5)?;
+                // One row per message: the first matching entry names it.
+                let matches = media_entries(&raw)
+                    .into_iter()
+                    .find(|entry| entry.get("sha256").and_then(|v| v.as_str()) == Some(sha256));
+                if let Some(entry) = matches {
+                    all.push(MediaMessageReference {
+                        message_id: id,
+                        conversation: row.get(1)?,
+                        chat_id: row.get(2)?,
+                        author: row.get(3)?,
+                        date: row.get(4)?,
+                        name: entry
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    });
+                }
+            }
+        }
+        let total = all.len() as u64;
+        let limit = limit.clamp(1, crate::query::MAX_LIMIT);
+        let offset = offset.min(crate::query::MAX_OFFSET);
+        let references = all
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect();
+        Ok(MediaDigestReferences {
+            sha256: sha256.to_string(),
+            total,
+            offset,
+            limit,
+            references,
+        })
+    }
+
     /// The media objects registered as unlinked (M4.2) — export files
     /// stored without a message, with their provenance. Oldest first.
     pub fn unlinked_media_objects(&self) -> Result<Vec<RegisteredMediaObject>> {
@@ -3802,6 +3875,46 @@ pub struct RegisteredMediaObject {
     pub origin: String,
     pub import_id: String,
     pub first_seen: String,
+}
+
+/// One archived message that references a media digest (the resolution
+/// of an integrity finding to the messages it affects, see
+/// [`Storage::media_digest_references`]): the id every reading surface
+/// (`message_detail_v2`, conversation links) keys on, plus the
+/// conversation/date context to show beside it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaMessageReference {
+    /// `archive_messages.id` — stable, and the key the detail and
+    /// context IPC surfaces accept.
+    pub message_id: i64,
+    /// The conversation's display label ('' when the row never resolved
+    /// to one).
+    pub conversation: String,
+    /// The message's legacy chat grouping as stored.
+    pub chat_id: String,
+    /// The author as stored ('' when unknown).
+    pub author: String,
+    /// The resolved UTC instant when known, else the original timestamp
+    /// text; '' when neither exists.
+    pub date: String,
+    /// The media entry's original display name (e.g. `photo.jpg`).
+    pub name: String,
+}
+
+/// The affected-message page for one digest (see
+/// [`Storage::media_digest_references`]): every archived message whose
+/// `raw_json` media entries reference the digest, in bounded pages with
+/// the full count for pagination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaDigestReferences {
+    pub sha256: String,
+    /// Total messages referencing the digest, ignoring the page window.
+    pub total: u64,
+    pub offset: u32,
+    pub limit: u32,
+    /// The page, oldest message id first (one row per message; a digest
+    /// a single message references twice names it once).
+    pub references: Vec<MediaMessageReference>,
 }
 
 /// Filter SQL fragments (`AND ...` clauses referencing table aliases `m`

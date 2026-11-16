@@ -109,7 +109,7 @@
 //! is usable (otherwise it degrades to the pre-M7 close-exit so a
 //! hidden unreachable process can never exist). See `src/tray.rs`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -143,7 +143,9 @@ use vault_core::search2::{
 };
 use vault_core::settings::{self, Options, Settings, SETTINGS_VERSION};
 use vault_core::stats::{ArchiveStats, DEFAULT_TOP};
-use vault_core::storage::{FailedItem, SourceInstance, Storage};
+use vault_core::storage::{
+    FailedItem, MediaMessageReference, RegisteredMediaObject, SourceInstance, Storage,
+};
 use vault_core::vector::{
     self, EmbedJobSummary, Embedder, EmbeddingStatus, HashEmbedder, EMBED_BODY_PREFIX_CHARS,
 };
@@ -424,7 +426,8 @@ fn list_import_scopes_v2(state: State<AppState>) -> Result<Vec<ImportScope>, App
 /// re-hashed with `verify`), staging litter from interrupted writes,
 /// and foreign files. Read-only: repairing litter is a separate
 /// explicit sweep (`ObjectStore::sweep_staging`), corruption recovery
-/// stays manual by design.
+/// stays manual by design. `media_reconcile_detail` resolves the
+/// missing/corrupt findings to the affected messages and known imports.
 #[tauri::command]
 async fn media_reconcile(
     app: AppHandle,
@@ -463,6 +466,208 @@ async fn media_usage(app: AppHandle, state: State<'_, AppState>) -> Result<Media
     tauri::async_runtime::spawn_blocking(move || Ok(ObjectStore::new(&data_dir).usage(&digests)))
         .await
         .map_err(|e| format!("usage task failed: {e}"))?
+}
+
+/// One damaged digest resolved for recovery: every archived message it
+/// affects (a bounded page plus the total) and, when the digest is a
+/// registered unlinked file, its known import provenance — so a
+/// finding says what to open and what to re-import, not just that a
+/// hash is gone.
+#[derive(Debug, Clone, Serialize)]
+struct IntegrityFinding {
+    sha256: String,
+    /// `"missing"` (no object in the store) or `"corrupt"` (object
+    /// present, content hash ≠ name digest).
+    category: String,
+    /// The raw reconcile note for corrupt objects (e.g. what the file
+    /// hashes to); empty for missing ones.
+    detail: String,
+    /// Import provenance when the digest sits in the `media_objects`
+    /// unlinked-file registry (the known import that stored it);
+    /// `None` for message-referenced objects.
+    registered: Option<RegisteredMediaObject>,
+    /// Total archived messages referencing this digest, ignoring the
+    /// page window.
+    total_references: u64,
+    /// The affected-message page (a digest shared by many messages
+    /// resolves page by page; `offset`/`limit` echo the request).
+    references: Vec<MediaMessageReference>,
+    offset: u32,
+    limit: u32,
+}
+
+/// One failure category's resolved findings: the total count of damaged
+/// digests plus a bounded list (the report stays small however damaged
+/// the store is; `media_reconcile` remains the full enumeration).
+#[derive(Debug, Clone, Serialize)]
+struct IntegrityFindings {
+    total: u64,
+    findings: Vec<IntegrityFinding>,
+}
+
+/// A bounded tail of names for the categories that need no resolution
+/// (orphans, staging litter, foreign files): what fits plus how much
+/// there is.
+#[derive(Debug, Clone, Serialize)]
+struct IntegrityTail {
+    total: u64,
+    entries: Vec<String>,
+}
+
+/// The detailed media integrity report: `media_reconcile`'s findings
+/// resolved into what a user can act on — affected messages to open,
+/// known imports to re-import — grouped by failure category, bounded,
+/// and read-only (recovery stays manual: restore a known-good backup
+/// or re-import the original export).
+#[derive(Debug, Clone, Serialize)]
+struct MediaReconcileDetail {
+    missing: IntegrityFindings,
+    corrupt: IntegrityFindings,
+    orphans: IntegrityTail,
+    stale_staging: IntegrityTail,
+    foreign: IntegrityTail,
+}
+
+/// Most resolved findings returned per category (the report is a
+/// bounded diagnostic view, not an enumeration; `media_reconcile`
+/// lists everything).
+const MAX_FINDINGS_PER_CATEGORY: usize = 200;
+/// Most names per resolution-free category tail.
+const MAX_TAIL_ENTRIES: usize = 200;
+/// Default affected-message page size for one finding.
+const DEFAULT_REFERENCES_LIMIT: u32 = 20;
+
+/// The digest half of a corrupt entry (`"<sha256>.<ext> (hashes to …)"`
+/// — the object's name stem) and its note, or `None` for an unexpected
+/// shape (defensive: the strings come from our own `reconcile`).
+fn corrupt_entry_digest(entry: &str) -> (Option<String>, &str) {
+    let (name, note) = entry.split_once(" (").unwrap_or((entry, ""));
+    let digest = name
+        .rsplit_once('.')
+        .filter(|(stem, _)| stem.len() == 64 && stem.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(|(stem, _)| stem.to_ascii_lowercase());
+    (digest, note)
+}
+
+/// Resolve one category's damaged digests into findings through the
+/// vault's stored references and registry: `damaged` carries
+/// `(digest, note)` pairs (the note is the corrupt entry's remark —
+/// what the file hashes to — or empty for missing objects). Pure read;
+/// errors propagate.
+fn resolve_findings(
+    storage: &Storage,
+    damaged: &[(String, String)],
+    category: &str,
+    only: Option<&str>,
+    registered: &HashMap<String, RegisteredMediaObject>,
+    offset: u32,
+    limit: u32,
+) -> CoreResult<IntegrityFindings> {
+    let selected: Vec<&(String, String)> = damaged
+        .iter()
+        .filter(|(digest, _)| only.is_none_or(|only| only == digest.as_str()))
+        .collect();
+    let total = selected.len() as u64;
+    let mut findings = Vec::new();
+    for (digest, note) in selected.into_iter().take(MAX_FINDINGS_PER_CATEGORY) {
+        let page = storage.media_digest_references(digest, offset, limit)?;
+        findings.push(IntegrityFinding {
+            sha256: digest.clone(),
+            category: category.to_string(),
+            detail: note.clone(),
+            registered: registered.get(digest).cloned(),
+            total_references: page.total,
+            references: page.references,
+            offset: page.offset,
+            limit: page.limit,
+        });
+    }
+    Ok(IntegrityFindings { total, findings })
+}
+
+/// The resolved media integrity report: `media_reconcile` with every
+/// missing/corrupt finding traced back to the affected archived
+/// messages (bounded pages plus totals) and to registered unlinked
+/// files' known import provenance. Read-only and diagnostic — nothing
+/// is written, deleted, or rewritten; recovery is the user's explicit
+/// action (restore a known-good backup, re-import the export).
+///
+/// `digest` narrows the resolved findings to one damaged object, so a
+/// large reference set pages through `offset`/`limit` per finding;
+/// without it the report shows every finding's first page.
+#[tauri::command]
+async fn media_reconcile_detail(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    digest: Option<String>,
+    offset: Option<u32>,
+    limit: Option<u32>,
+) -> Result<MediaReconcileDetail, String> {
+    // Same reasoning as `media_reconcile`: findings resolve against the
+    // personal vault's messages and imports, never the demo's.
+    state.refuse_in_demo()?;
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let reference_offset = offset.unwrap_or(0);
+    let reference_limit = limit.unwrap_or(DEFAULT_REFERENCES_LIMIT);
+    let digests = ActiveVault::from(&state)
+        .with_read(|s| s.media_digests())
+        .map_err(|e| e.to_string())?;
+    let verify = true; // maintenance call: pay the re-hash for certainty
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        ObjectStore::new(&data_dir).reconcile(&digests, verify)
+    })
+    .await
+    .map_err(|e| format!("reconcile task failed: {e}"))?
+    .map_err(|e| e.to_string())?;
+
+    // Resolution reads stored rows only: affected-message pages plus
+    // the unlinked-file registry's provenance.
+    ActiveVault::from(&state)
+        .with_read(|s| {
+            let registered: HashMap<String, RegisteredMediaObject> = s
+                .unlinked_media_objects()?
+                .into_iter()
+                .map(|row| (row.sha256.clone(), row))
+                .collect();
+            // Corrupt entries are `"<sha256>.<ext> (note)"` strings from
+            // the report; recover the digest so the finding resolves.
+            let corrupt: Vec<(String, String)> = report
+                .corrupt
+                .iter()
+                .map(|entry| {
+                    let (digest, note) = corrupt_entry_digest(entry);
+                    (digest.unwrap_or_default(), note.to_string())
+                })
+                .collect();
+            let missing: Vec<(String, String)> = report
+                .missing
+                .iter()
+                .map(|digest| (digest.clone(), String::new()))
+                .collect();
+            let resolve = |damaged: &[(String, String)], category: &str| {
+                resolve_findings(
+                    s,
+                    damaged,
+                    category,
+                    digest.as_deref(),
+                    &registered,
+                    reference_offset,
+                    reference_limit,
+                )
+            };
+            let tail = |entries: &[String]| IntegrityTail {
+                total: entries.len() as u64,
+                entries: entries.iter().take(MAX_TAIL_ENTRIES).cloned().collect(),
+            };
+            Ok(MediaReconcileDetail {
+                missing: resolve(&missing, "missing")?,
+                corrupt: resolve(&corrupt, "corrupt")?,
+                orphans: tail(&report.orphans),
+                stale_staging: tail(&report.stale_staging),
+                foreign: tail(&report.foreign),
+            })
+        })
+        .map_err(|e| e.to_string())
 }
 
 /// Summary of one explicit media export (M4.3): a byte-exact copy of
@@ -3473,6 +3678,7 @@ pub fn run() {
             export_messages_v2,
             save_text,
             media_reconcile,
+            media_reconcile_detail,
             media_usage,
             media_export,
             media_open_external,
