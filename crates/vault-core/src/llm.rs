@@ -18,18 +18,31 @@
 //! the key is never persisted. With no key everything still works: [`ask`]
 //! degrades to plain FTS5 term search (plus local hybrid ranking when
 //! embeddings exist) with no network traffic.
+//!
+//! The M5.2 v2 job-backed flow composes the same local steps as a
+//! prepare → approve → generate job pair ([`prepare_scoped_ask`] /
+//! [`generate_approved_answer`]): preparing runs fully locally and returns
+//! the **exact** bounded payload ([`build_synthesis_payload`]) hashed into
+//! a digest ([`prepared_ask_digest`]); the user approves that digest; and
+//! generation re-checks it and sends only the approved snapshot — every
+//! outbound byte is covered by the approved digest, so nothing ever leaves
+//! the machine before that approval. There is no translate round trip in
+//! v2: an outbound translate request would itself be an unapproved byte.
 
 use std::collections::VecDeque;
+use std::sync::atomic::AtomicU64;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::extract::CollectedLink;
 use crate::message::Message;
 use crate::search::build_match_query;
+use crate::search2::AskScope;
 use crate::storage::Storage;
 use crate::vector::{rrf_fuse, Embedder};
 use crate::{Error, Result};
@@ -728,26 +741,31 @@ pub struct Summarized {
     pub notes: Vec<String>,
 }
 
-/// Step 3 of the pipeline: synthesize a short answer over the top `top`
-/// results. Only those rows (truncated) are sent — the privacy guarantee.
-/// Skipped entirely when there are no results. Blocks are placed in
-/// [`lim_order`] (strongest evidence at the prompt's edges) while their
-/// `[k]` numbers stay by rank. When `collected` is non-empty, up to
+/// The exact bounded synthesis payload one ask would send: the system and
+/// user prompts, byte for byte (M5.2). This is the single builder behind
+/// both the v2 payload preview (what the user approves) and
+/// [`summarize_results`] (what leaves the machine), so the approved bytes
+/// and the sent bytes are the same strings by construction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SynthesisPayload {
+    pub system: String,
+    pub user: String,
+}
+
+/// Build the exact synthesis prompts over the top `top` of `results`
+/// (truncated, in [`lim_order`] placement); `None` when there are no
+/// results — nothing would be sent. When `collected` is non-empty, up to
 /// [`SUMMARY_LINK_LIMIT`] `url · author · date` lines are appended and the
 /// system prompt gains a rule for describing the links; with no collected
 /// links both prompts are built exactly as before.
-pub fn summarize_results(
-    llm: &dyn Llm,
+pub fn build_synthesis_payload(
     question: &str,
     results: &[Message],
     top: usize,
     collected: &[CollectedLink],
-) -> Summarized {
+) -> Option<SynthesisPayload> {
     if results.is_empty() {
-        return Summarized {
-            answer: None,
-            notes: Vec::new(),
-        };
+        return None;
     }
     let top_messages: Vec<&Message> = results.iter().take(top).collect();
     let contexts: String = lim_order(top_messages.len())
@@ -784,7 +802,27 @@ pub fn summarize_results(
             "\n- When a collected-links list is present, describe what the links are and who sent them; cite the numbered messages.",
         );
     }
-    match llm.complete(&system, &user) {
+    Some(SynthesisPayload { system, user })
+}
+
+/// Step 3 of the pipeline: synthesize a short answer over the top `top`
+/// results. Only those rows (truncated) are sent — the privacy guarantee.
+/// Skipped entirely when there are no results. The prompts come from
+/// [`build_synthesis_payload`], the same builder the v2 preview uses.
+pub fn summarize_results(
+    llm: &dyn Llm,
+    question: &str,
+    results: &[Message],
+    top: usize,
+    collected: &[CollectedLink],
+) -> Summarized {
+    let Some(payload) = build_synthesis_payload(question, results, top, collected) else {
+        return Summarized {
+            answer: None,
+            notes: Vec::new(),
+        };
+    };
+    match llm.complete(&payload.system, &payload.user) {
         Ok(answer) => Summarized {
             answer: Some(answer),
             notes: Vec::new(),
@@ -889,6 +927,458 @@ pub fn ask(
         collected,
         notes,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Prepared asks (M5.2 v2 job-backed flow: prepare → approve → generate)
+// ---------------------------------------------------------------------------
+
+/// The endpoint identity a prepared ask is bound to: everything about the
+/// provider selection that shapes the outbound request except the API key
+/// (a key never enters the approval — rotating one must not invalidate an
+/// approved payload). The empty endpoint is the local-only selection:
+/// nothing would ever be sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PreparedEndpoint {
+    /// Base URL of the Anthropic-compatible endpoint.
+    pub base_url: String,
+    /// Model name sent with the request.
+    pub model: String,
+}
+
+impl PreparedEndpoint {
+    /// The local-only selection: generation performs no round trip.
+    pub fn local() -> Self {
+        Self {
+            base_url: String::new(),
+            model: String::new(),
+        }
+    }
+}
+
+/// One prepared ask: the pending approval state between `prepare_ask_v2`
+/// and `generate_answer_v2`. Lives only in process memory (the M5.1
+/// session-scoped-consent decision extends here: an approval never
+/// survives a restart).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedAsk {
+    /// Session-stable id of this prepared ask.
+    pub id: u64,
+    /// SHA-256 over everything the approval binds ([`prepared_ask_digest`]).
+    pub digest: String,
+    /// The question, exactly as it appears inside the payload.
+    pub question: String,
+    /// The validated workspace scope the retrieval ran under (its
+    /// canonical JSON form is part of the digest).
+    pub scope: Option<AskScope>,
+    /// Endpoint the payload was prepared for.
+    pub endpoint: PreparedEndpoint,
+    /// The exact payload a consented generation would send; `None` when
+    /// nothing would be sent (no results — or a local-only selection).
+    pub payload: Option<SynthesisPayload>,
+    /// Message ids of the approved window in rank order: the answer's
+    /// citation `[n]` (1-based) maps to `window_ids[n − 1]`.
+    pub window_ids: Vec<i64>,
+    /// `archive_revision` when the ask was prepared — the result-snapshot
+    /// signal. A moved counter means retrieval could return a different
+    /// set than the one the user saw, so the approval is stale.
+    pub archive_revision: u64,
+}
+
+/// SHA-256 over everything the approval must bind: the endpoint (base URL
+/// + model), the question, the canonical workspace scope, and the exact
+/// payload bytes (`None` payload = nothing would be sent). Fields are
+/// U+001F-joined (the `content_hash` convention) so no field boundary is
+/// ambiguous; changing any one of them changes the digest.
+pub fn prepared_ask_digest(
+    endpoint: &PreparedEndpoint,
+    question: &str,
+    scope: Option<&AskScope>,
+    payload: Option<&SynthesisPayload>,
+) -> String {
+    let scope_json = scope
+        .map(|s| serde_json::to_string(s).unwrap_or_default())
+        .unwrap_or_default();
+    let mut hasher = Sha256::new();
+    for field in [
+        endpoint.base_url.as_str(),
+        endpoint.model.as_str(),
+        question,
+        scope_json.as_str(),
+        payload.map(|p| p.system.as_str()).unwrap_or(""),
+        payload.map(|p| p.user.as_str()).unwrap_or(""),
+    ] {
+        hasher.update(field.as_bytes());
+        hasher.update([0x1f]);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+/// Why a v2 prepared ask could not be generated. Every refusal message
+/// tells the user to prepare again — an approval never silently covers
+/// different bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AskV2Error {
+    /// No prepared ask is pending under that id (none prepared, replaced
+    /// by a newer prepare, or already consumed).
+    NoPendingPreparedAsk,
+    /// The approved digest does not match the pending ask — the question,
+    /// filters, endpoint, or payload changed after the approval.
+    StaleDigest,
+    /// The archive changed since the ask was prepared (`archive_revision`
+    /// moved), so the approved result snapshot may no longer be what
+    /// retrieval returns.
+    ArchiveChanged,
+    /// Cancelled at a cooperative checkpoint; nothing was sent.
+    Cancelled,
+    /// Scope validation or storage failure (detail in the message).
+    Vault(String),
+    /// The provider round trip failed (the approval is consumed).
+    Provider(String),
+}
+
+impl std::fmt::Display for AskV2Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoPendingPreparedAsk => write!(
+                f,
+                "no prepared ask matches this approval — prepare the ask again and \
+                 approve the new payload"
+            ),
+            Self::StaleDigest => write!(
+                f,
+                "the approved payload is stale (question, filters, endpoint, or \
+                 results changed) — prepare the ask again and approve the new payload"
+            ),
+            Self::ArchiveChanged => write!(
+                f,
+                "the archive changed since the ask was prepared — prepare the ask \
+                 again and approve the new payload"
+            ),
+            Self::Cancelled => write!(f, "cancelled before anything was sent"),
+            Self::Vault(message) | Self::Provider(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for AskV2Error {}
+
+/// In-memory registry of the session's pending prepared ask — exactly one
+/// at a time, mirroring the single staged restore: a new prepare replaces
+/// (and thereby invalidates) the previous approval, and a generate
+/// consumes it (one approval, one generation).
+#[derive(Debug, Default)]
+pub struct PreparedAskRegistry {
+    pending: Mutex<Option<PreparedAsk>>,
+    next_id: AtomicU64,
+}
+
+impl PreparedAskRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register the next prepared ask, replacing (and thereby invalidating
+    /// the approval of) any pending one. Computes the digest here so
+    /// preview and approval can never disagree about what is approved.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register(
+        &self,
+        endpoint: &PreparedEndpoint,
+        question: &str,
+        scope: Option<&AskScope>,
+        payload: Option<&SynthesisPayload>,
+        window_ids: &[i64],
+        archive_revision: u64,
+    ) -> PreparedAsk {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let digest = prepared_ask_digest(endpoint, question, scope, payload);
+        let prepared = PreparedAsk {
+            id,
+            digest,
+            question: question.to_string(),
+            scope: scope.cloned(),
+            endpoint: endpoint.clone(),
+            payload: payload.cloned(),
+            window_ids: window_ids.to_vec(),
+            archive_revision,
+        };
+        *self.pending.lock().unwrap() = Some(prepared.clone());
+        prepared
+    }
+
+    /// Take the pending prepared ask for generation. `Err` (without
+    /// touching the pending record) when nothing is pending under `id`
+    /// (never prepared, replaced by a newer prepare, or already consumed)
+    /// or the approved digest does not match the pending record. `Ok`
+    /// consumes the approval: a second generate under the same approval
+    /// is refused.
+    pub fn consume(&self, id: u64, digest: &str) -> std::result::Result<PreparedAsk, AskV2Error> {
+        let mut pending = self.pending.lock().unwrap();
+        if let Some(prepared) = pending.as_ref() {
+            if prepared.id != id {
+                return Err(AskV2Error::NoPendingPreparedAsk);
+            }
+            if prepared.digest != digest {
+                return Err(AskV2Error::StaleDigest);
+            }
+        } else {
+            return Err(AskV2Error::NoPendingPreparedAsk);
+        }
+        Ok(pending.take().expect("pending checked above"))
+    }
+}
+
+/// Outcome of one prepared (not yet approved) ask: the local results plus
+/// the exact bounded payload a consented generation would send, hashed
+/// into the digest the user approves.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PreparedAskOutcome {
+    pub prepared_id: u64,
+    pub digest: String,
+    pub plan: QueryPlan,
+    /// Always [`PlanSource::NoLlm`]: v2 has no translate round trip, so
+    /// the plan is local by construction and no outbound byte ever
+    /// precedes the approval.
+    pub plan_source: PlanSource,
+    pub ranking: RankingMode,
+    /// The local search results under the active filters.
+    pub results: Vec<Message>,
+    /// The exact payload a consented generation would send; `None` when
+    /// nothing would be sent (no results).
+    pub payload: Option<SynthesisPayload>,
+    /// Message ids of the payload window, rank order (citation `[n]` →
+    /// `window_ids[n − 1]`).
+    pub window_ids: Vec<i64>,
+    /// `archive_revision` the approval is bound to.
+    pub archive_revision: u64,
+    pub notes: Vec<String>,
+}
+
+/// Answer of one approved generation.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ApprovedAnswer {
+    pub question: String,
+    /// The synthesized answer; `None` when the approved payload was empty
+    /// (no results were approved to send) or the selection is local-only.
+    pub answer: Option<String>,
+    /// Message ids of the approved window, rank order: citation `[n]`
+    /// (1-based) maps to `window_ids[n − 1]` — a fixed map over this
+    /// ask's own approved results.
+    pub window_ids: Vec<i64>,
+}
+
+/// The prepare leg of the v2 ask flow — **fully local, zero network**: the
+/// question becomes a plain term plan (v2 has no translate round trip, so
+/// no outbound byte ever precedes the approval), retrieval runs under the
+/// validated workspace `scope` (the plan can only narrow it, never
+/// broaden), the exact bounded synthesis payload is built and hashed, and
+/// the single pending prepared ask is registered. The returned digest is
+/// what the user approves; generation sends only that snapshot.
+///
+/// `cancel` is checked between pipeline steps; `progress` receives the
+/// same done/total phase hints the job engine reports (`(done, total,
+/// message)`; totals are step counts, never guessed percentages).
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_scoped_ask(
+    storage: &Storage,
+    embedder: &dyn Embedder,
+    registry: &PreparedAskRegistry,
+    endpoint: &PreparedEndpoint,
+    question: &str,
+    scope: Option<&AskScope>,
+    limit: u32,
+    summarize_top: usize,
+    cancel: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(u64, u64, &str),
+) -> std::result::Result<PreparedAskOutcome, AskV2Error> {
+    if cancel() {
+        return Err(AskV2Error::Cancelled);
+    }
+    // Scope validation first — an invalid scope fails the ask before any
+    // retrieval (the v1 rule, unchanged).
+    progress(0, 4, "validating the active filters");
+    let resolved = match scope {
+        Some(raw) => Some(
+            crate::search2::validate_ask_scope(storage, raw)
+                .map_err(|e| AskV2Error::Vault(e.to_string()))?,
+        ),
+        None => None,
+    };
+    if cancel() {
+        return Err(AskV2Error::Cancelled);
+    }
+    let planned = PlannedQuery {
+        plan: QueryPlan::plain(question),
+        source: PlanSource::NoLlm,
+        notes: Vec::new(),
+    };
+    progress(1, 4, "searching the archive under the active filters");
+    let fts_results = run_plan_scoped(storage, &planned, resolved.as_ref(), limit)
+        .map_err(|e| AskV2Error::Vault(e.to_string()))?;
+    if cancel() {
+        return Err(AskV2Error::Cancelled);
+    }
+    progress(2, 4, "ranking results");
+    let hybrid = rank_hybrid_scoped(
+        storage,
+        embedder,
+        question,
+        &planned,
+        &fts_results,
+        resolved.as_ref(),
+        limit,
+    )
+    .map_err(|e| AskV2Error::Vault(e.to_string()))?;
+    let results = hybrid.results;
+    if cancel() {
+        return Err(AskV2Error::Cancelled);
+    }
+    progress(3, 4, "building the exact payload preview");
+    // The local plan never extracts links, so the payload is built with
+    // no collected-links section.
+    let payload = build_synthesis_payload(question, &results, summarize_top, &[]);
+    let archive_revision = storage
+        .archive_revision()
+        .map_err(|e| AskV2Error::Vault(e.to_string()))?;
+    let window_ids: Vec<i64> = results.iter().take(summarize_top).map(|m| m.id).collect();
+    let prepared = registry.register(
+        endpoint,
+        question,
+        scope,
+        payload.as_ref(),
+        &window_ids,
+        archive_revision,
+    );
+    Ok(PreparedAskOutcome {
+        prepared_id: prepared.id,
+        digest: prepared.digest,
+        plan: planned.plan,
+        plan_source: planned.source,
+        ranking: hybrid.ranking,
+        results,
+        payload,
+        window_ids,
+        archive_revision,
+        notes: vec![
+            "prepared fully locally — nothing has been sent; generation sends only the \
+             payload you approve"
+                .into(),
+        ],
+    })
+}
+
+/// The generate leg's local phase: consume the approval (bound to the
+/// exact digest) and re-check it — the freshly re-resolved selection's
+/// `endpoint` must match the prepared record, and the archive revision
+/// must not have moved since prepare. Split from the send so callers can
+/// run this phase inside a short-lived storage read and the network
+/// round trip outside it ([`generate_approved_answer`] composes both).
+pub fn take_approved_ask(
+    storage: &Storage,
+    registry: &PreparedAskRegistry,
+    endpoint: &PreparedEndpoint,
+    prepared_id: u64,
+    digest: &str,
+    cancel: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(u64, u64, &str),
+) -> std::result::Result<PreparedAsk, AskV2Error> {
+    if cancel() {
+        return Err(AskV2Error::Cancelled);
+    }
+    progress(0, 2, "re-checking the approved payload");
+    let prepared = registry.consume(prepared_id, digest)?;
+    if cancel() {
+        return Err(AskV2Error::Cancelled);
+    }
+    // Endpoint re-check: the approval binds the endpoint too — a
+    // re-resolved selection that no longer matches (base URL or model
+    // changed, the provider was removed, or a different one was picked)
+    // refuses instead of sending approved bytes somewhere else.
+    if &prepared.endpoint != endpoint {
+        return Err(AskV2Error::StaleDigest);
+    }
+    // Snapshot re-check: a moved archive_revision means retrieval could
+    // return a different set than the one the user saw and approved.
+    let archive_revision = storage
+        .archive_revision()
+        .map_err(|e| AskV2Error::Vault(e.to_string()))?;
+    if archive_revision != prepared.archive_revision {
+        return Err(AskV2Error::ArchiveChanged);
+    }
+    Ok(prepared)
+}
+
+/// The generate leg's send phase: send **only** the approved snapshot —
+/// the stored prompts, byte for byte, in one provider round trip (no
+/// round trip at all when the approved payload is empty or the selection
+/// is local-only). The approval was already consumed by
+/// [`take_approved_ask`]; a provider failure here consumes it too — one
+/// approval covers exactly one generation attempt.
+pub fn send_approved_payload(
+    prepared: &PreparedAsk,
+    llm: Option<&dyn Llm>,
+    cancel: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(u64, u64, &str),
+) -> std::result::Result<ApprovedAnswer, AskV2Error> {
+    if cancel() {
+        return Err(AskV2Error::Cancelled);
+    }
+    progress(1, 2, "sending the approved payload");
+    let answer = match (prepared.payload.as_ref(), llm) {
+        (Some(payload), Some(llm)) => Some(
+            llm.complete(&payload.system, &payload.user)
+                .map_err(|e| AskV2Error::Provider(e.to_string()))?,
+        ),
+        // Nothing was approved to send (no results), or the selection is
+        // local-only: no round trip, no answer — the invariant holds
+        // trivially.
+        _ => None,
+    };
+    Ok(ApprovedAnswer {
+        question: prepared.question.clone(),
+        answer,
+        window_ids: prepared.window_ids.clone(),
+    })
+}
+
+/// The generate leg of the v2 ask flow in one call: consume the approval
+/// (bound to the exact digest), re-check that neither the endpoint nor
+/// the archive changed since prepare, then send **only the approved
+/// snapshot** — the stored prompts, byte for byte — in one provider
+/// round trip. Callers that must keep the network round trip outside a
+/// storage read (the job engine's rule) use [`take_approved_ask`] and
+/// [`send_approved_payload`] directly.
+///
+/// `endpoint` is the freshly re-resolved selection's fingerprint; a
+/// mismatch with the prepared record refuses before anything is sent.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_approved_answer(
+    storage: &Storage,
+    registry: &PreparedAskRegistry,
+    llm: Option<&dyn Llm>,
+    endpoint: &PreparedEndpoint,
+    prepared_id: u64,
+    digest: &str,
+    cancel: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(u64, u64, &str),
+) -> std::result::Result<ApprovedAnswer, AskV2Error> {
+    let prepared = take_approved_ask(
+        storage,
+        registry,
+        endpoint,
+        prepared_id,
+        digest,
+        cancel,
+        progress,
+    )?;
+    if cancel() {
+        return Err(AskV2Error::Cancelled);
+    }
+    send_approved_payload(&prepared, llm, cancel, progress)
 }
 
 /// What the UI needs to know about LLM availability. Never exposes the key.
@@ -1812,5 +2302,469 @@ mod tests {
             !user.contains("beta"),
             "out-of-scope row leaked into the summary prompt: {user}"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // M5.2: prepared asks (v2 preview → approve → generate)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn payload_preview_equals_what_summarize_sends() {
+        let msgs: Vec<Message> = (0..3).map(lim_msg).collect();
+        let payload = build_synthesis_payload("vault?", &msgs, 2, &[]).unwrap();
+        let llm = MockLlm::with_replies(["summary"]);
+        let s = summarize_results(&llm, "vault?", &msgs, 2, &[]);
+        assert_eq!(s.answer.as_deref(), Some("summary"));
+        // The preview and the wire use the same builder: identical bytes.
+        assert_eq!(llm.prompts().len(), 1);
+        assert_eq!(
+            (llm.prompts()[0].0.as_str(), llm.prompts()[0].1.as_str()),
+            (payload.system.as_str(), payload.user.as_str())
+        );
+        // No results → no payload.
+        assert!(build_synthesis_payload("q", &[], 8, &[]).is_none());
+    }
+
+    #[test]
+    fn prepared_digest_binds_every_approved_field() {
+        let endpoint = PreparedEndpoint {
+            base_url: "https://api.example.com".into(),
+            model: "m1".into(),
+        };
+        let payload = SynthesisPayload {
+            system: "s".into(),
+            user: "u".into(),
+        };
+        let scope = AskScope {
+            author: Some("ana".into()),
+            ..AskScope::default()
+        };
+        let base = prepared_ask_digest(&endpoint, "q", Some(&scope), Some(&payload));
+        // Deterministic for the same inputs.
+        assert_eq!(
+            base,
+            prepared_ask_digest(&endpoint, "q", Some(&scope), Some(&payload))
+        );
+        // Each bound field changes the digest.
+        let other_endpoint = PreparedEndpoint {
+            model: "m2".into(),
+            ..endpoint.clone()
+        };
+        assert_ne!(
+            base,
+            prepared_ask_digest(&other_endpoint, "q", Some(&scope), Some(&payload))
+        );
+        assert_ne!(
+            base,
+            prepared_ask_digest(&endpoint, "q2", Some(&scope), Some(&payload))
+        );
+        assert_ne!(
+            base,
+            prepared_ask_digest(&endpoint, "q", None, Some(&payload))
+        );
+        let other_payload = SynthesisPayload {
+            system: "s".into(),
+            user: "u2".into(),
+        };
+        assert_ne!(
+            base,
+            prepared_ask_digest(&endpoint, "q", Some(&scope), Some(&other_payload))
+        );
+        assert_ne!(
+            base,
+            prepared_ask_digest(&endpoint, "q", Some(&scope), None)
+        );
+    }
+
+    #[test]
+    fn registry_keeps_exactly_one_pending_approval() {
+        let registry = PreparedAskRegistry::new();
+        let endpoint = PreparedEndpoint::local();
+        let payload = SynthesisPayload {
+            system: "s".into(),
+            user: "u".into(),
+        };
+        let first = registry.register(&endpoint, "q1", None, Some(&payload), &[1], 7);
+        let second = registry.register(&endpoint, "q2", None, Some(&payload), &[2], 7);
+        assert_ne!(first.id, second.id, "ids are session-stable and unique");
+        // The newer prepare replaced the older approval.
+        assert!(matches!(
+            registry.consume(first.id, &first.digest),
+            Err(AskV2Error::NoPendingPreparedAsk)
+        ));
+        // A wrong digest refuses without consuming the pending approval.
+        assert!(matches!(
+            registry.consume(second.id, "not-the-digest"),
+            Err(AskV2Error::StaleDigest)
+        ));
+        // The matching approval consumes; a second attempt under the
+        // same approval refuses.
+        let taken = registry.consume(second.id, &second.digest).unwrap();
+        assert_eq!(taken.question, "q2");
+        assert_eq!(taken.window_ids, vec![2]);
+        assert!(matches!(
+            registry.consume(second.id, &second.digest),
+            Err(AskV2Error::NoPendingPreparedAsk)
+        ));
+    }
+
+    /// Fixture for the v2 flow: two same-marker messages from different
+    /// authors, one question both answer.
+    fn v2_fixture() -> Storage {
+        let storage = Storage::open_in_memory().unwrap();
+        for (author, tag) in [("ana@example.com", "alpha"), ("bob@example.com", "beta")] {
+            storage
+                .insert_message(&crate::message::NewMessage::new(
+                    "test",
+                    format!("v2-{tag}"),
+                    author,
+                    "2026-10-05T12:00:00Z",
+                    format!("v2 {tag} marker about the vault"),
+                ))
+                .unwrap();
+        }
+        storage
+    }
+
+    #[test]
+    fn prepare_intersects_the_active_filters_and_previews_the_payload() {
+        let storage = v2_fixture();
+        let embedder = crate::vector::HashEmbedder;
+        let registry = PreparedAskRegistry::new();
+        let endpoint = PreparedEndpoint {
+            base_url: "https://api.example.com".into(),
+            model: "m1".into(),
+        };
+        let scope = AskScope {
+            author: Some("ana".into()),
+            ..AskScope::default()
+        };
+        let cancel = || false;
+        let mut progress = |_, _, _| {};
+        let outcome = prepare_scoped_ask(
+            &storage,
+            &embedder,
+            &registry,
+            &endpoint,
+            "vault marker",
+            Some(&scope),
+            50,
+            8,
+            &cancel,
+            &mut progress,
+        )
+        .unwrap();
+        assert_eq!(outcome.plan_source, PlanSource::NoLlm);
+        assert_eq!(outcome.results.len(), 1);
+        assert!(outcome.results[0].body.contains("alpha"));
+        let payload = outcome.payload.as_ref().expect("one result → a payload");
+        assert!(payload.user.contains("alpha"));
+        assert!(
+            !payload.user.contains("beta"),
+            "out-of-scope row leaked into the preview: {}",
+            payload.user
+        );
+        assert_eq!(outcome.window_ids, vec![outcome.results[0].id]);
+        // The registered pending ask matches the outcome the UI saw.
+        let prepared = registry
+            .consume(outcome.prepared_id, &outcome.digest)
+            .unwrap();
+        assert_eq!(prepared.payload.as_ref(), Some(payload));
+        assert_eq!(prepared.window_ids, outcome.window_ids);
+        assert_eq!(prepared.archive_revision, outcome.archive_revision);
+        assert_eq!(prepared.scope.as_ref(), Some(&scope));
+    }
+
+    #[test]
+    fn prepare_refuses_an_invalid_scope_before_any_retrieval() {
+        let storage = v2_fixture();
+        let embedder = crate::vector::HashEmbedder;
+        let registry = PreparedAskRegistry::new();
+        let scope = AskScope {
+            source_ids: vec!["no-such-source".into()],
+            ..AskScope::default()
+        };
+        let cancel = || false;
+        let mut progress = |_, _, _| {};
+        let err = prepare_scoped_ask(
+            &storage,
+            &embedder,
+            &registry,
+            &PreparedEndpoint::local(),
+            "vault marker",
+            Some(&scope),
+            50,
+            8,
+            &cancel,
+            &mut progress,
+        )
+        .unwrap_err();
+        assert!(matches!(err, AskV2Error::Vault(_)));
+        assert!(err.to_string().contains("unknown source id"));
+    }
+
+    #[test]
+    fn generate_sends_only_the_approved_payload_and_maps_citations() {
+        let storage = v2_fixture();
+        let embedder = crate::vector::HashEmbedder;
+        let registry = PreparedAskRegistry::new();
+        let endpoint = PreparedEndpoint {
+            base_url: "https://api.example.com".into(),
+            model: "m1".into(),
+        };
+        let cancel = || false;
+        let mut progress = |_, _, _| {};
+        let prepared = prepare_scoped_ask(
+            &storage,
+            &embedder,
+            &registry,
+            &endpoint,
+            "vault marker",
+            None,
+            50,
+            8,
+            &cancel,
+            &mut progress,
+        )
+        .unwrap();
+        assert_eq!(prepared.results.len(), 2);
+        let payload = prepared.payload.clone().unwrap();
+        let llm = MockLlm::with_replies(["approved answer [1] and [2]."]);
+        let answer = generate_approved_answer(
+            &storage,
+            &registry,
+            Some(&llm),
+            &endpoint,
+            prepared.prepared_id,
+            &prepared.digest,
+            &cancel,
+            &mut progress,
+        )
+        .unwrap();
+        assert_eq!(
+            answer.answer.as_deref(),
+            Some("approved answer [1] and [2].")
+        );
+        assert_eq!(answer.question, "vault marker");
+        // The citation window is this ask's own ranked results.
+        assert_eq!(answer.window_ids, prepared.window_ids);
+        assert_eq!(answer.window_ids.len(), 2);
+        // Exactly the approved prompts left, byte for byte.
+        assert_eq!(llm.prompts().len(), 1);
+        assert_eq!(
+            llm.prompts()[0],
+            (payload.system.clone(), payload.user.clone())
+        );
+    }
+
+    #[test]
+    fn generate_refuses_a_stale_result_snapshot() {
+        let storage = v2_fixture();
+        let embedder = crate::vector::HashEmbedder;
+        let registry = PreparedAskRegistry::new();
+        let endpoint = PreparedEndpoint::local();
+        let cancel = || false;
+        let mut progress = |_, _, _| {};
+        let prepared = prepare_scoped_ask(
+            &storage,
+            &embedder,
+            &registry,
+            &endpoint,
+            "vault marker",
+            None,
+            50,
+            8,
+            &cancel,
+            &mut progress,
+        )
+        .unwrap();
+        // A committed content change bumps archive_revision — the
+        // approval over the old result snapshot is stale.
+        storage
+            .insert_message(&crate::message::NewMessage::new(
+                "test",
+                "new",
+                "new@example.com",
+                "2026-10-06T12:00:00Z",
+                "a fresh vault marker row",
+            ))
+            .unwrap();
+        let llm = MockLlm::with_replies(["never served"]);
+        let err = generate_approved_answer(
+            &storage,
+            &registry,
+            Some(&llm),
+            &endpoint,
+            prepared.prepared_id,
+            &prepared.digest,
+            &cancel,
+            &mut progress,
+        )
+        .unwrap_err();
+        assert_eq!(err, AskV2Error::ArchiveChanged);
+        assert!(
+            llm.prompts().is_empty(),
+            "a stale approval must send nothing"
+        );
+    }
+
+    #[test]
+    fn generate_refuses_a_changed_endpoint() {
+        let storage = v2_fixture();
+        let embedder = crate::vector::HashEmbedder;
+        let registry = PreparedAskRegistry::new();
+        let endpoint = PreparedEndpoint {
+            base_url: "https://api.example.com".into(),
+            model: "m1".into(),
+        };
+        let cancel = || false;
+        let mut progress = |_, _, _| {};
+        let prepared = prepare_scoped_ask(
+            &storage,
+            &embedder,
+            &registry,
+            &endpoint,
+            "vault marker",
+            None,
+            50,
+            8,
+            &cancel,
+            &mut progress,
+        )
+        .unwrap();
+        // The provider selection changed between prepare and generate.
+        let moved = PreparedEndpoint {
+            model: "m2".into(),
+            ..endpoint.clone()
+        };
+        let llm = MockLlm::with_replies(["never served"]);
+        let err = generate_approved_answer(
+            &storage,
+            &registry,
+            Some(&llm),
+            &moved,
+            prepared.prepared_id,
+            &prepared.digest,
+            &cancel,
+            &mut progress,
+        )
+        .unwrap_err();
+        assert_eq!(err, AskV2Error::StaleDigest);
+        assert!(
+            llm.prompts().is_empty(),
+            "approved bytes must never go to a different endpoint"
+        );
+    }
+
+    #[test]
+    fn generate_cancels_between_steps_before_sending() {
+        let storage = v2_fixture();
+        let embedder = crate::vector::HashEmbedder;
+        let registry = PreparedAskRegistry::new();
+        let endpoint = PreparedEndpoint {
+            base_url: "https://api.example.com".into(),
+            model: "m1".into(),
+        };
+        let cancel = || false;
+        let mut progress = |_, _, _| {};
+        let prepared = prepare_scoped_ask(
+            &storage,
+            &embedder,
+            &registry,
+            &endpoint,
+            "vault marker",
+            None,
+            50,
+            8,
+            &cancel,
+            &mut progress,
+        )
+        .unwrap();
+        // The cancellation arrives after the first checkpoint passed: the
+        // very next checkpoint (before anything is sent) stops the job.
+        let checks = std::sync::atomic::AtomicU64::new(0);
+        let cancel_now = || checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1;
+        let llm = MockLlm::with_replies(["never served"]);
+        let err = generate_approved_answer(
+            &storage,
+            &registry,
+            Some(&llm),
+            &endpoint,
+            prepared.prepared_id,
+            &prepared.digest,
+            &cancel_now,
+            &mut progress,
+        )
+        .unwrap_err();
+        assert_eq!(err, AskV2Error::Cancelled);
+        assert!(llm.prompts().is_empty(), "a cancelled ask sends nothing");
+    }
+
+    #[test]
+    fn local_selection_and_empty_results_send_nothing() {
+        let storage = v2_fixture();
+        let embedder = crate::vector::HashEmbedder;
+        let registry = PreparedAskRegistry::new();
+        let cancel = || false;
+        let mut progress = |_, _, _| {};
+        // Local-only selection with results: no answer, nothing sent.
+        let prepared = prepare_scoped_ask(
+            &storage,
+            &embedder,
+            &registry,
+            &PreparedEndpoint::local(),
+            "vault marker",
+            None,
+            50,
+            8,
+            &cancel,
+            &mut progress,
+        )
+        .unwrap();
+        let llm = MockLlm::with_replies(["never"]);
+        let answer = generate_approved_answer(
+            &storage,
+            &registry,
+            None,
+            &PreparedEndpoint::local(),
+            prepared.prepared_id,
+            &prepared.digest,
+            &cancel,
+            &mut progress,
+        )
+        .unwrap();
+        assert_eq!(answer.answer, None);
+        assert_eq!(answer.window_ids.len(), 2);
+        assert!(llm.prompts().is_empty());
+        // A question nothing matches prepares an empty payload; approval
+        // of it still sends nothing.
+        let empty = prepare_scoped_ask(
+            &storage,
+            &embedder,
+            &registry,
+            &PreparedEndpoint::local(),
+            "zzz-no-such-term-anywhere",
+            None,
+            50,
+            8,
+            &cancel,
+            &mut progress,
+        )
+        .unwrap();
+        assert!(empty.payload.is_none());
+        assert!(empty.results.is_empty());
+        let answer = generate_approved_answer(
+            &storage,
+            &registry,
+            None,
+            &PreparedEndpoint::local(),
+            empty.prepared_id,
+            &empty.digest,
+            &cancel,
+            &mut progress,
+        )
+        .unwrap();
+        assert_eq!(answer.answer, None);
+        assert!(answer.window_ids.is_empty());
     }
 }
