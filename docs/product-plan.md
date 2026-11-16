@@ -48,7 +48,7 @@ The release supports Linux x64, Windows x64, and macOS Apple Silicon/Intel. OS a
 | P04 | Background import/sync with progress, cancellation, safe retry, and no network-held database lock | [Architecture: jobs](architecture.md#jobs-and-database-access) |
 | P05 | Copy available originals/media, open/export safely, and report unavailable files | [Architecture: objects](architecture.md#originals-media-and-object-lifecycle) |
 | P06 | Consistent backups, staged validation, restore recovery, and clear credential exclusions | [Architecture: recovery](architecture.md#backup-and-restore) |
-| P07 | AI off until enabled; per-question disclosure and per-answer context approval; citations open archived evidence | [UX: Ask](ux-specification.md#optional-ask) |
+| P07 | AI off until enabled; consent is session-scoped and never persisted (decided 2026-11-16, [#181](https://github.com/acailic/mailchat-vault/issues/181) — see the [decision record](#ai-consent-is-session-scoped-decided-2026-11-16-181)); per-question disclosure and per-answer context approval; citations open archived evidence | [UX: Ask](ux-specification.md#optional-ask) |
 | P08 | Accessible keyboard operation and usable small-window behavior | [UX: accessibility](ux-specification.md#accessibility-and-interaction) |
 | P09 | Install, upgrade, and use keychain/recovery workflows on all supported desktop targets | [Release validation](validation-and-release.md#platform-and-release-matrix) |
 | P10 | Optional background keep-alive: close-to-tray, start at login, single instance — each opt-in and off by default, never a headless service | [D10 amendment](decisions.md#d10-read-only-mail-ingestion-and-opt-in-scheduling) |
@@ -78,3 +78,15 @@ AI refinement remains part of the release because AI already exists, but it must
 ## Maintenance
 
 The product owner changes scope here first, then updates affected UX, contracts, roadmap slices, and acceptance tests. A newly requested connector or cloud feature requires a fresh scope decision rather than silent expansion of this release.
+
+## Decision records
+
+Dated product decisions that settle an open scope question land here first, then propagate to the affected specifications.
+
+### AI consent is session-scoped (decided 2026-11-16, #181)
+
+M5.1 proposed a persisted off-by-default AI-consent switch in Settings. The shipped implementation instead made consent session-scoped — in-memory only, reset on every app start, never written to any storage — and the [M5 progress record](implementation-roadmap.md#completion-tracking) held the choice between the two open pending this decision. **Decided ([#181](https://github.com/acailic/mailchat-vault/issues/181)): session-scoped consent is the final release behavior; the persisted off-by-default switch is superseded, not deferred.**
+
+- P07's "AI off until enabled" means off at *every* app start: each session begins ungranted, and the explicit per-session consent (per-question prompt, always-visible status line, mid-session Revoke) is the only way network asks are enabled. A consent can never survive a restart — stricter than the proposed switch, whose persisted grant could stay enabled indefinitely.
+- No Settings surface, persisted state, schema, or code change follows: the switch was never built, and M5.1's other halves (endpoint/model configuration visibility, keychain/session key storage, environment-config compatibility) shipped with M5 (#48).
+- Recorded with a dated [D09 amendment](decisions.md#d09-ai-is-optional-and-payload-approval-is-explicit) and the roadmap's M5.1 decision addendum; the [UX specification](ux-specification.md#optional-ask), [architecture](architecture.md#optional-ai-ask-layer), [contracts](data-and-api-contracts.md#search-request-and-response), and [assessment](project-assessment.md) carry supersession notes where they presented the switch as proposed. M5.1 closes; M5.2 (job-backed prepare/approve/generate) and the M5.3 cancellation/error/retry remainder stay open, so the M5 checkbox stays open.

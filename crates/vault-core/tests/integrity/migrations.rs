@@ -15,10 +15,10 @@ use crate::util::{migrations_table, msg, raw, version1_db_with_data};
 /// The schema version this build knows; bump expectation when a migration
 /// is added (the assertions below are version-agnostic where possible).
 const KNOWN_VERSION: i64 = 19;
-// Migration 18 is reserved for the parallel saved-searches slice, so the
-// applied ledger is not contiguous: 1-17 plus 19 (collections).
+// The applied ledger is contiguous: 1-18 (saved searches) plus 19
+// (collections) — the reservation note below no longer applies.
 const APPLIED_VERSIONS: &[i64] = &[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
 ];
 
 fn migrations_rows(db: &std::path::Path) -> Vec<i64> {
