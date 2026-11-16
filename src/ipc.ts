@@ -513,6 +513,12 @@ export function llmTest(payload: LlmTestPayload): Promise<LlmTestResult> {
   return invoke<LlmTestResult>("llm_test", { payload });
 }
 
+/** The running app's version, as this build stamped it (the Settings
+ * readout — never a hardcoded frontend string). */
+export function appVersion(): Promise<string> {
+  return invoke<string>("app_version");
+}
+
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------

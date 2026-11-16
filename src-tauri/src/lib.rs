@@ -1670,6 +1670,15 @@ async fn llm_test(
     .map_err(|e| format!("connection test task failed: {e}"))
 }
 
+/// The running app's own version, exactly as this build stamped it
+/// (tauri.conf.json `version`, baked in by tauri-build) — the Settings
+/// readout, so a dev build and a packaged build each report their own
+/// version, and nothing is ever hardcoded in the frontend.
+#[tauri::command]
+fn app_version(app: AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
 /// Everything the Settings UI shows: provider profiles (with a `has_key`
 /// flag — never the keys), the default selection, options, and the
 /// environment-fallback diagnostics.
@@ -4340,6 +4349,7 @@ pub fn run() {
             settings_save,
             llm_key_clear,
             llm_test,
+            app_version,
             import_mbox,
             import_chat_export,
             sync_imap,

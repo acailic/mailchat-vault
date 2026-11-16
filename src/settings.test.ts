@@ -23,6 +23,7 @@ import {
   providerName,
   uniqueProviderId,
   validateProviderForm,
+  versionReadout,
   ENV_ANTHROPIC_KEY_ID,
   ENV_ZAI_KEY_ID,
   type ProviderFormValues,
@@ -474,6 +475,13 @@ describe("env overrides", () => {
   it("keyring override ids mirror the backend", () => {
     expect(ENV_ZAI_KEY_ID).toBe("env:ZAI_API_KEY");
     expect(ENV_ANTHROPIC_KEY_ID).toBe("env:ANTHROPIC_API_KEY");
+  });
+});
+
+describe("versionReadout", () => {
+  it("labels whatever version the running app reports", () => {
+    expect(versionReadout("0.2.0")).toBe("Version 0.2.0");
+    expect(versionReadout(" 1.2.3-beta.4 ")).toBe("Version 1.2.3-beta.4");
   });
 });
 
