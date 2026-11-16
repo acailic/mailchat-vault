@@ -267,6 +267,19 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
   (corpus/label integrity, lexically-trivial floors), never a measured
   quality level.
 
+### Fixed (retrieval benchmark — claim calibration, U07)
+
+- Public search-quality claims are now wired to the U07 benchmark: the
+  support matrix's search and hybrid-ranking rows carry the measured
+  numbers and their forbidden claims (no synonym/paraphrase,
+  cross-language, or typo-at-scale claims; hybrid results are closest
+  matches, never proof the archive contains the answer). The benchmark
+  was re-verified on the current baseline at both scales (numbers
+  unchanged); record in
+  `docs/evidence/u07-retrieval-benchmark-2026-11-16.md`. The `vault-retrieval`
+  harness crate's license is aligned with D13 (`GPL-3.0-only`, was
+  `UNLICENSED`).
+
 ### Added
 
 - **Email attachments** — synced mail now stores its MIME attachments
