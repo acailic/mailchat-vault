@@ -145,6 +145,7 @@ use vault_core::staged_write::{staged_write, staged_write_opt};
 use vault_core::stats::{ArchiveStats, DEFAULT_TOP};
 use vault_core::storage::{
     FailedItem, MediaMessageReference, RegisteredMediaObject, SourceInstance, Storage,
+    UnlinkedMediaPage, UnlinkedMediaPageRequest,
 };
 use vault_core::vector::{
     self, EmbedJobSummary, Embedder, EmbeddingStatus, HashEmbedder, EMBED_BODY_PREFIX_CHARS,
@@ -671,6 +672,37 @@ async fn media_reconcile_detail(
             })
         })
         .map_err(|e| e.to_string())
+}
+
+/// Paged, searchable read of the unlinked media-object registry (M4.2):
+/// export files the vault stores without a message link, with their
+/// recorded provenance (original name, kind, size, the import that first
+/// registered them, first-seen time) and per-digest byte availability.
+/// Read-only: the count, rows, and archive revision come from one read
+/// snapshot, availability is stamped from the object store's presence
+/// check on the blocking pool, and the caller holds one bounded page —
+/// the registry is never loaded in full. Rows never assign a file to a
+/// message; a future Files view reuses `media_export` /
+/// `media_open_external` on the returned `path`.
+#[tauri::command]
+async fn media_unlinked_page(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: UnlinkedMediaPageRequest,
+) -> Result<UnlinkedMediaPage, String> {
+    // Same reasoning as `media_usage`: the registry's provenance belongs
+    // to the personal vault, never the demo corpus.
+    state.refuse_in_demo()?;
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let mut page = ActiveVault::from(&state)
+        .with_read(|s| s.unlinked_media_page(&request))
+        .map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        page.stamp_availability(&ObjectStore::new(&data_dir));
+        page
+    })
+    .await
+    .map_err(|e| format!("unlinked files task failed: {e}"))
 }
 
 /// Summary of one explicit media export (M4.3): a byte-exact copy of
@@ -3720,6 +3752,7 @@ pub fn run() {
             media_reconcile,
             media_reconcile_detail,
             media_usage,
+            media_unlinked_page,
             media_export,
             media_open_external,
             backup_inspect,
