@@ -340,6 +340,7 @@ pub fn import_bounded(
 /// stamps resolve in it and record `user_confirmed`) and the explicitly
 /// chosen destination source — the run's dedup namespace (the derived
 /// name stays the default, so the plain flow gains no required step).
+#[allow(clippy::too_many_arguments)]
 pub fn import_bounded_with(
     sink: &mut dyn IngestSink,
     picked: &Path,

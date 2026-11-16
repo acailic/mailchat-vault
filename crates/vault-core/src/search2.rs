@@ -655,9 +655,9 @@ impl std::error::Error for AppError {}
 impl From<Error> for AppError {
     fn from(err: Error) -> Self {
         match &err {
-            Error::InvalidQuery(message) | Error::InvalidExport(message) => {
-                AppError::invalid_input(message.clone(), None)
-            }
+            Error::InvalidQuery(message)
+            | Error::InvalidExport(message)
+            | Error::InvalidCollection(message) => AppError::invalid_input(message.clone(), None),
             Error::InvalidDate(message) => {
                 AppError::invalid_input(message.clone(), Some("from_date/to_date"))
             }
@@ -1218,7 +1218,7 @@ fn decode_entity(bytes: &[u8]) -> Option<(char, usize)> {
         let code = u32::from_str_radix(&digits, if hex { 16 } else { 10 }).ok()?;
         let ch = char::from_u32(code)?;
         // The markers and controls are not text a snippet should carry.
-        if matches!(code, 0 | 1 | 2) {
+        if matches!(code, 0..=2) {
             return None;
         }
         return Some((ch, i + 1));

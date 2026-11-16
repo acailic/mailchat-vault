@@ -772,8 +772,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let pick = tmp.path().join("mail");
         std::fs::create_dir_all(&pick).unwrap();
-        std::fs::write(&pick.join("1.eml"), b"Subject: a\nMessage-ID: <1@x>\n\nA\n").unwrap();
-        std::fs::write(&pick.join("2.eml"), b"Subject: b\nMessage-ID: <2@x>\n\nB\n").unwrap();
+        std::fs::write(pick.join("1.eml"), b"Subject: a\nMessage-ID: <1@x>\n\nA\n").unwrap();
+        std::fs::write(pick.join("2.eml"), b"Subject: b\nMessage-ID: <2@x>\n\nB\n").unwrap();
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
 

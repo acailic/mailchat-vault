@@ -3857,6 +3857,9 @@ describe("ask AI consent + evidence navigation", () => {
     );
     expect($("#ask-notes").textContent).toContain("AI consent not granted");
     expect($("#answer").hidden).toBe(true);
+    // No answer → no evidence caption or unsupported note either.
+    expect($("#answer-scope").hidden).toBe(true);
+    expect($("#answer-unsupported").hidden).toBe(true);
   });
 
   it("an open prompt re-renders when the provider selection changes to another network provider", async () => {
@@ -4039,6 +4042,13 @@ describe("ask AI consent + evidence navigation", () => {
       [...cites].map((c) => (c as unknown as HTMLElement).dataset.cite),
     ).toEqual(["1"]); // [3] is not a link
     expect($("#answer").textContent).toBe("answered from [1] and [3].");
+    // M5.3: the unsupported marker is named in a visible note, and the
+    // caption states the evidence scope (both sources sit inside the
+    // summarize window of 8).
+    expect($("#answer-unsupported").hidden).toBe(false);
+    expect($("#answer-unsupported").textContent).toContain("[3]");
+    expect($("#answer-scope").hidden).toBe(false);
+    expect($("#answer-scope").textContent).toBe("Based on 2 matching messages");
   });
 
   it("citations beyond the summary window stay plain text, never dead links", async () => {
@@ -4063,6 +4073,22 @@ describe("ask AI consent + evidence navigation", () => {
       [...cites].map((c) => (c as unknown as HTMLElement).dataset.cite),
     ).toEqual(["1"]); // [2] sits past summarize_top=1 → not a link
     expect($("#answer").textContent).toBe("answered from [1] and [2].");
+    // M5.3: the beyond-window marker is named in the visible note, and
+    // the caption counts only the messages inside the window (1).
+    expect($("#answer-unsupported").hidden).toBe(false);
+    expect($("#answer-unsupported").textContent).toContain("[2]");
+    expect($("#answer-scope").textContent).toBe("Based on 1 matching message");
+  });
+
+  it("a fully linked answer shows the scope caption and no unsupported note", async () => {
+    await bootConsentable();
+    await askFromInput("vault?");
+    $("#consent-allow-btn").click(); // consented ask → ASK_OUTCOME: [1]/[2] both linked
+    await vi.waitFor(() => expect($("#answer").hidden).toBe(false));
+    expect($("#answer").textContent).toBe(ASK_OUTCOME.answer);
+    expect($("#answer-scope").hidden).toBe(false);
+    expect($("#answer-scope").textContent).toBe("Based on 2 matching messages");
+    expect($("#answer-unsupported").hidden).toBe(true);
   });
 
   it("answer source rows are numbered like citations and open in thread context", async () => {
@@ -5694,6 +5720,116 @@ describe("accounts panel", () => {
     );
     await vi.waitFor(() =>
       expect($("#sources-status").textContent).toContain("archive stays"),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Nav source chips: per-source status (the M3.4 chip-status slice) — the
+// derived line from the accounts cache, the live "Syncing…" state fed by
+// a manual Sync now round trip and by an active imap_sync_all round, and
+// the restore to the derived status on the terminal event.
+// ---------------------------------------------------------------------------
+
+describe("source chip status", () => {
+  /** Boot fixtures: one synced email account, one paused email account,
+   * one import — each with a matching source instance and stats count,
+   * so all three chips render with distinct derived statuses. */
+  function installChipStatusFixtures(): void {
+    tauri.handlers.set("sources_list", () => [
+      { id: "inst-imap-1", kind: "imap", label: "imap.gmail.com-ana", connector_key: "imap", config_json: "{}",
+        state: "connected", excluded: false, last_attempt_at: null, last_success_at: null,
+        created_at: "2026-01-01 00:00:00" },
+      { id: "inst-imap-paused", kind: "imap", label: "imap.gmail.com-vey", connector_key: "imap", config_json: "{}",
+        state: "connected", excluded: true, last_attempt_at: null, last_success_at: null,
+        created_at: "2026-01-01 00:00:00" },
+      { id: "inst-mbox", kind: "legacy", label: "mbox", connector_key: "mbox", config_json: "{}",
+        state: "connected", excluded: false, last_attempt_at: null, last_success_at: null,
+        created_at: "2026-01-01 00:00:00" },
+    ]);
+    tauri.handlers.set("stats", () => ({
+      total: 21,
+      by_source: [
+        { source: "imap.gmail.com-ana", count: 12 },
+        { source: "imap.gmail.com-vey", count: 3 },
+        { source: "mbox", count: 6 },
+      ],
+    }));
+    tauri.handlers.set("accounts_list", () => [
+      IMAP_ACCOUNT, // inst-imap-1 — connected, last synced 2026-01-02 10:00:05
+      {
+        ...IMAP_ACCOUNT,
+        source_id: "inst-imap-paused",
+        label: "imap:imap.gmail.com:993:vey@gmail.com",
+        imap: {
+          host: "imap.gmail.com", port: 993, username: "vey@gmail.com",
+          folders: [], has_password: true, has_oauth: false,
+        },
+        message_count: 3,
+        failed_items: 0,
+        excluded: true,
+        last_attempt_at: null,
+        last_success_at: null,
+      },
+      { ...IMPORT_ACCOUNT, source_id: "inst-mbox", last_attempt_at: "2026-01-03 09:00:00" },
+    ]);
+  }
+
+  const chipStatus = (id: string): string =>
+    $(`#source-chips .chip[data-source="${id}"] .chip-status`).textContent ?? "";
+
+  it("shows each source's derived status beside the intact label-and-count text", async () => {
+    installChipStatusFixtures();
+    await boot();
+    await vi.waitFor(() =>
+      expect(chipStatus("inst-imap-1")).toBe("Last synced 2026-01-02 10:00:05"),
+    );
+    expect(chipStatus("inst-imap-paused")).toBe("Paused");
+    expect(chipStatus("inst-mbox")).toBe("Imported 2026-01-03 09:00:00");
+    // The e2e-asserted label-and-count substring stays intact inside
+    // the chip; the status only adds to it.
+    expect(
+      $('#source-chips .chip[data-source="inst-imap-1"]').textContent,
+    ).toContain("imap.gmail.com-ana (12)");
+  });
+
+  it("a running manual sync flips the chip to Syncing…; the outcome restores the derived status", async () => {
+    installChipStatusFixtures();
+    const slow = deferred<{ folders: unknown[]; saved_to: null }>();
+    tauri.handlers.set("sync_imap", () => slow.promise);
+    await boot();
+    await vi.waitFor(() =>
+      expect(chipStatus("inst-imap-1")).toBe("Last synced 2026-01-02 10:00:05"),
+    );
+    ($("#sources-list .account-row[data-source-id='inst-imap-1'] .account-sync-btn") as HTMLButtonElement).click();
+    await vi.waitFor(() => expect(chipStatus("inst-imap-1")).toBe("Syncing…"));
+    // The untouched sources keep their derived statuses meanwhile.
+    expect(chipStatus("inst-imap-paused")).toBe("Paused");
+    expect(chipStatus("inst-mbox")).toBe("Imported 2026-01-03 09:00:00");
+    slow.resolve({ folders: [], saved_to: null });
+    await vi.waitFor(() =>
+      expect(chipStatus("inst-imap-1")).toBe("Last synced 2026-01-02 10:00:05"),
+    );
+  });
+
+  it("an active imap_sync_all round flips non-excluded email chips to Syncing… and back", async () => {
+    installChipStatusFixtures();
+    await boot();
+    const emit = (payload: unknown) =>
+      tauriEvents.listeners.get("job-event")!({ payload });
+    await vi.waitFor(() =>
+      expect(chipStatus("inst-imap-1")).toBe("Last synced 2026-01-02 10:00:05"),
+    );
+    emit({ seq: 1, at: "t", job: 9, type: "submitted", kind: "imap_sync_all" });
+    emit({ seq: 2, at: "t", job: 9, type: "started" });
+    await vi.waitFor(() => expect(chipStatus("inst-imap-1")).toBe("Syncing…"));
+    // Excluded (paused) accounts are skipped by coordinator rounds and
+    // imports never sync — both keep their derived statuses.
+    expect(chipStatus("inst-imap-paused")).toBe("Paused");
+    expect(chipStatus("inst-mbox")).toBe("Imported 2026-01-03 09:00:00");
+    emit({ seq: 3, at: "t", job: 9, type: "succeeded", result: null });
+    await vi.waitFor(() =>
+      expect(chipStatus("inst-imap-1")).toBe("Last synced 2026-01-02 10:00:05"),
     );
   });
 });
