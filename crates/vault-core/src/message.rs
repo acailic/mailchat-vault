@@ -124,9 +124,10 @@ pub struct Message {
     /// instance — the dedup namespace [`crate::jsonl`] imports under.
     /// Machine-composed: connector-owned instances compose
     /// `instance:<kind>:<connector_key>`, legacy instances reuse their
-    /// legacy namespace. Populated only by the two JSON export streams;
-    /// every other construction site leaves it empty, and it serializes
-    /// only when non-empty so those rows stay byte-identical.
+    /// legacy namespace. Populated only by the JSON export streams
+    /// (search and whole-conversation alike); every other construction
+    /// site leaves it empty, and it serializes only when non-empty so
+    /// those rows stay byte-identical.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source_key: String,
     pub external_id: String,
