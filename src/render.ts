@@ -151,7 +151,10 @@ export interface SourceChipsOptions {
 /** Toggle chips for the source filter (none selected = all sources).
  * Selection keys are stable source-instance ids. Each chip leads with
  * its source's taxonomy icon (mail/chat/file — decorative, aria-hidden;
- * the label stays the accessible text, so `textContent` is unchanged). */
+ * the label stays the accessible text) and, when the row carries one,
+ * appends the source's short status span after the label — the label
+ * and count text themselves stay intact (the e2e specs assert them by
+ * substring), the status adds to the chip's accessible name. */
 export function renderSourceChips(el: HTMLElement, opts: SourceChipsOptions): void {
   const chips = opts.rows.map((row) => {
     const chip = document.createElement("button");
@@ -163,6 +166,12 @@ export function renderSourceChips(el: HTMLElement, opts: SourceChipsOptions): vo
     label.textContent =
       row.count === null ? row.label : `${row.label} (${row.count.toLocaleString()})`;
     chip.append(iconEl(row.icon), label);
+    if (row.status) {
+      const status = document.createElement("span");
+      status.className = "chip-status";
+      status.textContent = row.status;
+      chip.append(status);
+    }
     chip.addEventListener("click", () => opts.onToggle(row.id));
     return chip;
   });

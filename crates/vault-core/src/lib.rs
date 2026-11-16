@@ -37,6 +37,10 @@
 //!   the stage → promote → reference lifecycle (no half-written object
 //!   is ever visible, references never dangle), the import capacity
 //!   budget, and the reconciliation/integrity tool.
+//! - [`pdf_text`]: part 1a of attachment-content search (#171) —
+//!   budget-bounded, local-only PDF text extraction with explicit
+//!   corrupt/encrypted/unsupported/over-budget results; storage, jobs,
+//!   and search wiring arrive with the later parts of #171.
 //! - [`backup`]: the M4.4 versioned backup container and staged restore —
 //!   a ZIP holding `manifest.json`, a consistent SQLite snapshot (the
 //!   backup API, never a live-file copy), the settings file, and every
@@ -77,6 +81,9 @@
 //!   streams into a private temp sibling of the destination and only a
 //!   fully written, flushed, fsynced file is renamed into place, so a
 //!   failed export never replaces a previously valid user file.
+//! - [`health`]: persisted archive-health evidence — the media
+//!   verification summary and per-import-source last-import records the
+//!   health overview reads (absent records read as not checked).
 
 pub mod backup;
 pub mod bounded;
@@ -85,6 +92,7 @@ pub mod demo;
 pub mod discord;
 pub mod export;
 pub mod extract;
+pub mod health;
 pub mod imap;
 pub mod imap_coordinator;
 pub mod import_bounds;
@@ -99,6 +107,7 @@ pub mod message;
 pub mod messenger;
 pub mod oauth;
 pub mod object_store;
+pub mod pdf_text;
 pub mod preview;
 pub mod query;
 pub mod safe_migration;
@@ -158,6 +167,8 @@ pub enum Error {
     Jobs(String),
     #[error("invalid export: {0}")]
     InvalidExport(String),
+    #[error("invalid collection: {0}")]
+    InvalidCollection(String),
     #[error("media store error: {0}")]
     Media(String),
     #[error("backup/restore error: {0}")]

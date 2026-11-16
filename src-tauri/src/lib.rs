@@ -87,6 +87,11 @@
 //!   switches through the recoverable journal — a restart is required
 //!   afterwards), and the previous-vault recovery surface. Startup
 //!   resolves an interrupted switch before anything opens the vault.
+//! - `last_media_verification` / `last_imports` — the persisted
+//!   archive-health evidence (read-only): when the media store was last
+//!   reconciled with its coverage counts, and every import source's
+//!   last attempt / last success records. Absence is an explicit
+//!   not-checked, never a healthy default.
 //! - `export_search_v2` — write the current v2 search results (all pages, under
 //!   the active filters) to a user-chosen file as CSV, JSON Lines or MBOX.
 //! - `export_chat` — write the whole chat thread of one message to a
@@ -124,7 +129,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
@@ -132,6 +137,9 @@ use vault_core::backup::{self, BackupCounts, BackupManifest, RecoveryStatus, Res
 use vault_core::bounded::{BoundedRun, Flow, StreamItem, StreamSource};
 use vault_core::chat_export::{self, ChatImportOutcome};
 use vault_core::export::{self, ExportFormat, ExportSummary};
+use vault_core::health::{
+    self, ImportAttempt, ImportCounts, MediaVerificationSummary, SourceImportRecord,
+};
 use vault_core::imap::{self, FolderSyncSummary, ImapAuth, ImapConfig};
 use vault_core::imap_coordinator::{self, RoundSummary, StoredImapConfig};
 use vault_core::ingest::IngestSummary;
@@ -502,6 +510,12 @@ fn saved_searches_delete(state: State<AppState>, id: String) -> Result<(), AppEr
 /// explicit sweep (`ObjectStore::sweep_staging`), corruption recovery
 /// stays manual by design. `media_reconcile_detail` resolves the
 /// missing/corrupt findings to the affected messages and known imports.
+///
+/// The check itself stays live and on demand; once it finishes, its
+/// timestamp and coverage counts are persisted as the media
+/// verification summary (archive health, `vault_core::health`) so the
+/// health overview can say *when* the store was last verified and what
+/// that pass saw — an explicit not-checked before the first pass.
 #[tauri::command]
 async fn media_reconcile(
     app: AppHandle,
@@ -516,12 +530,24 @@ async fn media_reconcile(
         .with_read(|s| s.media_digests())
         .map_err(|e| e.to_string())?;
     let verify = true; // maintenance call: pay the re-hash for certainty
-    tauri::async_runtime::spawn_blocking(move || {
+    let report = tauri::async_runtime::spawn_blocking(move || {
         ObjectStore::new(&data_dir).reconcile(&digests, verify)
     })
     .await
     .map_err(|e| format!("reconcile task failed: {e}"))?
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    let summary = MediaVerificationSummary::of_report(
+        &report,
+        Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    );
+    let pool = Arc::clone(&state.pool);
+    tauri::async_runtime::spawn_blocking(move || {
+        pool.submit_write(move |s| health::record_media_verification(s, &summary))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("media verification record task failed: {e}"))??;
+    Ok(report)
 }
 
 /// Disk usage of the media object store (M4.3): object count, total
@@ -1161,6 +1187,44 @@ async fn last_backup(state: State<'_, AppState>) -> Result<Option<LastBackupView
     })
     .await
     .map_err(|e| format!("last-backup task failed: {e}"))?
+}
+
+/// The persisted media verification summary of the personal vault
+/// (archive health): when the media store was last reconciled and the
+/// coverage counts that pass saw — missing (external damage) kept
+/// distinct from corrupt, orphans, and litter. `None` is the explicit
+/// not-checked answer: no `media_reconcile` pass has finished (or the
+/// stored record is unreadable). The historical summary never claims
+/// the store is healthy *now*; only when it was last checked.
+#[tauri::command]
+async fn last_media_verification(
+    state: State<'_, AppState>,
+) -> Result<Option<MediaVerificationSummary>, String> {
+    let pool = Arc::clone(&state.pool);
+    tauri::async_runtime::spawn_blocking(move || {
+        pool.with_read(health::media_verification)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("media verification task failed: {e}"))?
+}
+
+/// The per-import-source last-import evidence of the personal vault
+/// (archive health): every import source's last attempt (outcome and
+/// counts, or the failure) kept distinct from its last success, so a
+/// failed or cancelled recent attempt never reads as a successful
+/// refresh nor overwrites the recorded success time. Empty when no
+/// import has finished — sources never imported read as absent, not
+/// failed.
+#[tauri::command]
+async fn last_imports(state: State<'_, AppState>) -> Result<Vec<SourceImportRecord>, String> {
+    let pool = Arc::clone(&state.pool);
+    tauri::async_runtime::spawn_blocking(move || {
+        pool.with_read(health::import_source_records)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("last-imports task failed: {e}"))?
 }
 
 /// Explicitly forget one previous-vault slot (releases its disk).
@@ -2576,7 +2640,9 @@ fn run_job_spec(
                 &cancelled,
                 &mut progress,
             )
-            .map_err(JobError::from)?;
+            .map_err(JobError::from);
+            let outcome =
+                record_import_evidence(ctx, &import_fallback_source(None, path), outcome)?;
             if outcome.cancelled {
                 return Err(JobError::Cancelled);
             }
@@ -2614,7 +2680,9 @@ fn run_job_spec(
                 source.as_deref(),
                 &cancelled,
                 &mut progress,
-            )?;
+            );
+            let fallback = import_fallback_source(source.as_deref(), path);
+            let outcome = record_import_evidence(ctx, &fallback, outcome)?;
             if outcome.cancelled {
                 return Err(JobError::Cancelled);
             }
@@ -2647,6 +2715,63 @@ fn run_job_spec(
         }
         JobSpec::RestorePreview { archive } => {
             run_restore_preview(ctx, switch_gate, data_dir, Path::new(archive))
+        }
+    }
+}
+
+/// The evidence key for an import that failed before its source name
+/// resolved: the explicitly chosen destination source when the request
+/// carried one (GP03), else the picked file's own name — the health
+/// overview can still say which pick failed, and when.
+fn import_fallback_source(destination: Option<&str>, path: &str) -> String {
+    destination
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string())
+        })
+}
+
+/// Record one finished import attempt's per-source evidence (archive
+/// health): a completed or cancelled run attributes to the run's own
+/// dedup namespace (`outcome.summary.source` — always resolved by the
+/// bounded driver), a failed run to `fallback_source` (it never got far
+/// enough to name one). Succeeded and cancelled runs carry their
+/// counts; failures carry the error. Best effort by design: the
+/// evidence is a side record and must never mask the import's own
+/// outcome — its write failure cannot fail (or "un-fail") the import.
+fn record_import_evidence<E: std::fmt::Display>(
+    ctx: &JobContext,
+    fallback_source: &str,
+    result: std::result::Result<vault_core::bounded::BoundedOutcome, E>,
+) -> std::result::Result<vault_core::bounded::BoundedOutcome, E> {
+    let at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    match result {
+        Ok(outcome) => {
+            let source = outcome.summary.source.clone();
+            let attempt = if outcome.cancelled {
+                ImportAttempt::Cancelled {
+                    counts: ImportCounts::of_summary(&outcome.summary),
+                }
+            } else {
+                ImportAttempt::Succeeded {
+                    counts: ImportCounts::of_summary(&outcome.summary),
+                }
+            };
+            let _ = ctx.write(move |s| health::record_import_attempt(s, &source, &at, &attempt));
+            Ok(outcome)
+        }
+        Err(error) => {
+            let source = fallback_source.to_string();
+            let attempt = ImportAttempt::Failed {
+                error: error.to_string(),
+            };
+            let _ = ctx.write(move |s| health::record_import_attempt(s, &source, &at, &attempt));
+            Err(error)
         }
     }
 }
@@ -3803,6 +3928,8 @@ pub fn run() {
             restore_commit,
             recovery_status,
             last_backup,
+            last_media_verification,
+            last_imports,
             recovery_forget,
             return_to_previous_vault
         ])
@@ -3828,6 +3955,26 @@ mod tests {
         // Opt-in but the tray icon never came up: never a hidden
         // unreachable process — closing degrades to the pre-M7 exit.
         assert_eq!(close_action(true, false), CloseAction::Close);
+    }
+
+    #[test]
+    fn import_fallback_source_prefers_destination_then_the_picked_name() {
+        // Archive health: a failed import that never resolved its source
+        // name attributes to the explicitly chosen destination source
+        // (trimmed), else the picked file's own name — the overview can
+        // still say which pick failed, and when.
+        assert_eq!(
+            import_fallback_source(Some("  Work chats "), "/anywhere/chat.zip"),
+            "Work chats"
+        );
+        // A blank destination is as good as none: fall back to the name.
+        assert_eq!(
+            import_fallback_source(Some("   "), "/home/you/Downloads/chat.zip"),
+            "chat.zip"
+        );
+        assert_eq!(import_fallback_source(None, "export.txt"), "export.txt");
+        // A bare file name (no directory component) is its own name.
+        assert_eq!(import_fallback_source(None, "chat.zip"), "chat.zip");
     }
 
     #[test]

@@ -44,10 +44,12 @@ import {
   consentPromptText,
   consentStatusLine,
   describePlan,
+  evidenceScopeCaption,
   linksToJson,
   linksToText,
   privacyNoteFor,
   splitCitations,
+  unsupportedCitationNote,
   type AskOutcome,
   type CollectedLink,
   type LlmStatus,
@@ -224,6 +226,8 @@ const askStatus = document.querySelector<HTMLElement>("#ask-status")!;
 const askSummary = document.querySelector<HTMLElement>("#ask-summary")!;
 const llmNote = document.querySelector<HTMLElement>("#llm-note")!;
 const answerBox = document.querySelector<HTMLElement>("#answer")!;
+const answerScope = document.querySelector<HTMLElement>("#answer-scope")!;
+const answerUnsupported = document.querySelector<HTMLElement>("#answer-unsupported")!;
 const askNotes = document.querySelector<HTMLElement>("#ask-notes")!;
 const askResults = document.querySelector<HTMLUListElement>("#ask-results")!;
 const askCollected = document.querySelector<HTMLElement>("#ask-collected")!;
@@ -275,6 +279,10 @@ let accountsCache: AccountView[] = [];
 let lastStats: { by_source: { source: string; count: number }[] } | null = null;
 /** id → disambiguated chip label (shared by nav chips and filter chips). */
 let sourceChipLabels = new Map<string, string>();
+/** Source ids with a manual Sync now round trip in flight — the live
+ * half of the chip status (the other half: any queued or running
+ * `imap_sync_all` round, which syncs every non-excluded account). */
+const manualSyncing = new Set<string>();
 // The import scopes offered by the import-scope filter.
 let importScopes: ImportScope[] = [];
 const exportButton = document.querySelector<HTMLButtonElement>("#export-btn")!;
@@ -430,13 +438,23 @@ function renderAskResults(list: HTMLUListElement, messages: Message[]): void {
  * citation `n` opens result `n - 1` — the archived message the summary
  * was built from — in its conversation context. Markers beyond `maxCite`
  * (the summary window: the model never saw those rows) and out-of-range
- * markers (a row not in the results) stay plain text. */
-function renderAnswerLinked(answer: string, sources: Message[], maxCite: number): void {
+ * markers (a row not in the results) stay plain text, never dead links;
+ * the unsupported marker numbers are returned so the caller can show the
+ * visible unsupported-citation note. */
+function renderAnswerLinked(answer: string, sources: Message[], maxCite: number): number[] {
+  const unsupported: number[] = [];
   answerBox.replaceChildren(
     ...splitCitations(answer).map((part) => {
       if (typeof part !== "string") {
         const target = part.cite <= maxCite ? sources[part.cite - 1] : undefined;
-        if (!target) return document.createTextNode(`[${part.cite}]`);
+        if (!target) {
+          if (!unsupported.includes(part.cite)) unsupported.push(part.cite);
+          const span = document.createElement("span");
+          span.className = "citation-unsupported";
+          span.title = `Citation [${part.cite}] has no matching source in this ask's results`;
+          span.textContent = `[${part.cite}]`;
+          return span;
+        }
         const cite = document.createElement("button");
         cite.type = "button";
         cite.className = "citation";
@@ -449,13 +467,23 @@ function renderAnswerLinked(answer: string, sources: Message[], maxCite: number)
       return document.createTextNode(part);
     }),
   );
+  return unsupported;
 }
 
 function renderAsk(outcome: AskOutcome): void {
   const sources = outcome.results as Message[];
   if (outcome.answer) {
-    renderAnswerLinked(outcome.answer, sources, llmStatus?.summarize_top ?? 8);
+    const maxCite = llmStatus?.summarize_top ?? 8;
+    const unsupported = renderAnswerLinked(outcome.answer, sources, maxCite);
     answerBox.hidden = false;
+    // Evidence honesty (M5.3): every answer states how many matching
+    // messages it is based on — the summarize step sends only the top
+    // rows, so the used count is capped by the summary window — and
+    // markers that cannot be linked get a visible note.
+    answerScope.textContent = evidenceScopeCaption(Math.min(sources.length, maxCite));
+    answerScope.hidden = false;
+    answerUnsupported.textContent = unsupportedCitationNote(unsupported);
+    answerUnsupported.hidden = unsupported.length === 0;
     // The answer is the point of the ask: when it lands below the ask
     // panel's fold (tall consent/provider controls above it) it must be
     // brought into view, or it arrives invisibly. Same nearest-block
@@ -463,6 +491,8 @@ function renderAsk(outcome: AskOutcome): void {
     answerBox.scrollIntoView({ block: "nearest" });
   } else {
     answerBox.hidden = true;
+    answerScope.hidden = true;
+    answerUnsupported.hidden = true;
   }
   askNotes.textContent = outcome.notes.join(" · ");
   askNotes.hidden = outcome.notes.length === 0;
@@ -697,11 +727,30 @@ function renderAll(): void {
   workspace.store.setReadingOpen(state.detail !== null);
 }
 
+/** The source ids whose chip should read "Syncing…": manual Sync now
+ * round trips plus every non-excluded email account while a scheduler
+ * or tray round (an `imap_sync_all` job) is queued or running. */
+function syncingSourceIds(): Set<string> {
+  const syncing = new Set(manualSyncing);
+  if (hasActiveJob(jobs, "imap_sync_all")) {
+    for (const account of accountsCache) {
+      if (account.kind === "imap" && !account.excluded) syncing.add(account.source_id);
+    }
+  }
+  return syncing;
+}
+
 /** Render the nav source chips from the current caches (ids, labels,
- * counts). Called after stats, sources, or accounts refresh. Also
+ * counts, per-source status). Called after stats, sources, or accounts
+ * refresh, and from job events (the live "Syncing…" state). Also
  * refreshes the id → label map used by the applied-filter chips. */
 function renderSourceChipsNow(): void {
-  const rows = sourceChipRows(sourceInstances, accountsCache, lastStats?.by_source ?? []);
+  const rows = sourceChipRows(
+    sourceInstances,
+    accountsCache,
+    lastStats?.by_source ?? [],
+    syncingSourceIds(),
+  );
   sourceChipLabels = new Map(rows.map((r) => [r.id, r.label]));
   renderSourceChips(sourceChips, {
     rows,
@@ -2445,7 +2494,9 @@ function accountSyncOutcomeLine(account: AccountView, outcome: ipc.ImapSyncOutco
 
 /** Sync one listed account now: `sync_imap` with the account's stored
  * identity and an empty password — the backend resolves the stored
- * keyring credential (or runs the Google sign-in refresh for OAuth). */
+ * keyring credential (or runs the Google sign-in refresh for OAuth).
+ * The account's nav chip reads "Syncing…" for the round trip's
+ * duration (the transient `manualSyncing` set feeds it). */
 async function syncAccountNow(account: AccountView): Promise<void> {
   const request: SyncNowRequest | null = syncNowRequest(account);
   if (!request) {
@@ -2453,6 +2504,8 @@ async function syncAccountNow(account: AccountView): Promise<void> {
     return;
   }
   sourcesStatus.textContent = `Syncing ${accountTitle(account)}… (first sync of a large mailbox can take a while)`;
+  manualSyncing.add(account.source_id);
+  renderSourceChipsNow();
   try {
     const outcome = await ipc.syncImap(request);
     await refreshStats();
@@ -2467,6 +2520,9 @@ async function syncAccountNow(account: AccountView): Promise<void> {
     // failure line the user must see.
     await refreshAccounts();
     sourcesStatus.textContent = `Sync failed for ${accountTitle(account)}: ${syncFailureText(e)}`;
+  } finally {
+    manualSyncing.delete(account.source_id);
+    renderSourceChipsNow();
   }
 }
 
@@ -2672,6 +2728,11 @@ function renderJobs(): void {
   jobsStatus.textContent = jobsStatusText(jobs);
   renderJobsList(jobsList, jobs);
   renderActivityBadge();
+  // Job events also drive the live chip status: a queued/started
+  // `imap_sync_all` round flips every non-excluded email chip to
+  // "Syncing…" and a terminal event restores the derived line
+  // (renderSourceChipsNow reads the tracker through syncingSourceIds).
+  renderSourceChipsNow();
   // The embedding button tracks its own job: disabled while queued or
   // running, re-enabled once no embedding job is active.
   embedButton.disabled = hasActiveJob(jobs, "embed_messages");

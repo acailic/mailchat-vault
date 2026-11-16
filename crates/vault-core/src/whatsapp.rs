@@ -442,6 +442,7 @@ where
 /// time resolution in the explicit zone and the content-hash id over the
 /// stable conversation key, with the occurrence counter keeping identical
 /// back-to-back messages distinct.
+#[allow(clippy::too_many_arguments)]
 fn finished_to_message<Tz: TimeZone>(
     f: Finished,
     chat_id: &str,

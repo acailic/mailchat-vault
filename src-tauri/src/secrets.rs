@@ -37,6 +37,11 @@ pub enum SecretStore {
 
 /// Account secret storage, managed as Tauri app state.
 pub struct Secrets {
+    /// Keyring service namespace this instance reads and writes —
+    /// [`SERVICE`] in production; tests inject a per-test namespace so
+    /// they cannot see each other's keyring entries (see
+    /// [`Self::with_service`]).
+    service: String,
     /// Session-memory fallback, keyed `user@host`.
     memory: Mutex<HashMap<String, String>>,
 }
@@ -44,6 +49,22 @@ pub struct Secrets {
 impl Secrets {
     pub fn new() -> Self {
         Self {
+            service: SERVICE.to_string(),
+            memory: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Test-only variant of [`Self::new`] under a caller-chosen keyring
+    /// service namespace. On a host with a working OS keyring the
+    /// keyring is a store shared by every `Secrets` instance (and
+    /// persistent across runs), so tests sharing one service name leak
+    /// entries to each other and their outcome depends on execution
+    /// order; a namespace unique to one test makes its keyring entries
+    /// unreachable from every other test, in any order.
+    #[cfg(test)]
+    fn with_service(service: &str) -> Self {
+        Self {
+            service: service.to_string(),
             memory: Mutex::new(HashMap::new()),
         }
     }
@@ -63,7 +84,7 @@ impl Secrets {
     pub fn save(&self, host: &str, username: &str, password: &str) -> SecretStore {
         let key = Self::account_key(host, username);
         let keyring =
-            keyring::Entry::new(SERVICE, &key).and_then(|entry| entry.set_password(password));
+            keyring::Entry::new(&self.service, &key).and_then(|entry| entry.set_password(password));
         match keyring {
             Ok(()) => SecretStore::OsKeyring,
             Err(_) => {
@@ -103,7 +124,7 @@ impl Secrets {
     pub fn save_refresh(&self, host: &str, username: &str, token: &str) -> SecretStore {
         let key = format!("oauth:{}", Self::account_key(host, username));
         let keyring =
-            keyring::Entry::new(SERVICE, &key).and_then(|entry| entry.set_password(token));
+            keyring::Entry::new(&self.service, &key).and_then(|entry| entry.set_password(token));
         match keyring {
             Ok(()) => SecretStore::OsKeyring,
             Err(_) => {
@@ -143,7 +164,7 @@ impl Secrets {
                 .expect("secrets memory lock")
                 .remove(&key)
                 .is_some();
-            let in_keyring = keyring::Entry::new(SERVICE, &key)
+            let in_keyring = keyring::Entry::new(&self.service, &key)
                 .and_then(|entry| entry.delete_credential())
                 .is_ok();
             removed |= in_memory || in_keyring;
@@ -165,7 +186,7 @@ impl Secrets {
 
     /// Read one keyring/memory key: OS keyring first, then session memory.
     fn load_key(&self, key: &str) -> Option<String> {
-        if let Ok(entry) = keyring::Entry::new(SERVICE, key) {
+        if let Ok(entry) = keyring::Entry::new(&self.service, key) {
             if let Ok(password) = entry.get_password() {
                 return Some(password);
             }
@@ -182,8 +203,8 @@ impl Secrets {
     /// passwords). Returns the store that was used.
     pub fn save_llm_key(&self, provider_id: &str, key: &str) -> SecretStore {
         let entry_key = Self::llm_key(provider_id);
-        let keyring =
-            keyring::Entry::new(SERVICE, &entry_key).and_then(|entry| entry.set_password(key));
+        let keyring = keyring::Entry::new(&self.service, &entry_key)
+            .and_then(|entry| entry.set_password(key));
         match keyring {
             Ok(()) => SecretStore::OsKeyring,
             Err(_) => {
@@ -200,7 +221,7 @@ impl Secrets {
     /// keyring first, then session memory). `None` when no key is set.
     pub fn load_llm_key(&self, provider_id: &str) -> Option<String> {
         let key = Self::llm_key(provider_id);
-        if let Ok(entry) = keyring::Entry::new(SERVICE, &key) {
+        if let Ok(entry) = keyring::Entry::new(&self.service, &key) {
             if let Ok(stored) = entry.get_password() {
                 return Some(stored);
             }
@@ -222,7 +243,7 @@ impl Secrets {
             .expect("secrets memory lock")
             .remove(&key)
             .is_some();
-        let in_keyring = keyring::Entry::new(SERVICE, &key)
+        let in_keyring = keyring::Entry::new(&self.service, &key)
             .and_then(|entry| entry.delete_credential())
             .is_ok();
         in_memory || in_keyring
@@ -249,9 +270,27 @@ mod tests {
     /// path (when one is available) never touches real accounts.
     const HOST: &str = "imap.secrets-test.invalid";
 
+    /// A [`Secrets`] under a keyring namespace unique to one test (its
+    /// label) and one run of the test binary (the process id). With a
+    /// working Secret Service the OS keyring is process-global and
+    /// persistent: when every test shared the production
+    /// `mailchat-vault` service, the fixed fixture names leaked between
+    /// tests — `load_finds_legacy…` saved `ana@example.invalid`, and
+    /// whichever `load_returns_none…` ran after it (or a leftover from
+    /// an earlier run) found it — so results depended on execution
+    /// order. Unique namespaces keep the real keyring path exercised on
+    /// bus-equipped hosts while making each test's entries unreachable
+    /// from every other test, in any order and across runs (leftovers
+    /// of a dead pid never resolve again). Bus-less hosts are
+    /// unaffected: they use the per-instance session-memory fallback
+    /// either way.
+    fn isolated_secrets(label: &str) -> Secrets {
+        Secrets::with_service(&format!("{SERVICE}-test-{label}-{}", std::process::id()))
+    }
+
     #[test]
     fn load_finds_legacy_lowercase_key_and_migrates_to_exact_case_key() {
-        let secrets = Secrets::new();
+        let secrets = isolated_secrets("legacy-migrates");
         // A pre-upgrade release lowercased the username before saving, so
         // the stored key holds `ana@...` while the account is now loaded
         // with its exact configured casing.
@@ -273,7 +312,7 @@ mod tests {
 
     #[test]
     fn load_prefers_exact_case_key_over_stale_legacy() {
-        let secrets = Secrets::new();
+        let secrets = isolated_secrets("exact-case-wins");
         let username = "Ana@Example.invalid";
         // Both keys exist with different passwords: the exact-case key is
         // authoritative, the legacy entry must not shadow it.
@@ -288,7 +327,7 @@ mod tests {
 
     #[test]
     fn load_returns_none_when_nothing_is_stored() {
-        let secrets = Secrets::new();
+        let secrets = isolated_secrets("nothing-stored");
         // All-lowercase username: the legacy key equals the lookup key, so
         // there is no second place to look — the UI prompts for a password.
         assert_eq!(secrets.load(HOST, "ana@example.invalid"), None);
@@ -298,7 +337,7 @@ mod tests {
 
     #[test]
     fn clear_account_forgets_both_secret_kinds() {
-        let secrets = Secrets::new();
+        let secrets = isolated_secrets("clear-both-kinds");
         let username = "forget@me.invalid";
         secrets.save(HOST, username, "app-fixture");
         secrets.save_refresh(HOST, username, "refresh-fixture");
@@ -319,7 +358,7 @@ mod tests {
 
     #[test]
     fn clear_account_also_forgets_pre_upgrade_legacy_key() {
-        let secrets = Secrets::new();
+        let secrets = isolated_secrets("clear-legacy-key");
         // Pre-upgrade save: keyed by the lowercased username, while the
         // account is forgotten under its exact configured casing.
         let username = "Ana@Example.invalid";
@@ -339,7 +378,7 @@ mod tests {
 
     #[test]
     fn clear_account_also_forgets_legacy_oauth_refresh_token() {
-        let secrets = Secrets::new();
+        let secrets = isolated_secrets("clear-legacy-oauth");
         // Google sign-in (`oauth_gmail_login`) lowercases the username
         // before storing, so the refresh token sits under the legacy
         // `oauth:{lower(username)@host}` key while the account is forgotten
@@ -361,7 +400,7 @@ mod tests {
 
     #[test]
     fn clear_account_leaves_other_accounts_untouched() {
-        let secrets = Secrets::new();
+        let secrets = isolated_secrets("clear-leaves-others");
         secrets.save(HOST, "kept@me.invalid", "keep-me");
         secrets.save(HOST, "gone@me.invalid", "drop-me");
 
@@ -377,7 +416,7 @@ mod tests {
     fn has_account_reports_credential_presence() {
         // Present (keyring or session memory): a same-machine restore
         // resolves the account — no reconnection needed.
-        let secrets = Secrets::new();
+        let secrets = isolated_secrets("has-account");
         secrets.save(HOST, "ana@example.invalid", "app-password");
         assert!(secrets.has_account(HOST, "ana@example.invalid"));
         // The legacy lowercase key counts as present too (it resolves

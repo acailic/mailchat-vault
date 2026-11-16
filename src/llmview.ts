@@ -168,6 +168,24 @@ export function splitCitations(answer: string): Array<string | CitationMarker> {
   return parts;
 }
 
+/** The evidence-scope caption under an answer: how many matching
+ * messages the summary was actually built from (the summarize step
+ * sends only the top rows, never the whole result list). */
+export function evidenceScopeCaption(n: number): string {
+  return `Based on ${n} matching message${n === 1 ? "" : "s"}`;
+}
+
+/** The visible note naming citation markers that cannot be linked (no
+ * matching source row): they stay plain text, never dead links — the
+ * note says so instead of silently downgrading them. */
+export function unsupportedCitationNote(numbers: number[]): string {
+  const markers = numbers.map((n) => `[${n}]`).join(", ");
+  if (numbers.length === 1) {
+    return `Citation ${markers} has no matching source and stays plain text.`;
+  }
+  return `Citations ${markers} have no matching source and stay plain text.`;
+}
+
 // ---------------------------------------------------------------------------
 // Collected links (ask-collect-links)
 // ---------------------------------------------------------------------------

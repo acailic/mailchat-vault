@@ -209,6 +209,7 @@ impl From<Error> for JobError {
             | Error::InvalidQuery(_)
             | Error::InvalidDate(_)
             | Error::InvalidExport(_)
+            | Error::InvalidCollection(_)
             | Error::Media(_)
             | Error::Json(_) => JobError::Import {
                 message: e.to_string(),

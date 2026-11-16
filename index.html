@@ -278,6 +278,13 @@
                     </div>
                     <div id="ask-status" class="meta" style="margin-top: 6px; min-height: 1em" role="status"></div>
                     <div id="answer" hidden></div>
+                    <!-- M5.3: evidence honesty. The caption states how many
+                         matching messages the summary used; the note names
+                         citation markers that cannot be linked (they stay
+                         plain text, never dead links). Siblings of #answer so
+                         its text content stays the verbatim answer. -->
+                    <div id="answer-scope" class="meta" hidden></div>
+                    <div id="answer-unsupported" class="meta" hidden></div>
                     <!-- ask-collect-links: the locally extracted, deduplicated
                          link list with the messages that cite each link. -->
                     <div id="ask-collected" hidden>
