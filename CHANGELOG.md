@@ -6,6 +6,17 @@ and packagers run, not item by item.
 
 ## [0.2.0] - pending tag
 
+### Added (per-source status on the navigation chips)
+
+- Every source chip in the navigation column now says what state its
+  source is in, right beside the label and count: "Syncing…" while a
+  manual sync or a scheduled sync round runs, "Needs sign-in" when no
+  credentials are stored or the last sync failed on them, "Sync failed
+  — <reason>" for other recorded failures, "Paused" for excluded
+  accounts, "Last synced <time>" ("Never synced" before the first
+  success) for connected email, and "Imported <time>" for file imports.
+  The label, count, and one-click source filtering are unchanged.
+
 ### Added (GP03 — first-session journey)
 
 - The import preview confirms what it assumed: exports with clock times
