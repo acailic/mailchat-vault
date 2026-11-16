@@ -39,6 +39,16 @@
 //! snapshots the file, converts in a single transaction, validates the
 //! indexes, and — on any failure — restores the original from the
 //! snapshot (kept next to the database). See [`Storage::open_with`].
+//!
+//! Since schema version 20 the vault also holds **people and
+//! user-confirmed identity links** ([`Storage::create_person`],
+//! [`Storage::link_person_identity`]): an explicit, reversible
+//! navigation layer over the archive. Links anchor to a source
+//! instance plus a stable author key or a source-scoped author name —
+//! never a display name matched across sources — and no linking,
+//! unlinking, renaming, or deleting ever rewrites an archived author,
+//! message, or conversation (see the identity contract in
+//! docs/data-and-api-contracts.md).
 
 use std::path::{Path, PathBuf};
 
@@ -813,7 +823,61 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
     (
         20,
-        // The what's-new boot digest's message half (M7 follow-up)
+        // People and user-confirmed identity links (the unified person
+        // view, storage slice). Additive DDL only: no archived row is
+        // read or changed. Numbering: 18 (saved searches) and 19
+        // (collections) are in the ledger above; the what's-new index
+        // follows as 21.
+        //
+        // The anchoring model (see the identity contract in
+        // docs/data-and-api-contracts.md): every link anchors to a
+        // canonical `source_instance_id` plus one of
+        // - `stable_key`: a stable, source-scoped author key (an email
+        //   address, a provider user id) where the source provides one,
+        //   case-folded at link time;
+        // - `author_name`: the verbatim author string where the source
+        //   provides nothing stable — inherently ambiguous (two humans
+        //   can share a display name), therefore scoped to its source
+        //   instance exactly to bound that ambiguity.
+        // The UNIQUE constraint is the "one identity, one person" rule:
+        // an anchor belongs to at most one person, and reassigning it
+        // is always an explicit unlink-then-link — the storage API
+        // refuses conflicting assignments with an explanation instead
+        // of silently moving the link. Deleting a person cascades its
+        // links and nothing else; messages, authors, and conversations
+        // are never rewritten, merged, or re-attributed.
+        r#"
+        CREATE TABLE people (
+            id         TEXT PRIMARY KEY,
+            name       TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE person_identity_links (
+            id                 TEXT PRIMARY KEY,
+            person_id          TEXT NOT NULL REFERENCES people (id) ON DELETE CASCADE,
+            source_instance_id TEXT NOT NULL,
+            -- 'stable_key' (stable author key, case-folded) or
+            -- 'author_name' (verbatim display name, ambiguous by
+            -- nature and source-scoped).
+            anchor_kind        TEXT NOT NULL CHECK (anchor_kind IN ('stable_key', 'author_name')),
+            anchor_value       TEXT NOT NULL,
+            -- Rendered label for the link UI; display only, never part
+            -- of the anchor.
+            display_label      TEXT NOT NULL DEFAULT '',
+            linked_at          TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (source_instance_id, anchor_kind, anchor_value)
+        );
+        CREATE INDEX idx_person_identity_links_person
+            ON person_identity_links (person_id);
+        "#,
+    ),
+    (
+        21,
+        // The what's-new boot digest's message half (M7 follow-up;
+        // renumbered 20 -> 21 for the merge: the people slice was
+        // first in the queue and keeps 20)
         // counts newly archived messages per source since the last
         // visit (`Storage::messages_archived_since`). Without an index
         // whose leading column is `created_at`, that filter's query
@@ -3418,6 +3482,227 @@ impl Storage {
     }
 
     // ------------------------------------------------------------------
+    // People and user-confirmed identity links (migration 20)
+    // ------------------------------------------------------------------
+
+    /// Create a person record. Purely a navigation layer: nothing about
+    /// archived messages changes (see the identity contract in
+    /// docs/data-and-api-contracts.md — a person exists only to hold
+    /// user-confirmed identity links).
+    pub fn create_person(&self, name: &str) -> Result<Person> {
+        let name = normalize_person_name(name)?;
+        let id = new_uuid();
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO people (id, name) VALUES (?1, ?2)",
+            params![id, name],
+        )?;
+        let person = tx
+            .query_row(
+                "SELECT id, name, created_at, updated_at FROM people WHERE id = ?1",
+                params![id],
+                person_from_row,
+            )
+            .optional()?;
+        tx.commit()?;
+        person.ok_or_else(|| Error::Sqlite(rusqlite::Error::QueryReturnedNoRows))
+    }
+
+    /// Rename a person (display only — a person's name is never identity
+    /// evidence). Unknown ids are refused with [`Error::PersonNotFound`].
+    pub fn rename_person(&self, id: &str, name: &str) -> Result<()> {
+        let name = normalize_person_name(name)?;
+        let updated = self.conn.execute(
+            "UPDATE people SET name = ?2, updated_at = datetime('now')
+             WHERE id = ?1",
+            params![id, name],
+        )?;
+        if updated == 0 {
+            return Err(Error::PersonNotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Delete a person and — via the schema's `ON DELETE CASCADE` —
+    /// exactly their identity-link rows. Archived content is untouched:
+    /// no message, author, or conversation row changes.
+    pub fn delete_person(&self, id: &str) -> Result<()> {
+        let deleted = self
+            .conn
+            .execute("DELETE FROM people WHERE id = ?1", params![id])?;
+        if deleted == 0 {
+            return Err(Error::PersonNotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Every person, oldest first (deterministic: creation time, then
+    /// id as the tiebreaker).
+    pub fn list_people(&self) -> Result<Vec<Person>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, created_at, updated_at
+             FROM people ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map([], person_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Explicitly link one author identity to a person.
+    ///
+    /// The anchor is a canonical source instance plus a stable author
+    /// key ([`PersonAnchorKind::StableKey`], case-folded) or a
+    /// source-scoped author display string
+    /// ([`PersonAnchorKind::AuthorName`], verbatim — ambiguous by
+    /// nature, which is why it never escapes its source instance).
+    /// Linking is the *only* way an identity joins a person; nothing is
+    /// ever inferred.
+    ///
+    /// Re-linking the exact anchor to the same person is an idempotent
+    /// no-op. Linking an anchor that already belongs to another person
+    /// is refused with [`Error::IdentityLinkConflict`] naming the
+    /// current owner — reassignment is always an explicit
+    /// unlink-then-link, never a silent move.
+    pub fn link_person_identity(
+        &self,
+        person_id: &str,
+        link: &NewPersonIdentityLink<'_>,
+    ) -> Result<()> {
+        let anchor_value = normalize_anchor_value(link.anchor_kind, link.anchor_value)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let person: Option<String> = tx
+            .query_row(
+                "SELECT id FROM people WHERE id = ?1",
+                params![person_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if person.is_none() {
+            return Err(Error::PersonNotFound(person_id.to_string()));
+        }
+        let owner: Option<(String, String)> = tx
+            .query_row(
+                "SELECT p.id, p.name
+                 FROM person_identity_links AS l JOIN people AS p ON p.id = l.person_id
+                 WHERE l.source_instance_id = ?1
+                   AND l.anchor_kind = ?2
+                   AND l.anchor_value = ?3",
+                params![
+                    link.source_instance_id,
+                    link.anchor_kind.as_str(),
+                    anchor_value
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        match owner {
+            Some((owner_id, owner_name)) if owner_id != person_id => {
+                return Err(Error::IdentityLinkConflict {
+                    source_instance_id: link.source_instance_id.to_string(),
+                    anchor_kind: link.anchor_kind.as_str().to_string(),
+                    anchor_value,
+                    owner_id,
+                    owner_name,
+                });
+            }
+            // Already linked to this person: idempotent no-op.
+            Some(_) => {}
+            None => {
+                tx.execute(
+                    "INSERT INTO person_identity_links
+                         (id, person_id, source_instance_id, anchor_kind,
+                          anchor_value, display_label)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        new_uuid(),
+                        person_id,
+                        link.source_instance_id,
+                        link.anchor_kind.as_str(),
+                        anchor_value,
+                        link.display_label
+                    ],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Remove one identity link (by its row id). Only the association
+    /// row is deleted — the person, the source instance, and every
+    /// archived message are untouched, and the anchor is immediately
+    /// linkable again (reversibility). Unknown link ids — and links
+    /// belonging to a different person — are refused with
+    /// [`Error::IdentityLinkNotFound`] / [`Error::PersonNotFound`].
+    pub fn unlink_person_identity(&self, person_id: &str, link_id: &str) -> Result<()> {
+        let removed = self.conn.execute(
+            "DELETE FROM person_identity_links WHERE id = ?1 AND person_id = ?2",
+            params![link_id, person_id],
+        )?;
+        if removed == 0 {
+            // Distinguish "no such link" from "someone else's link" so
+            // the caller gets an explanation, not a bare failure.
+            let owner: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT person_id FROM person_identity_links WHERE id = ?1",
+                    params![link_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            return match owner {
+                Some(other) if other != person_id => Err(Error::IdentityLinkNotFound(format!(
+                    "link {link_id} belongs to person {other}, not {person_id}"
+                ))),
+                _ => Err(Error::IdentityLinkNotFound(link_id.to_string())),
+            };
+        }
+        Ok(())
+    }
+
+    /// The identity links of one person, oldest first (deterministic:
+    /// link time, then id).
+    pub fn person_identity_links(&self, person_id: &str) -> Result<Vec<PersonIdentityLink>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, person_id, source_instance_id, anchor_kind,
+                    anchor_value, display_label, linked_at
+             FROM person_identity_links
+             WHERE person_id = ?1
+             ORDER BY linked_at, id",
+        )?;
+        let rows = stmt.query_map(params![person_id], person_link_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Resolve an identity anchor to its person, if the user has linked
+    /// one. This is the lookup the person view rides: a message's
+    /// (source instance, author anchor) resolves through it, so new
+    /// imports under an already-linked stable key join the person's
+    /// message set automatically, while the archived rows keep their
+    /// original author strings. `anchor_value` is normalized exactly as
+    /// [`Storage::link_person_identity`] normalizes it.
+    pub fn person_for_anchor(
+        &self,
+        source_instance_id: &str,
+        anchor_kind: PersonAnchorKind,
+        anchor_value: &str,
+    ) -> Result<Option<Person>> {
+        let anchor_value = normalize_anchor_value(anchor_kind, anchor_value)?;
+        let person = self
+            .conn
+            .query_row(
+                "SELECT p.id, p.name, p.created_at, p.updated_at
+                 FROM person_identity_links AS l JOIN people AS p ON p.id = l.person_id
+                 WHERE l.source_instance_id = ?1
+                   AND l.anchor_kind = ?2
+                   AND l.anchor_value = ?3",
+                params![source_instance_id, anchor_kind.as_str(), anchor_value],
+                person_from_row,
+            )
+            .optional()?;
+        Ok(person)
+    }
+
+    // ------------------------------------------------------------------
     // Saved searches (migration 18)
     // ------------------------------------------------------------------
 
@@ -4396,6 +4681,141 @@ pub struct NewSourceInstance<'a> {
     /// Non-secret connector configuration as JSON (validated by the
     /// connector). Credentials never appear here.
     pub config_json: &'a str,
+}
+
+/// What a user-confirmed identity link anchors to (migration 20). See
+/// the identity contract in docs/data-and-api-contracts.md: the anchor
+/// is always a source instance plus one of these, never a bare display
+/// name matched across sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonAnchorKind {
+    /// A stable, source-scoped author key where the source provides one
+    /// (an email address for mail sources, a provider user id for chat
+    /// exports that carry one). Case-folded at link time.
+    StableKey,
+    /// The verbatim author display string where the source provides
+    /// nothing stable. Inherently ambiguous (two humans can share a
+    /// display name), hence scoped to its source instance.
+    AuthorName,
+}
+
+impl PersonAnchorKind {
+    /// The stored `anchor_kind` token.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PersonAnchorKind::StableKey => "stable_key",
+            PersonAnchorKind::AuthorName => "author_name",
+        }
+    }
+
+    /// Parse a stored `anchor_kind` token; `None` for anything else.
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s {
+            "stable_key" => Some(PersonAnchorKind::StableKey),
+            "author_name" => Some(PersonAnchorKind::AuthorName),
+            _ => None,
+        }
+    }
+}
+
+/// A user-created person record (migration 20). Purely a navigation
+/// layer over the archive: nothing about archived messages changes when
+/// a person is created, renamed, or deleted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Person {
+    pub id: String,
+    /// Display name; never identity evidence.
+    pub name: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// The identity-to-person association a caller asks to create (see
+/// [`Storage::link_person_identity`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewPersonIdentityLink<'a> {
+    /// The canonical source instance the identity lives in.
+    pub source_instance_id: &'a str,
+    /// What `anchor_value` holds — see [`PersonAnchorKind`].
+    pub anchor_kind: PersonAnchorKind,
+    /// The stable author key (case-folded on storage) or the verbatim
+    /// author display string (trimmed).
+    pub anchor_value: &'a str,
+    /// Rendered label for the link UI (e.g. the address as the user
+    /// saw it); display only, never part of the anchor.
+    pub display_label: &'a str,
+}
+
+/// One stored user-confirmed identity link (see
+/// [`Storage::person_identity_links`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonIdentityLink {
+    pub id: String,
+    pub person_id: String,
+    pub source_instance_id: String,
+    pub anchor_kind: PersonAnchorKind,
+    pub anchor_value: String,
+    pub display_label: String,
+    pub linked_at: String,
+}
+
+/// Validate and normalize a person name: trimmed and non-empty.
+fn normalize_person_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(Error::InvalidPersonInput(
+            "person name must not be empty".into(),
+        ));
+    }
+    Ok(name.to_string())
+}
+
+/// Normalize an anchor value for storage and lookup: stable keys are
+/// trimmed and case-folded (email convention — addresses and provider
+/// keys are case-insensitive in practice); author-name anchors keep
+/// their verbatim case (display strings are matched exactly) and are
+/// only trimmed. Empty anchors never identify anyone.
+fn normalize_anchor_value(kind: PersonAnchorKind, value: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(Error::InvalidPersonInput(
+            "anchor value must not be empty".into(),
+        ));
+    }
+    Ok(match kind {
+        PersonAnchorKind::StableKey => trimmed.to_lowercase(),
+        PersonAnchorKind::AuthorName => trimmed.to_string(),
+    })
+}
+
+fn person_from_row(row: &Row<'_>) -> rusqlite::Result<Person> {
+    Ok(Person {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        created_at: row.get(2)?,
+        updated_at: row.get(3)?,
+    })
+}
+
+fn person_link_from_row(row: &Row<'_>) -> rusqlite::Result<PersonIdentityLink> {
+    let kind_raw: String = row.get(3)?;
+    let anchor_kind = PersonAnchorKind::from_str_opt(&kind_raw).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Text,
+            format!("invalid anchor_kind: {kind_raw}").into(),
+        )
+    })?;
+    Ok(PersonIdentityLink {
+        id: row.get(0)?,
+        person_id: row.get(1)?,
+        source_instance_id: row.get(2)?,
+        anchor_kind,
+        anchor_value: row.get(4)?,
+        display_label: row.get(5)?,
+        linked_at: row.get(6)?,
+    })
 }
 
 /// A durable source instance as stored (see

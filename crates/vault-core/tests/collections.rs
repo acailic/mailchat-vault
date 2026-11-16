@@ -282,10 +282,11 @@ fn reimport_of_an_archived_message_preserves_memberships() {
 }
 
 /// Build a database in the exact shape the previous release (schema
-/// version 17) left behind: full current schema minus migration 19's
-/// tables, bookkeeping row 19 absent. Reopening it with this build is
-/// the "existing vault upgrades in place" path. Returns the archived
-/// message's row id.
+/// version 17) left behind: full current schema minus the post-17
+/// migrations' tables (collections 19; people/identity links 20 — and,
+/// once the saved-searches slice lands, 18), their bookkeeping rows
+/// absent. Reopening it with this build is the "existing vault upgrades
+/// in place" path. Returns the archived message's row id.
 fn version17_db(db: &std::path::Path) -> i64 {
     let s = Storage::open(db).unwrap();
     let id = inserted_id(
@@ -298,7 +299,11 @@ fn version17_db(db: &std::path::Path) -> i64 {
     conn.execute_batch(
         "DROP TABLE collection_members;
          DROP TABLE collections;
-         DELETE FROM schema_migrations WHERE version = 19;",
+         DROP TABLE person_identity_links;
+         DROP TABLE people;
+         DROP TABLE saved_searches;
+         DROP INDEX IF EXISTS idx_archive_messages_created_source;
+         DELETE FROM schema_migrations WHERE version >= 18;",
     )
     .unwrap();
     id

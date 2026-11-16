@@ -76,10 +76,7 @@ fn counts_messages_archived_since_grouped_by_source() {
 
     // Strictly newer than the cutoff: a1 (at the cutoff) is excluded.
     let counts = s.messages_archived_since("2026-11-10 08:00:00").unwrap();
-    let pairs: Vec<(String, u64)> = counts
-        .iter()
-        .map(|c| (c.label.clone(), c.count))
-        .collect();
+    let pairs: Vec<(String, u64)> = counts.iter().map(|c| (c.label.clone(), c.count)).collect();
     assert_eq!(
         pairs,
         vec![("wa".to_string(), 2), ("tg".to_string(), 1)],
@@ -90,7 +87,10 @@ fn counts_messages_archived_since_grouped_by_source() {
     assert_ne!(counts[0].source_id, counts[1].source_id);
 
     // Nothing newer than a future cutoff.
-    assert!(s.messages_archived_since("2026-11-13 00:00:00").unwrap().is_empty());
+    assert!(s
+        .messages_archived_since("2026-11-13 00:00:00")
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -147,8 +147,14 @@ fn ledger_rows_since_are_strictly_newer_newest_first() {
     // The limit caps the read.
     let limited = s.job_ledger_since("2026-11-01T00:00:00+00:00", 1).unwrap();
     assert_eq!(limited.len(), 1);
-    assert!(s.job_ledger_since("2026-11-01T00:00:00+00:00", 0).unwrap().is_empty());
-    assert!(s.job_ledger_since("2026-11-13T00:00:00+00:00", 10).unwrap().is_empty());
+    assert!(s
+        .job_ledger_since("2026-11-01T00:00:00+00:00", 0)
+        .unwrap()
+        .is_empty());
+    assert!(s
+        .job_ledger_since("2026-11-13T00:00:00+00:00", 10)
+        .unwrap()
+        .is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -305,7 +311,11 @@ fn digest_reports_new_messages_and_import_sync_jobs_since_the_visit() {
     let mut labels: Vec<_> = digest.new_messages.iter().map(|m| &m.label).collect();
     labels.sort();
     assert_eq!(labels, vec!["tg", "wa"]);
-    let wa = digest.new_messages.iter().find(|m| m.label == "wa").unwrap();
+    let wa = digest
+        .new_messages
+        .iter()
+        .find(|m| m.label == "wa")
+        .unwrap();
     assert_eq!(wa.count, 2, "the pre-visit message never counts");
 
     assert_eq!(

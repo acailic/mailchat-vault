@@ -72,9 +72,11 @@ pub struct LastVisitRecord {
 /// at most one skipped second around a visit, never a double count.
 /// `None` when the text is not an RFC 3339 instant.
 pub fn sqlite_instant(rfc3339: &str) -> Option<String> {
-    DateTime::parse_from_rfc3339(rfc3339)
-        .ok()
-        .map(|at| at.with_timezone(&Utc).format("%Y-%m-%d %H:%M:%S").to_string())
+    DateTime::parse_from_rfc3339(rfc3339).ok().map(|at| {
+        at.with_timezone(&Utc)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    })
 }
 
 /// Read the persisted last-visit record. `Ok(None)` when the digest
