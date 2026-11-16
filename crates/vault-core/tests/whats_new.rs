@@ -427,6 +427,7 @@ fn the_since_query_rides_the_created_at_index_not_a_scan() {
         .query_row(
             "EXPLAIN QUERY PLAN \
              SELECT si.id, COUNT(*) FROM archive_messages AS m \
+             INDEXED BY idx_archive_messages_created_source \
              JOIN source_instances AS si ON si.id = m.source_instance_id \
              WHERE m.created_at > '2026-01-01 00:00:00' \
              GROUP BY m.source_instance_id",
@@ -436,6 +437,6 @@ fn the_since_query_rides_the_created_at_index_not_a_scan() {
         .unwrap();
     assert!(
         plan.contains("idx_archive_messages_created_source"),
-        "the digest query must seek the migration-20 index, plan was: {plan}"
+        "the digest query must seek the migration-21 index, plan was: {plan}"
     );
 }

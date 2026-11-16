@@ -2475,13 +2475,18 @@ impl Storage {
     /// archived messages, not re-sightings. Grouped by source instance
     /// and joined to the same label the stats chips show, heaviest
     /// first. Rides `idx_archive_messages_created_source` (migration
-    /// 20): the range above `since` is a covered index seek, never a
-    /// scan, so the digest answers within the boot budget on
-    /// million-message archives.
+    /// 21 on the merged ledger; originally numbered 20): the range
+    /// above `since` is a covered index seek, never a scan, so the
+    /// digest answers within the boot budget on million-message
+    /// archives. The seek is pinned with INDEXED BY: without it the
+    /// planner may prefer migration 15's source/channel index for the
+    /// GROUP BY order and fall back to a full index scan — exactly
+    /// what the boot budget cannot afford (caught by the EXPLAIN plan
+    /// test in tests/whats_new.rs, first executed on the tier B host).
     pub fn messages_archived_since(&self, since: &str) -> Result<Vec<SourceNewCount>> {
         let mut stmt = self.conn.prepare(
             "SELECT si.id, COALESCE(si.legacy_namespace, si.label, si.id), COUNT(*)
-             FROM archive_messages AS m
+             FROM archive_messages AS m INDEXED BY idx_archive_messages_created_source
              JOIN source_instances AS si ON si.id = m.source_instance_id
              WHERE m.created_at > ?1
              GROUP BY m.source_instance_id
