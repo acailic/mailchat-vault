@@ -204,8 +204,8 @@ describe("pagination", () => {
 describe("source chips", () => {
   it("renders toggles with counts and pressed state", () => {
     const rows: SourceChipRow[] = [
-      { id: "inst-mbox", label: "mbox", count: 900, icon: "file" },
-      { id: "inst-whatsapp", label: "whatsapp", count: 80, icon: "chat" },
+      { id: "inst-mbox", label: "mbox", count: 900, icon: "file", status: "" },
+      { id: "inst-whatsapp", label: "whatsapp", count: 80, icon: "chat", status: "" },
     ];
     const el = document.createElement("div");
     renderSourceChips(el, { rows, selected: ["inst-whatsapp"], onToggle: () => {} });
@@ -220,8 +220,8 @@ describe("source chips", () => {
     const el = document.createElement("div");
     renderSourceChips(el, {
       rows: [
-        { id: "inst-imap", label: "imap.gmail.com-ana", count: 12, icon: "mail" },
-        { id: "inst-whatsapp", label: "whatsapp", count: 80, icon: "chat" },
+        { id: "inst-imap", label: "imap.gmail.com-ana", count: 12, icon: "mail", status: "" },
+        { id: "inst-whatsapp", label: "whatsapp", count: 80, icon: "chat", status: "" },
       ],
       selected: [],
       onToggle: () => {},
@@ -245,7 +245,7 @@ describe("source chips", () => {
     let toggled = "";
     const el = document.createElement("div");
     renderSourceChips(el, {
-      rows: [{ id: "inst-mbox", label: "mbox", count: 1, icon: "file" }],
+      rows: [{ id: "inst-mbox", label: "mbox", count: 1, icon: "file", status: "" }],
       selected: [],
       onToggle: (id) => (toggled = id),
     });
@@ -257,14 +257,41 @@ describe("source chips", () => {
     const el = document.createElement("div");
     renderSourceChips(el, {
       rows: [
-        { id: "inst-mbox", label: "mbox", count: 900, icon: "file" },
-        { id: "inst-telegram", label: "telegram", count: 80, icon: "chat" },
+        { id: "inst-mbox", label: "mbox", count: 900, icon: "file", status: "" },
+        { id: "inst-telegram", label: "telegram", count: 80, icon: "chat", status: "" },
       ],
       selected: [],
       onToggle: () => {},
     });
     expect(el.innerHTML).toMatchSnapshot();
     expect(el.querySelectorAll(".chip.on").length).toBe(0);
+  });
+
+  it("appends the per-source status after the label, leaving the label-and-count text intact", () => {
+    // The e2e specs assert each chip's label and count by substring;
+    // the status adds to the chip's accessible name as its own span
+    // and never rewrites the label text it follows.
+    const el = document.createElement("div");
+    renderSourceChips(el, {
+      rows: [
+        { id: "inst-imap", label: "imap.gmail.com-ana", count: 12, icon: "mail", status: "Syncing…" },
+        { id: "inst-mbox", label: "mbox", count: 900, icon: "file", status: "" },
+      ],
+      selected: ["inst-imap"],
+      onToggle: () => {},
+    });
+    const chips = [...el.querySelectorAll(".chip")];
+    expect(chips[0].querySelector(".chip-status")?.textContent).toBe("Syncing…");
+    expect(chips[0].querySelector("span:not(.chip-status)")?.textContent).toBe(
+      "imap.gmail.com-ana (12)",
+    );
+    expect(chips[0].textContent).toBe("imap.gmail.com-ana (12)Syncing…");
+    // A row without a status renders no span — the chip is unchanged.
+    expect(chips[1].querySelector(".chip-status")).toBeNull();
+    expect(chips[1].textContent).toBe("mbox (900)");
+    // The pressed state and the decorative icon are untouched by status.
+    expect(chips[0].getAttribute("aria-pressed")).toBe("true");
+    expect(chips[0].querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
   });
 });
 

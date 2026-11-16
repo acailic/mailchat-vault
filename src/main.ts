@@ -275,6 +275,10 @@ let accountsCache: AccountView[] = [];
 let lastStats: { by_source: { source: string; count: number }[] } | null = null;
 /** id → disambiguated chip label (shared by nav chips and filter chips). */
 let sourceChipLabels = new Map<string, string>();
+/** Source ids with a manual Sync now round trip in flight — the live
+ * half of the chip status (the other half: any queued or running
+ * `imap_sync_all` round, which syncs every non-excluded account). */
+const manualSyncing = new Set<string>();
 // The import scopes offered by the import-scope filter.
 let importScopes: ImportScope[] = [];
 const exportButton = document.querySelector<HTMLButtonElement>("#export-btn")!;
@@ -697,11 +701,30 @@ function renderAll(): void {
   workspace.store.setReadingOpen(state.detail !== null);
 }
 
+/** The source ids whose chip should read "Syncing…": manual Sync now
+ * round trips plus every non-excluded email account while a scheduler
+ * or tray round (an `imap_sync_all` job) is queued or running. */
+function syncingSourceIds(): Set<string> {
+  const syncing = new Set(manualSyncing);
+  if (hasActiveJob(jobs, "imap_sync_all")) {
+    for (const account of accountsCache) {
+      if (account.kind === "imap" && !account.excluded) syncing.add(account.source_id);
+    }
+  }
+  return syncing;
+}
+
 /** Render the nav source chips from the current caches (ids, labels,
- * counts). Called after stats, sources, or accounts refresh. Also
+ * counts, per-source status). Called after stats, sources, or accounts
+ * refresh, and from job events (the live "Syncing…" state). Also
  * refreshes the id → label map used by the applied-filter chips. */
 function renderSourceChipsNow(): void {
-  const rows = sourceChipRows(sourceInstances, accountsCache, lastStats?.by_source ?? []);
+  const rows = sourceChipRows(
+    sourceInstances,
+    accountsCache,
+    lastStats?.by_source ?? [],
+    syncingSourceIds(),
+  );
   sourceChipLabels = new Map(rows.map((r) => [r.id, r.label]));
   renderSourceChips(sourceChips, {
     rows,
@@ -2445,7 +2468,9 @@ function accountSyncOutcomeLine(account: AccountView, outcome: ipc.ImapSyncOutco
 
 /** Sync one listed account now: `sync_imap` with the account's stored
  * identity and an empty password — the backend resolves the stored
- * keyring credential (or runs the Google sign-in refresh for OAuth). */
+ * keyring credential (or runs the Google sign-in refresh for OAuth).
+ * The account's nav chip reads "Syncing…" for the round trip's
+ * duration (the transient `manualSyncing` set feeds it). */
 async function syncAccountNow(account: AccountView): Promise<void> {
   const request: SyncNowRequest | null = syncNowRequest(account);
   if (!request) {
@@ -2453,6 +2478,8 @@ async function syncAccountNow(account: AccountView): Promise<void> {
     return;
   }
   sourcesStatus.textContent = `Syncing ${accountTitle(account)}… (first sync of a large mailbox can take a while)`;
+  manualSyncing.add(account.source_id);
+  renderSourceChipsNow();
   try {
     const outcome = await ipc.syncImap(request);
     await refreshStats();
@@ -2467,6 +2494,9 @@ async function syncAccountNow(account: AccountView): Promise<void> {
     // failure line the user must see.
     await refreshAccounts();
     sourcesStatus.textContent = `Sync failed for ${accountTitle(account)}: ${syncFailureText(e)}`;
+  } finally {
+    manualSyncing.delete(account.source_id);
+    renderSourceChipsNow();
   }
 }
 
@@ -2672,6 +2702,11 @@ function renderJobs(): void {
   jobsStatus.textContent = jobsStatusText(jobs);
   renderJobsList(jobsList, jobs);
   renderActivityBadge();
+  // Job events also drive the live chip status: a queued/started
+  // `imap_sync_all` round flips every non-excluded email chip to
+  // "Syncing…" and a terminal event restores the derived line
+  // (renderSourceChipsNow reads the tracker through syncingSourceIds).
+  renderSourceChipsNow();
   // The embedding button tracks its own job: disabled while queued or
   // running, re-enabled once no embedding job is active.
   embedButton.disabled = hasActiveJob(jobs, "embed_messages");
