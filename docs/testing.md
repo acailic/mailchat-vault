@@ -27,7 +27,7 @@ failure. Raise the random rounds locally with
 
 ## Continuous integration
 
-CI (`.github/workflows/ci.yml`) runs all of the above plus `clippy` and `fmt --check` on every push and PR.
+CI (`.github/workflows/ci.yml`) runs all of the above plus `clippy` and `fmt --check` on every push and PR. Two dedicated harness workflows run alongside it: `retrieval.yml` (the U07 retrieval-quality benchmark at 10k messages with its instrument gate, documented in [`tests/retrieval/BASELINE.md`](../tests/retrieval/BASELINE.md)) and `perf.yml` (the response-time budgets over 100k messages).
 
 > **CI is not starting jobs since 2026-11-14** (account spending limit —
 > a billing action outside any repository change). Until that is lifted,
