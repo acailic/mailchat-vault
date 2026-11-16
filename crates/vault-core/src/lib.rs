@@ -73,6 +73,9 @@
 //!   counts by source/day/chat/author).
 //! - [`export`]: export search results or whole chats to CSV / JSON Lines /
 //!   MBOX.
+//! - [`health`]: persisted archive-health evidence — the media
+//!   verification summary and per-import-source last-import records the
+//!   health overview reads (absent records read as not checked).
 
 pub mod backup;
 pub mod bounded;
@@ -81,6 +84,7 @@ pub mod demo;
 pub mod discord;
 pub mod export;
 pub mod extract;
+pub mod health;
 pub mod imap;
 pub mod imap_coordinator;
 pub mod import_bounds;
