@@ -110,7 +110,6 @@
 //! hidden unreachable process can never exist). See `src/tray.rs`.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -142,6 +141,7 @@ use vault_core::search2::{
     SearchArchiveRequest, SelectionExportSummary, SelectionFormat,
 };
 use vault_core::settings::{self, Options, Settings, SETTINGS_VERSION};
+use vault_core::staged_write::{staged_write, staged_write_opt};
 use vault_core::stats::{ArchiveStats, DEFAULT_TOP};
 use vault_core::storage::{
     FailedItem, MediaMessageReference, RegisteredMediaObject, SourceInstance, Storage,
@@ -621,9 +621,12 @@ async fn media_reconcile_detail(
     .map_err(|e| e.to_string())?;
 
     // Resolution reads stored rows only: affected-message pages plus
-    // the unlinked-file registry's provenance.
+    // the unlinked-file registry's provenance. (The closure's return
+    // type is annotated like every other `with_read` call in this file:
+    // the `?` operators inside only bound the error type, they do not
+    // pin it, and the outer `map_err` needs it known.)
     ActiveVault::from(&state)
-        .with_read(|s| {
+        .with_read(|s| -> CoreResult<MediaReconcileDetail> {
             let registered: HashMap<String, RegisteredMediaObject> = s
                 .unlinked_media_objects()?
                 .into_iter()
@@ -1171,9 +1174,9 @@ async fn export_messages_v2(
     tauri::async_runtime::spawn_blocking(move || {
         vault
             .with_read(|s| -> CoreResult<SelectionExportSummary> {
-                let file = std::fs::File::create(&path).map_err(Error::from)?;
-                let mut out = BufWriter::new(file);
-                search2::export_selection(s, &ids, format, &mut out)
+                staged_write(Path::new(&path), |out| {
+                    search2::export_selection(s, &ids, format, out)
+                })
             })
             .map_err(AppError::from)
     })
@@ -3128,7 +3131,9 @@ fn job_cancel(state: State<AppState>, id: JobId) -> bool {
 /// only email-channel rows and reports the rest as `skipped`. Rows stream
 /// through a `BufWriter` (never all in memory) off the UI thread; since
 /// M2.1 the stream reads from a read connection, so imports and syncs
-/// keep committing while a large export writes.
+/// keep committing while a large export writes. The output is staged in
+/// a temp sibling of `path` and renamed into place only once complete —
+/// a failed export never truncates a previously valid file.
 #[tauri::command]
 async fn export_search(
     state: State<'_, AppState>,
@@ -3141,11 +3146,9 @@ async fn export_search(
     tauri::async_runtime::spawn_blocking(move || {
         vault
             .with_read(|s| -> CoreResult<ExportSummary> {
-                let file = std::fs::File::create(&path).map_err(Error::from)?;
-                let mut out = BufWriter::new(file);
-                let summary = export::export_search(s, &query, format, &mut out)
-                    .and_then(|s| out.flush().map(|_| s).map_err(Error::from))?;
-                Ok(summary)
+                staged_write(Path::new(&path), |out| {
+                    export::export_search(s, &query, format, out)
+                })
             })
             .map_err(|e: Error| e.to_string())
     })
@@ -3170,11 +3173,9 @@ async fn export_search_v2(
     tauri::async_runtime::spawn_blocking(move || {
         vault
             .with_read(|s| -> CoreResult<ExportSummary> {
-                let file = std::fs::File::create(&path).map_err(Error::from)?;
-                let mut out = BufWriter::new(file);
-                let summary = export::export_search_v2(s, &request, format, &mut out)?;
-                out.flush().map_err(Error::from)?;
-                Ok(summary)
+                staged_write(Path::new(&path), |out| {
+                    export::export_search_v2(s, &request, format, out)
+                })
             })
             .map_err(AppError::from)
     })
@@ -3199,14 +3200,15 @@ async fn export_chat(
             .with_read(|s| -> CoreResult<Option<ExportSummary>> {
                 // Existence is checked before the destination is touched: an
                 // unknown id (message deleted between list render and export
-                // click) must leave no file at the user-chosen path.
+                // click) must leave no file at the user-chosen path. The
+                // staged write re-checks through `export_chat` itself and
+                // declines to publish if the anchor vanished meanwhile.
                 if s.get(id)?.is_none() {
                     return Ok(None);
                 }
-                let file = std::fs::File::create(&path).map_err(Error::from)?;
-                let mut out = BufWriter::new(file);
-                export::export_chat(s, id, format, &mut out)
-                    .and_then(|s| out.flush().map(|_| s).map_err(Error::from))
+                staged_write_opt(Path::new(&path), |out| {
+                    export::export_chat(s, id, format, out)
+                })
             })
             .map_err(|e| e.to_string())
     })
