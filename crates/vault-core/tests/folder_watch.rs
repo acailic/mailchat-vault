@@ -1,13 +1,15 @@
 //! Integration tests for folder watching (real `notify` backend, real temp
 //! folders): new/modified export files are imported in the background after
 //! the settle window, re-imports never duplicate (dedup contract), skips
-//! and errors are surfaced as events, and the watcher never dies.
+//! and errors are surfaced as events, the watcher never dies, and a failed
+//! import can be retried by hand once its cause is resolved.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use vault_core::jobs::{DbPool, PoolConfig};
-use vault_core::watch::{FolderWatcher, WatchConfig, WatchEvent, WatchSnapshot};
+use vault_core::watch::{FolderWatcher, WatchConfig, WatchEvent, WatchSnapshot, WatchUnitStatus};
 
 /// Fast enough for tests, slow enough to coalesce write bursts.
 fn test_config() -> WatchConfig {
@@ -143,6 +145,43 @@ fn imported_summary(
         }
         _ => None,
     })
+}
+
+/// The newest recorded status of the import unit whose key contains
+/// `key_fragment` (the file itself, or a Messenger thread folder).
+fn unit_status(watcher: &FolderWatcher, key_fragment: &str) -> Option<WatchUnitStatus> {
+    watcher
+        .snapshot()
+        .units
+        .iter()
+        .find(|u| u.key.contains(key_fragment))
+        .map(|u| u.status)
+}
+
+/// How many events of any kind name `path_fragment`.
+fn events_naming(watcher: &FolderWatcher, path_fragment: &str) -> usize {
+    watcher
+        .snapshot()
+        .events
+        .iter()
+        .filter(|e| e.path().contains(path_fragment))
+        .count()
+}
+
+/// The error text of the newest Failed event naming `path_fragment`.
+fn failure_text(watcher: &FolderWatcher, path_fragment: &str) -> Option<String> {
+    watcher.snapshot().events.iter().find_map(|e| match e {
+        WatchEvent::Failed { path, error } if path.contains(path_fragment) => Some(error.clone()),
+        _ => None,
+    })
+}
+
+/// Change a path's permission bits (the transient-failure injection:
+/// an unprivileged owner flipping a folder or file read-only).
+#[cfg(unix)]
+fn chmod(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -608,6 +647,362 @@ fn initial_scan_of_populated_messenger_tree_imports_once() {
     assert_eq!(total(&storage), 2, "initial scan duplicated messages");
     let summary = imported_summary(&watcher, "message_1.json").unwrap();
     assert_eq!(summary.source, "messenger");
+    watcher.shutdown();
+    storage.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Retry of failed imports
+// ---------------------------------------------------------------------------
+
+/// A transient read failure (the watched folder briefly untraversable)
+/// clears after the settle deadline: the import attempt fails once with
+/// an explanation, and restoring access alone re-arms nothing — the
+/// folder's own metadata event is not a file candidate. Retry then
+/// imports the unchanged file, a repeated retry reuses the committed
+/// checkpoint and stores nothing twice.
+#[cfg(unix)]
+#[test]
+fn retry_after_resolved_transient_failure_imports_the_unchanged_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let watched = tmp.path().join("exports");
+    std::fs::create_dir_all(&watched).unwrap();
+    let mbox = watched.join("kept.mbox");
+    std::fs::write(&mbox, mbox_bytes(&[("r-1", "One"), ("r-2", "Two")])).unwrap();
+
+    let storage = pool(&tmp);
+    let watcher = spawn_watcher(&storage);
+    // add_folder's ack returns strictly ahead of the imports, so the
+    // folder is unreadable before the armed candidate settles.
+    watcher.add_folder(&watched).unwrap();
+    chmod(&watched, 0o000);
+
+    let failed = eventually(Duration::from_secs(10), || {
+        unit_status(&watcher, "kept.mbox") == Some(WatchUnitStatus::Failed)
+    });
+    assert!(failed, "import did not fail: {:?}", latest_events(&watcher));
+    let error = failure_text(&watcher, "kept.mbox").expect("a Failed event");
+    assert!(
+        error.to_lowercase().contains("denied"),
+        "expected a permission explanation, got: {error}"
+    );
+    assert_eq!(total(&storage), 0);
+
+    // Resolve the cause. The chmod fires only the folder's metadata
+    // event (not a file candidate), so nothing re-imports on its own.
+    chmod(&watched, 0o755);
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(
+        !watcher
+            .snapshot()
+            .events
+            .iter()
+            .any(|e| matches!(e, WatchEvent::Imported { .. })),
+        "the access fix must not import by itself: {:?}",
+        latest_events(&watcher)
+    );
+    assert_eq!(total(&storage), 0);
+
+    // Retry re-enqueues the unchanged file; the import succeeds.
+    watcher.retry(&mbox).unwrap();
+    assert_eq!(
+        unit_status(&watcher, "kept.mbox"),
+        Some(WatchUnitStatus::Pending)
+    );
+    assert!(
+        eventually(Duration::from_secs(10), || total(&storage) == 2),
+        "retry did not import, got {} (events: {:?})",
+        total(&storage),
+        latest_events(&watcher)
+    );
+    assert_eq!(
+        unit_status(&watcher, "kept.mbox"),
+        Some(WatchUnitStatus::Succeeded)
+    );
+    let summary = imported_summary(&watcher, "kept.mbox").unwrap();
+    assert_eq!(summary.inserted, 2);
+
+    // Nothing duplicates afterwards, and a retry of the now-succeeded
+    // unit reuses the committed checkpoint identity: every row skips.
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(total(&storage), 2);
+    watcher.retry(&mbox).unwrap();
+    assert!(
+        eventually(Duration::from_secs(10), || imported_summary(
+            &watcher,
+            "kept.mbox"
+        )
+        .is_some_and(|s| s.inserted == 0)),
+        "second retry did not dedup, events: {:?}",
+        latest_events(&watcher)
+    );
+    assert_eq!(total(&storage), 2, "retry duplicated committed rows");
+    watcher.shutdown();
+    storage.shutdown();
+}
+
+/// A second retry while the unit is queued for import is ignored: the
+/// pending count stays one and exactly one import pass runs.
+#[cfg(unix)]
+#[test]
+fn second_retry_while_pending_is_ignored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let watched = tmp.path().join("exports");
+    std::fs::create_dir_all(&watched).unwrap();
+    let mbox = watched.join("once.mbox");
+    std::fs::write(&mbox, mbox_bytes(&[("p-1", "One")])).unwrap();
+
+    let storage = pool(&tmp);
+    let watcher = spawn_watcher(&storage);
+    watcher.add_folder(&watched).unwrap();
+    assert!(eventually(Duration::from_secs(10), || total(&storage) == 1));
+
+    // Two rapid retries: the first queues the unit, the second is a
+    // no-op (the unit is pending) — no duplicate work is enqueued.
+    watcher.retry(&mbox).unwrap();
+    watcher.retry(&mbox).unwrap();
+    let snap = watcher.snapshot();
+    assert_eq!(snap.pending, 1, "duplicate retry enqueued twice: {snap:?}");
+    assert_eq!(
+        unit_status(&watcher, "once.mbox"),
+        Some(WatchUnitStatus::Pending)
+    );
+
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            imported_summary(&watcher, "once.mbox").is_some_and(|s| s.inserted == 0)
+        }),
+        "retried unit never imported, events: {:?}",
+        latest_events(&watcher)
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    // Exactly two import passes ran for the file in total: the initial
+    // scan's and one for both retries — never one per click.
+    let imports = watcher
+        .snapshot()
+        .events
+        .iter()
+        .filter(|e| matches!(e, WatchEvent::Imported { path, .. } if path.contains("once.mbox")))
+        .count();
+    assert_eq!(
+        imports,
+        2,
+        "duplicate import pass ran: {:?}",
+        latest_events(&watcher)
+    );
+    assert_eq!(total(&storage), 1);
+    watcher.shutdown();
+    storage.shutdown();
+}
+
+/// A retry left over from a folder the user removed is a stale action,
+/// and a path that never existed reports a useful error.
+#[test]
+fn retry_outside_watched_folders_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let watched = tmp.path().join("exports");
+    let elsewhere = tmp.path().join("other");
+    std::fs::create_dir_all(&watched).unwrap();
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let mbox = watched.join("gone-from-watch.mbox");
+    std::fs::write(&mbox, mbox_bytes(&[("s-1", "One")])).unwrap();
+    let stranger = elsewhere.join("stranger.mbox");
+    std::fs::write(&stranger, mbox_bytes(&[("s-2", "Two")])).unwrap();
+
+    let storage = pool(&tmp);
+    let watcher = spawn_watcher(&storage);
+    watcher.add_folder(&watched).unwrap();
+    assert!(eventually(Duration::from_secs(10), || total(&storage) == 1));
+
+    // Removing the folder invalidates retries for its files.
+    watcher.remove_folder(&watched).unwrap();
+    let err = watcher.retry(&mbox).unwrap_err();
+    assert!(
+        err.contains("not in a watched folder anymore"),
+        "stale retry not reported: {err}"
+    );
+
+    // A path that was never watched is equally refused.
+    let err = watcher.retry(&stranger).unwrap_err();
+    assert!(
+        err.contains("not in a watched folder anymore"),
+        "unwatched retry not reported: {err}"
+    );
+
+    // A missing path reports the underlying filesystem error and stays
+    // retryable (no state was poisoned).
+    let missing = watched.join("never-existed.mbox");
+    let err = watcher.retry(&missing).unwrap_err();
+    assert!(
+        err.contains("never-existed.mbox"),
+        "missing-path retry not explained: {err}"
+    );
+    assert!(watcher.snapshot().running);
+    watcher.shutdown();
+    storage.shutdown();
+}
+
+/// A file that keeps failing (here: unreadable) is never requeued by
+/// the watcher itself; each manual retry explains the failure again,
+/// and no automatic retry loop starts.
+#[cfg(unix)]
+#[test]
+fn a_permanently_failing_import_never_auto_requeues() {
+    let tmp = tempfile::tempdir().unwrap();
+    let watched = tmp.path().join("exports");
+    std::fs::create_dir_all(&watched).unwrap();
+    let mbox = watched.join("locked.mbox");
+    std::fs::write(&mbox, mbox_bytes(&[("l-1", "One")])).unwrap();
+
+    let storage = pool(&tmp);
+    let watcher = spawn_watcher(&storage);
+    watcher.add_folder(&watched).unwrap();
+    chmod(&mbox, 0o000); // the chmod's metadata event re-arms it once
+
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            failure_text(&watcher, "locked.mbox").is_some()
+        }),
+        "unreadable file not reported: {:?}",
+        latest_events(&watcher)
+    );
+    assert_eq!(total(&storage), 0);
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(
+        events_naming(&watcher, "locked.mbox"),
+        1,
+        "the watcher requeued a failed import by itself: {:?}",
+        latest_events(&watcher)
+    );
+
+    // A manual retry stays possible and fails again, with explanation.
+    watcher.retry(&mbox).unwrap();
+    assert!(
+        eventually(Duration::from_secs(10), || events_naming(
+            &watcher,
+            "locked.mbox"
+        ) == 2),
+        "retry did not attempt the import again: {:?}",
+        latest_events(&watcher)
+    );
+    let error = failure_text(&watcher, "locked.mbox").unwrap();
+    assert!(
+        error.to_lowercase().contains("denied"),
+        "expected a permission explanation, got: {error}"
+    );
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(
+        events_naming(&watcher, "locked.mbox"),
+        2,
+        "an automatic retry loop started: {:?}",
+        latest_events(&watcher)
+    );
+    assert_eq!(total(&storage), 0);
+    assert!(watcher.snapshot().running);
+
+    // Once the file is readable again the retry path recovers it.
+    chmod(&mbox, 0o644);
+    watcher.retry(&mbox).unwrap();
+    assert!(
+        eventually(Duration::from_secs(10), || total(&storage) == 1),
+        "recovered retry did not import, events: {:?}",
+        latest_events(&watcher)
+    );
+    watcher.shutdown();
+    storage.shutdown();
+}
+
+/// A Messenger part that fails imports at its thread-folder scope: the
+/// retry of one part re-imports the whole thread, and a second part's
+/// retry while the thread unit is queued is ignored.
+#[cfg(unix)]
+#[test]
+fn messenger_part_failure_retries_the_whole_thread() {
+    let tmp = tempfile::tempdir().unwrap();
+    let watched = tmp.path().join("exports");
+    let thread = watched.join("messages/inbox/ana_1234567890");
+    std::fs::create_dir_all(&thread).unwrap();
+    std::fs::write(
+        thread.join("message_1.json"),
+        messenger_part(&[
+            ("Ana", 1762981200000, "zdravo"),
+            ("Ana", 1762981260000, "kako si?"),
+        ]),
+    )
+    .unwrap();
+    std::fs::write(
+        thread.join("message_2.json"),
+        messenger_part(&[
+            ("Ana", 1762981320000, "dobro"),
+            ("Ana", 1762981380000, "a ti?"),
+            ("Ana", 1762981440000, "odlicno"),
+        ]),
+    )
+    .unwrap();
+
+    let storage = pool(&tmp);
+    let watcher = spawn_watcher(&storage);
+    watcher.add_folder(&watched).unwrap();
+    // Both parts fail to open while the thread folder is untraversable.
+    chmod(&thread, 0o000);
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            events_naming(&watcher, "message_2.json") >= 1
+                && events_naming(&watcher, "message_1.json") >= 1
+        }),
+        "parts did not fail while the thread folder was unreadable: {:?}",
+        latest_events(&watcher)
+    );
+    assert_eq!(total(&storage), 0);
+
+    // Access restored: nothing re-imports on its own (only the folder's
+    // metadata event fires), and both parts' retries map to the one
+    // thread unit — the second is ignored while the first is queued.
+    chmod(&thread, 0o755);
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(total(&storage), 0);
+    watcher.retry(thread.join("message_1.json")).unwrap();
+    watcher.retry(thread.join("message_2.json")).unwrap();
+    let snap = watcher.snapshot();
+    assert_eq!(snap.pending, 1, "thread unit enqueued twice: {snap:?}");
+    assert_eq!(
+        unit_status(&watcher, "ana_1234567890"),
+        Some(WatchUnitStatus::Pending)
+    );
+
+    // One import pass of the whole thread: all five messages, one
+    // Imported event, keyed by the thread folder.
+    assert!(
+        eventually(Duration::from_secs(10), || total(&storage) == 5),
+        "thread retry did not import the whole thread, got {} (events: {:?})",
+        total(&storage),
+        latest_events(&watcher)
+    );
+    let imports = watcher
+        .snapshot()
+        .events
+        .iter()
+        .filter(|e| matches!(e, WatchEvent::Imported { .. }))
+        .count();
+    assert_eq!(
+        imports,
+        1,
+        "duplicate thread import: {:?}",
+        latest_events(&watcher)
+    );
+    let summary = imported_summary(&watcher, "message_1.json").unwrap();
+    assert_eq!(summary.source, "messenger");
+    assert_eq!(
+        summary.seen, 5,
+        "retry must import the thread, not the part"
+    );
+    assert_eq!(summary.inserted, 5);
+    assert_eq!(
+        unit_status(&watcher, "ana_1234567890"),
+        Some(WatchUnitStatus::Succeeded)
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(total(&storage), 5);
     watcher.shutdown();
     storage.shutdown();
 }

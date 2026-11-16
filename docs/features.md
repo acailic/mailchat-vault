@@ -83,6 +83,19 @@ every message stores exactly once.
   running. A folder that vanishes mid-session is silently disarmed for the
   session. Skipped files with a watched extension (`.mbox`/`.eml`/`.txt`/
   `.json`) that are not recognized exports are reported, not imported.
+- **Retry, never a loop**: a failed import is never requeued by the watcher
+  itself — a permanently broken input explains itself once instead of
+  spinning. Once you resolve the cause (closed the reader, freed the disk,
+  restored access), **Retry** re-runs the same import unit through the
+  ordinary settle window without touching the file or restarting the app:
+  already stored messages stay single (the same import identity and dedup
+  contract), the file's folder must still be watched (a retry left over
+  from a removed folder is refused as stale), a Messenger part retries its
+  whole thread, and the watcher's per-unit status (pending / running /
+  succeeded / failed, published with every snapshot) keeps a second click
+  on a queued or running unit from enacting duplicate work. A missing or
+  still-unreadable file reports the underlying error and can be retried
+  again later.
 - **Persistent**: watched folders are stored in the vault database and
   re-armed on the next start (a folder that is missing at startup is
   reported; it re-arms on the next start once it is present again).

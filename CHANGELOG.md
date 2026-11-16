@@ -38,6 +38,18 @@ and packagers run, not item by item.
   hints) now appears on the first-run card and the Add-source chooser,
   not only inside the import section.
 
+### Added (watched-folder retry)
+
+- A failed automatic import can be retried once its cause is resolved,
+  without touching the source file or restarting the app: the watcher
+  re-runs the same import unit (a Messenger part retries its whole
+  thread) under its unchanged import identity, so already stored
+  messages stay single. Retries for files whose watched folder was
+  removed are refused; a permanently failing input is never requeued
+  automatically (no retry loop), and each watcher snapshot now carries
+  per-unit import states (pending/running/succeeded/failed). The Retry
+  affordance in the watching panel ships separately.
+
 The media release: attachments and chat-export media are now preserved
 and viewable in the app, AI answers run only behind your explicit
 consent, new mail can notify you, and the Linux packages install as
