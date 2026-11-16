@@ -160,6 +160,8 @@ pub enum Error {
     Jobs(String),
     #[error("invalid export: {0}")]
     InvalidExport(String),
+    #[error("invalid collection: {0}")]
+    InvalidCollection(String),
     #[error("media store error: {0}")]
     Media(String),
     #[error("backup/restore error: {0}")]
