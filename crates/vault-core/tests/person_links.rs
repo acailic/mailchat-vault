@@ -11,8 +11,10 @@
 //! - link and unlink are reversible, and one identity belongs to at
 //!   most one person, with conflicting assignments refused with an
 //!   explanation instead of silently moving the link;
-//! - people and links persist in the vault and survive a reopen.
+//! - people and links persist in the vault and survive a reopen and a
+//!   backup/restore round trip.
 
+use vault_core::backup::{self, BackupOptions, RestoreOptions};
 use vault_core::message::NewMessage;
 use vault_core::storage::{NewPersonIdentityLink, PersonAnchorKind, Storage};
 use vault_core::Error;
@@ -391,6 +393,15 @@ fn deleting_a_person_removes_associations_only() {
             .is_none(),
         "the association went with the person"
     );
+    // The cascade really removed the link rows (foreign keys are on),
+    // not merely the person they pointed at.
+    let orphaned: i64 = storage
+        .connection()
+        .query_row("SELECT COUNT(*) FROM person_identity_links", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(orphaned, 0, "no association row may outlive its person");
 
     // The archived message is untouched and the anchor is free again.
     let msg = storage.get(mid).unwrap().unwrap();
@@ -436,5 +447,124 @@ fn people_and_links_survive_reopen() {
             .unwrap()
             .as_ref(),
         Some(&person)
+    );
+}
+
+/// Associations ride the vault's backup container: after a
+/// backup/restore round trip the person, the link, and the anchor
+/// resolution are all back — the same persistence path as every other
+/// vault table.
+#[test]
+fn associations_survive_backup_and_restore() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data_dir = tmp.path().join("vault");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let db = data_dir.join("vault.db");
+    let container = tmp.path().join("person-vault.mcbackup");
+
+    let (instance, person) = {
+        let storage = Storage::open(&db).unwrap();
+        insert_one(&storage, "mbox", "m1", "Ana <ana@example.com>", "body");
+        let instance = instance_for(&storage, "mbox");
+        let person = storage.create_person("Ana Ilic").unwrap();
+        storage
+            .link_person_identity(&person.id, &mail_link(&instance, "ana@example.com"))
+            .unwrap();
+
+        let summary = backup::create_backup(
+            &data_dir,
+            storage.connection(),
+            &container,
+            &|_| {},
+            &|| false,
+            &BackupOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            summary.manifest.schema_version,
+            vault_core::storage::SUPPORTED_SCHEMA_VERSION
+        );
+        let fingerprint = storage.vault_fingerprint().unwrap();
+        backup::restore_backup(
+            &data_dir,
+            &container,
+            &fingerprint,
+            &|_| {},
+            &RestoreOptions::default(),
+            &|_: &vault_core::storage::SourceInstance| false,
+        )
+        .unwrap();
+        (instance, person)
+    };
+
+    let storage = Storage::open(&db).unwrap();
+    assert_eq!(storage.list_people().unwrap(), vec![person.clone()]);
+    let links = storage.person_identity_links(&person.id).unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].anchor_value, "ana@example.com");
+    assert_eq!(
+        storage
+            .person_for_anchor(&instance, PersonAnchorKind::StableKey, "ana@example.com")
+            .unwrap()
+            .as_ref(),
+        Some(&person)
+    );
+}
+
+/// Links anchor to the stable identity, not to message rows: imports
+/// that arrive after the link resolve to the person automatically,
+/// without any re-confirmation touching the archived content.
+#[test]
+fn new_imports_under_a_linked_stable_key_resolve_automatically() {
+    let storage = Storage::open_in_memory().unwrap();
+    insert_one(
+        &storage,
+        "mbox",
+        "old-1",
+        "Ana <ana@example.com>",
+        "imported before the link",
+    );
+
+    let person = storage.create_person("Ana Ilic").unwrap();
+    let instance = instance_for(&storage, "mbox");
+    storage
+        .link_person_identity(&person.id, &mail_link(&instance, "ana@example.com"))
+        .unwrap();
+
+    // Future imports under the same stable key need no new link.
+    insert_one(
+        &storage,
+        "mbox",
+        "new-1",
+        "Ana <ana@example.com>",
+        "imported after the link",
+    );
+    insert_one(
+        &storage,
+        "mbox",
+        "new-2",
+        "ana@example.com",
+        "different author casing",
+    );
+    assert_eq!(
+        storage
+            .person_for_anchor(&instance, PersonAnchorKind::StableKey, "ana@example.com")
+            .unwrap()
+            .as_ref(),
+        Some(&person)
+    );
+    assert_eq!(
+        storage
+            .person_for_anchor(&instance, PersonAnchorKind::StableKey, "ANA@example.com")
+            .unwrap()
+            .as_ref(),
+        Some(&person),
+        "the case-folded stable key resolves the same person"
+    );
+    assert_eq!(storage.stats().unwrap().total, 3);
+    assert_eq!(
+        storage.person_identity_links(&person.id).unwrap().len(),
+        1,
+        "no new link rows appeared — the anchor already covers them"
     );
 }

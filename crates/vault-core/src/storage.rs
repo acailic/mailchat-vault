@@ -39,6 +39,16 @@
 //! snapshots the file, converts in a single transaction, validates the
 //! indexes, and — on any failure — restores the original from the
 //! snapshot (kept next to the database). See [`Storage::open_with`].
+//!
+//! Since schema version 20 the vault also holds **people and
+//! user-confirmed identity links** ([`Storage::create_person`],
+//! [`Storage::link_person_identity`]): an explicit, reversible
+//! navigation layer over the archive. Links anchor to a source
+//! instance plus a stable author key or a source-scoped author name —
+//! never a display name matched across sources — and no linking,
+//! unlinking, renaming, or deleting ever rewrites an archived author,
+//! message, or conversation (see the identity contract in
+//! docs/data-and-api-contracts.md).
 
 use std::path::{Path, PathBuf};
 
