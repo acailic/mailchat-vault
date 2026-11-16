@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use vault_core::chat_export::{import_bounded, ChatImportOutcome};
 use vault_core::search::build_match_query;
-use vault_core::storage::Storage;
+use vault_core::storage::{Storage, UnlinkedMediaPageRequest};
 
 /// Real small files committed with the repo.
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
@@ -927,6 +927,170 @@ fn unlinked_export_files_are_stored_and_registered() {
     assert_eq!(storage.unlinked_media_objects().unwrap().len(), 4);
     let digests = storage.media_digests().unwrap();
     assert_eq!(digests.len(), 7);
+}
+
+/// One Telegram export with two stray files: the bounded, provenance-
+/// carrying setup the paged-query tests below reuse.
+fn unlinked_page_sandbox(tag: &str) -> (Sandbox, Storage) {
+    let sb = Sandbox::new(tag);
+    write_telegram_export(&sb);
+    // Stray files with content no message references (distinct bytes,
+    // or the digest check would rightly treat them as linked copies).
+    fs::write(
+        sb.export_dir().join("photos/orphan.png"),
+        b"orphan-png-bytes",
+    )
+    .unwrap();
+    fs::write(sb.export_dir().join("files/extra.txt"), b"stray notes").unwrap();
+    (sb, Storage::open_in_memory().unwrap())
+}
+
+#[test]
+fn unlinked_files_page_reports_provenance_search_and_availability() {
+    // The Files-not-linked-to-a-message backend: after a whole-tree
+    // import, the registered strays are discoverable one bounded page
+    // at a time with name/kind/size/import provenance, search and the
+    // import filter run in the vault (never the whole registry in the
+    // webview), and availability follows the store's presence check —
+    // including an honest unavailable state for missing bytes.
+    let (sb, mut storage) = unlinked_page_sandbox("tg-unlinked-page");
+    let outcome = sb.import_with_media(&mut storage);
+    let import_id = outcome.import_id.clone();
+
+    let mut page = storage
+        .unlinked_media_page(&UnlinkedMediaPageRequest::default())
+        .unwrap();
+    assert_eq!((page.objects.len(), page.total), (2, 2));
+    for row in &page.objects {
+        assert_eq!(row.origin, "unlinked");
+        assert_eq!(row.import_id, import_id, "known import provenance");
+        assert!(!row.first_seen.is_empty());
+        assert!(row.size > 0);
+        assert!(
+            !row.available && row.path.is_none(),
+            "the SQL read never stamps availability — disk state is a separate check"
+        );
+    }
+
+    // Search over name and kind, filtered inside the vault.
+    let hit = storage
+        .unlinked_media_page(&UnlinkedMediaPageRequest {
+            search: "ORPHAN".into(),
+            ..UnlinkedMediaPageRequest::default()
+        })
+        .unwrap();
+    assert_eq!((hit.objects.len(), hit.total), (1, 1));
+    assert_eq!(hit.objects[0].name, "orphan.png");
+    assert_eq!(hit.objects[0].kind, "image");
+    let docs = storage
+        .unlinked_media_page(&UnlinkedMediaPageRequest {
+            search: "document".into(),
+            ..UnlinkedMediaPageRequest::default()
+        })
+        .unwrap();
+    assert_eq!((docs.objects.len(), docs.total), (1, 1));
+    assert_eq!(docs.objects[0].name, "extra.txt");
+
+    // The import filter: the completion state's import surfaces exactly
+    // its own strays; an unknown import is an honest empty page.
+    let scoped = storage
+        .unlinked_media_page(&UnlinkedMediaPageRequest {
+            import_id: Some(import_id.clone()),
+            ..UnlinkedMediaPageRequest::default()
+        })
+        .unwrap();
+    assert_eq!((scoped.objects.len(), scoped.total), (2, 2));
+    assert!(scoped.objects.iter().all(|r| r.import_id == import_id));
+    let unknown = storage
+        .unlinked_media_page(&UnlinkedMediaPageRequest {
+            import_id: Some("chat-import:none-such".into()),
+            ..UnlinkedMediaPageRequest::default()
+        })
+        .unwrap();
+    assert_eq!((unknown.objects.len(), unknown.total), (0, 0));
+
+    // Paging: one row per page walks the same stable order, with the
+    // exact total from the read snapshot.
+    let p1 = storage
+        .unlinked_media_page(&UnlinkedMediaPageRequest {
+            limit: Some(1),
+            ..UnlinkedMediaPageRequest::default()
+        })
+        .unwrap();
+    let p2 = storage
+        .unlinked_media_page(&UnlinkedMediaPageRequest {
+            limit: Some(1),
+            offset: Some(1),
+            ..UnlinkedMediaPageRequest::default()
+        })
+        .unwrap();
+    assert_eq!(
+        (p1.objects.len(), p1.total, p2.objects.len(), p2.total),
+        (1, 2, 1, 2)
+    );
+    assert_ne!(p1.objects[0].sha256, p2.objects[0].sha256);
+
+    // Availability from the object-store presence check: present bytes
+    // carry the store-relative path a Save-a-copy/open action uses.
+    let store = vault_core::object_store::ObjectStore::new(&sb.data_dir());
+    page.stamp_availability(&store);
+    assert!(page.objects.iter().all(|r| r.available));
+    let orphan = page
+        .objects
+        .iter()
+        .find(|r| r.name == "orphan.png")
+        .expect("orphan row");
+    let rel = orphan.path.as_deref().expect("store-relative path");
+    let file = rel.strip_prefix("media/").expect("media/ prefix");
+    assert_eq!(
+        fs::read(sb.store_dir().join(file)).unwrap(),
+        b"orphan-png-bytes",
+        "the path addresses the preserved bytes"
+    );
+
+    // Missing bytes (external damage) turn exactly that row
+    // unavailable — actionable, never assigned away or guessed.
+    fs::remove_file(sb.store_dir().join(file)).unwrap();
+    let mut damaged = storage
+        .unlinked_media_page(&UnlinkedMediaPageRequest::default())
+        .unwrap();
+    damaged.stamp_availability(&store);
+    for row in &damaged.objects {
+        if row.name == "orphan.png" {
+            assert!(!row.available && row.path.is_none());
+        } else {
+            assert!(row.available && row.path.is_some());
+        }
+    }
+}
+
+#[test]
+fn unlinked_files_page_survives_reimport_without_new_rows_or_bytes() {
+    // Reimport idempotency observed through the paged query: the same
+    // export re-imported registers no second row and stores no second
+    // object (the registry's INSERT OR IGNORE stays the only write
+    // path), so the page's rows and the store's bytes are unchanged.
+    let (sb, mut storage) = unlinked_page_sandbox("tg-unlinked-page-reimport");
+    sb.import_with_media(&mut storage);
+    let first = storage
+        .unlinked_media_page(&UnlinkedMediaPageRequest::default())
+        .unwrap();
+    let first_digests: Vec<String> = first.objects.iter().map(|r| r.sha256.clone()).collect();
+    // 3 referenced files + 2 strays in the store.
+    assert_eq!(fs::read_dir(sb.store_dir()).unwrap().count(), 5);
+
+    let outcome = sb.import_with_media(&mut storage);
+    let media = outcome.media.unwrap();
+    assert_eq!(media.unlinked, 0, "nothing newly registered");
+    assert_eq!(media.unlinked_deduped, 2);
+
+    let second = storage
+        .unlinked_media_page(&UnlinkedMediaPageRequest::default())
+        .unwrap();
+    assert_eq!(second.total, first.total);
+    let second_digests: Vec<String> = second.objects.iter().map(|r| r.sha256.clone()).collect();
+    assert_eq!(second_digests, first_digests, "same rows, no duplicates");
+    assert_eq!(fs::read_dir(sb.store_dir()).unwrap().count(), 5);
 }
 
 #[test]

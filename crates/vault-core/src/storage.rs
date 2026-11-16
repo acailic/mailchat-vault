@@ -62,6 +62,7 @@ use crate::query::{
     ChatContext, SearchHit, SearchPage, SearchQuery, SNIPPET_CLOSE_MARK, SNIPPET_OPEN_MARK,
 };
 use crate::safe_migration::{self, MigrationFailPoint, OpenOptions};
+use crate::search2::SearchArchiveRequest;
 use crate::stats::{ArchiveStats, AuthorCount, ChatCount, DayCount};
 use crate::vector::VectorHit;
 use crate::{Error, Result};
@@ -763,6 +764,30 @@ const MIGRATIONS: &[(i64, &str)] = &[
         // migration rather than an edit of migration 4.
         r#"
         DROP INDEX IF EXISTS idx_archive_messages_source;
+        "#,
+    ),
+    (
+        18,
+        // Saved searches (the Archive workspace's recurring searches).
+        // One row per named definition: `request_json` holds the serde
+        // JSON of a v2 `SearchArchiveRequest` — the *dynamic* query and
+        // its complete filter semantics (canonical source ids, author,
+        // explicit day bounds plus timezone, attachment/honesty filters,
+        // import scope, sort), with `limit`/`offset` stripped before
+        // persisting because pagination is per-execution, not part of
+        // the definition. Source references stay canonical source ids
+        // inside the stored request, so display-label renames or
+        // duplicate labels never redirect a saved search. Rename and
+        // delete are single-row operations on this table and never
+        // touch archived messages.
+        r#"
+        CREATE TABLE saved_searches (
+            id           TEXT PRIMARY KEY,
+            name         TEXT NOT NULL UNIQUE,
+            request_json TEXT NOT NULL,
+            created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+        );
         "#,
     ),
     (
@@ -3091,6 +3116,104 @@ impl Storage {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Paged, searchable read of the unlinked media-object registry
+    /// (M4.2) — the backend of the Files-not-linked-to-a-message view.
+    /// The total, the rows, and the archive revision are read inside one
+    /// transaction (one snapshot), so a page can never disagree with its
+    /// own count; `limit` defaults to [`UNLINKED_DEFAULT_LIMIT`] and
+    /// clamps to `1..=UNLINKED_MAX_LIMIT`, `offset` to
+    /// `0..=UNLINKED_MAX_OFFSET` (the search2 paging convention — see
+    /// [`crate::search2`]). The caller holds one page; the registry is
+    /// never read in full.
+    ///
+    /// Rows report the registry's recorded provenance only: a digest
+    /// shared across imports keeps its first-seen registration (nothing
+    /// invents a second source), and nothing here ever assigns a file to
+    /// a message — linkage stays what ingest recorded. Availability is
+    /// disk state, not registry state, so the SQL read leaves it
+    /// unstamped; run [`UnlinkedMediaPage::stamp_availability`] against
+    /// the object store afterwards.
+    pub fn unlinked_media_page(
+        &self,
+        request: &UnlinkedMediaPageRequest,
+    ) -> Result<UnlinkedMediaPage> {
+        let limit = request
+            .limit
+            .unwrap_or(UNLINKED_DEFAULT_LIMIT)
+            .clamp(1, UNLINKED_MAX_LIMIT);
+        let offset = request.offset.unwrap_or(0).min(UNLINKED_MAX_OFFSET);
+        let search = request.search.trim();
+        let import_id = request
+            .import_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty());
+
+        // The shared filter (AND ... clauses), bound by the same values
+        // in the count and the page statements — the shape search2's
+        // page/count pairs use.
+        let mut filter = String::new();
+        let mut values: Vec<SqlValue> = Vec::new();
+        if !search.is_empty() {
+            filter.push_str(
+                " AND (fold(name) LIKE fold(?) ESCAPE '\\'
+                   OR fold(kind) LIKE fold(?) ESCAPE '\\')",
+            );
+            let pattern = format!("%{}%", crate::query::escape_like(search));
+            values.push(SqlValue::from(pattern.clone()));
+            values.push(SqlValue::from(pattern));
+        }
+        if let Some(import) = import_id {
+            filter.push_str(" AND import_id = ?");
+            values.push(SqlValue::from(import.to_string()));
+        }
+        let order = match request.sort {
+            UnlinkedMediaSort::FirstSeen => "first_seen, sha256",
+            UnlinkedMediaSort::Digest => "sha256",
+        };
+
+        let tx = self.conn.unchecked_transaction()?;
+        let total: u64 = {
+            let sql = format!("SELECT COUNT(*) FROM media_objects WHERE 1=1 {filter}");
+            let mut stmt = tx.prepare(&sql)?;
+            stmt.query_row(params_from_iter(values.iter()), |row| row.get(0))?
+        };
+        let objects = {
+            let mut page_values = values.clone();
+            page_values.push(SqlValue::Integer(limit as i64));
+            page_values.push(SqlValue::Integer(offset as i64));
+            let sql = format!(
+                "SELECT sha256, size, name, kind, origin, import_id, first_seen
+                 FROM media_objects WHERE 1=1 {filter}
+                 ORDER BY {order} LIMIT ? OFFSET ?"
+            );
+            let mut stmt = tx.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(page_values), |row| {
+                Ok(UnlinkedMediaRow {
+                    sha256: row.get(0)?,
+                    size: row.get::<_, i64>(1)?.max(0) as u64,
+                    name: row.get(2)?,
+                    kind: row.get(3)?,
+                    origin: row.get(4)?,
+                    import_id: row.get(5)?,
+                    first_seen: row.get(6)?,
+                    available: false,
+                    path: None,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let archive_revision = archive_revision_on(&tx)?;
+        tx.commit()?;
+        Ok(UnlinkedMediaPage {
+            objects,
+            total,
+            limit,
+            offset,
+            archive_revision,
+        })
+    }
+
     /// Remember a watched folder (idempotent on the canonical path).
     /// See [`crate::watch`].
     pub fn add_watched_folder(&self, path: &str) -> Result<()> {
@@ -3339,6 +3462,126 @@ impl Storage {
             )
             .optional()?;
         Ok(person)
+    }
+
+    // ------------------------------------------------------------------
+    // Saved searches (migration 18)
+    // ------------------------------------------------------------------
+
+    /// The saved-search definitions, oldest first (same-second ties
+    /// broken by name) — the order the Archive workspace lists them in.
+    /// Each definition is a dynamic v2 request: executing it re-runs the
+    /// search, so newly imported matching messages appear, and source
+    /// references are canonical source ids, so label renames and
+    /// duplicate labels never redirect a saved search.
+    pub fn saved_searches(&self) -> Result<Vec<SavedSearch>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, request_json, created_at, updated_at
+             FROM saved_searches ORDER BY created_at, name",
+        )?;
+        let rows = stmt.query_map([], saved_search_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Create or update one saved-search definition:
+    ///
+    /// - `id` `None` creates a new definition under `name` — a name
+    ///   another definition already holds is refused, not silently
+    ///   overwritten;
+    /// - `id` `Some(id)` updates that definition in place: a new name
+    ///   (rename), a new request (update from the current search), or
+    ///   both. Renaming onto a name another definition holds is
+    ///   refused; an unknown `id` is refused.
+    ///
+    /// The request is validated by normalizing it (bad text length, day
+    /// bounds, or timezone refuse the save), then persisted as serde
+    /// JSON with `limit`/`offset` stripped — pagination is
+    /// per-execution, not part of the definition. Only the
+    /// `saved_searches` row is touched; archived messages never are.
+    pub fn upsert_saved_search(
+        &self,
+        id: Option<&str>,
+        name: &str,
+        request: &SearchArchiveRequest,
+    ) -> Result<SavedSearch> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::SavedSearch(
+                "a saved search needs a name".to_string(),
+            ));
+        }
+        if name.chars().count() > SAVED_SEARCH_MAX_NAME_CHARS {
+            return Err(Error::SavedSearch(format!(
+                "saved-search name exceeds {SAVED_SEARCH_MAX_NAME_CHARS} characters"
+            )));
+        }
+        // Refuse to store a request that could not execute: normalize
+        // (validate) it and drop the resolved form.
+        request.normalize()?;
+
+        // Pagination never persists: strip it before serializing.
+        let mut stored = request.clone();
+        stored.limit = None;
+        stored.offset = None;
+        let request_json = serde_json::to_string(&stored)?;
+
+        let tx = self.conn.unchecked_transaction()?;
+        let taken: bool = tx.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM saved_searches
+                 WHERE name = ?1 AND (?2 IS NULL OR id != ?2)
+             )",
+            params![name, id],
+            |row| row.get(0),
+        )?;
+        if taken {
+            return Err(Error::SavedSearch(format!(
+                "a saved search named {name:?} already exists"
+            )));
+        }
+        let row_id = match id {
+            None => {
+                let new_id = new_uuid();
+                tx.execute(
+                    "INSERT INTO saved_searches (id, name, request_json)
+                     VALUES (?1, ?2, ?3)",
+                    params![new_id, name, request_json],
+                )?;
+                new_id
+            }
+            Some(id) => {
+                let updated = tx.execute(
+                    "UPDATE saved_searches
+                     SET name = ?2, request_json = ?3,
+                         updated_at = datetime('now')
+                     WHERE id = ?1",
+                    params![id, name, request_json],
+                )?;
+                if updated == 0 {
+                    return Err(Error::SavedSearch(format!("no saved search with id {id}")));
+                }
+                id.to_string()
+            }
+        };
+        let stored = tx.query_row(
+            "SELECT id, name, request_json, created_at, updated_at
+             FROM saved_searches WHERE id = ?1",
+            params![row_id],
+            saved_search_from_row,
+        )?;
+        tx.commit()?;
+        Ok(stored)
+    }
+
+    /// Delete one saved-search definition. Returns whether a row was
+    /// removed (deleting an unknown id is not an error). Only the
+    /// definition goes — archived messages, sources, and every other
+    /// definition are untouched.
+    pub fn delete_saved_search(&self, id: &str) -> Result<bool> {
+        let removed = self
+            .conn
+            .execute("DELETE FROM saved_searches WHERE id = ?1", params![id])?;
+        Ok(removed > 0)
     }
 
     // ------------------------------------------------------------------
@@ -4648,6 +4891,41 @@ pub struct ImportBatchCounts {
 /// to this many newest rows; the panel renders at most its top 20 anyway.
 pub const JOB_LEDGER_KEEP: usize = 50;
 
+/// Upper bound for a saved-search name (Unicode characters), mirroring
+/// the bounded text fields of the v2 request it stores.
+pub const SAVED_SEARCH_MAX_NAME_CHARS: usize = 200;
+
+/// One stored saved-search definition (migration 18): a name plus the
+/// dynamic v2 request it re-executes. See [`Storage::upsert_saved_search`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedSearch {
+    /// Canonical row id (a UUID); stable across renames.
+    pub id: String,
+    pub name: String,
+    /// The stored request, `limit`/`offset` stripped (pagination is
+    /// per-execution, not part of the definition).
+    pub request: SearchArchiveRequest,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Map one `saved_searches` row to its [`SavedSearch`]. A row whose
+/// request JSON cannot deserialize into the current request model
+/// surfaces as an error rather than being silently dropped or widened.
+fn saved_search_from_row(row: &Row<'_>) -> rusqlite::Result<SavedSearch> {
+    let request_json: String = row.get(2)?;
+    let request = serde_json::from_str(&request_json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    Ok(SavedSearch {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        request,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+    })
+}
+
 /// One terminal job to append to the finished-jobs ledger (see
 /// [`Storage::record_job_ledger`]). Owned: the entry crosses thread
 /// boundaries into the write queue, away from the registry it came from.
@@ -4736,6 +5014,111 @@ pub struct MediaDigestReferences {
     /// The page, oldest message id first (one row per message; a digest
     /// a single message references twice names it once).
     pub references: Vec<MediaMessageReference>,
+}
+
+/// Default/maximum page size and maximum offset for the paged unlinked
+/// read (mirrors the search2 paging bounds).
+pub const UNLINKED_DEFAULT_LIMIT: u32 = 50;
+pub const UNLINKED_MAX_LIMIT: u32 = 200;
+pub const UNLINKED_MAX_OFFSET: u32 = 1_000_000;
+
+/// Sort order for [`UnlinkedMediaPageRequest`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UnlinkedMediaSort {
+    /// `first_seen, sha256` — oldest first, the order
+    /// [`Storage::unlinked_media_objects`] returns; same-second ties
+    /// break deterministically by digest.
+    #[default]
+    FirstSeen,
+    /// `sha256` ascending — a stable order independent of import time.
+    Digest,
+}
+
+/// One paged request over the unlinked media-object registry (see
+/// [`Storage::unlinked_media_page`]). All filters are conjunctive.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlinkedMediaPageRequest {
+    /// Case-insensitive (Unicode-folded) substring over the original
+    /// name and the kind; empty = no filter.
+    pub search: String,
+    /// Restrict to objects first registered by one bounded import run
+    /// (the stable `import_id` the registry records); empty/`None` = all
+    /// imports.
+    pub import_id: Option<String>,
+    pub sort: UnlinkedMediaSort,
+    /// Default 50, clamped to `1..=200`.
+    pub limit: Option<u32>,
+    /// Clamped to `0..=1_000_000`.
+    pub offset: Option<u32>,
+}
+
+/// One row of the paged unlinked-files view: a registry row's provenance
+/// plus what the object store says about the bytes right now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlinkedMediaRow {
+    pub sha256: String,
+    pub size: u64,
+    pub name: String,
+    pub kind: String,
+    /// How the object entered the vault (`"unlinked"`).
+    pub origin: String,
+    /// The bounded import run that first registered the digest — the
+    /// recorded first-seen provenance, never a guess: a digest shared
+    /// across imports keeps the registration the first import wrote.
+    pub import_id: String,
+    pub first_seen: String,
+    /// Whether the digest's bytes are present in the media store.
+    /// `false` until [`UnlinkedMediaPage::stamp_availability`] runs —
+    /// the SQL read never touches disk.
+    pub available: bool,
+    /// Store-relative object path (`media/<sha256>.<ext>`) when the
+    /// bytes are present — the reference `media_export` /
+    /// `media_open_external` act on. `None` = unstamped or missing.
+    pub path: Option<String>,
+}
+
+/// One page of the unlinked-files view: bounded rows, the exact total
+/// from the same read snapshot, and that snapshot's `archive_revision`
+/// (the A07 staleness signal, like [`crate::search2::SearchArchivePage`]
+/// — an import that lands between two pages bumps it, and the UI offers
+/// a refresh instead of silently restarting pagination).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlinkedMediaPage {
+    pub objects: Vec<UnlinkedMediaRow>,
+    pub total: u64,
+    pub limit: u32,
+    pub offset: u32,
+    pub archive_revision: u64,
+}
+
+impl UnlinkedMediaPage {
+    /// Stamp each row's availability from the object store's presence
+    /// check: one store enumeration answers every digest on the page
+    /// (bounded by the page size — the store is not re-scanned per row,
+    /// and the full registry is never loaded). Present bytes set
+    /// `available` and the store-relative `path`; missing bytes leave
+    /// `available: false` with no path — an honest unavailable state,
+    /// never a guessed file name.
+    pub fn stamp_availability(&mut self, store: &crate::object_store::ObjectStore) {
+        let present: std::collections::HashMap<String, String> = store
+            .enumerate()
+            .into_iter()
+            .map(|object| (object.sha256, object.path))
+            .collect();
+        for row in &mut self.objects {
+            match present.get(&row.sha256) {
+                Some(path) => {
+                    row.available = true;
+                    row.path = Some(path.clone());
+                }
+                None => {
+                    row.available = false;
+                    row.path = None;
+                }
+            }
+        }
+    }
 }
 
 /// A vault-local collection (migration 19): a user-named set of
@@ -5912,6 +6295,358 @@ mod media_merge_tests {
             s.commit_import_batch("imp", "telegram", &[], &[], &registered, 0, true)
                 .unwrap();
             assert_eq!(s.unlinked_media_objects().unwrap().len(), 1);
+        }
+    }
+
+    /// Register one unlinked object through the real batch-commit path
+    /// (the `INSERT OR IGNORE` semantics the paged query must not
+    /// change), optionally forcing its `first_seen` for ordering tests.
+    fn register_unlinked(
+        s: &Storage,
+        import_id: &str,
+        sha: &str,
+        name: &str,
+        kind: &str,
+        size: u64,
+        first_seen: Option<&str>,
+    ) {
+        let objects = vec![crate::media::UnlinkedObject {
+            sha256: sha.to_string(),
+            size,
+            name: name.into(),
+            kind: kind.into(),
+        }];
+        s.commit_import_batch(import_id, "telegram", &[], &[], &objects, 0, true)
+            .unwrap();
+        if let Some(seen) = first_seen {
+            s.conn
+                .execute(
+                    "UPDATE media_objects SET first_seen = ?1 WHERE sha256 = ?2",
+                    params![seen, sha],
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn unlinked_media_page_clamps_limits_and_offsets() {
+        let s = Storage::open_in_memory().unwrap();
+        for (i, (sha, name)) in [
+            ("a", "orphan.png"),
+            ("b", "extra.txt"),
+            ("c", "notes.html"),
+            ("d", "beep.wav"),
+            ("e", "rules.json"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            register_unlinked(
+                &s,
+                "imp-a",
+                &sha.repeat(64),
+                name,
+                "document",
+                10 + i as u64,
+                None,
+            );
+        }
+
+        // Defaults: limit 50, offset 0, one page under the total.
+        let page = s
+            .unlinked_media_page(&UnlinkedMediaPageRequest::default())
+            .unwrap();
+        assert_eq!(
+            (page.objects.len(), page.total, page.limit, page.offset),
+            (5, 5, 50, 0)
+        );
+        assert_eq!(page.archive_revision, s.archive_revision().unwrap());
+
+        // A zero/absurd limit clamps to the 1..=200 window, and the
+        // clamped values are reported back (the caller paginates on
+        // what ran, not what was asked).
+        let page = s
+            .unlinked_media_page(&UnlinkedMediaPageRequest {
+                limit: Some(0),
+                ..UnlinkedMediaPageRequest::default()
+            })
+            .unwrap();
+        assert_eq!((page.objects.len(), page.limit), (1, 1));
+        let page = s
+            .unlinked_media_page(&UnlinkedMediaPageRequest {
+                limit: Some(10_000),
+                ..UnlinkedMediaPageRequest::default()
+            })
+            .unwrap();
+        assert_eq!((page.objects.len(), page.limit), (5, 200));
+
+        // Offsets walk the same order; past the end the page is empty
+        // but the total still reports the whole registry.
+        let page = s
+            .unlinked_media_page(&UnlinkedMediaPageRequest {
+                limit: Some(2),
+                offset: Some(4),
+                ..UnlinkedMediaPageRequest::default()
+            })
+            .unwrap();
+        assert_eq!((page.objects.len(), page.total, page.offset), (1, 5, 4));
+        let page = s
+            .unlinked_media_page(&UnlinkedMediaPageRequest {
+                offset: Some(500),
+                ..UnlinkedMediaPageRequest::default()
+            })
+            .unwrap();
+        assert_eq!((page.objects.len(), page.total, page.offset), (0, 5, 500));
+    }
+
+    #[test]
+    fn unlinked_media_page_searches_name_and_kind_folded() {
+        let s = Storage::open_in_memory().unwrap();
+        register_unlinked(&s, "imp-a", &"a".repeat(64), "Orphan.PNG", "image", 1, None);
+        register_unlinked(
+            &s,
+            "imp-a",
+            &"b".repeat(64),
+            "plan.pdf",
+            "document",
+            2,
+            None,
+        );
+        register_unlinked(
+            &s,
+            "imp-a",
+            &"c".repeat(64),
+            "50%_off.txt",
+            "document",
+            3,
+            None,
+        );
+        register_unlinked(&s, "imp-a", &"d".repeat(64), "beep.wav", "audio", 4, None);
+
+        let page = |search: &str| {
+            s.unlinked_media_page(&UnlinkedMediaPageRequest {
+                search: search.to_string(),
+                ..UnlinkedMediaPageRequest::default()
+            })
+            .unwrap()
+        };
+
+        // Name and kind, case-insensitively (ASCII folds, Unicode via
+        // the shared fold() SQL function).
+        let hit = page("orphan");
+        assert_eq!((hit.objects.len(), hit.total), (1, 1));
+        assert_eq!(hit.objects[0].name, "Orphan.PNG");
+        let docs = page("document");
+        assert_eq!(docs.total, 2, "kind is searchable");
+        let aud = page("AUDIO");
+        assert_eq!(aud.total, 1);
+        // LIKE wildcards in the search stay literal: "%" matches the
+        // one name that contains it, not everything.
+        let pct = page("%");
+        assert_eq!(pct.total, 1);
+        assert_eq!(pct.objects[0].name, "50%_off.txt");
+        // No match is an empty page with an honest zero total.
+        let none = page("no-such-file");
+        assert_eq!((none.objects.len(), none.total), (0, 0));
+    }
+
+    #[test]
+    fn unlinked_media_page_filters_by_import() {
+        let s = Storage::open_in_memory().unwrap();
+        register_unlinked(&s, "imp-a", &"a".repeat(64), "orphan.png", "image", 1, None);
+        register_unlinked(
+            &s,
+            "imp-a",
+            &"b".repeat(64),
+            "extra.txt",
+            "document",
+            2,
+            None,
+        );
+        register_unlinked(
+            &s,
+            "imp-b",
+            &"c".repeat(64),
+            "notes.html",
+            "document",
+            3,
+            None,
+        );
+
+        let page = s
+            .unlinked_media_page(&UnlinkedMediaPageRequest {
+                import_id: Some("imp-a".into()),
+                ..UnlinkedMediaPageRequest::default()
+            })
+            .unwrap();
+        assert_eq!(page.total, 2);
+        assert!(page.objects.iter().all(|row| row.import_id == "imp-a"));
+
+        // Conjunctive with search, and an unknown import is empty (an
+        // honest zero, never a fallback to every import).
+        let page = s
+            .unlinked_media_page(&UnlinkedMediaPageRequest {
+                import_id: Some("imp-a".into()),
+                search: "orphan".into(),
+                ..UnlinkedMediaPageRequest::default()
+            })
+            .unwrap();
+        assert_eq!((page.objects.len(), page.total), (1, 1));
+        let page = s
+            .unlinked_media_page(&UnlinkedMediaPageRequest {
+                import_id: Some("imp-missing".into()),
+                ..UnlinkedMediaPageRequest::default()
+            })
+            .unwrap();
+        assert_eq!((page.objects.len(), page.total), (0, 0));
+    }
+
+    #[test]
+    fn unlinked_media_page_orders_by_first_seen_then_digest_or_by_digest() {
+        let s = Storage::open_in_memory().unwrap();
+        // Digest order (a < b < c) is the inverse of first-seen order,
+        // so each sort is proven by disagreeing with the other.
+        register_unlinked(
+            &s,
+            "imp-a",
+            &"c".repeat(64),
+            "first.png",
+            "image",
+            1,
+            Some("2026-01-01 00:00:00"),
+        );
+        register_unlinked(
+            &s,
+            "imp-a",
+            &"b".repeat(64),
+            "second.png",
+            "image",
+            2,
+            Some("2026-01-02 00:00:00"),
+        );
+        register_unlinked(
+            &s,
+            "imp-a",
+            &"a".repeat(64),
+            "third.png",
+            "image",
+            3,
+            Some("2026-01-03 00:00:00"),
+        );
+
+        let page = s
+            .unlinked_media_page(&UnlinkedMediaPageRequest::default())
+            .unwrap();
+        let by_seen: Vec<&str> = page.objects.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(by_seen, ["first.png", "second.png", "third.png"]);
+
+        let page = s
+            .unlinked_media_page(&UnlinkedMediaPageRequest {
+                sort: UnlinkedMediaSort::Digest,
+                ..UnlinkedMediaPageRequest::default()
+            })
+            .unwrap();
+        let by_digest: Vec<&str> = page.objects.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(by_digest, ["third.png", "second.png", "first.png"]);
+
+        // Same-second first_seen ties break deterministically by digest
+        // (the full-registry read's rule).
+        s.conn
+            .execute(
+                "UPDATE media_objects SET first_seen = '2026-01-03 00:00:00'",
+                [],
+            )
+            .unwrap();
+        let page = s
+            .unlinked_media_page(&UnlinkedMediaPageRequest::default())
+            .unwrap();
+        let tied: Vec<String> = page.objects.iter().map(|r| r.sha256.clone()).collect();
+        let mut sorted = tied.clone();
+        sorted.sort();
+        assert_eq!(tied, sorted, "digest is the tiebreak");
+    }
+
+    #[test]
+    fn unlinked_media_page_reports_empty_registry_and_reimport_rows_once() {
+        let s = Storage::open_in_memory().unwrap();
+        // Empty registry: an empty page, zero total, current revision.
+        let page = s
+            .unlinked_media_page(&UnlinkedMediaPageRequest::default())
+            .unwrap();
+        assert_eq!((page.objects.len(), page.total), (0, 0));
+        assert_eq!(page.archive_revision, s.archive_revision().unwrap());
+
+        // Re-registering the same export adds no row the query can see:
+        // the registry's INSERT OR IGNORE stays the only write path.
+        register_unlinked(&s, "imp-a", &"a".repeat(64), "orphan.png", "image", 7, None);
+        register_unlinked(&s, "imp-a", &"a".repeat(64), "orphan.png", "image", 7, None);
+        let page = s
+            .unlinked_media_page(&UnlinkedMediaPageRequest::default())
+            .unwrap();
+        assert_eq!((page.objects.len(), page.total), (1, 1));
+        // A second import registering the same digest keeps the first
+        // registration's provenance — first-seen is never rewritten.
+        register_unlinked(&s, "imp-b", &"a".repeat(64), "orphan.png", "image", 7, None);
+        let page = s
+            .unlinked_media_page(&UnlinkedMediaPageRequest {
+                import_id: Some("imp-b".into()),
+                ..UnlinkedMediaPageRequest::default()
+            })
+            .unwrap();
+        assert_eq!(page.total, 0, "shared digest keeps its first-seen import");
+    }
+
+    #[test]
+    fn unlinked_media_page_availability_follows_the_store_presence_check() {
+        let s = Storage::open_in_memory().unwrap();
+
+        // No store at all: every row is honestly unavailable, with no
+        // path to act on.
+        register_unlinked(&s, "imp-a", &"a".repeat(64), "orphan.png", "image", 3, None);
+        let mut page = s
+            .unlinked_media_page(&UnlinkedMediaPageRequest::default())
+            .unwrap();
+        assert!(page
+            .objects
+            .iter()
+            .all(|row| !row.available && row.path.is_none()));
+        page.stamp_availability(&crate::object_store::ObjectStore::new(
+            std::path::Path::new("/nonexistent-mcv-unlinked"),
+        ));
+        assert!(page
+            .objects
+            .iter()
+            .all(|row| !row.available && row.path.is_none()));
+
+        // A store holding one of the registered digests: that row turns
+        // available with its store-relative path, the other stays
+        // honestly unavailable.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::object_store::ObjectStore::new(dir.path());
+        let mut budget = crate::object_store::Capacity::default();
+        let src = dir.path().join("bytes.png");
+        std::fs::write(&src, b"orphan-bytes").unwrap();
+        let staged = store.stage(&src, "png", &mut budget).unwrap();
+        let present_sha = staged.sha256.clone();
+        store.promote(staged, &mut budget).unwrap();
+        let stored = store.enumerate();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].sha256, present_sha);
+
+        register_unlinked(&s, "imp-b", &present_sha, "present.png", "image", 12, None);
+        let mut page = s
+            .unlinked_media_page(&UnlinkedMediaPageRequest::default())
+            .unwrap();
+        assert_eq!(page.total, 2);
+        page.stamp_availability(&store);
+        for row in &page.objects {
+            if row.sha256 == present_sha {
+                assert!(row.available, "present digest is available");
+                assert_eq!(row.path.as_deref(), Some(stored[0].path.as_str()));
+            } else {
+                assert!(!row.available, "absent digest stays unavailable");
+                assert_eq!(row.path, None);
+            }
         }
     }
 

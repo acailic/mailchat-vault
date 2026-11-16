@@ -299,7 +299,8 @@ fn version17_db(db: &std::path::Path) -> i64 {
          DROP TABLE collections;
          DROP TABLE person_identity_links;
          DROP TABLE people;
-         DELETE FROM schema_migrations WHERE version >= 19;",
+         DROP TABLE saved_searches;
+         DELETE FROM schema_migrations WHERE version >= 18;",
     )
     .unwrap();
     id
