@@ -29,7 +29,7 @@ use vault_core::search2::{SearchArchiveRequest, SearchSort};
 use vault_core::storage::{SavedSearch, Storage, SAVED_SEARCH_MAX_NAME_CHARS};
 
 fn request(text: &str, author: &str) -> SearchArchiveRequest {
-        SearchArchiveRequest {
+    SearchArchiveRequest {
         cursor: None,
         text: text.into(),
         author: author.into(),
@@ -40,7 +40,7 @@ fn request(text: &str, author: &str) -> SearchArchiveRequest {
 /// The form a definition stores: the request with pagination (limit /
 /// offset) stripped — it is per-execution, never part of the definition.
 fn stripped(mut req: SearchArchiveRequest) -> SearchArchiveRequest {
-        req.limit = None;
+    req.limit = None;
     req.offset = None;
     req
 }

@@ -476,8 +476,7 @@ pub(crate) fn decode_search_cursor(raw: &str) -> Result<SearchCursor> {
         .decode(raw.trim())
         .map_err(|_| malformed("not valid cursor text"))?;
     let wire: CursorWire = serde_json::from_slice(&json)
-        .map_err(|_| malformed("not valid cursor text"))?;
-    if wire.v != CURSOR_VERSION {
+        .map_err(|_| malformed("not valid cursor text"))?;    if wire.v != CURSOR_VERSION {
         return Err(malformed("unknown cursor version"));
     }
     // Shape is mode-specific: newest/browse carry the instant (or the
@@ -1658,8 +1657,7 @@ fn archive_keyset(req: &NormalizedSearch) -> (String, Vec<SqlValue>) {
                     vec![SqlValue::Integer(*id)],
                 ),
             }
-        }
-        Some(SearchCursor::Relevance { rank_bits, id }) => {
+        }        Some(SearchCursor::Relevance { rank_bits, id }) => {
             let rank = f64::from_bits(*rank_bits);
             let expr = bm25_rank_expr();
             (
@@ -1738,8 +1736,7 @@ impl Storage {
         // Set by the winning branch when the probe row existed; drives
         // `next_cursor`. The relevance branch also keeps the last row's
         // bm25 rank (a summary does not carry it).
-        let mut has_more = false;
-        let mut last_rank: Option<f64> = None;
+        let mut has_more = false;        let mut last_rank: Option<f64> = None;
 
         let hits: Vec<MessageSummary> = if req.text.is_empty() {
             // Browse: newest first — resolved instant descending, then id
@@ -1865,8 +1862,7 @@ impl Storage {
                             )),
                         )?,
                         rank,
-                    ))
-                })?
+                    ))                })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             has_more = rows.len() > req.limit as usize;
             if has_more {
@@ -3279,8 +3275,7 @@ mod tests {
                 "browse cursor carrying a rank",
             ),
             (
-                CURSOR_BASE64.encode(r#"{"v":1,"mode":"chrono","sent":null,"rank_bits":null,"id":3}"#),
-                "unknown order mode",
+                CURSOR_BASE64.encode(r#"{"v":1,"mode":"chrono","sent":null,"rank_bits":null,"id":3}"#),                "unknown order mode",
             ),
         ] {
             let err = s
