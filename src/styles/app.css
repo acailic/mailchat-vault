@@ -594,15 +594,32 @@ kbd {
  * chip scale — decorative (aria-hidden, currentColor like every icon),
  * inline-flex so icon and label sit on one line and the pill still
  * wraps like an inline box. Scoped to #source-chips: the removable
- * filter chips keep their text-only contract. */
+ * filter chips keep their text-only contract. The chip also carries the
+ * source's short status line; both spans stay on one bounded line
+ * (max-width + nowrap + ellipsis), so statuses appearing and leaving
+ * can never change a chip's height and make the nav column jump. */
 #source-chips .chip {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  max-width: 100%;
 }
 #source-chips .chip .icon {
   width: 12px;
   height: 12px;
+  flex: none;
+}
+#source-chips .chip > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The per-source status ("Syncing…", "Needs sign-in", "Last synced …")
+ * reads as quiet meta text beside the label — present, never shouting. */
+#source-chips .chip .chip-status {
+  color: var(--muted);
+  flex-shrink: 1;
 }
 
 #status {

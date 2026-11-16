@@ -755,6 +755,37 @@ const MIGRATIONS: &[(i64, &str)] = &[
         DROP INDEX IF EXISTS idx_archive_messages_source;
         "#,
     ),
+    (
+        19,
+        // Vault-local collections (the organization layer, part 1 of
+        // the collections slice): user-named sets referencing canonical
+        // messages across source instances. Additive, metadata-only —
+        // nothing here ever touches archived content, provenance, or
+        // identity. `collection_members.message_id` deliberately
+        // carries **no** foreign key: the membership is a soft
+        // reference to the stable archive rowid, so a canonical row
+        // that is absent (a vault restored from an older snapshot, a
+        // row lost to corruption) surfaces in the collection detail as
+        // an *unavailable* row instead of the membership vanishing
+        // (honest-reference semantics, decided in the slice spec).
+        // Deleting a collection cascades its memberships only.
+        r#"
+        CREATE TABLE collections (
+            id         TEXT PRIMARY KEY,
+            name       TEXT    NOT NULL,
+            created_at TEXT    NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE collection_members (
+            collection_id TEXT    NOT NULL REFERENCES collections (id)
+                ON DELETE CASCADE,
+            message_id    INTEGER NOT NULL,
+            added_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (collection_id, message_id)
+        );
+        CREATE INDEX idx_collection_members_message ON collection_members (message_id);
+        "#,
+    ),
 ];
 
 /// Rust halves of migrations, for backfill logic that SQL alone cannot
@@ -3122,6 +3153,213 @@ impl Storage {
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+
+    // ------------------------------------------------------------------
+    // Collections (user organization, migration 19)
+    // ------------------------------------------------------------------
+
+    /// Create a collection with the given name (trimmed; empty after
+    /// trimming is refused). Names are not unique — the returned id is
+    /// the stable handle. Organization is vault-local metadata: nothing
+    /// here reads or writes archived content.
+    pub fn create_collection(&self, name: &str) -> Result<Collection> {
+        let name = validate_collection_name(name)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let id = new_uuid();
+        tx.execute(
+            "INSERT INTO collections (id, name) VALUES (?1, ?2)",
+            params![id, name],
+        )?;
+        let collection =
+            collection_row(&tx, &id)?.expect("just-inserted collection must read back");
+        tx.commit()?;
+        Ok(collection)
+    }
+
+    /// Rename a collection (`false` when no collection has `id`). The
+    /// name is trimmed and must be non-empty, like
+    /// [`Storage::create_collection`].
+    pub fn rename_collection(&self, id: &str, name: &str) -> Result<bool> {
+        let name = validate_collection_name(name)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let renamed = tx.execute(
+            "UPDATE collections SET name = ?2, updated_at = datetime('now')
+             WHERE id = ?1",
+            params![id, name],
+        )?;
+        tx.commit()?;
+        Ok(renamed > 0)
+    }
+
+    /// Delete a collection. Memberships cascade; the underlying archive
+    /// is never touched (`false` when no collection has `id`).
+    pub fn delete_collection(&self, id: &str) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        // Delete the memberships explicitly so the archive-untouched
+        // guarantee holds even under a connection with foreign keys
+        // disabled (the cascade alone would still be correct, but the
+        // deletion contract should not depend on the connection's pragma).
+        tx.execute(
+            "DELETE FROM collection_members WHERE collection_id = ?1",
+            params![id],
+        )?;
+        let deleted = tx.execute("DELETE FROM collections WHERE id = ?1", params![id])?;
+        tx.commit()?;
+        Ok(deleted > 0)
+    }
+
+    /// Every collection, oldest first (creation order — `rowid`, since
+    /// the second-resolution `created_at` ties), each with its
+    /// membership count (memberships whose referenced message is absent
+    /// count too — they are surfaced, not hidden).
+    pub fn list_collections(&self) -> Result<Vec<Collection>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id, c.name, c.created_at, c.updated_at, COUNT(cm.message_id)
+             FROM collections AS c
+             LEFT JOIN collection_members AS cm ON cm.collection_id = c.id
+             GROUP BY c.id
+             ORDER BY c.rowid",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Collection {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                created_at: row.get(2)?,
+                updated_at: row.get(3)?,
+                message_count: row.get::<_, i64>(4)?.max(0) as u64,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// One collection's detail: the collection row plus its member
+    /// rows, in add order (`rowid` — the second-resolution `added_at`
+    /// ties), each joined with the message provenance the v2 detail
+    /// path exposes (source instance, conversation). A membership whose
+    /// canonical message is absent surfaces as an unavailable row — no
+    /// provenance is invented, the membership does not vanish.
+    /// `Ok(None)` when no collection has `id`.
+    pub fn collection_detail(&self, id: &str) -> Result<Option<CollectionDetail>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let Some(collection) = collection_row(&tx, id)? else {
+            return Ok(None);
+        };
+        let members = {
+            let mut stmt = tx.prepare(
+                "SELECT cm.message_id, cm.added_at, m.id,
+                        si.id, si.label, m.conversation_id, c.label,
+                        m.author, NULLIF(m.subject, ''), m.sent_instant
+                 FROM collection_members AS cm
+                 LEFT JOIN archive_messages AS m ON m.id = cm.message_id
+                 LEFT JOIN source_instances AS si ON si.id = m.source_instance_id
+                 LEFT JOIN conversations AS c ON c.id = m.conversation_id
+                 WHERE cm.collection_id = ?1
+                 ORDER BY cm.rowid",
+            )?;
+            let members = stmt
+                .query_map(params![id], |row| {
+                    let available: Option<i64> = row.get(2)?;
+                    if available.is_some() {
+                        Ok(CollectionMember {
+                            message_id: row.get(0)?,
+                            available: true,
+                            added_at: row.get(1)?,
+                            source_id: Some(row.get(3)?),
+                            source_label: Some(row.get(4)?),
+                            conversation_id: row.get(5)?,
+                            conversation_label: row.get(6)?,
+                            author: Some(row.get(7)?),
+                            subject: row.get(8)?,
+                            sent_at: row.get(9)?,
+                        })
+                    } else {
+                        Ok(CollectionMember {
+                            message_id: row.get(0)?,
+                            available: false,
+                            added_at: row.get(1)?,
+                            source_id: None,
+                            source_label: None,
+                            conversation_id: None,
+                            conversation_label: None,
+                            author: None,
+                            subject: None,
+                            sent_at: None,
+                        })
+                    }
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            members
+        };
+        tx.commit()?;
+        Ok(Some(CollectionDetail {
+            collection,
+            members,
+        }))
+    }
+
+    /// Add canonical messages (by stable `archive_messages` rowid) to
+    /// a collection, idempotently: re-adding an existing membership
+    /// changes nothing. Every id must reference an archived message,
+    /// and the collection must exist — a reference that cannot be
+    /// resolved now is refused instead of stored as unavailable (add
+    /// what exists; absence surfaces only after the fact, through
+    /// [`Storage::collection_detail`]). Returns how many memberships
+    /// were newly added.
+    pub fn add_collection_members(&self, id: &str, message_ids: &[i64]) -> Result<u64> {
+        let tx = self.conn.unchecked_transaction()?;
+        ensure_collection_exists(&tx, id)?;
+        for &message_id in message_ids {
+            let present: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM archive_messages WHERE id = ?1",
+                    params![message_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if present.is_none() {
+                return Err(Error::InvalidCollection(format!(
+                    "message {message_id} is not in the archive"
+                )));
+            }
+        }
+        let mut added = 0u64;
+        for &message_id in message_ids {
+            added += tx.execute(
+                "INSERT INTO collection_members (collection_id, message_id)
+                     VALUES (?1, ?2)
+                     ON CONFLICT (collection_id, message_id) DO NOTHING",
+                params![id, message_id],
+            )? as u64;
+        }
+        if added > 0 {
+            tx.execute(
+                "UPDATE collections SET updated_at = datetime('now') WHERE id = ?1",
+                params![id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(added)
+    }
+
+    /// Remove one message from a collection (`false` when the
+    /// membership does not exist). The archived message is never
+    /// touched.
+    pub fn remove_collection_member(&self, id: &str, message_id: i64) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let removed = tx.execute(
+            "DELETE FROM collection_members
+             WHERE collection_id = ?1 AND message_id = ?2",
+            params![id, message_id],
+        )?;
+        if removed > 0 {
+            tx.execute(
+                "UPDATE collections SET updated_at = datetime('now') WHERE id = ?1",
+                params![id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(removed > 0)
+    }
 }
 
 /// Insert one message inside an open transaction — the shared body of
@@ -4281,6 +4519,106 @@ impl UnlinkedMediaPage {
             }
         }
     }
+}
+
+/// A vault-local collection (migration 19): a user-named set of
+/// references to canonical messages. Organization metadata only — the
+/// name, timestamps, and membership count; source content, provenance,
+/// and identity live on the referenced rows and are never copied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Collection {
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
+    /// Last create/rename/membership change.
+    pub updated_at: String,
+    /// Membership rows, including any whose referenced message is
+    /// absent (they surface as unavailable, never disappear).
+    pub message_count: u64,
+}
+
+/// One collection's full read ([`Storage::collection_detail`]): the
+/// collection row plus its members in add order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollectionDetail {
+    pub collection: Collection,
+    pub members: Vec<CollectionMember>,
+}
+
+/// One membership row of a collection detail: what the vault can
+/// honestly say about the referenced canonical message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollectionMember {
+    /// The stable `archive_messages` rowid the membership references —
+    /// the handle the UI deep-links back to the original message and
+    /// its conversation.
+    pub message_id: i64,
+    /// Whether the referenced canonical message still exists. An
+    /// unavailable row carries no provenance and previews no content:
+    /// the reference itself is shown, never fabricated.
+    pub available: bool,
+    pub added_at: String,
+    /// Provenance joins, present only when `available` (the same joins
+    /// the v2 message detail performs).
+    pub source_id: Option<String>,
+    pub source_label: Option<String>,
+    pub conversation_id: Option<String>,
+    pub conversation_label: Option<String>,
+    pub author: Option<String>,
+    /// Subject line (`None` when the message has none — chat sources).
+    pub subject: Option<String>,
+    /// Resolved UTC instant (`None` when unknown).
+    pub sent_at: Option<String>,
+}
+
+/// A collection name, trimmed; empty after trimming is refused.
+fn validate_collection_name(name: &str) -> Result<&str> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(Error::InvalidCollection(
+            "collection name must not be empty".into(),
+        ));
+    }
+    Ok(trimmed)
+}
+
+/// One collection row with its live membership count — shared by
+/// [`Storage::create_collection`] and [`Storage::collection_detail`].
+fn collection_row(conn: &Connection, id: &str) -> Result<Option<Collection>> {
+    let row = conn
+        .query_row(
+            "SELECT id, name, created_at, updated_at,
+                    (SELECT COUNT(*) FROM collection_members
+                     WHERE collection_id = collections.id)
+             FROM collections WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(Collection {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    created_at: row.get(2)?,
+                    updated_at: row.get(3)?,
+                    message_count: row.get::<_, i64>(4)?.max(0) as u64,
+                })
+            },
+        )
+        .optional()?;
+    Ok(row)
+}
+
+/// Refuse an unknown collection id inside a write transaction.
+fn ensure_collection_exists(conn: &Connection, id: &str) -> Result<()> {
+    let present: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM collections WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if present.is_none() {
+        return Err(Error::InvalidCollection(format!("no collection {id}")));
+    }
+    Ok(())
 }
 
 /// Filter SQL fragments (`AND ...` clauses referencing table aliases `m`
