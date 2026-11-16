@@ -37,7 +37,8 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
 - Exporting search results preserves source-instance selection, attachment and
   import filters, date/timezone bounds, and sort order across every page.
   Older export callers keep their existing source-name contract.
-- JSON Lines exports carry a portable source identity (`source_key`), so a
+- JSON Lines exports — search-result subsets and whole-conversation chat
+  exports alike — carry a portable source identity (`source_key`), so a
   subset exported from two sources sharing a display label — and a mail
   Message-ID — imports with both messages retained instead of the second
   collapsing onto the first as an apparent duplicate. Older JSON Lines files
@@ -273,6 +274,14 @@ real desktop citizens. Vaults from 0.1.0 upgrade in place, safely.
   of name or location, every object is checksum-verified, interrupted
   imports never leave half-written files behind, and a disk-usage view
   reports what the media store actually holds.
+- **Media integrity findings resolve to affected messages** — the
+  integrity check now names what a damaged object affects: each missing
+  or corrupt file resolves to the archived messages that reference it
+  (a message to open, with its conversation and date) and to the known
+  import that stored it, in bounded pages with totals — read-only and
+  diagnostic, with recovery left to you (restore a known-good backup or
+  re-import the original export). Backend surface this release; the
+  report UI follows.
 - **AI answers behind explicit consent** — asking an AI provider about
   your archive is now gated: nothing leaves your machine until you
   grant consent for the current session, and the grant is never

@@ -2010,6 +2010,11 @@ impl Storage {
     /// instants order by id, matching the legacy ordering exactly
     /// (COALESCE maps the unknown NULL instant to the legacy
     /// empty-string position).
+    ///
+    /// Every row carries the portable source identity
+    /// ([`SOURCE_KEY_COLUMN`]), exactly like the search export streams,
+    /// so a JSON Lines archive transfers between vaults without
+    /// collapsing same-labelled sources.
     pub fn conversation_thread_stream(
         &self,
         id: i64,
@@ -2025,26 +2030,46 @@ impl Storage {
             |row| row.get(0),
         )?;
         if !has_conversation {
-            return match self.get(id)? {
+            return match self.get_for_export(id)? {
                 Some(m) => sink(&m),
                 None => Ok(()),
             };
         }
 
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
-             m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), m.body, m.raw_json \
+             m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), m.body, m.raw_json, \
+             {SOURCE_KEY_COLUMN} \
              FROM archive_messages AS m \
              JOIN source_instances AS si ON si.id = m.source_instance_id \
              WHERE m.conversation_id = ( \
                  SELECT conversation_id FROM archive_messages WHERE id = ?1) \
              ORDER BY COALESCE(m.sent_instant, '') ASC, m.id ASC",
-        )?;
+        ))?;
         let mut rows = stmt.query(params![id])?;
         while let Some(row) = rows.next()? {
-            sink(&message_from_row(row)?)?;
+            sink(&export_message_from_row(row)?)?;
         }
         Ok(())
+    }
+
+    /// One message by row id on the export shape: the nine
+    /// [`message_from_row`] columns plus [`SOURCE_KEY_COLUMN`], so the
+    /// whole-conversation export stream's standalone rows carry the same
+    /// portable source identity as its thread rows. Private — the
+    /// public [`Storage::get`] keeps its 9-column contract.
+    fn get_for_export(&self, id: i64) -> Result<Option<Message>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT m.id, COALESCE(si.legacy_namespace, si.label, si.id), m.external_id, \
+             m.channel, m.chat_id, m.author, COALESCE(m.sent_instant, ''), m.body, m.raw_json, \
+             {SOURCE_KEY_COLUMN} \
+             FROM archive_messages AS m \
+             JOIN source_instances AS si ON si.id = m.source_instance_id \
+             WHERE m.id = ?1",
+        ))?;
+        stmt.query_row(params![id], export_message_from_row)
+            .optional()
+            .map_err(Into::into)
     }
 
     /// Archive counts: total and per source.
@@ -2787,6 +2812,79 @@ impl Storage {
         Ok(digests)
     }
 
+    /// Resolve one media digest to the archived messages that reference
+    /// it — the affected-message side of a reconciliation finding: when
+    /// [`crate::object_store::ObjectStore::reconcile`] names a digest
+    /// missing or corrupt, this is the route from the damaged object
+    /// back to every message it affects. The same scan
+    /// [`Storage::message_media_digests`] walks, keeping message
+    /// identity and conversation/date context instead of discarding it.
+    ///
+    /// One row per message (oldest message id first, the first matching
+    /// entry's display name), returned in bounded pages: `limit` is
+    /// clamped like the search surface ([`crate::query::MAX_LIMIT`])
+    /// and `total` carries the full affected count for pagination. A
+    /// digest referenced by no message (a registered unlinked file —
+    /// see [`Storage::unlinked_media_objects`] for its provenance)
+    /// resolves to an empty page with `total == 0`. Read-only: a pure
+    /// SELECT over stored rows.
+    pub fn media_digest_references(
+        &self,
+        sha256: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<MediaDigestReferences> {
+        let mut all = Vec::new();
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT m.id, COALESCE(c.label, ''), m.chat_id, m.author,
+                        COALESCE(m.sent_instant, m.original_timestamp, ''), m.raw_json
+                 FROM archive_messages m
+                 LEFT JOIN conversations c ON c.id = m.conversation_id
+                 WHERE m.raw_json LIKE '%\"media\"%'
+                 ORDER BY m.id",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let id: i64 = row.get(0)?;
+                let raw: String = row.get(5)?;
+                // One row per message: the first matching entry names it.
+                let matches = media_entries(&raw)
+                    .into_iter()
+                    .find(|entry| entry.get("sha256").and_then(|v| v.as_str()) == Some(sha256));
+                if let Some(entry) = matches {
+                    all.push(MediaMessageReference {
+                        message_id: id,
+                        conversation: row.get(1)?,
+                        chat_id: row.get(2)?,
+                        author: row.get(3)?,
+                        date: row.get(4)?,
+                        name: entry
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    });
+                }
+            }
+        }
+        let total = all.len() as u64;
+        let limit = limit.clamp(1, crate::query::MAX_LIMIT);
+        let offset = offset.min(crate::query::MAX_OFFSET);
+        let references = all
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect();
+        Ok(MediaDigestReferences {
+            sha256: sha256.to_string(),
+            total,
+            offset,
+            limit,
+            references,
+        })
+    }
+
     /// The media objects registered as unlinked (M4.2) — export files
     /// stored without a message, with their provenance. Oldest first.
     pub fn unlinked_media_objects(&self) -> Result<Vec<RegisteredMediaObject>> {
@@ -3463,9 +3561,10 @@ pub(crate) const SOURCE_KEY_COLUMN: &str = "CASE WHEN si.connector_key IS NOT NU
      ELSE COALESCE(si.legacy_namespace, '') END";
 
 /// Build an export row from a 10-column selection: the nine
-/// [`message_from_row`] columns plus [`SOURCE_KEY_COLUMN`]. Only the two
-/// JSON export streams select that extra column; every other query keeps
-/// the 9-column shape and an empty key.
+/// [`message_from_row`] columns plus [`SOURCE_KEY_COLUMN`]. Only the JSON
+/// export streams — search and whole-conversation alike — select that
+/// extra column; every other query keeps the 9-column shape and an empty
+/// key.
 pub(crate) fn export_message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
     let mut message = message_from_row(row)?;
     message.source_key = row.get(9)?;
@@ -3802,6 +3901,46 @@ pub struct RegisteredMediaObject {
     pub origin: String,
     pub import_id: String,
     pub first_seen: String,
+}
+
+/// One archived message that references a media digest (the resolution
+/// of an integrity finding to the messages it affects, see
+/// [`Storage::media_digest_references`]): the id every reading surface
+/// (`message_detail_v2`, conversation links) keys on, plus the
+/// conversation/date context to show beside it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaMessageReference {
+    /// `archive_messages.id` — stable, and the key the detail and
+    /// context IPC surfaces accept.
+    pub message_id: i64,
+    /// The conversation's display label ('' when the row never resolved
+    /// to one).
+    pub conversation: String,
+    /// The message's legacy chat grouping as stored.
+    pub chat_id: String,
+    /// The author as stored ('' when unknown).
+    pub author: String,
+    /// The resolved UTC instant when known, else the original timestamp
+    /// text; '' when neither exists.
+    pub date: String,
+    /// The media entry's original display name (e.g. `photo.jpg`).
+    pub name: String,
+}
+
+/// The affected-message page for one digest (see
+/// [`Storage::media_digest_references`]): every archived message whose
+/// `raw_json` media entries reference the digest, in bounded pages with
+/// the full count for pagination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MediaDigestReferences {
+    pub sha256: String,
+    /// Total messages referencing the digest, ignoring the page window.
+    pub total: u64,
+    pub offset: u32,
+    pub limit: u32,
+    /// The page, oldest message id first (one row per message; a digest
+    /// a single message references twice names it once).
+    pub references: Vec<MediaMessageReference>,
 }
 
 /// Filter SQL fragments (`AND ...` clauses referencing table aliases `m`
