@@ -52,6 +52,48 @@ export interface ArchiveStats {
   top_authors: AuthorCount[];
 }
 
+// ---------------------------------------------------------------------------
+// What's-new boot digest (the M7 follow-up) — mirrors
+// `vault_core::stats` / `vault_core::whats_new`
+// ---------------------------------------------------------------------------
+
+/** One source's newly archived messages since the last visit. */
+export interface SourceNewCount {
+  /** The durable source instance id (stable key/filter value). */
+  source_id: string;
+  /** Display label (the same label the source chips show). */
+  label: string;
+  count: number;
+}
+
+/** One finished or failed import or sync job in the boot digest. */
+export interface WhatsNewJob {
+  /** `import_mbox` | `import_chat_export` | `imap_sync` | `imap_sync_all`. */
+  kind: string;
+  state: "succeeded" | "failed" | string;
+  /** RFC 3339 UTC — when the job finished. */
+  finished_at: string;
+  /** The one-line result summary the finished-jobs ledger carries. */
+  summary: string;
+}
+
+/** What changed since the previous visit: one `whats_new_digest` round
+ * trip. Reading it advances the vault-scoped last-visit timestamp, so
+ * the next digest counts only newer changes. */
+export interface WhatsNewDigest {
+  /** RFC 3339 UTC — the previous visit this digest covers; null on the
+   * first visit, whose digest is deliberately empty (quiet first boot). */
+  since: string | null;
+  /** RFC 3339 UTC — the instant this read recorded as the new cutoff. */
+  read_at: string;
+  /** Newly archived messages per source, heaviest first. Counts mean
+   * newly archived messages: re-imports that dedup keep their original
+   * `created_at` and never count twice. */
+  new_messages: SourceNewCount[];
+  /** Finished or failed import/sync jobs, newest first. */
+  jobs: WhatsNewJob[];
+}
+
 export interface IngestSummary {
   source: string;
   seen: number;

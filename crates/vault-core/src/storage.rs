@@ -52,7 +52,7 @@ use crate::query::{
     ChatContext, SearchHit, SearchPage, SearchQuery, SNIPPET_CLOSE_MARK, SNIPPET_OPEN_MARK,
 };
 use crate::safe_migration::{self, MigrationFailPoint, OpenOptions};
-use crate::stats::{ArchiveStats, AuthorCount, ChatCount, DayCount};
+use crate::stats::{ArchiveStats, AuthorCount, ChatCount, DayCount, SourceNewCount};
 use crate::vector::VectorHit;
 use crate::{Error, Result};
 
@@ -786,6 +786,22 @@ const MIGRATIONS: &[(i64, &str)] = &[
         CREATE INDEX idx_collection_members_message ON collection_members (message_id);
         "#,
     ),
+    (
+        20,
+        // The what's-new boot digest's message half (M7 follow-up)
+        // counts newly archived messages per source since the last
+        // visit (`Storage::messages_archived_since`). Without an index
+        // whose leading column is `created_at`, that filter's query
+        // plan is a full table scan — on a million-message vault the
+        // scan would blow the boot budget every time the window shows.
+        // The composite carries `source_instance_id` second so the
+        // count query is covered by the index alone (the per-row table
+        // lookup is what the bare-column index would still pay).
+        r#"
+        CREATE INDEX idx_archive_messages_created_source
+            ON archive_messages (created_at, source_instance_id);
+        "#,
+    ),
 ];
 
 /// Rust halves of migrations, for backfill logic that SQL alone cannot
@@ -1176,6 +1192,38 @@ impl Storage {
              LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(JobLedgerRow {
+                job_id: row.get::<_, i64>(0)?.max(0) as u64,
+                kind: row.get(1)?,
+                submitted_at: row.get(2)?,
+                finished_at: row.get(3)?,
+                state: row.get(4)?,
+                summary: row.get(5)?,
+                payload: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Terminal ledger rows whose `finished_at` is strictly newer than
+    /// `since` (an RFC 3339 UTC instant in the same form the ledger
+    /// stamps carry, so the comparison is a plain string compare),
+    /// newest first, at most `limit`. The what's-new boot digest's job
+    /// half reads this and filters to its own kinds and outcomes (see
+    /// [`crate::whats_new`]); the ledger itself stays bounded at
+    /// [`JOB_LEDGER_KEEP`] rows, so this is never a large read.
+    pub fn job_ledger_since(&self, since: &str, limit: u32) -> Result<Vec<JobLedgerRow>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT job_id, kind, submitted_at, finished_at, state, summary, payload
+             FROM job_ledger
+             WHERE finished_at > ?1
+             ORDER BY id DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since, limit as i64], |row| {
             Ok(JobLedgerRow {
                 job_id: row.get::<_, i64>(0)?.max(0) as u64,
                 kind: row.get(1)?,
@@ -2170,6 +2218,40 @@ impl Storage {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         let total = by_source.iter().map(|s| s.count).sum();
         Ok(Stats { total, by_source })
+    }
+
+    /// Newly archived messages per source instance since an instant
+    /// (the what's-new boot digest's message half). `since` is an
+    /// instant in the `archive_messages.created_at` column's own format
+    /// (`YYYY-MM-DD HH:MM:SS` UTC — [`crate::whats_new::sqlite_instant`]
+    /// converts the RFC 3339 record form); rows strictly newer count, so
+    /// a message that re-imports and dedups keeps its original
+    /// `created_at` and never counts twice — the numbers mean newly
+    /// archived messages, not re-sightings. Grouped by source instance
+    /// and joined to the same label the stats chips show, heaviest
+    /// first. Rides `idx_archive_messages_created_source` (migration
+    /// 20): the range above `since` is a covered index seek, never a
+    /// scan, so the digest answers within the boot budget on
+    /// million-message archives.
+    pub fn messages_archived_since(&self, since: &str) -> Result<Vec<SourceNewCount>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT si.id, COALESCE(si.legacy_namespace, si.label, si.id), COUNT(*)
+             FROM archive_messages AS m
+             JOIN source_instances AS si ON si.id = m.source_instance_id
+             WHERE m.created_at > ?1
+             GROUP BY m.source_instance_id
+             ORDER BY COUNT(*) DESC, si.id",
+        )?;
+        let counts = stmt
+            .query_map([since], |row| {
+                Ok(SourceNewCount {
+                    source_id: row.get(0)?,
+                    label: row.get(1)?,
+                    count: row.get::<_, i64>(2)?.max(0) as u64,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(counts)
     }
 
     /// Per-account overview counts for the multi-account UI (roadmap: the

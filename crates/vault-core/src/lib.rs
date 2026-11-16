@@ -75,6 +75,10 @@
 //! - [`query`]: paged/filtered search requests and chat-thread context.
 //! - [`stats`]: archive statistics for the dashboard (totals, date range,
 //!   counts by source/day/chat/author).
+//! - [`whats_new`]: the "what's new since your last visit" boot digest
+//!   (the M7 follow-up) — the vault-scoped last-visit record plus the
+//!   derivation of new messages per source and finished/failed import
+//!   and sync jobs since it.
 //! - [`export`]: export search results or whole chats to CSV / JSON Lines /
 //!   MBOX.
 //! - [`staged_write`]: staged file publication for exports — the export
@@ -123,6 +127,7 @@ pub mod telegram;
 pub mod util;
 pub mod vector;
 pub mod watch;
+pub mod whats_new;
 pub mod whatsapp;
 
 use thiserror::Error;

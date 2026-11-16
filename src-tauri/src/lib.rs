@@ -80,6 +80,11 @@
 //! - `stats` — archive counts per source (drives the source filter chips).
 //! - `archive_stats` — dashboard aggregates: totals, date range, counts by
 //!   source/day, top chats and top authors.
+//! - `whats_new_digest` — the "what's new since your last visit" boot
+//!   digest (M7 follow-up): new messages per source plus finished or
+//!   failed imports and syncs since the previous read; one call derives
+//!   the digest and advances the vault-scoped last-visit cutoff exactly
+//!   once (first visit: a quiet, empty digest).
 //! - `backup_inspect` / `restore_commit` / `recovery_status` /
 //!   `recovery_forget` / `return_to_previous_vault` — the M4.4
 //!   backup/restore surface: quick container inspection, the commit
@@ -150,7 +155,7 @@ use vault_core::search2::{
 };
 use vault_core::settings::{self, Options, Settings, SETTINGS_VERSION};
 use vault_core::staged_write::{staged_write, staged_write_opt};
-use vault_core::stats::{ArchiveStats, DEFAULT_TOP};
+use vault_core::stats::{ArchiveStats, WhatsNewDigest, DEFAULT_TOP};
 use vault_core::storage::{
     FailedItem, MediaMessageReference, RegisteredMediaObject, SourceInstance, Storage,
 };
@@ -158,6 +163,7 @@ use vault_core::vector::{
     self, EmbedJobSummary, Embedder, EmbeddingStatus, HashEmbedder, EMBED_BODY_PREFIX_CHARS,
 };
 use vault_core::watch::{FolderWatcher, WatchSnapshot};
+use vault_core::whats_new;
 use vault_core::{demo, message, Error, Result as CoreResult};
 
 mod media_proto;
@@ -3397,6 +3403,39 @@ fn archive_stats(state: State<AppState>, top: Option<u32>) -> Result<ArchiveStat
         .map_err(|e| e.to_string())
 }
 
+/// The "what's new since your last visit" boot digest (the M7
+/// follow-up): new messages per source plus finished or failed imports
+/// and syncs since the previous read — what changed while the app was
+/// closed or hidden in the tray. One call is one visit: the digest is
+/// derived through a pool read connection (WAL — it never queues
+/// behind writes), and the new last-visit timestamp is recorded on the
+/// write queue, so each read advances the cutoff exactly once and the
+/// next call counts only newer changes. The first visit (no stored
+/// record) is a quiet, deliberately empty digest. The last-visit
+/// record lives in the personal vault's own `archive_meta`, so it is
+/// vault-scoped — switching or restoring a vault never crosses digests
+/// (which is also why this reads the personal pool directly, not the
+/// demo-routed active vault). Message counts mean newly archived
+/// messages: re-imports that dedup keep their original `created_at`
+/// and never count twice. If the advance write fails the call errors
+/// and the old cutoff stays — the next call would repeat the same
+/// digest, never lose one.
+#[tauri::command]
+async fn whats_new_digest(state: State<'_, AppState>) -> Result<WhatsNewDigest, String> {
+    let pool = Arc::clone(&state.pool);
+    tauri::async_runtime::spawn_blocking(move || {
+        let now = Utc::now().to_rfc3339();
+        let digest = pool
+            .with_read(|s| whats_new::read_digest(s, &now))
+            .map_err(|e| e.to_string())?;
+        pool.submit_write(move |s| whats_new::record_last_visit(s, &now))
+            .map_err(|e| e.to_string())?;
+        Ok(digest)
+    })
+    .await
+    .map_err(|e| format!("what's-new task failed: {e}"))?
+}
+
 /// The built-in demo messages as an ingest source: the tiny
 /// whole-archive helper stays for tests; the job path streams (the demo
 /// set is six messages, so both paths are equally bounded in practice).
@@ -3833,6 +3872,7 @@ pub fn run() {
             preview_import,
             stats,
             archive_stats,
+            whats_new_digest,
             export_search,
             export_search_v2,
             export_chat,

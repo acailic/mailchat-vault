@@ -25,6 +25,7 @@ import type {
   Stats,
   SyncScheduleView,
   WatchSnapshot,
+  WhatsNewDigest,
 } from "./types";
 import type { AskOutcome, LlmStatus } from "./llmview";
 import type {
@@ -336,6 +337,16 @@ export function stats(): Promise<Stats> {
 
 export function archiveStats(top = 10): Promise<ArchiveStats> {
   return invoke<ArchiveStats>("archive_stats", { top });
+}
+
+/** The "what's new since your last visit" boot digest (M7 follow-up):
+ * new messages per source plus finished or failed imports and syncs
+ * since the previous read. One call is one visit — it advances the
+ * vault-scoped last-visit cutoff exactly once, so the next digest
+ * counts only newer changes. The first visit returns a quiet, empty
+ * digest. */
+export function whatsNewDigest(): Promise<WhatsNewDigest> {
+  return invoke<WhatsNewDigest>("whats_new_digest");
 }
 
 // ---------------------------------------------------------------------------
