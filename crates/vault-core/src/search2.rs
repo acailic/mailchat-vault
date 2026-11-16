@@ -475,8 +475,8 @@ pub(crate) fn decode_search_cursor(raw: &str) -> Result<SearchCursor> {
     let json = CURSOR_BASE64
         .decode(raw.trim())
         .map_err(|_| malformed("not valid cursor text"))?;
-    let wire: CursorWire = serde_json::from_slice(&json)
-        .map_err(|_| malformed("not valid cursor text"))?;
+    let wire: CursorWire =
+        serde_json::from_slice(&json).map_err(|_| malformed("not valid cursor text"))?;
     if wire.v != CURSOR_VERSION {
         return Err(malformed("unknown cursor version"));
     }
@@ -1640,25 +1640,23 @@ pub(crate) fn bm25_rank_expr() -> String {
 fn archive_keyset(req: &NormalizedSearch) -> (String, Vec<SqlValue>) {
     match &req.cursor {
         None => (String::new(), Vec::new()),
-        Some(SearchCursor::Browse { sent, id } | SearchCursor::Newest { sent, id }) => {
-            match sent {
-                Some(instant) => (
-                    " AND (m.sent_instant IS NULL \
+        Some(SearchCursor::Browse { sent, id } | SearchCursor::Newest { sent, id }) => match sent {
+            Some(instant) => (
+                " AND (m.sent_instant IS NULL \
                        OR m.sent_instant < ? \
                        OR (m.sent_instant = ? AND m.id < ?))"
-                        .to_string(),
-                    vec![
-                        SqlValue::from(instant.clone()),
-                        SqlValue::from(instant.clone()),
-                        SqlValue::Integer(*id),
-                    ],
-                ),
-                None => (
-                    " AND (m.sent_instant IS NULL AND m.id < ?)".to_string(),
-                    vec![SqlValue::Integer(*id)],
-                ),
-            }
-        }
+                    .to_string(),
+                vec![
+                    SqlValue::from(instant.clone()),
+                    SqlValue::from(instant.clone()),
+                    SqlValue::Integer(*id),
+                ],
+            ),
+            None => (
+                " AND (m.sent_instant IS NULL AND m.id < ?)".to_string(),
+                vec![SqlValue::Integer(*id)],
+            ),
+        },
         Some(SearchCursor::Relevance { rank_bits, id }) => {
             let rank = f64::from_bits(*rank_bits);
             let expr = bm25_rank_expr();
@@ -1856,16 +1854,14 @@ impl Storage {
                 .query_map(rusqlite::params_from_iter(bind), |row| {
                     let raw: String = row.get(11)?;
                     let rank: f64 = row.get(12)?;
-                    Ok((
-                        summary_from_row(
-                            row,
-                            Some(truncate_chars(
-                                &html_to_snippet_text(&raw),
-                                MAX_SNIPPET_CHARS,
-                            )),
-                        ),
-                        rank,
-                    ))
+                    summary_from_row(
+                        row,
+                        Some(truncate_chars(
+                            &html_to_snippet_text(&raw),
+                            MAX_SNIPPET_CHARS,
+                        )),
+                    )
+                    .map(|summary| (summary, rank))
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             has_more = rows.len() > req.limit as usize;
@@ -3053,11 +3049,7 @@ mod tests {
     fn cursor_past_the_last_row_is_an_empty_page_without_next_cursor() {
         let s = cursor_seeded();
         // Browse: last row = id 7 (the lowest unknown-instant id).
-        let cursor = encode_search_cursor(&SearchCursor::Browse {
-            sent: None,
-            id: 7,
-        })
-        .unwrap();
+        let cursor = encode_search_cursor(&SearchCursor::Browse { sent: None, id: 7 }).unwrap();
         let page = s
             .search_archive(&SearchArchiveRequest {
                 cursor: Some(cursor),
@@ -3069,11 +3061,7 @@ mod tests {
         assert!(page.next_cursor.is_none());
 
         // Newest: last row = id 7 again (dated matches end at id 1).
-        let cursor = encode_search_cursor(&SearchCursor::Newest {
-            sent: None,
-            id: 7,
-        })
-        .unwrap();
+        let cursor = encode_search_cursor(&SearchCursor::Newest { sent: None, id: 7 }).unwrap();
         let page = s
             .search_archive(&SearchArchiveRequest {
                 text: "needle".into(),
@@ -3162,14 +3150,15 @@ mod tests {
         let mut tied_ids = Vec::new();
         for i in 0..5 {
             tied_ids.push(
-                match s.insert_message(&NewMessage::new(
-                    "demo",
-                    format!("tie{i}"),
-                    "Ana",
-                    format!("2026-01-0{}T10:00:00Z", i + 1),
-                    "identical tie body mentioning needle",
-                ))
-                .unwrap()
+                match s
+                    .insert_message(&NewMessage::new(
+                        "demo",
+                        format!("tie{i}"),
+                        "Ana",
+                        format!("2026-01-0{}T10:00:00Z", i + 1),
+                        "identical tie body mentioning needle",
+                    ))
+                    .unwrap()
                 {
                     InsertOutcome::Inserted(id) | InsertOutcome::Duplicate(id) => id,
                 },
@@ -3267,19 +3256,24 @@ mod tests {
             ("not-a-cursor".to_string(), "garbage text"),
             (String::new(), "empty"),
             (
-                CURSOR_BASE64.encode(r#"{"v":9,"mode":"browse","sent":null,"rank_bits":null,"id":1}"#),
+                CURSOR_BASE64
+                    .encode(r#"{"v":9,"mode":"browse","sent":null,"rank_bits":null,"id":1}"#),
                 "unknown version",
             ),
             (
-                CURSOR_BASE64.encode(r#"{"v":1,"mode":"relevance","sent":null,"rank_bits":null,"id":3}"#),
+                CURSOR_BASE64
+                    .encode(r#"{"v":1,"mode":"relevance","sent":null,"rank_bits":null,"id":3}"#),
                 "relevance cursor without a rank",
             ),
             (
-                CURSOR_BASE64.encode(r#"{"v":1,"mode":"browse","sent":"2026-01-01T10:00:00Z","rank_bits":5,"id":3}"#),
+                CURSOR_BASE64.encode(
+                    r#"{"v":1,"mode":"browse","sent":"2026-01-01T10:00:00Z","rank_bits":5,"id":3}"#,
+                ),
                 "browse cursor carrying a rank",
             ),
             (
-                CURSOR_BASE64.encode(r#"{"v":1,"mode":"chrono","sent":null,"rank_bits":null,"id":3}"#),
+                CURSOR_BASE64
+                    .encode(r#"{"v":1,"mode":"chrono","sent":null,"rank_bits":null,"id":3}"#),
                 "unknown order mode",
             ),
         ] {

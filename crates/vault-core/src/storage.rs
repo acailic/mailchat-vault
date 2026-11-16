@@ -2061,16 +2061,14 @@ impl Storage {
                 .last()
                 .expect("a following page implies a full page was read");
             let cursor = match order_mode {
-                crate::search2::CursorOrderMode::Browse => {
-                    crate::search2::SearchCursor::Browse {
-                        sent: if last.message.sent_at.is_empty() {
-                            None
-                        } else {
-                            Some(last.message.sent_at.clone())
-                        },
-                        id: last.message.id,
-                    }
-                }
+                crate::search2::CursorOrderMode::Browse => crate::search2::SearchCursor::Browse {
+                    sent: if last.message.sent_at.is_empty() {
+                        None
+                    } else {
+                        Some(last.message.sent_at.clone())
+                    },
+                    id: last.message.id,
+                },
                 crate::search2::CursorOrderMode::Relevance => {
                     crate::search2::SearchCursor::Relevance {
                         rank_bits: last_rank

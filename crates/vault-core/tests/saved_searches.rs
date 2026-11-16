@@ -131,6 +131,7 @@ fn crud_round_trip_strips_pagination_and_refuses_conflicts() {
         sort: SearchSort::Newest,
         limit: Some(7),
         offset: Some(40),
+        cursor: None,
     };
     let saved = s.upsert_saved_search(None, "Invoices 2024", &req).unwrap();
     assert_eq!(saved.name, "Invoices 2024");
