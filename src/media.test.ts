@@ -64,6 +64,21 @@ describe("inlineKind", () => {
     expect(inlineKind(attachment({ kind: "document", path: `media/${SHA}.html` }))).toBeNull();
     expect(inlineKind(attachment({ kind: "file", path: `media/${SHA}.bin` }))).toBeNull();
   });
+
+  it("Signal kind strings render like email and WhatsApp ones", () => {
+    // The v2 API derives Signal kinds from the attachment
+    // `contentType`'s first segment when coarse (image/…, video/…,
+    // audio/…), else the file name's extension (application/pdf →
+    // document) — the same strings the switch below already maps.
+    expect(
+      inlineKind(attachment({ name: "signal-2023-11-01-110050.jpg", kind: "image" })),
+    ).toBe("image");
+    expect(inlineKind(attachment({ name: "clip.mp4", kind: "video", path: `media/${SHA}.mp4` }))).toBe("video");
+    expect(inlineKind(attachment({ name: "voice.mp3", kind: "audio", path: `media/${SHA}.mp3` }))).toBe("audio");
+    expect(
+      inlineKind(attachment({ name: "report.pdf", kind: "document", path: `media/${SHA}.pdf` })),
+    ).toBeNull();
+  });
 });
 
 describe("buildMediaItem", () => {
@@ -128,6 +143,132 @@ describe("buildMediaItem", () => {
     expect(item.classList.contains("unresolved")).toBe(true);
     expect(item.textContent).toContain("not in export");
     expect(item.querySelector("button, img, audio, video")).toBeNull();
+  });
+});
+
+describe("Signal media rows", () => {
+  // What the v2 API emits for Signal raw_json: the media pass names
+  // stored entries by the attachment `fileName` with a store path, and
+  // missing or unaccounted references render honest unavailable rows
+  // (size 0, no path) — the same AttachmentSummary shape every other
+  // source renders (M4.3 parity).
+  const SIGNAL_SHA = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+  const handlers = { onExport: () => {}, onOpenExternal: () => {} };
+
+  it("renders a stored Signal photo with an inline preview and actions", () => {
+    const item = buildMediaItem(
+      {
+        name: "signal-2023-11-01-110050.jpg",
+        kind: "image",
+        size: 48_213,
+        available: true,
+        path: `media/${SIGNAL_SHA}.jpg`,
+      },
+      handlers,
+    );
+    expect(item.classList.contains("unresolved")).toBe(false);
+    expect(item.textContent).toContain("signal-2023-11-01-110050.jpg");
+    const img = item.querySelector<HTMLImageElement>("img");
+    expect(img?.getAttribute("src")).toBe(`mcmedia://local/${SIGNAL_SHA}.jpg`);
+    expect(img?.getAttribute("alt")).toBe("signal-2023-11-01-110050.jpg");
+    expect(item.querySelector("button.media-save-btn")).not.toBeNull();
+    expect(item.querySelector("button.media-open-btn")).not.toBeNull();
+  });
+
+  it("renders stored Signal video and audio with controls, never autoplay", () => {
+    const video = buildMediaItem(
+      {
+        name: "signal-2024-03-05-091233.mp4",
+        kind: "video",
+        size: 1_204_882,
+        available: true,
+        path: `media/${SIGNAL_SHA}.mp4`,
+      },
+      handlers,
+    );
+    const videoEl = video.querySelector("video");
+    expect(videoEl?.hasAttribute("controls")).toBe(true);
+    expect(videoEl?.hasAttribute("autoplay")).toBe(false);
+    expect(videoEl?.getAttribute("src")).toBe(`mcmedia://local/${SIGNAL_SHA}.mp4`);
+
+    const audio = buildMediaItem(
+      {
+        name: "voice-note.mp3",
+        kind: "audio",
+        size: 92_331,
+        available: true,
+        path: `media/${SIGNAL_SHA}.mp3`,
+      },
+      handlers,
+    );
+    const audioEl = audio.querySelector("audio");
+    expect(audioEl?.hasAttribute("controls")).toBe(true);
+    expect(audioEl?.hasAttribute("autoplay")).toBe(false);
+    expect(audioEl?.getAttribute("preload")).toBe("none");
+  });
+
+  it("renders a stored Signal document as a row with actions only", () => {
+    // contentType application/pdf is not a coarse kind: the backend
+    // derives `document` from the file name's extension, and documents
+    // never render inline.
+    const item = buildMediaItem(
+      {
+        name: "signal-2024-03-05-091241.pdf",
+        kind: "document",
+        size: 302_411,
+        available: true,
+        path: `media/${SIGNAL_SHA}.pdf`,
+      },
+      handlers,
+    );
+    expect(item.querySelector("img, audio, video, iframe")).toBeNull();
+    expect(item.querySelector("button.media-save-btn")).not.toBeNull();
+    expect(item.querySelector("button.media-open-btn")).not.toBeNull();
+  });
+
+  it("missing and unaccounted Signal references stay honest rows", () => {
+    // A reference whose file was not in the export (the media pass
+    // recorded it missing) and an array the pass never accounted for
+    // (one honest unavailable row) both render "not in export".
+    const missing = buildMediaItem(
+      { name: "gone.jpg", kind: "image", size: 0, available: false, path: null },
+      handlers,
+    );
+    const unaccounted = buildMediaItem(
+      {
+        name: "signal-2023-11-01-110050.jpg",
+        kind: "image",
+        size: 0,
+        available: false,
+        path: null,
+      },
+      handlers,
+    );
+    for (const item of [missing, unaccounted]) {
+      expect(item.classList.contains("unresolved")).toBe(true);
+      expect(item.textContent).toContain("not in export");
+      expect(item.querySelector("button, img, audio, video")).toBeNull();
+    }
+  });
+
+  it("wires the explicit export / open-external actions for Signal media", () => {
+    const calls: string[] = [];
+    const item = buildMediaItem(
+      {
+        name: "signal-2023-11-01-110050.jpg",
+        kind: "image",
+        size: 48_213,
+        available: true,
+        path: `media/${SIGNAL_SHA}.jpg`,
+      },
+      {
+        onExport: (a) => calls.push(`export:${a.name}`),
+        onOpenExternal: (a) => calls.push(`open:${a.name}`),
+      },
+    );
+    (item.querySelector("button.media-save-btn") as HTMLElement).click();
+    (item.querySelector("button.media-open-btn") as HTMLElement).click();
+    expect(calls).toEqual(["export:signal-2023-11-01-110050.jpg", "open:signal-2023-11-01-110050.jpg"]);
   });
 });
 
