@@ -37,6 +37,10 @@
 //!   the stage → promote → reference lifecycle (no half-written object
 //!   is ever visible, references never dangle), the import capacity
 //!   budget, and the reconciliation/integrity tool.
+//! - [`pdf_text`]: part 1a of attachment-content search (#171) —
+//!   budget-bounded, local-only PDF text extraction with explicit
+//!   corrupt/encrypted/unsupported/over-budget results; storage, jobs,
+//!   and search wiring arrive with the later parts of #171.
 //! - [`backup`]: the M4.4 versioned backup container and staged restore —
 //!   a ZIP holding `manifest.json`, a consistent SQLite snapshot (the
 //!   backup API, never a live-file copy), the settings file, and every
@@ -99,6 +103,7 @@ pub mod message;
 pub mod messenger;
 pub mod oauth;
 pub mod object_store;
+pub mod pdf_text;
 pub mod preview;
 pub mod query;
 pub mod safe_migration;
