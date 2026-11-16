@@ -52,6 +52,7 @@ use crate::query::{
     ChatContext, SearchHit, SearchPage, SearchQuery, SNIPPET_CLOSE_MARK, SNIPPET_OPEN_MARK,
 };
 use crate::safe_migration::{self, MigrationFailPoint, OpenOptions};
+use crate::search2::SearchArchiveRequest;
 use crate::stats::{ArchiveStats, AuthorCount, ChatCount, DayCount};
 use crate::vector::VectorHit;
 use crate::{Error, Result};
@@ -753,6 +754,30 @@ const MIGRATIONS: &[(i64, &str)] = &[
         // migration rather than an edit of migration 4.
         r#"
         DROP INDEX IF EXISTS idx_archive_messages_source;
+        "#,
+    ),
+    (
+        18,
+        // Saved searches (the Archive workspace's recurring searches).
+        // One row per named definition: `request_json` holds the serde
+        // JSON of a v2 `SearchArchiveRequest` — the *dynamic* query and
+        // its complete filter semantics (canonical source ids, author,
+        // explicit day bounds plus timezone, attachment/honesty filters,
+        // import scope, sort), with `limit`/`offset` stripped before
+        // persisting because pagination is per-execution, not part of
+        // the definition. Source references stay canonical source ids
+        // inside the stored request, so display-label renames or
+        // duplicate labels never redirect a saved search. Rename and
+        // delete are single-row operations on this table and never
+        // touch archived messages.
+        r#"
+        CREATE TABLE saved_searches (
+            id           TEXT PRIMARY KEY,
+            name         TEXT NOT NULL UNIQUE,
+            request_json TEXT NOT NULL,
+            created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+        );
         "#,
     ),
     (
@@ -3155,6 +3180,126 @@ impl Storage {
     }
 
     // ------------------------------------------------------------------
+    // Saved searches (migration 18)
+    // ------------------------------------------------------------------
+
+    /// The saved-search definitions, oldest first (same-second ties
+    /// broken by name) — the order the Archive workspace lists them in.
+    /// Each definition is a dynamic v2 request: executing it re-runs the
+    /// search, so newly imported matching messages appear, and source
+    /// references are canonical source ids, so label renames and
+    /// duplicate labels never redirect a saved search.
+    pub fn saved_searches(&self) -> Result<Vec<SavedSearch>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, request_json, created_at, updated_at
+             FROM saved_searches ORDER BY created_at, name",
+        )?;
+        let rows = stmt.query_map([], saved_search_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Create or update one saved-search definition:
+    ///
+    /// - `id` `None` creates a new definition under `name` — a name
+    ///   another definition already holds is refused, not silently
+    ///   overwritten;
+    /// - `id` `Some(id)` updates that definition in place: a new name
+    ///   (rename), a new request (update from the current search), or
+    ///   both. Renaming onto a name another definition holds is
+    ///   refused; an unknown `id` is refused.
+    ///
+    /// The request is validated by normalizing it (bad text length, day
+    /// bounds, or timezone refuse the save), then persisted as serde
+    /// JSON with `limit`/`offset` stripped — pagination is
+    /// per-execution, not part of the definition. Only the
+    /// `saved_searches` row is touched; archived messages never are.
+    pub fn upsert_saved_search(
+        &self,
+        id: Option<&str>,
+        name: &str,
+        request: &SearchArchiveRequest,
+    ) -> Result<SavedSearch> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::SavedSearch(
+                "a saved search needs a name".to_string(),
+            ));
+        }
+        if name.chars().count() > SAVED_SEARCH_MAX_NAME_CHARS {
+            return Err(Error::SavedSearch(format!(
+                "saved-search name exceeds {SAVED_SEARCH_MAX_NAME_CHARS} characters"
+            )));
+        }
+        // Refuse to store a request that could not execute: normalize
+        // (validate) it and drop the resolved form.
+        request.normalize()?;
+
+        // Pagination never persists: strip it before serializing.
+        let mut stored = request.clone();
+        stored.limit = None;
+        stored.offset = None;
+        let request_json = serde_json::to_string(&stored)?;
+
+        let tx = self.conn.unchecked_transaction()?;
+        let taken: bool = tx.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM saved_searches
+                 WHERE name = ?1 AND (?2 IS NULL OR id != ?2)
+             )",
+            params![name, id],
+            |row| row.get(0),
+        )?;
+        if taken {
+            return Err(Error::SavedSearch(format!(
+                "a saved search named {name:?} already exists"
+            )));
+        }
+        let row_id = match id {
+            None => {
+                let new_id = new_uuid();
+                tx.execute(
+                    "INSERT INTO saved_searches (id, name, request_json)
+                     VALUES (?1, ?2, ?3)",
+                    params![new_id, name, request_json],
+                )?;
+                new_id
+            }
+            Some(id) => {
+                let updated = tx.execute(
+                    "UPDATE saved_searches
+                     SET name = ?2, request_json = ?3,
+                         updated_at = datetime('now')
+                     WHERE id = ?1",
+                    params![id, name, request_json],
+                )?;
+                if updated == 0 {
+                    return Err(Error::SavedSearch(format!("no saved search with id {id}")));
+                }
+                id.to_string()
+            }
+        };
+        let stored = tx.query_row(
+            "SELECT id, name, request_json, created_at, updated_at
+             FROM saved_searches WHERE id = ?1",
+            params![row_id],
+            saved_search_from_row,
+        )?;
+        tx.commit()?;
+        Ok(stored)
+    }
+
+    /// Delete one saved-search definition. Returns whether a row was
+    /// removed (deleting an unknown id is not an error). Only the
+    /// definition goes — archived messages, sources, and every other
+    /// definition are untouched.
+    pub fn delete_saved_search(&self, id: &str) -> Result<bool> {
+        let removed = self
+            .conn
+            .execute("DELETE FROM saved_searches WHERE id = ?1", params![id])?;
+        Ok(removed > 0)
+    }
+
+    // ------------------------------------------------------------------
     // Collections (user organization, migration 19)
     // ------------------------------------------------------------------
 
@@ -4325,6 +4470,41 @@ pub struct ImportBatchCounts {
 /// How many finished jobs the ledger keeps (migration 16). A write prunes
 /// to this many newest rows; the panel renders at most its top 20 anyway.
 pub const JOB_LEDGER_KEEP: usize = 50;
+
+/// Upper bound for a saved-search name (Unicode characters), mirroring
+/// the bounded text fields of the v2 request it stores.
+pub const SAVED_SEARCH_MAX_NAME_CHARS: usize = 200;
+
+/// One stored saved-search definition (migration 18): a name plus the
+/// dynamic v2 request it re-executes. See [`Storage::upsert_saved_search`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedSearch {
+    /// Canonical row id (a UUID); stable across renames.
+    pub id: String,
+    pub name: String,
+    /// The stored request, `limit`/`offset` stripped (pagination is
+    /// per-execution, not part of the definition).
+    pub request: SearchArchiveRequest,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Map one `saved_searches` row to its [`SavedSearch`]. A row whose
+/// request JSON cannot deserialize into the current request model
+/// surfaces as an error rather than being silently dropped or widened.
+fn saved_search_from_row(row: &Row<'_>) -> rusqlite::Result<SavedSearch> {
+    let request_json: String = row.get(2)?;
+    let request = serde_json::from_str(&request_json).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    Ok(SavedSearch {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        request,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+    })
+}
 
 /// One terminal job to append to the finished-jobs ledger (see
 /// [`Storage::record_job_ledger`]). Owned: the entry crosses thread

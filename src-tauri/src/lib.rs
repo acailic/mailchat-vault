@@ -96,6 +96,15 @@
 //!   the active filters) to a user-chosen file as CSV, JSON Lines or MBOX.
 //! - `export_chat` — write the whole chat thread of one message to a
 //!   user-chosen file in the same formats.
+//! - `saved_searches_list` / `saved_searches_save` /
+//!   `saved_searches_delete` — the Archive workspace's saved searches:
+//!   named dynamic v2 search requests (query, canonical source ids,
+//!   date bounds with explicit timezone, attachment/honesty filters,
+//!   import scope, sort — pagination stripped). Saving creates a
+//!   definition or updates one in place (rename and/or new request);
+//!   deleting removes the definition only, never archived messages.
+//!   Definitions are personal-vault state: reads and writes target the
+//!   personal pool and writes refuse while the sample archive is open.
 //!
 //! Desktop notifications for new mail (the Tauri notification plugin,
 //! registered here, drives macOS/Windows/Linux natively) live in the
@@ -120,7 +129,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
@@ -152,7 +161,7 @@ use vault_core::settings::{self, Options, Settings, SETTINGS_VERSION};
 use vault_core::staged_write::{staged_write, staged_write_opt};
 use vault_core::stats::{ArchiveStats, DEFAULT_TOP};
 use vault_core::storage::{
-    FailedItem, MediaMessageReference, RegisteredMediaObject, SourceInstance, Storage,
+    FailedItem, MediaMessageReference, RegisteredMediaObject, SavedSearch, SourceInstance, Storage,
     UnlinkedMediaPage, UnlinkedMediaPageRequest,
 };
 use vault_core::vector::{
@@ -423,6 +432,71 @@ fn conversation_context_v2(
 fn list_import_scopes_v2(state: State<AppState>) -> Result<Vec<ImportScope>, AppError> {
     ActiveVault::from(&state)
         .with_read(|s| s.import_scopes())
+        .map_err(AppError::from)
+}
+
+// ---------------------------------------------------------------------------
+// Saved searches (schema 18)
+// ---------------------------------------------------------------------------
+
+/// What one `saved_searches_save` writes: `id` `None` creates a new
+/// definition under `name`; `Some(id)` updates that definition in place
+/// — a new name (rename), a new request (update from the current
+/// search), or both.
+#[derive(Debug, Deserialize)]
+struct SavedSearchSave {
+    id: Option<String>,
+    name: String,
+    request: SearchArchiveRequest,
+}
+
+/// The vault's saved-search definitions, oldest first. Definitions are
+/// personal-vault state: this always reads the personal pool, even
+/// while the isolated sample archive is open — the demo never serves
+/// (or absorbs) definitions.
+#[tauri::command]
+fn saved_searches_list(state: State<AppState>) -> Result<Vec<SavedSearch>, AppError> {
+    state
+        .pool
+        .with_read(|s| s.saved_searches())
+        .map_err(AppError::from)
+}
+
+/// Save the current search under a name (create), or update an existing
+/// definition (rename and/or replace its request). The stored request is
+/// the dynamic v2 request minus pagination, so reopening re-executes the
+/// search and newly imported matching messages appear. Writes touch the
+/// definition row only, never archived messages, and refuse while the
+/// sample archive is open (personal-vault mutation guard).
+#[tauri::command]
+fn saved_searches_save(
+    state: State<AppState>,
+    definition: SavedSearchSave,
+) -> Result<SavedSearch, AppError> {
+    state
+        .refuse_in_demo()
+        .map_err(|e| AppError::invalid_input(e, None))?;
+    let pool = Arc::clone(&state.pool);
+    pool.submit_write(move |s| {
+        s.upsert_saved_search(
+            definition.id.as_deref(),
+            &definition.name,
+            &definition.request,
+        )
+    })
+    .map_err(AppError::from)
+}
+
+/// Delete one saved-search definition (idempotent: deleting an unknown
+/// id succeeds). Only the definition goes — archived messages are never
+/// touched. Refuses while the sample archive is open.
+#[tauri::command]
+fn saved_searches_delete(state: State<AppState>, id: String) -> Result<(), AppError> {
+    state
+        .refuse_in_demo()
+        .map_err(|e| AppError::invalid_input(e, None))?;
+    let pool = Arc::clone(&state.pool);
+    pool.submit_write(move |s| s.delete_saved_search(&id).map(|_| ()))
         .map_err(AppError::from)
 }
 
@@ -3872,6 +3946,9 @@ pub fn run() {
             message_detail_v2,
             conversation_context_v2,
             list_import_scopes_v2,
+            saved_searches_list,
+            saved_searches_save,
+            saved_searches_delete,
             export_messages_v2,
             save_text,
             media_reconcile,
