@@ -1736,7 +1736,7 @@ impl Storage {
         // Set by the winning branch when the probe row existed; drives
         // `next_cursor`. The relevance branch also keeps the last row's
         // bm25 rank (a summary does not carry it).
-        let mut has_more = false;
+        let has_more;
         let mut last_rank: Option<f64> = None;
 
         let hits: Vec<MessageSummary> = if req.text.is_empty() {
@@ -2922,7 +2922,7 @@ mod tests {
     fn offset_walk(s: &Storage, base: &SearchArchiveRequest, limit: u32) -> (Vec<Vec<i64>>, u64) {
         let mut pages = Vec::new();
         let mut offset = 0;
-        let mut total = 0;
+        let mut total;
         loop {
             let page = s
                 .search_archive(&SearchArchiveRequest {
