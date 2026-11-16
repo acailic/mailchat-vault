@@ -868,6 +868,19 @@ mark.hit {
   cursor: pointer;
   text-decoration: underline;
 }
+/* M5.3: markers with no matching source are not links — a dotted
+ * underline signals text-only, and the visible note below the answer
+ * names them. */
+#answer .citation-unsupported {
+  font: inherit;
+  color: inherit;
+  text-decoration: underline dotted;
+}
+/* M5.3: evidence honesty — the caption states how many matching
+ * messages the summary used; the unsupported note warns which markers
+ * could not be linked (same quiet warning tone as #ask-notes). */
+#answer-scope { margin-top: var(--sp-1); }
+#answer-unsupported { margin-top: var(--sp-1); color: var(--warning); }
 /* M5: answer source rows — numbered like the citations, clickable into
  * the reading pane (thread context). */
 #ask-results li .ask-source {

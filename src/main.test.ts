@@ -3857,6 +3857,9 @@ describe("ask AI consent + evidence navigation", () => {
     );
     expect($("#ask-notes").textContent).toContain("AI consent not granted");
     expect($("#answer").hidden).toBe(true);
+    // No answer → no evidence caption or unsupported note either.
+    expect($("#answer-scope").hidden).toBe(true);
+    expect($("#answer-unsupported").hidden).toBe(true);
   });
 
   it("an open prompt re-renders when the provider selection changes to another network provider", async () => {
@@ -4039,6 +4042,13 @@ describe("ask AI consent + evidence navigation", () => {
       [...cites].map((c) => (c as unknown as HTMLElement).dataset.cite),
     ).toEqual(["1"]); // [3] is not a link
     expect($("#answer").textContent).toBe("answered from [1] and [3].");
+    // M5.3: the unsupported marker is named in a visible note, and the
+    // caption states the evidence scope (both sources sit inside the
+    // summarize window of 8).
+    expect($("#answer-unsupported").hidden).toBe(false);
+    expect($("#answer-unsupported").textContent).toContain("[3]");
+    expect($("#answer-scope").hidden).toBe(false);
+    expect($("#answer-scope").textContent).toBe("Based on 2 matching messages");
   });
 
   it("citations beyond the summary window stay plain text, never dead links", async () => {
@@ -4063,6 +4073,22 @@ describe("ask AI consent + evidence navigation", () => {
       [...cites].map((c) => (c as unknown as HTMLElement).dataset.cite),
     ).toEqual(["1"]); // [2] sits past summarize_top=1 → not a link
     expect($("#answer").textContent).toBe("answered from [1] and [2].");
+    // M5.3: the beyond-window marker is named in the visible note, and
+    // the caption counts only the messages inside the window (1).
+    expect($("#answer-unsupported").hidden).toBe(false);
+    expect($("#answer-unsupported").textContent).toContain("[2]");
+    expect($("#answer-scope").textContent).toBe("Based on 1 matching message");
+  });
+
+  it("a fully linked answer shows the scope caption and no unsupported note", async () => {
+    await bootConsentable();
+    await askFromInput("vault?");
+    $("#consent-allow-btn").click(); // consented ask → ASK_OUTCOME: [1]/[2] both linked
+    await vi.waitFor(() => expect($("#answer").hidden).toBe(false));
+    expect($("#answer").textContent).toBe(ASK_OUTCOME.answer);
+    expect($("#answer-scope").hidden).toBe(false);
+    expect($("#answer-scope").textContent).toBe("Based on 2 matching messages");
+    expect($("#answer-unsupported").hidden).toBe(true);
   });
 
   it("answer source rows are numbered like citations and open in thread context", async () => {
