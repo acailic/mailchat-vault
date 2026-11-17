@@ -251,6 +251,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
+        # bash, not the Windows default PowerShell: `$TAG` and the
+        # *.msi/*.exe globs below are shell syntax. Under PowerShell the
+        # tag expands empty and the globs stay literal, so the upload
+        # fails with "release not found".
+        shell: bash
         run: >
           gh release upload "$TAG" --clobber
           target/release/bundle/msi/*.msi

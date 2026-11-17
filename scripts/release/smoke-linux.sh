@@ -45,6 +45,19 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# Docker treats a mount source that does not start with "/" as a NAMED
+# VOLUME, not a host folder: `-v bundles:/x` silently mounts an empty
+# volume and the smoke dies with "no .deb found". Absolutize first.
+for flag_var in BUNDLES LOGS; do
+  val="${!flag_var}"
+  if [[ "$val" != /* ]]; then
+    val="$PWD/$val"
+    printf -v "$flag_var" '%s' "$val"
+  fi
+done
+[[ -d "$BUNDLES" ]] || { echo "error: --bundles dir not found: $BUNDLES" >&2; exit 2; }
+[[ -d "$LOGS" ]] || mkdir -p "$LOGS"
+
 debs="$(find "$BUNDLES" -name '*.deb' 2>/dev/null | head -1)"
 appimages="$(find "$BUNDLES" -name '*.AppImage' 2>/dev/null | head -1)"
 if [[ -z "$debs" || -z "$appimages" ]]; then
