@@ -1032,8 +1032,7 @@ function numberInput(
 
 /** One provider row as four labelled sections — Provider, Model,
  * Credentials, Advanced — with per-kind conditional fields, helper text,
- * and inline error slots. `takenKinds`… (unused; kind options are the
- * shared catalog). */
+ * and inline error slots. */
 function providerRow(
   profile: ProviderProfile,
   hasKey: boolean,
@@ -1594,10 +1593,16 @@ async function runLlmTest(
 
 function testPayloadForRow(row: HTMLElement): LlmTestPayload {
   const inputs = rowInputs(row);
+  // On Azure the deployment name is the model; the hidden model input's
+  // stale value must not pose as typed input (empty falls back to the
+  // stored/effective values server-side).
+  const model = kindFieldVisibility(row.dataset.kind as ProviderKind).model
+    ? inputs.model.value.trim()
+    : "";
   return {
     provider: row.dataset.id!,
     base_url: inputs.base_url.value.trim(),
-    model: inputs.model.value.trim(),
+    model,
     key: inputs.key.value.trim(),
     zai_key: "",
     anthropic_key: "",

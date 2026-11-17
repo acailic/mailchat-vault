@@ -101,11 +101,14 @@ FTS5 relevance and cosine similarity have incomparable scales, so the two ranked
 
 The **Settings screen** is where LLM providers are configured — one place, no environment variables needed:
 
-- **Providers**: add any number of named provider profiles. A profile has a *kind* that fixes the key/endpoint pairing rules:
+- **Providers**: add any number of named provider profiles. Each row is sectioned into **Provider, Model, Credentials, and Advanced**, shows only the fields its kind uses, and carries its own **Test connection** button; the active provider and model show at the top of the page. A profile has a *kind* that fixes the key/endpoint pairing rules and carries per-kind defaults (model, endpoint, temperature 0.2, max tokens 1024, timeout 30 s — 120 s for local Ollama); selecting a kind auto-fills its defaults, every value stays overridable, per-kind edits survive switching, and **Reset to defaults** restores them:
   - **z.ai GLM** (the default) — key for `https://api.z.ai/api/anthropic`; the base URL may be left empty (defaults apply, model defaults to `glm-5`) or must point at the z.ai host;
   - **Anthropic** — the key is only ever sent to an explicitly configured endpoint (never the z.ai host), so base URL and model are explicit (prefilled with `https://api.anthropic.com`);
-  - **Custom** — any Anthropic-compatible `/v1/messages` endpoint, base URL and model fully explicit.
-  A profile that violates its pairing rule is **refused with a clear error before anything is saved** — the same policy the environment configuration enforces.
+  - **OpenAI, Google Gemini, Mistral, Groq, OpenRouter** — OpenAI-compatible chat-completions providers with a fixed default endpoint (the base URL field hides behind a hint) and a default model offered in the dropdown;
+  - **Azure OpenAI** — deployment name + api-version (default `2024-10-21`); the deployment name is the model id, and the resource base URL is user-supplied;
+  - **Ollama** — a local server (`http://127.0.0.1:11434/v1` by default), no API key needed;
+  - **Custom** — any OpenAI-compatible `/chat/completions` endpoint, base URL and model fully explicit. (AWS Bedrock profiles load and save unchanged; their configuration UI is a follow-up.)
+  The model field offers the kind default in a dropdown with free text allowed; the Advanced section holds the sampling overrides (temperature, max tokens, timeout — empty means the kind default). A profile that violates its pairing rule is **flagged inline and refused before anything is saved** — the same policy the environment configuration enforces.
 - **Default provider**: which backend an Ask uses. None selected = automatic (the environment fallback when valid, else local-only mode).
 - **Environment fallback**: the *Environment variables* section (see [Configuration](#configuration-settings-ui-or-environment-variables)) sets or overrides the process-env fallback — API keys into the OS keyring, base URL and model into `settings.json` — and carries a **Test connection** button, as does every provider row.
 - **Options**: UI theme (system / light / dark), how many top results feed the RAG summary (1–50, default 8), the **Desktop notifications** toggle (on by default — see the [feature reference](features.md#what-the-app-does) for its contract), and the two **background keep-alive** toggles (both off by default): *keep running in the background* (close hides to the tray instead of exiting) and *start automatically at login* — see the M7 bullet in the [feature reference](features.md#what-the-app-does).
