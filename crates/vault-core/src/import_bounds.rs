@@ -25,6 +25,8 @@ use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use crate::{Error, Result};
 
 /// Bounds for one import tree (directory walk or ZIP expansion).
@@ -186,6 +188,80 @@ fn walk_rec(
                 size,
             });
         }
+    }
+    Ok(())
+}
+
+/// A2a: the error a fingerprint-bound import refuses with — the input
+/// changed after the preview that authorized it, so the stale preview
+/// is no longer permission to store anything.
+pub const INPUT_CHANGED_AFTER_PREVIEW: &str = "input changed after preview — inspect again";
+
+/// A2a: a stable fingerprint of a picked import input, computed
+/// identically by the preview and the fingerprint-bound commit entries
+/// (plan 5.2: a confirmed import must never store bytes the preview did
+/// not show).
+///
+/// A file pick (including a `.zip` — its own bytes cover any manifest
+/// or entry change inside it) is `sha256:<sha256 of the file
+/// bytes>:<size>`; a directory pick hashes the sorted walk manifest
+/// (`relative path + size` per file, from the same [`walk_bounded`]
+/// enumeration the preview's `input_bytes` runs) plus the total size:
+/// `sha256:<sha256 of the manifest>:<total size>`. Content edits inside
+/// a tree pick surface as size or layout changes; the token is stable
+/// across calls regardless of directory iteration order.
+pub fn input_fingerprint(picked: &Path) -> Result<String> {
+    let metadata = fs::metadata(picked).map_err(|_| {
+        Error::ChatImport(format!(
+            "cannot read {}: file or folder not found — pick it again",
+            picked.display()
+        ))
+    })?;
+    if metadata.is_file() {
+        let mut file = fs::File::open(picked)?;
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        return Ok(format!(
+            "sha256:{:x}:{}",
+            hasher.finalize(),
+            metadata.len()
+        ));
+    }
+    if metadata.is_dir() {
+        // Sorted so the manifest does not depend on directory iteration
+        // order (walk order is fs-dependent).
+        let mut files = walk_bounded(picked, &ImportBounds::default())?;
+        files.sort_by(|a, b| a.rel.cmp(&b.rel));
+        let mut hasher = Sha256::new();
+        let mut total: u64 = 0;
+        for file in &files {
+            hasher.update(file.rel.as_bytes());
+            hasher.update(&file.size.to_le_bytes());
+            total += file.size;
+        }
+        return Ok(format!("sha256:{:x}:{total}", hasher.finalize()));
+    }
+    Err(Error::ChatImport(format!(
+        "cannot read {}: file or folder not found — pick it again",
+        picked.display()
+    )))
+}
+
+/// A2a: refuse a fingerprint-bound import whose input no longer matches
+/// the preview's fingerprint — before any message or media byte is
+/// stored. [`crate::chat_export::import_bounded_bound_to`] and
+/// [`crate::mbox::import_pick_bounded_bound_to`] run this first.
+pub fn verify_input_fingerprint(picked: &Path, expected: &str) -> Result<()> {
+    let actual = input_fingerprint(picked)?;
+    if actual != expected {
+        return Err(Error::ChatImport(INPUT_CHANGED_AFTER_PREVIEW.to_string()));
     }
     Ok(())
 }
@@ -427,5 +503,68 @@ mod tests {
         let deep = format!("{}{}file.txt", "d/".repeat(bounds.max_depth), "e/");
         assert!(zip_entry_target(dest, &deep, &bounds).is_none());
         assert!(zip_entry_target(dest, "a/b/file.txt", &bounds).is_some());
+    }
+
+    #[test]
+    fn file_fingerprint_tracks_bytes_and_size() {
+        let dir = tmpdir("fp-file");
+        let file = dir.join("chat.txt");
+        fs::write(&file, b"[1.11.2026., 09:00:05] Marko: hi\n").unwrap();
+        let a = input_fingerprint(&file).unwrap();
+        // Stable across calls, `sha256:<hex>:<size>` shaped.
+        assert_eq!(input_fingerprint(&file).unwrap(), a);
+        assert!(a.starts_with("sha256:"), "{a}");
+        let size = fs::metadata(&file).unwrap().len();
+        assert!(a.ends_with(&format!(":{size}")), "{a}");
+        // Edited bytes (even same-size) change the token.
+        fs::write(&file, b"[1.11.2026., 09:00:05] Ana: yo\n").unwrap();
+        assert_ne!(input_fingerprint(&file).unwrap(), a);
+        // A grown file changes it too (size leg).
+        fs::write(&file, b"[1.11.2026., 09:00:05] Marko: hi again\n").unwrap();
+        assert_ne!(input_fingerprint(&file).unwrap(), a);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dir_fingerprint_tracks_the_sorted_walk_manifest() {
+        let dir = tmpdir("fp-dir");
+        fs::write(dir.join("result.json"), b"{\"messages\":[]}").unwrap();
+        let media = dir.join("photos");
+        fs::create_dir(&media).unwrap();
+        fs::write(media.join("p.jpg"), b"jpegbytes").unwrap();
+        let a = input_fingerprint(&dir).unwrap();
+        // Stable across calls (directory iteration order may differ).
+        assert_eq!(input_fingerprint(&dir).unwrap(), a);
+        assert!(a.starts_with("sha256:"), "{a}");
+        // A resized file changes the manifest hash.
+        fs::write(media.join("p.jpg"), b"jpegbytes-longer").unwrap();
+        let resized = input_fingerprint(&dir).unwrap();
+        assert_ne!(resized, a);
+        // A renamed (re-laid-out) file changes it too.
+        fs::rename(media.join("p.jpg"), media.join("q.jpg")).unwrap();
+        assert_ne!(input_fingerprint(&dir).unwrap(), resized);
+        // Restoring the layout and size restores the token.
+        fs::rename(media.join("q.jpg"), media.join("p.jpg")).unwrap();
+        fs::write(media.join("p.jpg"), b"jpegbytes").unwrap();
+        assert_eq!(input_fingerprint(&dir).unwrap(), a);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_refuses_changed_input_with_the_inspect_again_error() {
+        let dir = tmpdir("fp-verify");
+        let file = dir.join("chat.txt");
+        fs::write(&file, b"[1.11.2026., 09:00:05] Marko: hi\n").unwrap();
+        let expected = input_fingerprint(&file).unwrap();
+        verify_input_fingerprint(&file, &expected).unwrap();
+        fs::write(&file, b"[1.11.2026., 09:00:06] Ana: yo\n").unwrap();
+        let err = verify_input_fingerprint(&file, &expected)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("input changed after preview"), "{err}");
+        // A vanished input never matches either.
+        let _ = fs::remove_file(&file);
+        assert!(verify_input_fingerprint(&file, &expected).is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -24,7 +24,7 @@ use serde_json::{Map, Value};
 
 use crate::bounded::{Flow, StreamItem, StreamSource};
 use crate::chat_export::{self, ChatFormat};
-use crate::import_bounds::{expand_zip_bounded, walk_bounded, ImportBounds};
+use crate::import_bounds::{expand_zip_bounded, input_fingerprint, walk_bounded, ImportBounds};
 use crate::mbox::{EmlDirSource, MboxSource, MBOX_SOURCE};
 use crate::messenger::messenger_export_root;
 use crate::{Error, Result};
@@ -94,6 +94,16 @@ pub struct ImportPreview {
     pub assumed_zone: Option<String>,
     /// Human-readable caveats ("scan stopped at 500 items…").
     pub warnings: Vec<String>,
+    /// A2a: the stable fingerprint of the picked input
+    /// ([`crate::import_bounds::input_fingerprint`] — `sha256:<hex>:<size>`
+    /// over the file bytes, or the sorted walk manifest for a tree
+    /// pick). The confirmation passes it back to the fingerprint-bound
+    /// commit entries, which recompute it and refuse changed input, so
+    /// a stale preview can never authorize bytes it did not show.
+    /// Empty when the fingerprint could not be computed (the warnings
+    /// say so; an empty token never authorizes a bound commit).
+    #[serde(default)]
+    pub fingerprint: String,
 }
 
 /// A previewed input, split into what to render and what to import.
@@ -530,6 +540,19 @@ pub fn preview_import(picked: &Path) -> Result<ImportPreview> {
     } else {
         fs::metadata(picked).map(|m| m.len()).unwrap_or(0)
     };
+    // A2a: the fingerprint the confirm step binds to. A `.zip` pick is
+    // fingerprinted by its own file bytes (they cover every manifest or
+    // entry change inside it), so the guard's temp tree never enters
+    // the computation.
+    let fingerprint = match input_fingerprint(picked) {
+        Ok(token) => token,
+        Err(e) => {
+            warnings.push(format!(
+                "could not fingerprint the picked input — the confirm step cannot verify it: {e}"
+            ));
+            String::new()
+        }
+    };
     Ok(ImportPreview {
         kind: resolved.kind,
         source: resolved.source,
@@ -543,6 +566,7 @@ pub fn preview_import(picked: &Path) -> Result<ImportPreview> {
         naive_timestamps,
         assumed_zone,
         warnings,
+        fingerprint,
     })
 }
 
@@ -881,5 +905,216 @@ mod tests {
         assert_eq!(preview.kind, "telegram");
         assert_eq!(preview.messages_seen, 1);
         assert_eq!(preview.media_missing, 0, "photo present inside the zip");
+    }
+
+    // -----------------------------------------------------------------------
+    // A2a: fingerprint-bound confirmation. The preview's fingerprint is
+    // the token the commit entries verify (see
+    // `import_bounded_bound_to` / `import_pick_bounded_bound_to`), so a
+    // stale preview can never authorize changed bytes. These tests
+    // drive real imports against an in-memory vault, the same way
+    // `tests/object_store.rs` does.
+    // -----------------------------------------------------------------------
+
+    const WHATSAPP_A: &str = "[1.11.2026., 09:00:05] Marko: Zdravo ekipa!\n";
+    const WHATSAPP_B: &str = "[2.11.2026., 10:00:07] Ana: Potpuno drugi sadržaj!\n";
+
+    #[test]
+    fn preview_carries_a_fingerprint_and_deserializes_without_one() {
+        let dir = tempdir();
+        let path = dir.path().join("chat.txt");
+        write(&path, WHATSAPP_A);
+        let preview = preview_import(&path).expect("whatsapp preview");
+        assert_eq!(
+            preview.fingerprint,
+            crate::import_bounds::input_fingerprint(&path).unwrap()
+        );
+        assert!(
+            preview.fingerprint.starts_with("sha256:"),
+            "{}",
+            preview.fingerprint
+        );
+        // Additive serde: a serialized preview from before the field
+        // existed still deserializes (empty token, no refusal wording).
+        let older = serde_json::json!({
+            "kind": "whatsapp",
+            "source": "whatsapp:chat:x",
+            "input_bytes": 1,
+            "messages_seen": 1,
+            "scan_complete": true,
+            "parse_failures": 0,
+            "samples": [],
+            "media_referenced": 0,
+            "media_missing": 0,
+            "naive_timestamps": 0,
+            "assumed_zone": null,
+            "warnings": [],
+        });
+        let decoded: ImportPreview = serde_json::from_value(older).expect("older payload decodes");
+        assert_eq!(decoded.fingerprint, "");
+    }
+
+    #[test]
+    fn bound_commit_refuses_input_that_changed_after_preview() {
+        let dir = tempdir();
+        let path = dir.path().join("chat.txt");
+        write(&path, WHATSAPP_A);
+        let preview = preview_import(&path).expect("preview A");
+        // The pick changes between inspect and confirm.
+        write(&path, WHATSAPP_B);
+        let mut storage = crate::storage::Storage::open_in_memory().unwrap();
+        let err = crate::chat_export::import_bounded_bound_to(
+            &mut storage,
+            &path,
+            &preview.fingerprint,
+            false,
+            None,
+            None,
+            None,
+            &|| false,
+            &mut |_, _, _| {},
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("input changed after preview"),
+            "refusal names the stale preview: {err}"
+        );
+        assert_eq!(
+            storage.stats().unwrap().total,
+            0,
+            "nothing is imported from refused bytes"
+        );
+    }
+
+    #[test]
+    fn bound_commit_with_matching_fingerprint_imports_as_today() {
+        let dir = tempdir();
+        let path = dir.path().join("chat.txt");
+        write(&path, WHATSAPP_A);
+        let preview = preview_import(&path).expect("preview");
+        let mut plain = crate::storage::Storage::open_in_memory().unwrap();
+        let expected = crate::chat_export::import_bounded(
+            &mut plain,
+            &path,
+            false,
+            None,
+            &|| false,
+            &mut |_, _, _| {},
+        )
+        .unwrap();
+        let mut bound = crate::storage::Storage::open_in_memory().unwrap();
+        let actual = crate::chat_export::import_bounded_bound_to(
+            &mut bound,
+            &path,
+            &preview.fingerprint,
+            false,
+            None,
+            None,
+            None,
+            &|| false,
+            &mut |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            actual.summary, expected.summary,
+            "unchanged bytes import exactly as the plain path"
+        );
+        assert_eq!(actual.media, expected.media);
+        assert_eq!(
+            bound.stats().unwrap().total,
+            plain.stats().unwrap().total
+        );
+    }
+
+    #[test]
+    fn zip_whose_contents_changed_after_preview_is_refused() {
+        use std::io::Write as _;
+        let dir = tempdir();
+        let zip_path = dir.path().join("emls.zip");
+        let build = |extra: bool| {
+            let file = std::fs::File::create(&zip_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let mut entries = vec![
+                ("1.eml", b"Subject: a\nMessage-ID: <1@x>\n\nA\n".as_slice().to_vec()),
+                ("2.eml", b"Subject: b\nMessage-ID: <2@x>\n\nB\n".as_slice().to_vec()),
+            ];
+            if extra {
+                entries.push((
+                    "3.eml",
+                    b"Subject: c\nMessage-ID: <3@x>\n\nC\n".as_slice().to_vec(),
+                ));
+            }
+            for (name, bytes) in entries {
+                zip.start_file(name, zip::write::FileOptions::<()>::default())
+                    .unwrap();
+                zip.write_all(&bytes).unwrap();
+            }
+            zip.finish().unwrap();
+        };
+        build(false);
+        let preview = preview_import(&zip_path).expect("zip preview");
+        assert_eq!(preview.messages_seen, 2);
+        // The archive is rewritten before the confirm: the zip's own
+        // bytes changed, so its fingerprint no longer matches.
+        build(true);
+        let mut storage = crate::storage::Storage::open_in_memory().unwrap();
+        let data_dir = tempdir();
+        let err = crate::mbox::import_pick_bounded_bound_to(
+            &mut storage,
+            &zip_path,
+            &preview.fingerprint,
+            data_dir.path(),
+            &|| false,
+            &mut |_, _, _| {},
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("input changed after preview"),
+            "rewritten zip is refused: {err}"
+        );
+        assert_eq!(
+            storage.stats().unwrap().total,
+            0,
+            "nothing is extracted or imported from the rewritten zip"
+        );
+    }
+
+    #[test]
+    fn mail_pick_bound_to_a_changed_mbox_is_refused() {
+        let dir = tempdir();
+        let path = dir.path().join("archive.mbox");
+        write(
+            &path,
+            "From a@example.com Sun Nov  1 10:00:00 2026\n\
+             From: A <a@example.com>\nSubject: one\nMessage-ID: <m1@x>\n\nBody one.\n",
+        );
+        let preview = preview_import(&path).expect("mbox preview");
+        // The mailbox grows between inspect and confirm.
+        write(
+            &path,
+            "From a@example.com Sun Nov  1 10:00:00 2026\n\
+             From: A <a@example.com>\nSubject: one\nMessage-ID: <m1@x>\n\nBody one.\n\
+             From c@example.com Sun Nov  1 11:00:00 2026\n\
+             From: C <c@example.com>\nSubject: two\nMessage-ID: <m2@x>\n\nBody two.\n",
+        );
+        let mut storage = crate::storage::Storage::open_in_memory().unwrap();
+        let data_dir = tempdir();
+        let err = crate::mbox::import_pick_bounded_bound_to(
+            &mut storage,
+            &path,
+            &preview.fingerprint,
+            data_dir.path(),
+            &|| false,
+            &mut |_, _, _| {},
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("input changed after preview"),
+            "changed mbox is refused: {err}"
+        );
+        assert_eq!(storage.stats().unwrap().total, 0);
     }
 }
