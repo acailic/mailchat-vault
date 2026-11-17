@@ -294,11 +294,15 @@ async function runQuery(text: string): Promise<void> {
   await vi.waitFor(() => expect(searchCalls().length).toBeGreaterThan(0));
 }
 
-async function boot(): Promise<void> {
+async function boot(opts: { themeVesper?: string } = {}): Promise<void> {
   win = new Window();
   vi.stubGlobal("window", win);
   vi.stubGlobal("document", win.document);
   vi.stubGlobal("navigator", win.navigator);
+  // A pre-seeded machine-local theme record ("1"/"0") stands in for a
+  // prior explicit choice; without one the fresh-machine default applies.
+  if (opts.themeVesper !== undefined)
+    win.localStorage.setItem("mcv.themeVesper", opts.themeVesper);
   // Note: the happy-dom environment replaces the global URL class, so the
   // index.html path is resolved through node:url instead of new URL().
   const indexHtml = join(dirname(fileURLToPath(import.meta.url)), "..", "index.html");
@@ -4300,6 +4304,9 @@ describe("settings screen", () => {
     // The backend enum has no vesper variant: the save payload must carry
     // "dark" while the machine-local localStorage flag records the real
     // choice, and every settings render re-applies the flag's theme.
+    // Booting with a recorded non-vesper choice ("0") reproduces the
+    // pre-default machine state; the fresh-vault default has its own
+    // tests below.
     let savedTheme: string | undefined;
     tauri.handlers.set("settings_get", () => viewWith());
     tauri.handlers.set("settings_save", (args: unknown) => {
@@ -4317,10 +4324,10 @@ describe("settings screen", () => {
       providers: [LOCAL_ITEM, ZAI_ITEM],
       default_provider: "zai",
     }));
-    await boot();
+    await boot({ themeVesper: "0" });
     // Settings must have rendered once before saving is allowed.
     await vi.waitFor(() => expect(input("#summarize-top").value).toBe("8"));
-    expect(win.localStorage.getItem("mcv.themeVesper")).toBe(null);
+    expect(win.localStorage.getItem("mcv.themeVesper")).toBe("0");
 
     // Selecting vesper applies the explicit theme immediately.
     const select = input("#theme");
@@ -4349,6 +4356,77 @@ describe("settings screen", () => {
     expect(savedTheme).toBe("light");
     expect(input("#theme").value).toBe("light");
     expect(document.documentElement.dataset.theme).toBe("light");
+  });
+
+  it("a fresh vault defaults to vesper and records the choice", async () => {
+    // No saved theme choice and no machine-local record: the first
+    // settings render resolves the product default Vesper — pinning the
+    // explicit palette (the OS scheme cannot flip it), selecting it in
+    // the form, and recording the decision so it is never re-made.
+    tauri.handlers.set("settings_get", () => viewWith()); // theme: "system"
+    await boot();
+    await vi.waitFor(() => expect(input("#theme").value).toBe("vesper"));
+    expect(win.localStorage.getItem("mcv.themeVesper")).toBe("1");
+    expect(document.documentElement.dataset.theme).toBe("vesper");
+    expect(document.documentElement.style.colorScheme).toBe("dark");
+  });
+
+  it("restart keeps vesper: a recorded choice re-resolves over a still-System view", async () => {
+    // The record written on first run is machine-local: a later render
+    // (the restart path) with the unchanged System view stays Vesper.
+    tauri.handlers.set("settings_get", () => viewWith()); // theme: "system"
+    await boot({ themeVesper: "1" });
+    await vi.waitFor(() => expect(input("#theme").value).toBe("vesper"));
+    expect(document.documentElement.dataset.theme).toBe("vesper");
+    expect(win.localStorage.getItem("mcv.themeVesper")).toBe("1");
+  });
+
+  it("a saved light theme renders as saved with no local record", async () => {
+    // An explicitly owned choice is never defaulted: saved Light wins on
+    // a machine with no record, and nothing is recorded for it.
+    tauri.handlers.set("settings_get", () => viewWith((v) => (v.theme = "light")));
+    await boot();
+    await vi.waitFor(() => expect(input("#theme").value).toBe("light"));
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(win.localStorage.getItem("mcv.themeVesper")).toBe(null);
+  });
+
+  it("a saved dark theme renders as saved with no local record", async () => {
+    tauri.handlers.set("settings_get", () => viewWith((v) => (v.theme = "dark")));
+    await boot();
+    await vi.waitFor(() => expect(input("#theme").value).toBe("dark"));
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(win.localStorage.getItem("mcv.themeVesper")).toBe(null);
+  });
+
+  it("an explicit System pick after the default records the choice and sticks", async () => {
+    // First run defaults to Vesper; the user then selects System and
+    // saves: the save records the explicit non-vesper choice (the same
+    // persistThemeVesper seam), settings.json keeps "system", and the
+    // re-render follows the OS scheme instead of the default.
+    let savedTheme: string | undefined;
+    tauri.handlers.set("settings_get", () => viewWith());
+    tauri.handlers.set("settings_save", (args: unknown) => {
+      const payload = (args as { payload: { theme?: string } }).payload;
+      savedTheme = payload.theme;
+      return viewWith((v) => {
+        v.theme = payload.theme;
+      });
+    });
+    await boot();
+    await vi.waitFor(() => expect(input("#theme").value).toBe("vesper"));
+
+    const select = input("#theme");
+    select.value = "system";
+    fireChange(select);
+    $("#settings-save-general").click();
+    await vi.waitFor(() =>
+      expect(win.localStorage.getItem("mcv.themeVesper")).toBe("0"),
+    );
+    expect(savedTheme).toBe("system");
+    expect(input("#theme").value).toBe("system");
+    expect(document.documentElement.dataset.theme).toBeUndefined();
+    expect(document.documentElement.style.colorScheme).toBe("");
   });
 
   it("renders the M7 keep-alive toggles from the view and saves them back", async () => {
@@ -4465,8 +4543,11 @@ describe("settings screen", () => {
   });
 
   it("theme changes apply immediately, not only after save", async () => {
+    // A recorded non-vesper choice keeps the pre-default render (System)
+    // so switching to Dark is a real change; the fresh-vault default
+    // (Vesper on first render) has its own tests above.
     tauri.handlers.set("settings_get", () => viewWith((v) => (v.theme = "system")));
-    await boot();
+    await boot({ themeVesper: "0" });
     await vi.waitFor(() => expect(input("#theme").value).toBe("system"));
     input("#theme").value = "dark";
     fireChange(input("#theme"));
