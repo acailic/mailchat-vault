@@ -115,7 +115,7 @@ Answers label their evidence scope (“Based on 6 matching messages”). Citatio
 
 ## Visual direction
 
-Use a quiet reference-library aesthetic with dense but comfortable message rows. Bundle Source Sans 3 with its license, falling back to native UI fonts. Body text is 15px/1.5, metadata 13px, section titles 18px, and page titles 24px. Use a 4px spacing scale, 8–12px row padding, restrained 4–6px radii, and borders rather than decorative card shadows.
+Use a quiet reference-library aesthetic with dense but comfortable message rows. Bundle Source Sans 3 with its license, falling back to native UI fonts. Type sizes come from one modular rem ramp (--text-xs…--text-2xl, ratio ≈ 1.25): body text 15px/1.5, metadata 13px, section titles 18px, page titles 24px, every font-size naming a ramp step. Counts, timestamps, sizes, and durations render tabular numerals; pane headers and empty-state headlines take a display variant (heavier weight, tighter tracking). Use a 4px spacing scale, 8–12px row padding, restrained 4–6px radii, and borders rather than decorative card shadows.
 
 Define semantic tokens for canvas, panel, text, muted text, border, accent, selection, match, success, warning, and danger. Start with warm neutral light surfaces and a forest-green accent; provide a dark equivalent and System/Light/Dark settings. Final token values must pass measured contrast. Use an amber search-match highlight distinct from selection. Keep message lines near 70–85 characters where space permits.
 
