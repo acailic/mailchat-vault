@@ -65,6 +65,10 @@
 //! - [`oauth`]: the Google OAuth2 login flow behind IMAP XOAUTH2 — PKCE
 //!   loopback-redirect authorization, token exchange/refresh, SASL string.
 //! - [`search`]: free-text to FTS5 MATCH query building.
+//! - [`simhash`]: 64-bit SimHash near-duplicate fingerprints over
+//!   k=4 word shingles (storage slice: computed at import, persisted
+//!   per message; query-time folding and the backfill for existing
+//!   archives are follow-up slices).
 //! - [`llm`]: LLM-assisted search — natural language to an FTS5 plan, then
 //!   a summary over the top results (privacy-scoped RAG).
 //! - [`vector`]: local embeddings (offline embedder, SQLite blob index,
@@ -139,6 +143,7 @@ pub mod search;
 pub mod search2;
 pub mod settings;
 pub mod signal;
+pub mod simhash;
 pub mod staged_write;
 pub mod stats;
 pub mod storage;

@@ -1070,6 +1070,28 @@ const MIGRATIONS: &[(i64, &str)] = &[
         CREATE INDEX idx_original_references_digest ON original_references (digest);
         "#,
     ),
+    (
+        27,
+        // SimHash near-duplicate fingerprints (P2.12, storage slice):
+        // one 64-bit fingerprint per message, computed over the stored
+        // body text exactly as the archive_fts triggers index it and
+        // written in the same transaction as the message by
+        // [`insert_message_in_tx`]. Real archives are full of forwarded
+        // chains, quoted replies, and the same announcement across mail
+        // and chat; exact-sha dedup misses them all. The fingerprint is
+        // the edit-stable handle query-time folding and the Ask
+        // pipeline's passage dedup consume later (Manku/Jain/Das Sarma
+        // WWW 2007; Broder 1997 — see [`crate::simhash`]). Messages
+        // archived before this migration carry no row until the
+        // separately scoped backfill runs.
+        r#"
+        CREATE TABLE message_fingerprints (
+            message_id INTEGER PRIMARY KEY REFERENCES archive_messages(id)
+                ON DELETE CASCADE,
+            simhash64  INTEGER NOT NULL
+        );
+        "#,
+    ),
 ];
 
 /// Rust halves of migrations, for backfill logic that SQL alone cannot
@@ -4754,6 +4776,16 @@ fn insert_message_in_tx(
         "INSERT INTO message_occurrences (message_id, scope, provider_item_id, import_id)
          VALUES (?1, 'import', ?2, ?3)",
         params![id, msg.external_id, import_id],
+    )?;
+    // Near-duplicate fingerprint over the body exactly as stored — the
+    // same text the archive_fts insert trigger just indexed — so
+    // query-time folding (P2.12 follow-up) never recomputes it. In the
+    // same transaction as the message: a message and its fingerprint
+    // land together or not at all.
+    tx.execute(
+        "INSERT INTO message_fingerprints (message_id, simhash64)
+         VALUES (?1, ?2)",
+        params![id, crate::simhash::simhash64(&msg.body) as i64],
     )?;
     Ok(InsertOutcome::Inserted(id))
 }

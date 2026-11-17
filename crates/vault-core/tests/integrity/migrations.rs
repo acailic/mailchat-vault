@@ -14,17 +14,20 @@ use crate::util::{migrations_table, msg, raw, version1_db_with_data};
 
 /// The schema version this build knows; bump expectation when a migration
 /// is added (the assertions below are version-agnostic where possible).
-const KNOWN_VERSION: i64 = 26;
-// The applied ledger is contiguous 1-26: 18 saved searches and 19
+const KNOWN_VERSION: i64 = 27;
+// The applied ledger is contiguous 1-27: 18 saved searches and 19
 // collections from main, 20 people (the #197 slice, first in the
 // merge queue so it keeps 20), 21 the what's-new created_at index
 // (renumbered from its original 20 for this merge), 22 the
 // attachment_refs projection (A6), 23 the person link history
 // ledger (A5a), 24 the durable source receipts table plus the
-// import-checkpoint count totals, and 25 the manual-export reminder
-// preferences (A9).
+// import-checkpoint count totals, 25 the manual-export reminder
+// preferences (A9), 26 the original-retention object store and
+// references, and 27 the SimHash message-fingerprint side table
+// (P2.12).
 const APPLIED_VERSIONS: &[i64] = &[
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+    27,
 ];
 
 fn migrations_rows(db: &std::path::Path) -> Vec<i64> {
