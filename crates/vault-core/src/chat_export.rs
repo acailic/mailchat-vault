@@ -114,8 +114,9 @@ pub fn detect_chat_format_reader(path: &Path) -> Result<Option<ChatFormat>> {
 }
 
 /// Outcome of a chat export import: the ingest summary, the bounded
-/// run's import id (the "View imported messages" scope), and (when media
-/// extraction ran) how the media pass went.
+/// run's import id (the "View imported messages" scope), (when media
+/// extraction ran) how the media pass went, and (when the run
+/// completed) the durable receipt the completing commit wrote.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatImportOutcome {
     pub summary: IngestSummary,
@@ -123,6 +124,13 @@ pub struct ChatImportOutcome {
     #[serde(default)]
     pub import_id: String,
     pub media: Option<MediaSummary>,
+    /// The completed import's receipt (A2b): run-total new/present/
+    /// failed counts, file outcomes, and observed bounds, as the
+    /// completing commit recorded them in the same transaction as its
+    /// final batch. `None` on a cancelled run, and absent in job
+    /// results written before the field existed (it defaults in).
+    #[serde(default)]
+    pub receipt: Option<crate::storage::SourceReceipt>,
 }
 
 impl From<BoundedOutcome> for ChatImportOutcome {
@@ -131,6 +139,7 @@ impl From<BoundedOutcome> for ChatImportOutcome {
             summary: outcome.summary,
             import_id: outcome.import_id,
             media: outcome.media,
+            receipt: outcome.receipt,
         }
     }
 }

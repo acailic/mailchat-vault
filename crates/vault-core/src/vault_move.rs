@@ -1,111 +1,204 @@
-//! A7: the vault-location engine — candidate inspection, move preview,
-//! and the crash-recoverable move journal.
+//! The A7 vault-location engine: inspect a candidate directory,
+//! preview a move with an estimate, and keep a crash-recoverable move
+//! journal whose every phase has one defined recovery action.
 //!
-//! This module is the protocol engine behind the plan's move steps
-//! (docs/archive-experience-plan.md section 8). The desktop folder
-//! picker and the Tauri wiring are a thin follow-up; nothing here has
-//! UI dependencies.
+//! This slice is the protocol engine only — the desktop folder picker
+//! and the Tauri wiring are a thin follow-up, and the executing copy
+//! (a future `vault_move_commit`, plan section 8 steps 2–5) is the
+//! next ticket. Nothing here switches the active vault or removes the
+//! old copy.
 //!
 //! # Inspection
 //!
-//! [`inspect_location`] examines a candidate directory and **refuses**
-//! everything this build must not treat as a vault destination: a
-//! missing or non-directory path, a directory without write access, a
-//! network filesystem (SQLite WAL requires all participants on the
-//! same host — the active vault never lives on one), an unrelated
-//! directory (content but no vault identity is never prepared for
-//! overwrite), an identity belonging to a different vault, or a
-//! `vault.db` with a schema newer than this build supports. A
-//! successful inspection reports free space, the filesystem type, and
-//! whether the directory is empty or already holds a compatible vault.
+//! [`vault_location_inspect`] answers "could the active vault live
+//! here?": the directory must exist, be writable (a probe file), sit
+//! on a **local** filesystem (network filesystems are refused for an
+//! active WAL vault — [SQLite WAL](https://www.sqlite.org/wal.html)
+//! requires every participant on the same host; backup *destinations*
+//! are validated separately and may be remote), and report free space
+//! through the existing `fs4` usage. An existing identity
+//! (`vault.json`) is read and validated: a directory holding another
+//! vault's identity is never prepared for overwrite, and an existing
+//! database must not carry a schema newer than this build. A directory
+//! with content but no vault identity or database is refused as
+//! unrelated — never silently taken over.
 //!
-//! Filesystem-type detection parses a mount table that the caller
-//! supplies ([`inspect_location`] takes it as a string) so tests can
-//! fixture network mounts without privileges;
-//! [`host_mount_table`] reads `/proc/self/mounts` on Linux. macOS and
-//! Windows detection is a documented follow-up for the desktop ticket:
-//! with no mount-table text, detection reports an unknown filesystem,
-//! which inspection does not refuse (only *known network* filesystems
-//! are refused).
+//! Filesystem-type detection reads `/proc/self/mounts` on Linux; the
+//! mount-table source is injectable so tests fixture network mounts
+//! without privileges. macOS and Windows detection is the desktop
+//! follow-up (an unreadable mount table reports
+//! [`FilesystemKind::Unknown`], never a guess).
 //!
 //! # Preview
 //!
-//! [`preview_move`] produces the phased plan (quiesce → snapshot and
-//! object inventory → staged verified copy → pointer switch → restart
-//! with the old copy retained) with a byte estimate derived from the
-//! same counting path the backup uses ([`crate::backup::snapshot_for_backup`]):
-//! an exact snapshot of the database plus every referenced object plus
-//! the portable settings file when present. A move is always a
-//! **verified copy**; cross-volume is detected and reported, but the
-//! engine never assumes a rename is possible even on one volume.
+//! [`vault_move_preview`] produces the phased plan of the move
+//! protocol (quiesce → snapshot → staged verified copy → pointer
+//! switch → restart with the old copy retained) plus a byte estimate
+//! derived from the backup snapshot path ([`backup::snapshot_for_backup`]):
+//! database, every referenced object, and the portable settings file
+//! when present. The copy is always a **verified copy** — a
+//! cross-volume move is never assumed to be an atomic rename, and the
+//! same-volume case makes no rename assumption either.
 //!
 //! The quiesce contract is caller-managed, exactly as the backup
-//! snapshot path documents its writer-connection contract:
-//! [`preview_move`] runs on the vault's **writer** connection, with new
-//! writes paused behind the write queue, so the SQLite backup API
-//! yields a consistent snapshot of a WAL database. This module never
-//! stops jobs or watchers itself.
+//! snapshot path documents its writer-connection contract: the caller
+//! stops new jobs and watch events, finishes or cancels current work,
+//! and holds writers stable before the snapshot phase runs.
 //!
-//! # Journal
+//! # The move journal
 //!
-//! [`MoveJournal`] is device-local serde JSON under the existing
-//! recovery-directory convention ([`crate::backup::recovery_dir`]) with
-//! a distinct filename (`move-journal.json`, never the restore switch
-//! journal's). Every record carries **both** vault endpoints —
-//! identity and path — plus the intent, so an interruption can be
-//! resolved without guessing which vault was moving where.
+//! The journal is device-local JSON under the existing
+//! recovery-directory convention ([`backup::recovery_dir`]) with its
+//! own file name ([`MOVE_JOURNAL_FILE`]); it never lives on the
+//! destination volume, which may disappear. Every phase carries both
+//! vault endpoints (identity and path — the same stable vault UUID
+//! moving from origin to destination), the staging paths, and the
+//! move intent, so an interrupted move can be resolved without
+//! guessing:
 //!
-//! [`resolve_interrupted_move`] turns any journal into exactly one
-//! defined action **before a pool opens**: every pre-pointer phase
-//! resolves with the **origin** vault authoritative (this slice ships
-//! no `vault_move_commit` executor, and the origin is the last copy
-//! known complete and writable), a crash at the atomic pointer switch
-//! rolls **forward** to the already-verified destination, and a
-//! completed journal reports completion. Each outcome names exactly
-//! one writable vault ([`MoveRecovery::writable_vault`]) — an
-//! interrupted move must never leave two.
+//! | phase | meaning | recovery action |
+//! |---|---|---|
+//! | [`MovePhase::Intended`] | journal written, nothing started | cancel the move; the origin stays authoritative |
+//! | [`MovePhase::Quiesced`] | jobs/watch stopped, writers held | resume the origin; discard any staging |
+//! | [`MovePhase::Snapshotted`] | consistent snapshot + object inventory staged | discard the staging snapshot; resume the origin |
+//! | [`MovePhase::Copying`] | staged copy in progress on the destination | discard the partial destination staging; resume the origin |
+//! | [`MovePhase::Copied`] | copy finished and checksum-verified | roll **back** to the origin: the verified duplicate is removed so no second writable vault exists (a future executor slice may offer roll-forward) |
+//! | [`MovePhase::PointerSwitched`] | the bootstrap pointer names the destination | activate the destination; the origin copy is retained (read-only through this app) until separately removed |
+//! | [`MovePhase::Completed`] | the move finished | nothing to do |
 //!
-//! Executing the copy, the pointer swap, and the per-phase crash
-//! matrix is the separately mergeable `vault_move_commit` ticket; this
-//! module never switches the active vault, never writes a `vault.json`
-//! (only tests and the commit slice do), and never removes the old
-//! copy.
+//! [`recover_interrupted_move`] runs at startup **before a pool is
+//! opened** and enacts the action for the phase it finds, marking the
+//! journal completed once resolved. The origin vault is authoritative
+//! whenever the commit executor is absent — this build has no
+//! executor, so every pre-pointer interruption resolves to the intact
+//! origin and a cleaned destination. A journal at
+//! [`MovePhase::PointerSwitched`] whose destination is gone resolves
+//! to the typed [`MoveError::VaultUnavailable`] fact (the recovery
+//! screen path) with the journal left unresolved — the user reattaches
+//! the location; an empty replacement archive is never created.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::MetadataExt;
+use std::fs::{self, File};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-use crate::backup::{recovery_dir, snapshot_for_backup};
-use crate::storage::SUPPORTED_SCHEMA_VERSION;
-use crate::vault_session::VaultIdentity;
+use crate::backup::{self, fsync_dir, now_rfc3339_utc, write_json_atomic};
+use crate::settings::SETTINGS_FILE;
+use crate::storage::{read_schema_version, SUPPORTED_SCHEMA_VERSION};
+use crate::vault_session::{self, SessionError};
 
-/// The move-journal file inside the recovery directory — deliberately
-/// distinct from the restore switch journal (`switch-journal.json`),
-/// so an interrupted move and an interrupted restore can never be
-/// confused for one another.
+/// The move-journal file inside the recovery directory — distinct from
+/// the backup switch journal so a restore and a move never collide.
 pub const MOVE_JOURNAL_FILE: &str = "move-journal.json";
 
-/// The move-journal format version this build writes.
+/// The move-journal format version this build writes; a journal with a
+/// newer version refuses to resolve (an older build cannot interpret
+/// it).
 pub const MOVE_JOURNAL_VERSION: u32 = 1;
 
-/// Free-space slack on top of measured bytes for a move destination
-/// (filesystem metadata, atomic temp files and renames) — mirrors the
-/// backup preflight's slack.
-pub const MOVE_SLACK_BYTES: u64 = 4 * 1024 * 1024;
+/// The staging directory a move creates **inside** the destination
+/// root: the staged, checksum-verified copy lands here and is only
+/// finalized into the destination root by the pointer-switch phase.
+pub const DESTINATION_STAGING_DIR: &str = ".mailchat-move-staging";
 
-/// Filesystem types that cannot host the **active** vault: SQLite WAL
-/// requires every participant on the same host, and these filesystems
-/// move pages across hosts. Backup *destinations* may be network
-/// storage; the live vault may not.
-/// <https://www.sqlite.org/wal.html>
+/// The staging area (snapshot + object inventory) a move creates
+/// inside the origin's recovery directory — device-local, like the
+/// journal itself.
+pub const ORIGIN_STAGING_DIR: &str = "move-staging";
+
+// ---------------------------------------------------------------------------
+// Errors — typed facts for the UI and the recovery screen
+// ---------------------------------------------------------------------------
+
+/// Why a location inspection, preview, or journal resolution refused.
+/// Every variant is a fact to show (the later recovery screen consumes
+/// [`MoveError::VaultUnavailable`]), never a silent fallback.
+#[derive(Debug, thiserror::Error)]
+pub enum MoveError {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("database error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("the candidate vault location does not exist: {0}")]
+    DirectoryMissing(PathBuf),
+    #[error("the candidate vault location is not a directory: {0}")]
+    NotADirectory(PathBuf),
+    #[error("the candidate vault location is not writable: {0}")]
+    NotWritable(PathBuf),
+    #[error(
+        "refusing the network filesystem {fstype} at {path}: an active WAL vault must live on \
+         local storage (https://www.sqlite.org/wal.html)"
+    )]
+    NetworkFilesystem { fstype: String, path: PathBuf },
+    #[error(
+        "refusing to prepare the unrelated directory {0} for overwrite: it holds content but no \
+         vault identity or database"
+    )]
+    UnrelatedDirectory(PathBuf),
+    #[error("the vault identity at {path} is invalid: {reason}")]
+    InvalidIdentity { path: PathBuf, reason: String },
+    #[error(
+        "the destination already holds vault {destination_id} while the active vault is \
+         {active_id} — another vault is never overwritten"
+    )]
+    DestinationVaultMismatch {
+        path: PathBuf,
+        destination_id: String,
+        active_id: String,
+    },
+    #[error(
+        "archive schema version {db} is newer than this build supports ({supported}); upgrade \
+         the app before opening it"
+    )]
+    SchemaTooNew { db: i64, supported: i64 },
+    #[error(
+        "the vault this journal switched to is unavailable: {0} — reattach the location and \
+         restart; no replacement archive was created"
+    )]
+    VaultUnavailable(PathBuf),
+    #[error(
+        "an unresolved vault move journal exists (phase {state:?}); resolve it before planning \
+         another move"
+    )]
+    UnresolvedJournal { state: MovePhase },
+    #[error("vault move error: {0}")]
+    Vault(String),
+}
+
+fn move_err(e: crate::Error) -> MoveError {
+    MoveError::Vault(e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem-type detection (Linux; injectable mount table)
+// ---------------------------------------------------------------------------
+
+/// The filesystem a candidate location sits on. `Local` and `Network`
+/// carry the mount-table filesystem type (`ext4`, `nfs4`, …);
+/// `Unknown` means the mount table could not be read (a non-Linux OS
+/// today; the desktop follow-up adds macOS/Windows detection).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilesystemKind {
+    Local(String),
+    Network(String),
+    Unknown,
+}
+
+/// Filesystem types refused for an active WAL vault: every network
+/// filesystem the Linux mount table can name that a personal machine
+/// plausibly mounts. Cloud-synchronized *directories* on a local
+/// filesystem are a supported-configuration matter, not a detectable
+/// mount type (see the plan: copying completed backups is the
+/// supported route onto such storage).
 pub const NETWORK_FILESYSTEMS: &[&str] = &[
     "nfs",
     "nfs4",
+    "nfsd",
     "cifs",
     "smb",
     "smbfs",
@@ -113,176 +206,78 @@ pub const NETWORK_FILESYSTEMS: &[&str] = &[
     "ncpfs",
     "afs",
     "ceph",
+    "fuse.cephfs",
     "lustre",
-    "gpfs",
-    "beegfs",
-    "9p",
+    "fuse.lustre",
+    "glusterfs",
+    "fuse.glusterfs",
+    "sshfs",
     "fuse.sshfs",
-    "fuse.s3fs",
-    "fuse.davfs2",
+    "9p",
+    "v9fs",
     "davfs",
-    "davfs2",
+    "fuse.davfs2",
 ];
 
-/// Why a candidate location (or a move over it) was refused. Every
-/// refusal is a typed fact the UI can render; none of them ever
-/// leaves the candidate directory prepared for overwrite.
-#[derive(Debug, thiserror::Error)]
-pub enum MoveError {
-    /// The candidate path does not exist. A native picker normally
-    /// yields existing directories; a missing path is a refusal, not a
-    /// creation.
-    #[error("the vault location does not exist: {path}")]
-    Missing { path: PathBuf },
-    /// The recorded active vault location is missing — an unplugged or
-    /// unmounted external drive. This is the recovery-screen fact:
-    /// the vault is **never** recreated as an empty replacement
-    /// archive, and this app never writes under the missing path.
-    #[error(
-        "the vault location is missing (an external drive may be unplugged): {path} — no \
-         replacement archive was created; reconnect the drive or pick a recovery path"
-    )]
-    ExternalVaultMissing { path: PathBuf },
-    /// The candidate path exists but is not a directory.
-    #[error("the vault location is not a directory: {path}")]
-    NotADirectory { path: PathBuf },
-    /// The write probe inside the candidate directory failed.
-    #[error("the vault location is not writable: {path}")]
-    NotWritable { path: PathBuf },
-    /// The candidate lives on a network filesystem, which the active
-    /// WAL vault must never do (SQLite WAL requires all participants
-    /// on one host). Copying a *backup* there remains allowed.
-    #[error(
-        "network filesystem {fs:?} at {path} cannot host the active vault (SQLite WAL \
-         requires all participants on the same host); use it for backups only"
-    )]
-    NetworkFilesystem { fs: String, path: PathBuf },
-    /// The directory holds content but no vault identity: an unrelated
-    /// directory is never prepared for overwrite.
-    #[error(
-        "the directory {path} holds unrelated content and no vault identity — it is never \
-         prepared for overwrite"
-    )]
-    UnrelatedDirectory { path: PathBuf },
-    /// A `vault.json` exists but is not a valid identity for this
-    /// build (unknown format marker, unsupported version, unparseable
-    /// UUID, or a recorded directory name that binds it elsewhere).
-    #[error("the vault identity at this location is invalid: {0}")]
-    InvalidIdentity(String),
-    /// The directory already holds a different vault; a move over it
-    /// would overwrite that vault's identity.
-    #[error(
-        "the directory {path} already holds vault {existing}, not the moving vault {active} — \
-         it is never overwritten"
-    )]
-    IdentityMismatch {
-        path: PathBuf,
-        existing: String,
-        active: String,
-    },
-    /// A `vault.db` exists but cannot be opened/read as a schema
-    /// version.
-    #[error("cannot read the vault database at {path}: {reason}")]
-    InvalidVaultDb { path: PathBuf, reason: String },
-    /// The existing vault's schema version is newer than this build
-    /// supports (same refusal as opening one).
-    #[error(
-        "vault at {path} uses schema version {db}, newer than this build supports \
-         ({supported}); upgrade the app before opening it"
-    )]
-    SchemaTooNew {
-        path: PathBuf,
-        db: i64,
-        supported: i64,
-    },
-    /// The destination filesystem cannot hold the estimated move.
-    #[error(
-        "not enough free space to move the vault: need {needed} bytes, only {available} \
-         available"
-    )]
-    InsufficientSpace { needed: u64, available: u64 },
-    /// An error from the reused vault machinery (snapshot/backup
-    /// counting, storage reads).
-    #[error("vault move error: {0}")]
-    Vault(String),
-    /// An I/O error.
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-    /// A JSON error while reading or writing the journal.
-    #[error("json error: {0}")]
-    Json(#[from] serde_json::Error),
+/// The injectable mount-table source: returns `/proc/self/mounts`
+/// text. Tests fixture network mounts through a closure; production
+/// passes [`proc_mounts`].
+pub type MountTable<'a> = &'a dyn Fn() -> std::io::Result<String>;
+
+/// The production mount-table source: `/proc/self/mounts` on Linux,
+/// an unsupported error elsewhere (reported as
+/// [`FilesystemKind::Unknown`], never a guess).
+pub fn proc_mounts() -> std::io::Result<String> {
+    #[cfg(target_os = "linux")]
+    {
+        fs::read_to_string("/proc/self/mounts")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err(std::io::Error::other(
+            "mount-table detection is implemented for Linux only (desktop follow-up covers \
+             macOS and Windows)",
+        ))
+    }
 }
 
-fn vault_err(context: &str, e: crate::Error) -> MoveError {
-    MoveError::Vault(format!("{context}: {e}"))
-}
-
-// ---------------------------------------------------------------------------
-// Filesystem detection
-// ---------------------------------------------------------------------------
-
-/// What detection learned about a candidate's filesystem.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FilesystemInfo {
-    /// The mount-table filesystem type (`ext4`, `nfs`, …); `"unknown"`
-    /// when no mount entry matched or the platform provides no mount
-    /// table (macOS/Windows detection is a documented desktop
-    /// follow-up).
-    pub fs_type: String,
-    /// Whether the type is one of [`NETWORK_FILESYSTEMS`]. Only a
-    /// *known network* type is refused; `unknown` is not.
-    pub network: bool,
-}
-
-/// Read this host's mount table. On Linux this is
-/// `/proc/self/mounts`; elsewhere it returns an empty string (detection
-/// then reports `unknown`, which inspection does not refuse — see the
-/// module docs for the OS-specific follow-up note).
-pub fn host_mount_table() -> String {
-    fs::read_to_string("/proc/self/mounts").unwrap_or_default()
-}
-
-/// Detect the filesystem backing `path` from a mount table's text
-/// (each line: `device mountpoint fstype options dump pass`). The
-/// entry whose mountpoint is the longest prefix of the canonicalized
-/// path wins; `\040`-style escapes in mountpoints are decoded. An
-/// empty or non-matching table yields `fs_type: "unknown"`.
-pub fn detect_filesystem(path: &Path, mount_table: &str) -> FilesystemInfo {
-    let candidate = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+/// Classify a (canonical) path against mount-table text: the entry
+/// whose mount point is the longest component-wise prefix of the path
+/// wins, exactly as mount resolution works; its filesystem type is
+/// checked against [`NETWORK_FILESYSTEMS`]. No matching entry means
+/// `Unknown`.
+pub fn filesystem_kind(canonical_path: &Path, mounts: &str) -> FilesystemKind {
     let mut best: Option<(usize, String)> = None;
-    for line in mount_table.lines() {
-        let mut fields = line.split_whitespace();
-        let (Some(_dev), Some(mount), Some(fstype)) = (fields.next(), fields.next(), fields.next())
+    for line in mounts.lines() {
+        let mut fields = line.split(' ');
+        let (Some(_device), Some(mount_point), Some(fstype)) =
+            (fields.next(), fields.next(), fields.next())
         else {
             continue;
         };
-        let mount = unescape_mount_point(mount);
-        let mount = Path::new(&mount);
-        // `Path::starts_with` compares whole components, so `/a/b`
-        // matches mount `/a` but never `/abc`.
-        if candidate.starts_with(mount) {
-            let len = mount.as_os_str().len();
-            if best.as_ref().is_none_or(|(best_len, _)| len > *best_len) {
-                best = Some((len, fstype.to_string()));
+        let mount_point = unescape_mount_point(mount_point);
+        let mount_path = PathBuf::from(mount_point);
+        if canonical_path.starts_with(&mount_path) {
+            let depth = mount_path.components().count();
+            // Prefer the last of equal-depth entries: a later line in
+            // the mount table is the overmounted, visible filesystem.
+            let better = best.as_ref().is_none_or(|(current, _)| depth >= *current);
+            if better {
+                best = Some((depth, fstype.to_string()));
             }
         }
     }
     match best {
-        Some((_, fs_type)) => {
-            let network = NETWORK_FILESYSTEMS
-                .iter()
-                .any(|n| n.eq_ignore_ascii_case(&fs_type));
-            FilesystemInfo { fs_type, network }
+        Some((_, fstype)) if NETWORK_FILESYSTEMS.contains(&fstype.as_str()) => {
+            FilesystemKind::Network(fstype)
         }
-        None => FilesystemInfo {
-            fs_type: "unknown".to_string(),
-            network: false,
-        },
+        Some((_, fstype)) => FilesystemKind::Local(fstype),
+        None => FilesystemKind::Unknown,
     }
 }
 
-/// Decode the octal escapes `/proc/self/mounts` uses for spaces and
-/// tabs in mount points (`\040`, `\011`, …).
+/// Decode the octal escapes `/proc/self/mounts` uses in mount points
+/// (`\040` space, `\011` tab, `\012` newline, `\134` backslash).
 fn unescape_mount_point(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut chars = raw.chars();
@@ -291,723 +286,739 @@ fn unescape_mount_point(raw: &str) -> String {
             out.push(c);
             continue;
         }
-        let mut digits = String::new();
-        for _ in 0..3 {
-            match chars.clone().next() {
-                Some(d) if d.is_ascii_digit() => {
-                    digits.push(d);
+        let rest: String = chars.clone().take(3).collect();
+        let decoded = match rest.as_str() {
+            "040" => Some(' '),
+            "011" => Some('\t'),
+            "012" => Some('\n'),
+            "134" => Some('\\'),
+            _ => None,
+        };
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                for _ in 0..3 {
                     chars.next();
                 }
-                _ => break,
             }
+            None => out.push('\\'),
         }
-        if digits.len() == 3 {
-            if let Ok(value) = u8::from_str_radix(&digits, 8) {
-                out.push(value as char);
-                continue;
-            }
-        }
-        out.push('\\');
-        out.push_str(&digits);
     }
     out
 }
 
 // ---------------------------------------------------------------------------
-// Inspection
+// Location inspection
 // ---------------------------------------------------------------------------
 
-/// What inspection found in the candidate directory.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LocationDisposition {
-    /// The directory holds nothing at all (ignoring this inspection's
-    /// own probe file, which is always removed): a safe destination
-    /// for a new copy of the vault.
+/// What the candidate directory already holds, from the identity file
+/// and database found there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExistingContent {
+    /// Nothing (ignoring dot-prefixed leftovers like an aborted move's
+    /// staging): a fresh location the move may populate.
     Empty,
-    /// The directory already holds a vault this build can open: a
-    /// validated identity bound to this directory name, a supported
-    /// schema version when a database exists. Opening or moving over
-    /// it is the caller's explicit choice; inspection never writes.
-    ExistingVault {
-        vault_id: Uuid,
-        /// The schema version of the found `vault.db`, or `None` when
-        /// the identity exists without a database yet.
+    /// A vault: `vault_id` from a validated `vault.json` (`None` for a
+    /// legacy vault with a database but no identity yet), the
+    /// database's schema version when a database exists, and the
+    /// identity's recorded directory name when present.
+    Vault {
+        vault_id: Option<String>,
         schema_version: Option<i64>,
+        directory_name: Option<String>,
     },
 }
 
-/// A successful inspection of a candidate vault location.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The result of a successful [`vault_location_inspect`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocationInspection {
-    /// The inspected directory (canonicalized by detection; the path
-    /// itself is reported as given).
+    /// The canonical candidate directory.
     pub path: PathBuf,
-    /// Free space on the location's filesystem, measured through the
-    /// same `fs4` usage the backup preflight uses.
-    pub free_bytes: u64,
-    /// The detected filesystem (see [`detect_filesystem`]).
-    pub filesystem: FilesystemInfo,
-    /// Always `true` on success — a failed write probe is the
-    /// [`MoveError::NotWritable`] refusal.
+    /// The write probe succeeded (an unwritable location is a
+    /// refusal, so this is always `true` in an `Ok` result — kept
+    /// explicit for the UI fact).
     pub writable: bool,
-    /// What the directory holds today.
-    pub disposition: LocationDisposition,
+    /// Free space on the candidate's filesystem (`fs4`, the same
+    /// measurement the backup preflights use).
+    pub free_bytes: u64,
+    /// The filesystem type the mount table reports.
+    pub filesystem: FilesystemKind,
+    /// What the directory already holds.
+    pub existing: ExistingContent,
 }
 
-/// The entries a directory may hold and still count as a vault (or an
-/// empty candidate): the identity/database/settings/media/lock files
-/// plus SQLite's WAL sidecars (`vault.db-wal`, `vault.db-shm`,
-/// `vault.db-journal`), which a live or interrupted database can leave
-/// behind. Everything else means unrelated content. The probe file
-/// this inspection creates is cleaned up before scanning.
-const VAULT_ENTRIES: &[&str] = &[
-    "vault.json",
-    "vault.db",
-    "vault.db-wal",
-    "vault.db-shm",
-    "vault.db-journal",
-    "settings.json",
-    "media",
-    "vault.lock",
-];
-
-/// Inspect a candidate vault directory. `active_vault_id` is the vault
-/// being moved (or opened) when inspection serves a move/open flow;
-/// `None` inspects without a move context. `mount_table` is the
-/// injectable mount-table text ([`host_mount_table`] on Linux).
+/// Inspect a candidate vault location for the active vault: existence,
+/// write access, filesystem type (network filesystems refused — WAL
+/// constraint), free space, existing identity, and schema
+/// compatibility. `active_vault_id` is the moving vault's UUID (from
+/// the origin's `vault.json`); a destination already holding a
+/// *different* vault's identity is refused, never overwritten.
 ///
-/// Inspection is read-only apart from its own probe file, which is
-/// always removed: it never writes a `vault.json`, never creates a
-/// database, and never prepares an unrelated directory for overwrite.
-pub fn inspect_location(
+/// Refusals are typed ([`MoveError`]); successes report the
+/// measurements. The inspection never writes anything except its own
+/// removed probe file and never mutates the directory's contents.
+pub fn vault_location_inspect(
     path: &Path,
-    active_vault_id: Option<Uuid>,
-    mount_table: &str,
+    active_vault_id: Option<&str>,
+    mounts: MountTable<'_>,
 ) -> Result<LocationInspection, MoveError> {
-    let meta = fs::metadata(path).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => MoveError::Missing {
-            path: path.to_path_buf(),
-        },
-        _ => MoveError::Io(e),
-    })?;
-    if !meta.is_dir() {
-        return Err(MoveError::NotADirectory {
-            path: path.to_path_buf(),
-        });
+    if !path.exists() {
+        return Err(MoveError::DirectoryMissing(path.to_path_buf()));
     }
-
-    let filesystem = detect_filesystem(path, mount_table);
-    if filesystem.network {
+    if !path.is_dir() {
+        return Err(MoveError::NotADirectory(path.to_path_buf()));
+    }
+    let canonical = path.canonicalize()?;
+    let table =
+        mounts().map_err(|e| MoveError::Vault(format!("cannot read the mount table: {e}")))?;
+    let filesystem = filesystem_kind(&canonical, &table);
+    if let FilesystemKind::Network(fstype) = &filesystem {
         return Err(MoveError::NetworkFilesystem {
-            fs: filesystem.fs_type,
-            path: path.to_path_buf(),
+            fstype: fstype.clone(),
+            path: canonical,
         });
     }
 
-    probe_writable(path)?;
-
-    let free_bytes = fs4::available_space(path).map_err(|e| {
-        MoveError::Vault(format!(
-            "cannot measure free space at {}: {e}",
-            path.display()
-        ))
-    })?;
-
-    let disposition = classify_contents(path, active_vault_id)?;
-    Ok(LocationInspection {
-        path: path.to_path_buf(),
-        free_bytes,
-        filesystem,
-        writable: true,
-        disposition,
-    })
-}
-
-/// Prove write access by creating, writing, and removing a probe file
-/// inside the directory. A failure refuses the location.
-fn probe_writable(dir: &Path) -> Result<(), MoveError> {
-    let probe = dir.join(format!(".mailchat-inspect-{}", std::process::id()));
-    let result = (|| -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&probe)?;
+    // Write probe: create, write, drop, remove. Any failure is a
+    // not-writable refusal.
+    let probe = canonical.join(format!(".vault-inspect-{}", std::process::id()));
+    let probe_result = (|| -> std::io::Result<()> {
+        let mut file = File::create(&probe)?;
         file.write_all(b"probe")?;
-        file.sync_all()
+        file.sync_all()?;
+        drop(file);
+        Ok(())
     })();
     let _ = fs::remove_file(&probe);
-    result.map_err(|_| MoveError::NotWritable {
-        path: dir.to_path_buf(),
-    })
-}
+    probe_result.map_err(|_| MoveError::NotWritable(canonical.clone()))?;
 
-/// Decide what the directory holds: nothing at all, an existing vault,
-/// or an unrelated directory that must never be overwritten. Vault
-/// files **without** an identity (e.g. a bare `vault.db`, or a legacy
-/// vault never opened through a session) are a refusal too: a copy may
-/// not overwrite a directory that could hold someone's data.
-fn classify_contents(
-    dir: &Path,
-    active_vault_id: Option<Uuid>,
-) -> Result<LocationDisposition, MoveError> {
-    let mut has_identity = false;
-    let mut has_entries = false;
-    for entry in fs::read_dir(dir).map_err(MoveError::Io)? {
-        let entry = entry.map_err(MoveError::Io)?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !VAULT_ENTRIES.contains(&name.as_str()) {
-            return Err(MoveError::UnrelatedDirectory {
-                path: dir.to_path_buf(),
-            });
+    let free_bytes = fs4::available_space(&canonical)
+        .map_err(|e| MoveError::Vault(format!("cannot measure free space: {e}")))?;
+
+    // Existing identity: read and validate when present.
+    let identity_path = canonical.join(vault_session::IDENTITY_FILE);
+    let identity = match fs::read_to_string(&identity_path) {
+        Ok(text) => {
+            let identity =
+                vault_session::parse_identity(&text).map_err(|e| MoveError::InvalidIdentity {
+                    path: identity_path.clone(),
+                    reason: e.to_string(),
+                })?;
+            identity
+                .validate_format()
+                .map_err(|e| MoveError::InvalidIdentity {
+                    path: identity_path.clone(),
+                    reason: e.to_string(),
+                })?;
+            Some(identity)
         }
-        has_entries = true;
-        has_identity |= name == "vault.json";
-    }
-    if !has_entries {
-        return Ok(LocationDisposition::Empty);
-    }
-    if !has_identity {
-        // Vault-shaped content without a governing identity: never
-        // prepared for overwrite.
-        return Err(MoveError::UnrelatedDirectory {
-            path: dir.to_path_buf(),
-        });
-    }
-
-    // A vault identity governs this directory: validate it against the
-    // directory itself (format, version, UUID, directory-name binding).
-    let identity = VaultIdentity::read(dir)
-        .map_err(|e| MoveError::InvalidIdentity(e.to_string()))?
-        .expect("identity entry was just seen");
-    let vault_id = identity
-        .validate(dir)
-        .map_err(|e| MoveError::InvalidIdentity(e.to_string()))?;
-    if let Some(active) = active_vault_id {
-        if vault_id != active {
-            return Err(MoveError::IdentityMismatch {
-                path: dir.to_path_buf(),
-                existing: vault_id.to_string(),
-                active: active.to_string(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(MoveError::Io(e)),
+    };
+    if let (Some(identity), Some(active)) = (&identity, active_vault_id) {
+        if identity.vault_id != active {
+            return Err(MoveError::DestinationVaultMismatch {
+                path: canonical,
+                destination_id: identity.vault_id.clone(),
+                active_id: active.to_string(),
             });
         }
     }
 
-    // Schema compatibility: a database newer than this build refuses
-    // exactly like an open would.
-    let db = dir.join("vault.db");
-    let schema_version = if db.is_file() {
-        Some(schema_version_of(&db, dir)?)
+    // Schema compatibility through the existing supported-version
+    // refusal: a database this build cannot open refuses the location.
+    let db_path = canonical.join(vault_session::DB_FILE);
+    let schema_version = if db_path.is_file() {
+        let conn =
+            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let version = read_schema_version(&conn).map_err(move_err)?;
+        if version > SUPPORTED_SCHEMA_VERSION {
+            return Err(MoveError::SchemaTooNew {
+                db: version,
+                supported: SUPPORTED_SCHEMA_VERSION,
+            });
+        }
+        Some(version)
     } else {
         None
     };
-    Ok(LocationDisposition::ExistingVault {
-        vault_id,
-        schema_version,
+
+    let existing = match (&identity, schema_version) {
+        (Some(identity), schema_version) => ExistingContent::Vault {
+            vault_id: Some(identity.vault_id.clone()),
+            schema_version,
+            directory_name: identity.directory_name.clone(),
+        },
+        (None, Some(schema_version)) => ExistingContent::Vault {
+            vault_id: None,
+            schema_version: Some(schema_version),
+            directory_name: None,
+        },
+        (None, None) => {
+            let unrelated = fs::read_dir(&canonical)?
+                .flatten()
+                .any(|entry| !entry.file_name().to_string_lossy().starts_with('.'));
+            if unrelated {
+                return Err(MoveError::UnrelatedDirectory(canonical));
+            }
+            ExistingContent::Empty
+        }
+    };
+
+    Ok(LocationInspection {
+        path: canonical,
+        writable: true,
+        free_bytes,
+        filesystem,
+        existing,
     })
 }
 
-/// Read the schema version of a candidate database read-only and
-/// refuse a newer one.
-fn schema_version_of(db: &Path, dir_for_error: &Path) -> Result<i64, MoveError> {
-    let conn = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|e| MoveError::InvalidVaultDb {
-            path: dir_for_error.to_path_buf(),
-            reason: format!("cannot open read-only: {e}"),
-        })?;
-    let version =
-        crate::storage::read_schema_version(&conn).map_err(|e| MoveError::InvalidVaultDb {
-            path: dir_for_error.to_path_buf(),
-            reason: e.to_string(),
-        })?;
-    if version > SUPPORTED_SCHEMA_VERSION {
-        return Err(MoveError::SchemaTooNew {
-            path: dir_for_error.to_path_buf(),
-            db: version,
-            supported: SUPPORTED_SCHEMA_VERSION,
-        });
-    }
-    Ok(version)
-}
-
 // ---------------------------------------------------------------------------
-// Preview
+// Move preview
 // ---------------------------------------------------------------------------
 
-/// One planned phase of the move, in execution order (plan section 8,
-/// steps 2–5): what the executor will do and what a crash at that
-/// boundary means.
+/// One step of the phased move plan (plan section 8, steps 2–5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MovePhaseStep {
+    /// The phase key (`quiesce`, `snapshot`, `copy`, `switch`,
+    /// `restart`).
+    pub name: &'static str,
+    /// What the phase does, in the protocol's own words.
+    pub description: &'static str,
+}
+
+/// The phased plan every move follows; the journal phase set mirrors
+/// these steps.
+pub fn move_plan_phases() -> Vec<MovePhaseStep> {
+    vec![
+        MovePhaseStep {
+            name: "quiesce",
+            description: "stop new jobs and watch events, finish or cancel current work, and \
+                          hold writers stable (caller-managed, like the backup snapshot \
+                          contract)",
+        },
+        MovePhaseStep {
+            name: "snapshot",
+            description: "create a consistent SQLite snapshot and the referenced object \
+                          inventory through the backup snapshot path",
+        },
+        MovePhaseStep {
+            name: "copy",
+            description: "staged copy on the destination volume with checksum verification — \
+                          always a verified copy, never an assumed rename",
+        },
+        MovePhaseStep {
+            name: "switch",
+            description: "close pool and media handles, then atomically update the \
+                          device-local move journal and bootstrap pointer to the destination",
+        },
+        MovePhaseStep {
+            name: "restart",
+            description: "restart into the selected vault; the old copy is retained until \
+                          separately removed",
+        },
+    ]
+}
+
+/// How the copy phase moves bytes. A single variant states the
+/// invariant: cross-volume moves are verified copies, and the
+/// same-volume case makes no rename assumption either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MovePhase {
-    /// Step 2a: lifecycle ownership acquired — new jobs/watch events
-    /// stopped, current work finished or cancelled, writers held
-    /// stable. Caller-managed. Crash: nothing has been copied; the
-    /// origin is authoritative.
-    Quiescing,
-    /// Step 2b: a consistent SQLite snapshot and the referenced object
-    /// inventory exist. Crash: origin authoritative.
-    SnapshotReady,
-    /// Step 3a: copying snapshot, objects, and portable metadata into
-    /// staging **on the destination volume**, verifying checksums
-    /// (always a copy; never an assumed rename, cross-volume or not).
-    /// Crash: origin authoritative; destination staging is incomplete
-    /// by definition.
-    Copying,
-    /// Step 3b: the destination holds a checksum-verified, integrity-
-    /// checked copy in staging. Crash: origin still authoritative (the
-    /// pointer has not moved); the verified staging is kept for the
-    /// pointer switch.
-    CopiedVerified,
-    /// Step 4: the device-local move journal/bootstrap pointer is being
-    /// atomically updated. Crash: rolls forward — the destination was
-    /// verified before this phase began.
-    SwitchingPointer,
-    /// Step 5: restarted into the selected vault; the old copy is
-    /// retained until the user separately removes it.
-    Completed,
+pub enum MoveStrategy {
+    /// Copy into destination staging, checksum every byte against the
+    /// inventory, only then finalize.
+    VerifiedCopy,
 }
 
-impl MovePhase {
-    /// The ordered phases of a full move (for previews and docs).
-    pub const PLAN: [MovePhase; 6] = [
-        MovePhase::Quiescing,
-        MovePhase::SnapshotReady,
-        MovePhase::Copying,
-        MovePhase::CopiedVerified,
-        MovePhase::SwitchingPointer,
-        MovePhase::Completed,
-    ];
-
-    /// One-line summary of the phase.
-    pub fn summary(&self) -> &'static str {
-        match self {
-            MovePhase::Quiescing => {
-                "quiesce: stop jobs and watch events, hold writers stable (caller-managed)"
-            }
-            MovePhase::SnapshotReady => {
-                "snapshot: consistent SQLite snapshot plus the referenced object inventory"
-            }
-            MovePhase::Copying => {
-                "copy: staged copy on the destination volume with checksum verification (never an assumed rename)"
-            }
-            MovePhase::CopiedVerified => "verified: destination staging passed checksums and database integrity",
-            MovePhase::SwitchingPointer => "pointer: atomically update the device-local move journal/bootstrap pointer",
-            MovePhase::Completed => "restart: open the selected vault; retain the old copy until separately removed",
-        }
-    }
-}
-
-/// One endpoint of a move: the vault's stable identity and the path it
-/// sits at. The identity is the same UUID on both ends — a move copies
-/// the vault, it never mints a new identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VaultEndpoint {
-    /// The vault UUID recorded in that copy's `vault.json`.
-    pub vault_id: String,
-    /// The directory holding that copy.
-    pub path: PathBuf,
-}
-
-/// Why the journal exists. `Move` is the only intent today; the enum
-/// exists so future intents (e.g. a restore-into-location) carry their
-/// own recovery semantics without reshaping the journal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MoveIntent {
-    /// Relocate the active vault to the destination directory, keeping
-    /// the old copy until separately removed.
-    Move,
-}
-
-/// The byte estimate a preview reports. `database_bytes` is the exact
-/// consistent-snapshot size (the copy carries the snapshot, not the
-/// live WAL file); `object_bytes` covers every referenced object; the
-/// portable settings file counts when present; `overhead_bytes` is
-/// filesystem slack.
+/// The byte estimate of a move, derived from the backup snapshot
+/// plan: the database snapshot, every referenced object, and the
+/// portable settings file when present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MoveEstimate {
-    pub database_bytes: u64,
+    pub db_bytes: u64,
+    pub object_count: u64,
     pub object_bytes: u64,
-    pub settings_bytes: u64,
-    pub overhead_bytes: u64,
-    /// The sum of the above (saturating).
+    /// `Some` only when the vault carries a portable settings file.
+    pub settings_bytes: Option<u64>,
+    /// `db_bytes + object_bytes + settings_bytes`.
     pub total_bytes: u64,
 }
 
-impl MoveEstimate {
-    fn total(&self) -> u64 {
-        self.database_bytes
-            .saturating_add(self.object_bytes)
-            .saturating_add(self.settings_bytes)
-            .saturating_add(self.overhead_bytes)
-    }
-}
-
-/// A previewed move: the phased plan, the byte estimate, and the
-/// destination facts the plan was checked against.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// What [`vault_move_preview`] reports: the phased plan, the estimate,
+/// and the destination facts the plan was validated against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MovePreview {
-    /// The vault being moved.
-    pub origin: VaultEndpoint,
-    /// The inspected, accepted destination.
-    pub destination: VaultEndpoint,
-    /// The ordered phases ([`MovePhase::PLAN`] with summaries).
-    pub phases: Vec<MovePhase>,
-    /// The byte estimate for the copy.
+    /// The canonical origin (active vault) directory.
+    pub origin: PathBuf,
+    /// The canonical destination directory.
+    pub destination: PathBuf,
+    /// The phased plan (quiesce → snapshot → copy → switch → restart).
+    pub phases: Vec<MovePhaseStep>,
+    /// The byte estimate for the copy phase.
     pub estimate: MoveEstimate,
-    /// Whether origin and destination sit on different filesystem
-    /// devices. The move is a verified copy either way — this flag
-    /// informs the UI and the estimate, never an optimization that
-    /// assumes a rename.
+    /// Whether origin and destination sit on different volumes
+    /// (`st_dev` comparison; conservative `true` when undeterminable).
     pub cross_volume: bool,
+    /// The copy strategy — always [`MoveStrategy::VerifiedCopy`].
+    pub strategy: MoveStrategy,
     /// Free space measured at the destination when the preview ran.
     pub destination_free_bytes: u64,
 }
 
-/// Knobs for [`preview_move`].
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MovePreviewOptions {
-    /// Force the capacity preflight to demand at least this many free
-    /// bytes (test hook for provoking [`MoveError::InsufficientSpace`]
-    /// on any real disk).
-    pub min_free_bytes: Option<u64>,
-}
-
-/// Preview a move of the vault at `data_dir` into `destination`.
+/// Preview a move of the vault at `origin` into `destination`:
+/// re-inspect the destination (all [`vault_location_inspect`]
+/// refusals apply), take the consistent snapshot + object inventory
+/// through the backup snapshot path, and derive the estimate from it.
 ///
-/// Runs on the vault's **writer** connection (`conn`) with new writes
-/// paused behind the write queue — the same caller-managed quiesce
-/// contract as [`crate::backup::snapshot_for_backup`]. The estimate is
-/// derived from that consistent snapshot and the referenced-object
-/// inventory (the backup counting path), so it describes an exact
-/// point-in-time vault, not a live-file guess.
+/// `conn` is the vault's **writer** connection (through the pool's
+/// write queue at the app layer), exactly as
+/// [`backup::snapshot_for_backup`] documents: the snapshot runs with
+/// new writes paused behind the queue. The quiesce phase itself is
+/// caller-managed — this preview does not stop jobs.
 ///
-/// The destination is inspected first (all refusals apply: unrelated
-/// directory, foreign identity, network filesystem, write access), the
-/// capacity preflight compares the estimate against measured free
-/// space, and the preview snapshot is removed again — a preview leaves
-/// nothing behind but the (pre-existing) recovery directory.
-pub fn preview_move(
-    data_dir: &Path,
-    conn: &Connection,
+/// Refuses while an unresolved move journal exists. The snapshot is
+/// taken into the origin's recovery directory and discarded once
+/// counted; nothing at the destination is written.
+pub fn vault_move_preview(
+    origin: &Path,
     destination: &Path,
-    mount_table: &str,
-    opts: &MovePreviewOptions,
+    conn: &Connection,
+    mounts: MountTable<'_>,
 ) -> Result<MovePreview, MoveError> {
-    // The origin must be a session-opened vault: the journal carries
-    // its stable identity.
-    let identity = VaultIdentity::read(data_dir)
-        .map_err(|e| MoveError::InvalidIdentity(e.to_string()))?
-        .ok_or_else(|| {
-            MoveError::Vault(format!(
-                "the origin vault at {} has no vault.json identity — open it once through a \
-                 VaultSession before moving it",
-                data_dir.display()
-            ))
-        })?;
-    let origin_id = identity
-        .validate(data_dir)
-        .map_err(|e| MoveError::InvalidIdentity(e.to_string()))?;
+    ensure_no_open_move(origin)?;
+    let origin_canonical = origin
+        .canonicalize()
+        .map_err(|_| MoveError::DirectoryMissing(origin.to_path_buf()))?;
+    let active_vault_id = read_origin_identity(&origin_canonical)?;
 
-    let inspection = inspect_location(destination, Some(origin_id), mount_table)?;
+    let inspection = vault_location_inspect(destination, active_vault_id.as_deref(), mounts)?;
 
-    // The estimate's database side is the consistent snapshot; objects
-    // and settings come from the same plan. Written under the recovery
-    // directory and removed afterwards.
-    let recovery = recovery_dir(data_dir);
-    fs::create_dir_all(&recovery).map_err(MoveError::Io)?;
-    let snapshot = recovery.join(format!(".move-preview-{}.db", std::process::id()));
+    // The estimate comes from the snapshot path itself (the same
+    // counting a backup trusts), staged in the device-local recovery
+    // directory and discarded once counted.
+    let recovery = backup::recovery_dir(&origin_canonical);
+    fs::create_dir_all(&recovery)?;
+    let snapshot_tmp = recovery.join(format!(".move-preview-snapshot-{}", std::process::id()));
     let result = (|| -> Result<MoveEstimate, MoveError> {
-        let plan = snapshot_for_backup(data_dir, conn, &snapshot)
-            .map_err(|e| vault_err("cannot snapshot the vault for the move estimate", e))?;
-        let database_bytes = fs::metadata(&snapshot).map_err(MoveError::Io)?.len();
-        let object_bytes = plan.objects.iter().map(|o| o.size).sum();
-        let settings_bytes = if plan.has_settings {
-            fs::metadata(data_dir.join(crate::settings::SETTINGS_FILE))
-                .map_err(MoveError::Io)?
-                .len()
-        } else {
-            0
-        };
+        let plan = backup::snapshot_for_backup(&origin_canonical, conn, &snapshot_tmp)
+            .map_err(move_err)?;
+        let db_bytes = fs::metadata(&plan.snapshot)?.len();
+        let object_bytes: u64 = plan.objects.iter().map(|o| o.size).sum();
+        let settings_bytes = plan.has_settings.then(|| {
+            fs::metadata(origin_canonical.join(SETTINGS_FILE))
+                .map(|m| m.len())
+                .unwrap_or(0)
+        });
+        let total_bytes = db_bytes + object_bytes + settings_bytes.unwrap_or(0);
         Ok(MoveEstimate {
-            database_bytes,
+            db_bytes,
+            object_count: plan.objects.len() as u64,
             object_bytes,
             settings_bytes,
-            overhead_bytes: MOVE_SLACK_BYTES,
-            total_bytes: 0,
+            total_bytes,
         })
     })();
-    // Remove the preview snapshot (and any WAL sidecars the read-only
-    // probe left) whatever happened.
-    let _ = fs::remove_file(snapshot.with_extension("db-wal"));
-    let _ = fs::remove_file(snapshot.with_extension("db-shm"));
-    let _ = fs::remove_file(&snapshot);
-    let mut estimate = result?;
-    estimate.total_bytes = estimate.total();
-
-    let needed = opts.min_free_bytes.map_or(estimate.total_bytes, |floor| {
-        estimate.total_bytes.max(floor)
-    });
-    if inspection.free_bytes < needed {
-        return Err(MoveError::InsufficientSpace {
-            needed,
-            available: inspection.free_bytes,
-        });
-    }
+    backup::discard_snapshot(&snapshot_tmp);
+    let estimate = result?;
 
     Ok(MovePreview {
-        origin: VaultEndpoint {
-            vault_id: origin_id.to_string(),
-            path: data_dir.to_path_buf(),
-        },
-        destination: VaultEndpoint {
-            vault_id: origin_id.to_string(),
-            path: destination.to_path_buf(),
-        },
-        phases: MovePhase::PLAN.to_vec(),
+        origin: origin_canonical.clone(),
+        destination: inspection.path.clone(),
+        phases: move_plan_phases(),
         estimate,
-        cross_volume: cross_volume(data_dir, destination),
+        cross_volume: !same_volume(&origin_canonical, &inspection.path),
+        strategy: MoveStrategy::VerifiedCopy,
         destination_free_bytes: inspection.free_bytes,
     })
 }
 
-/// Whether two paths sit on different filesystem devices. Detection
-/// uses `st_dev`; when either side cannot be stat'ed the answer is
-/// conservatively `true` (a cross-volume answer forces the copy path —
-/// the engine never assumes a rename).
-fn cross_volume(a: &Path, b: &Path) -> bool {
-    match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => match (a.metadata(), b.metadata()) {
-            (Ok(am), Ok(bm)) => am.dev() != bm.dev(),
-            _ => true,
-        },
-        _ => true,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Move journal
-// ---------------------------------------------------------------------------
-
-/// The device-local journal of one vault move: every record carries
-/// both endpoints (identity and path) and the intent, so an
-/// interruption can be resolved without guessing which vault was
-/// moving where. Written atomically (temp + fsync + rename) under the
-/// recovery directory; see [`resolve_interrupted_move`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MoveJournal {
-    /// The journal format version ([`MOVE_JOURNAL_VERSION`]).
-    pub version: u32,
-    /// The phase the move had reached when the journal was last
-    /// written — the recovery action is a function of this alone.
-    pub phase: MovePhase,
-    /// RFC 3339 UTC — when the move started.
-    pub created_at: String,
-    /// What the move intends (see [`MoveIntent`]).
-    pub intent: MoveIntent,
-    /// The vault being moved (authoritative for every pre-pointer
-    /// phase).
-    pub origin: VaultEndpoint,
-    /// Where the vault is being moved to.
-    pub destination: VaultEndpoint,
-}
-
-impl MoveJournal {
-    /// A fresh journal for a move of `origin` into `destination`,
-    /// starting at [`MovePhase::Quiescing`]. The executor (the later
-    /// `vault_move_commit` slice) advances the phase; tests and that
-    /// slice are the only writers.
-    pub fn new_move(origin: VaultEndpoint, destination: VaultEndpoint) -> Self {
-        Self {
-            version: MOVE_JOURNAL_VERSION,
-            phase: MovePhase::Quiescing,
-            created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            intent: MoveIntent::Move,
-            origin,
-            destination,
+/// The origin's vault UUID from its `vault.json` (`None` for a legacy
+/// vault the session has not opened yet — the executor opens a session
+/// first, which mints the identity).
+fn read_origin_identity(origin: &Path) -> Result<Option<String>, MoveError> {
+    match fs::read_to_string(origin.join(vault_session::IDENTITY_FILE)) {
+        Ok(text) => {
+            let identity =
+                vault_session::parse_identity(&text).map_err(|e| MoveError::InvalidIdentity {
+                    path: origin.join(vault_session::IDENTITY_FILE),
+                    reason: e.to_string(),
+                })?;
+            identity.validate_format().map_err(identity_err(origin))?;
+            Ok(Some(identity.vault_id))
         }
-    }
-}
-
-/// The move journal's path under the recovery directory.
-pub fn move_journal_path(data_dir: &Path) -> PathBuf {
-    recovery_dir(data_dir).join(MOVE_JOURNAL_FILE)
-}
-
-/// Write the move journal atomically: the JSON lands in a private temp
-/// sibling first, is fsynced, and only a fully written file is renamed
-/// into place, then the recovery directory is fsynced — a crash
-/// mid-write can never leave a half-written journal.
-pub fn write_move_journal(data_dir: &Path, journal: &MoveJournal) -> Result<(), MoveError> {
-    let recovery = recovery_dir(data_dir);
-    fs::create_dir_all(&recovery).map_err(MoveError::Io)?;
-    let path = move_journal_path(data_dir);
-    let tmp = recovery.join(format!(".{MOVE_JOURNAL_FILE}.tmp"));
-    {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)
-            .map_err(MoveError::Io)?;
-        file.write_all(&serde_json::to_vec_pretty(journal)?)
-            .map_err(MoveError::Io)?;
-        file.sync_all().map_err(MoveError::Io)?;
-    }
-    fs::rename(&tmp, &path).map_err(MoveError::Io)?;
-    fsync_dir(&recovery)?;
-    Ok(())
-}
-
-/// Read the move journal; `Ok(None)` when none exists (no move was in
-/// flight). A corrupt journal is an error, never a silent restart —
-/// startup must resolve it before any pool opens.
-pub fn read_move_journal(data_dir: &Path) -> Result<Option<MoveJournal>, MoveError> {
-    match fs::read(move_journal_path(data_dir)) {
-        Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(MoveError::Io(e)),
     }
 }
 
-/// The one defined action an interrupted (or completed) move journal
-/// resolves to at startup, **before a pool opens**. Resolution is a
-/// pure function of the journal: it performs no file operations — the
-/// caller performs the action. Every action names exactly one writable
-/// vault ([`MoveRecovery::writable_vault`]); an interrupted move never
-/// leaves two.
+fn identity_err(origin: &Path) -> impl Fn(SessionError) -> MoveError + '_ {
+    move |e: SessionError| MoveError::InvalidIdentity {
+        path: origin.join(vault_session::IDENTITY_FILE),
+        reason: e.to_string(),
+    }
+}
+
+/// Whether two existing paths sit on the same volume (`st_dev`).
+/// `None` (treated as "not same volume" — a copy) when either stat
+/// fails or the platform has no device ids.
+#[cfg(unix)]
+fn same_volume(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(ma), Ok(mb)) => ma.dev() == mb.dev(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_volume(_a: &Path, _b: &Path) -> bool {
+    false
+}
+
+// ---------------------------------------------------------------------------
+// The move journal
+// ---------------------------------------------------------------------------
+
+/// One phase of a journaled move. Every variant has exactly one
+/// recovery action (see the module table).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MovePhase {
+    /// The journal is written; nothing has started. Recovery: cancel.
+    Intended,
+    /// Jobs/watch stopped, writers held (plan step 2 begun). Recovery:
+    /// resume the origin.
+    Quiesced,
+    /// Consistent snapshot + object inventory staged (plan step 2
+    /// done). Recovery: discard the staging snapshot, resume origin.
+    Snapshotted,
+    /// The staged copy is in progress on the destination (plan step
+    /// 3). Recovery: discard the partial copy, resume origin.
+    Copying,
+    /// The staged copy finished and every checksum verified (plan step
+    /// 3 done). Recovery: roll back to the origin and remove the
+    /// verified duplicate (no second writable vault).
+    Copied,
+    /// The bootstrap pointer names the destination (plan step 4).
+    /// Recovery: activate the destination; retain the origin copy.
+    PointerSwitched,
+    /// The move finished (plan step 5). Recovery: nothing.
+    Completed,
+}
+
+/// Both endpoints of a move: the vault's stable identity and the path
+/// it moves from/to. Both sides carry the same UUID — one vault, two
+/// locations — so a recovered journal never guesses which identity is
+/// authoritative.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultEndpoint {
+    /// The stable vault UUID (as recorded in `vault.json`).
+    pub vault_id: String,
+    /// The vault directory path at this end.
+    pub path: PathBuf,
+}
+
+/// The device-local move journal, serde JSON under the recovery
+/// directory with its own file name — never on the destination volume.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveJournal {
+    /// The journal format version ([`MOVE_JOURNAL_VERSION`]).
+    pub version: u32,
+    /// The phase the move reached.
+    pub state: MovePhase,
+    /// RFC 3339 UTC — when the move started.
+    pub created_at: String,
+    /// The moving vault's endpoint at the origin.
+    pub origin: VaultEndpoint,
+    /// The moving vault's endpoint at the destination.
+    pub destination: VaultEndpoint,
+    /// The staged-copy directory inside the destination root.
+    pub destination_staging: PathBuf,
+    /// The snapshot/inventory staging inside the origin's recovery
+    /// directory.
+    pub origin_staging: PathBuf,
+    /// The recoverable intent, in words: which vault moves where.
+    pub intent: String,
+}
+
+/// The move journal's path (inside the origin's recovery directory).
+pub fn move_journal_path(origin: &Path) -> PathBuf {
+    backup::recovery_dir(origin).join(MOVE_JOURNAL_FILE)
+}
+
+/// Read the move journal; `Ok(None)` when none exists. A journal with
+/// a newer format version refuses to resolve.
+pub fn read_move_journal(origin: &Path) -> Result<Option<MoveJournal>, MoveError> {
+    let path = move_journal_path(origin);
+    match fs::read_to_string(&path) {
+        Ok(text) => {
+            let journal: MoveJournal = serde_json::from_str(&text)?;
+            if journal.version > MOVE_JOURNAL_VERSION {
+                return Err(MoveError::Vault(format!(
+                    "move journal version {} is newer than this build supports ({})",
+                    journal.version, MOVE_JOURNAL_VERSION
+                )));
+            }
+            Ok(Some(journal))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(MoveError::Io(e)),
+    }
+}
+
+/// Write the move journal atomically (staged rename + directory
+/// fsync), creating the recovery directory when needed. Public for the
+/// later commit executor and tests.
+pub fn write_move_journal(origin: &Path, journal: &MoveJournal) -> Result<(), MoveError> {
+    let recovery = backup::recovery_dir(origin);
+    fs::create_dir_all(&recovery)?;
+    write_json_atomic(&move_journal_path(origin), journal).map_err(move_err)?;
+    fsync_dir(&recovery).map_err(move_err)?;
+    Ok(())
+}
+
+/// Build a fresh journal at [`MovePhase::Intended`] for moving the
+/// vault at `origin` (whose `vault.json` must already exist — open a
+/// session first for a legacy vault) into `destination`. The later
+/// commit executor writes this before touching anything.
+pub fn new_move_journal(origin: &Path, destination: &Path) -> Result<MoveJournal, MoveError> {
+    let origin_canonical = origin
+        .canonicalize()
+        .map_err(|_| MoveError::DirectoryMissing(origin.to_path_buf()))?;
+    let destination_canonical = destination
+        .canonicalize()
+        .map_err(|_| MoveError::DirectoryMissing(destination.to_path_buf()))?;
+    let Some(vault_id) = read_origin_identity(&origin_canonical)? else {
+        return Err(MoveError::Vault(format!(
+            "the vault at {} has no identity yet — open a session first (a legacy vault gains \
+             its identity on first open)",
+            origin_canonical.display()
+        )));
+    };
+    Ok(MoveJournal {
+        version: MOVE_JOURNAL_VERSION,
+        state: MovePhase::Intended,
+        created_at: now_rfc3339_utc(),
+        origin: VaultEndpoint {
+            vault_id: vault_id.clone(),
+            path: origin_canonical.clone(),
+        },
+        destination: VaultEndpoint {
+            vault_id: vault_id.clone(),
+            path: destination_canonical.clone(),
+        },
+        destination_staging: destination_canonical.join(DESTINATION_STAGING_DIR),
+        origin_staging: backup::recovery_dir(&origin_canonical).join(ORIGIN_STAGING_DIR),
+        intent: format!(
+            "move vault {vault_id} from {} to {}",
+            origin_canonical.display(),
+            destination_canonical.display()
+        ),
+    })
+}
+
+/// Refuse while a move journal is unresolved (anything but
+/// [`MovePhase::Completed`]): resolve it first.
+pub fn ensure_no_open_move(origin: &Path) -> Result<(), MoveError> {
+    if let Some(journal) = read_move_journal(origin)? {
+        if journal.state != MovePhase::Completed {
+            return Err(MoveError::UnresolvedJournal {
+                state: journal.state,
+            });
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Journal resolution (startup, before any pool opens)
+// ---------------------------------------------------------------------------
+
+/// What [`recover_interrupted_move`] found and did. Every interrupted
+/// phase resolves to exactly one variant, and exactly one vault is
+/// authoritative afterwards.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MoveRecovery {
     /// No journal exists: nothing was in flight.
     None,
-    /// Keep the **origin**: every pre-pointer phase resolves with the
-    /// origin authoritative — it is the last copy known complete and
-    /// writable, and (until the `vault_move_commit` executor exists)
-    /// the only copy this build ever switched pointers away from. The
-    /// action: open the origin as the only writable vault; any staging
-    /// left at the destination is incomplete or at most pre-pointer
-    /// and must be discarded before a retry; the origin is never
-    /// recreated as an empty archive.
-    KeepOrigin {
-        origin: VaultEndpoint,
-        destination: VaultEndpoint,
+    /// The last move completed; the destination is the active vault.
+    AlreadyCompleted { journal: MoveJournal },
+    /// An `intended` journal was cancelled before anything started;
+    /// the origin is authoritative and untouched.
+    Cancelled { journal: MoveJournal },
+    /// A `quiesced`/`snapshotted`/`copying` journal was resolved to
+    /// the intact origin; the listed staging artifacts were discarded.
+    ResumedOrigin {
+        journal: MoveJournal,
+        discarded: Vec<PathBuf>,
     },
-    /// Adopt the **destination**: a crash at the atomic pointer switch
-    /// rolls forward — the destination copy was verified
-    /// ([`MovePhase::CopiedVerified`]) before that phase began, and
-    /// the pointer update itself is atomic. The action: open the
-    /// destination as the only writable vault and retain the origin
-    /// read-only until the user separately removes it.
-    AdoptDestination {
-        origin: VaultEndpoint,
-        destination: VaultEndpoint,
+    /// A `copied` journal rolled **back**: the verified duplicate at
+    /// the destination was removed, so the origin stays the one
+    /// writable vault.
+    RolledBackToOrigin {
+        journal: MoveJournal,
+        discarded_copy: PathBuf,
     },
-    /// The journal records a finished move: the destination is the
-    /// selected vault, the origin copy is retained until separately
-    /// removed.
-    Completed {
-        origin: VaultEndpoint,
-        destination: VaultEndpoint,
-    },
+    /// A `pointer_switched` journal rolled **forward**: the
+    /// destination (verified present with the journal's identity) is
+    /// the vault to open; the origin copy is retained until separately
+    /// removed and never writable through this app afterwards.
+    ActivatedDestination { journal: MoveJournal },
 }
 
-impl MoveRecovery {
-    /// The exactly one vault that may be writable after resolution:
-    /// `None` when no journal existed. An interrupted move must never
-    /// resolve to two writable vaults.
-    pub fn writable_vault(&self) -> Option<&Path> {
-        match self {
-            MoveRecovery::None => None,
-            MoveRecovery::KeepOrigin { origin, .. } => Some(&origin.path),
-            MoveRecovery::AdoptDestination { destination, .. }
-            | MoveRecovery::Completed { destination, .. } => Some(&destination.path),
+/// Resolve an interrupted move at startup, **before a pool is
+/// opened**. Each phase has one defined action (see the module
+/// table); the origin is authoritative whenever the commit executor
+/// is absent — this build has none, so every pre-pointer phase
+/// resolves to the origin with the destination staging removed (a
+/// duplicate writable vault is never left behind).
+///
+/// A `pointer_switched` journal whose destination is missing or holds
+/// the wrong identity returns [`MoveError::VaultUnavailable`] /
+/// identity refusals with the journal left unresolved: the recovery
+/// screen shows the fact, the user reattaches the location, and no
+/// empty replacement archive is ever created.
+pub fn recover_interrupted_move(origin: &Path) -> Result<MoveRecovery, MoveError> {
+    let Some(journal) = read_move_journal(origin)? else {
+        return Ok(MoveRecovery::None);
+    };
+    match journal.state {
+        MovePhase::Completed => Ok(MoveRecovery::AlreadyCompleted { journal }),
+        MovePhase::Intended => {
+            // Nothing started; drop any leftover staging best-effort.
+            let _ = fs::remove_dir_all(&journal.destination_staging);
+            let _ = fs::remove_dir_all(&journal.origin_staging);
+            complete_journal(origin, journal.clone())?;
+            Ok(MoveRecovery::Cancelled { journal })
+        }
+        MovePhase::Quiesced | MovePhase::Snapshotted | MovePhase::Copying => {
+            // The origin was never touched. Discard both staging areas
+            // — a partial copy must not survive as a second vault —
+            // then resume the origin. Failures here keep the journal
+            // unresolved so the next startup retries.
+            let mut discarded = Vec::new();
+            for staging in [&journal.origin_staging, &journal.destination_staging] {
+                if fs::remove_dir_all(staging).is_ok() {
+                    discarded.push(staging.clone());
+                } else if staging.exists() {
+                    return Err(MoveError::Io(std::io::Error::other(format!(
+                        "cannot discard the interrupted move's staging at {}",
+                        staging.display()
+                    ))));
+                }
+            }
+            complete_journal(origin, journal.clone())?;
+            Ok(MoveRecovery::ResumedOrigin { journal, discarded })
+        }
+        MovePhase::Copied => {
+            // The copy verified, but the pointer never switched and
+            // this build has no executor to adopt it: the origin stays
+            // authoritative and the duplicate is removed — never two
+            // writable vaults.
+            if journal.destination_staging.exists() {
+                fs::remove_dir_all(&journal.destination_staging)?;
+            }
+            let _ = fs::remove_dir_all(&journal.origin_staging);
+            let discarded_copy = journal.destination_staging.clone();
+            complete_journal(origin, journal.clone())?;
+            Ok(MoveRecovery::RolledBackToOrigin {
+                journal,
+                discarded_copy,
+            })
+        }
+        MovePhase::PointerSwitched => {
+            // The pointer already names the destination: it is the
+            // vault to open, provided it is really there and really
+            // this vault. Otherwise the journal stays unresolved and
+            // the caller shows the typed fact.
+            if !journal.destination.path.is_dir()
+                || !journal
+                    .destination
+                    .path
+                    .join(vault_session::DB_FILE)
+                    .is_file()
+            {
+                return Err(MoveError::VaultUnavailable(
+                    journal.destination.path.clone(),
+                ));
+            }
+            let identity_path = journal.destination.path.join(vault_session::IDENTITY_FILE);
+            let identity = vault_session::parse_identity(&fs::read_to_string(&identity_path)?)
+                .and_then(|i| i.validate_format().map(|_| i))
+                .map_err(|e| MoveError::InvalidIdentity {
+                    path: identity_path,
+                    reason: e.to_string(),
+                })?;
+            if identity.vault_id != journal.destination.vault_id {
+                return Err(MoveError::InvalidIdentity {
+                    path: journal.destination.path.join(vault_session::IDENTITY_FILE),
+                    reason: format!(
+                        "the destination holds vault {} but the journal moved {}",
+                        identity.vault_id, journal.destination.vault_id
+                    ),
+                });
+            }
+            // Staging leftovers are worthless once finalized.
+            let _ = fs::remove_dir_all(&journal.destination_staging);
+            let _ = fs::remove_dir_all(&journal.origin_staging);
+            complete_journal(origin, journal.clone())?;
+            Ok(MoveRecovery::ActivatedDestination { journal })
         }
     }
 }
 
-/// Resolve the move journal at startup into one defined action (see
-/// [`MoveRecovery`]). Runs before any pool opens; a present-but-
-/// unreadable journal is an error the caller must surface (the
-/// recovery screen), never a silent empty-vault restart.
-pub fn resolve_interrupted_move(data_dir: &Path) -> Result<MoveRecovery, MoveError> {
-    let Some(journal) = read_move_journal(data_dir)? else {
-        return Ok(MoveRecovery::None);
-    };
-    let MoveJournal {
-        origin,
-        destination,
-        ..
-    } = journal;
-    Ok(match journal.phase {
-        MovePhase::Quiescing
-        | MovePhase::SnapshotReady
-        | MovePhase::Copying
-        | MovePhase::CopiedVerified => MoveRecovery::KeepOrigin {
-            origin,
-            destination,
-        },
-        MovePhase::SwitchingPointer => MoveRecovery::AdoptDestination {
-            origin,
-            destination,
-        },
-        MovePhase::Completed => MoveRecovery::Completed {
-            origin,
-            destination,
-        },
-    })
-}
-
-/// fsync a directory so a rename inside it is durable (the same
-/// convention the backup journal uses).
-fn fsync_dir(dir: &Path) -> Result<(), MoveError> {
-    let file = fs::File::open(dir).map_err(MoveError::Io)?;
-    file.sync_all().map_err(MoveError::Io)?;
-    Ok(())
+/// Mark the journal completed (its phases are over; the record stays
+/// for the "what happened" UX, like the switch journal does).
+fn complete_journal(origin: &Path, mut journal: MoveJournal) -> Result<(), MoveError> {
+    journal.state = MovePhase::Completed;
+    write_move_journal(origin, &journal)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn local_mounts() -> String {
-        "proc /proc proc rw 0 0\n/dev/sda1 / ext4 rw,relatime 0 0\n".to_string()
+    #[test]
+    fn the_longest_mount_point_prefix_wins() {
+        let mounts = "\
+proc /proc proc rw 0 0
+/dev/sda1 / ext4 rw 0 0
+nas:/export/shared /mnt/nas nfs4 rw 0 0
+";
+        assert_eq!(
+            filesystem_kind(Path::new("/home/user/vault"), mounts),
+            FilesystemKind::Local("ext4".to_string())
+        );
+        assert_eq!(
+            filesystem_kind(Path::new("/mnt/nas/vault"), mounts),
+            FilesystemKind::Network("nfs4".to_string())
+        );
+        // A path no mount point covers is unknown, never a guess.
+        assert_eq!(
+            filesystem_kind(Path::new("/somewhere/else"), "tmpfs /mnt/x tmpfs rw 0 0\n"),
+            FilesystemKind::Unknown
+        );
     }
 
     #[test]
-    fn detects_local_and_network_filesystems_from_the_mount_table() {
-        let dir = tempfile::tempdir().unwrap();
-        let local = detect_filesystem(dir.path(), &local_mounts());
-        assert_eq!(local.fs_type, "ext4");
-        assert!(!local.network);
-
-        let network = local_mounts().replace("/ ext4", "/ nfs");
-        let refused = detect_filesystem(dir.path(), &network);
-        assert_eq!(refused.fs_type, "nfs");
-        assert!(refused.network, "nfs is a network filesystem");
-
-        // A cifs mount below `/` wins by longest prefix.
-        let nested_path = dir
-            .path()
-            .canonicalize()
-            .unwrap()
-            .strip_prefix("/")
-            .unwrap()
-            .display()
-            .to_string();
-        let nested = format!("{}dev/sdb /{} cifs rw 0 0\n", local_mounts(), nested_path);
-        let nested_info = detect_filesystem(dir.path(), &nested);
-        assert_eq!(nested_info.fs_type, "cifs");
-        assert!(nested_info.network);
-
-        let unknown = detect_filesystem(dir.path(), "");
-        assert_eq!(unknown.fs_type, "unknown");
-        assert!(!unknown.network);
+    fn mount_point_escapes_decode_before_matching() {
+        let mounts = "nas:/x /mnt/with\\040space nfs4 rw 0 0\n/dev/sda1 / ext4 rw 0 0\n";
+        assert_eq!(
+            filesystem_kind(Path::new("/mnt/with space/vault"), mounts),
+            FilesystemKind::Network("nfs4".to_string())
+        );
     }
 
     #[test]
-    fn mount_point_escapes_decode() {
-        assert_eq!(unescape_mount_point("/mnt/my\\040share"), "/mnt/my share");
-        assert_eq!(unescape_mount_point("/plain"), "/plain");
+    fn every_network_filesystem_name_is_refused() {
+        let fstype = "cifs";
+        assert!(NETWORK_FILESYSTEMS.contains(&fstype));
+        let mounts = format!("//server/share /mnt/share {fstype} rw 0 0\n");
+        assert_eq!(
+            filesystem_kind(Path::new("/mnt/share/vault"), &mounts),
+            FilesystemKind::Network(fstype.to_string())
+        );
     }
 }

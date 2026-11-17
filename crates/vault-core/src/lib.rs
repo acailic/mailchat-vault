@@ -81,24 +81,29 @@
 //!   and sync jobs since it.
 //! - [`export`]: export search results or whole chats to CSV / JSON Lines /
 //!   MBOX.
+//! - [`export_html`]: the A8 readable offline HTML export bundle — static
+//!   escaped pages, copied media objects, a provenance/missing-file
+//!   manifest written last, staged publication, and honest
+//!   reconstructed-versus-original fidelity labels.
 //! - [`staged_write`]: staged file publication for exports — the export
 //!   streams into a private temp sibling of the destination and only a
 //!   fully written, flushed, fsynced file is renamed into place, so a
 //!   failed export never replaces a previously valid user file.
 //! - [`health`]: persisted archive-health evidence — the media
 //!   verification summary and per-import-source last-import records the
-//!   health overview reads (absent records read as not checked).
+//!   health overview reads (absent records read as not checked), plus
+//!   the `archive_health` read model composing the overview's three
+//!   separate committed facts (last sync, last import, last verified
+//!   backup) with the ledger's unresolved failure counts.
 //! - [`vault_session`]: the vault session seam (A4) — one owner of
 //!   vault identity, the exclusive advisory session lock, and the
 //!   derived vault paths, so every consumer resolves the vault through
 //!   a single session before custom locations exist.
-//! - [`vault_move`]: the A7 vault-location engine — candidate
-//!   inspection (write access, filesystem type, free space, identity,
-//!   schema compatibility; an unrelated directory is never prepared
-//!   for overwrite), the phased move preview with its byte estimate
-//!   (always a verified copy, never an assumed rename), and the
-//!   device-local move journal whose every phase resolves to one
-//!   defined recovery action with exactly one writable vault.
+//! - [`vault_move`]: the A7 vault-location engine — candidate-location
+//!   inspection (write access, filesystem type, free space, existing
+//!   identity, schema compatibility), the phased move preview with a
+//!   byte estimate, and the device-local move journal whose every
+//!   phase has one defined recovery action at startup.
 
 pub mod backup;
 pub mod bounded;
@@ -106,6 +111,7 @@ pub mod chat_export;
 pub mod demo;
 pub mod discord;
 pub mod export;
+pub mod export_html;
 pub mod extract;
 pub mod files;
 pub mod health;

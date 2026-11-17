@@ -1,5 +1,9 @@
-//! Persisted archive-health evidence: the two records the archive
-//! health overview composes that no live table already carries.
+//! Persisted archive-health evidence: the records the archive health
+//! overview composes that no live table already carries, plus the
+//! [`archive_health`] read model that derives the overview's three
+//! separate facts (last committed sync, last completed import, last
+//! verified backup) from committed rows only — never from a frontend
+//! timer.
 //!
 //! Both follow the [`crate::backup`] "last verified backup" seam (U05):
 //! a serde struct written through [`Storage::set_archive_meta`] and read
@@ -20,17 +24,23 @@
 //!   the success fields untouched — a failed recent run can never
 //!   overwrite the recorded time of the last success or read as a
 //!   successful refresh.
+//! - [`ArchiveHealth`] / [`archive_health`] — the composed read model:
+//!   per source the last completed sync and import receipts with their
+//!   observed ranges, the ledger's unresolved failure counts, and the
+//!   vault's last verified backup. Three separate facts, never one
+//!   shared claim.
 //!
 //! Because both records ride `vault.db`, a restore naturally replaces
 //! them with the restored vault's own history, exactly like the backup
 //! record.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::backup::LastBackupRecord;
 use crate::object_store::ReconcileReport;
-use crate::storage::Storage;
+use crate::storage::{SourceReceipt, SourceReceiptKind, Storage, JOB_LEDGER_KEEP};
 use crate::{Error, Result};
 
 /// The `archive_meta` key holding the persisted media verification
@@ -252,4 +262,119 @@ fn import_records_map(storage: &Storage) -> Result<BTreeMap<String, SourceImport
         return Ok(BTreeMap::new());
     };
     Ok(serde_json::from_str(&json).unwrap_or_default())
+}
+
+// ---------------------------------------------------------------------------
+// Archive-health read model (committed facts only)
+// ---------------------------------------------------------------------------
+
+/// How many of a source's newest receipt rows [`archive_health`] reads
+/// to find its newest completed sync and newest completed import — a
+/// bounded scan in the spirit of [`JOB_LEDGER_KEEP`]: only a source
+/// with more completed runs than this between two runs of one kind
+/// would have the older kind read from inside the window.
+const SOURCE_RECEIPT_SCAN: u32 = 128;
+
+/// One source's archive-health facts, each derived from committed
+/// receipt rows only: the last successful committed **sync** and the
+/// last completed **manual import** with its observed range (a receipt
+/// row exists only for a run that completed, and the range is a pair
+/// of separate nullable bounds — evidence, never a coverage claim).
+/// `None` is the explicit never-happened answer; no timestamp is
+/// invented for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceHealth {
+    /// The durable source instance the facts belong to.
+    pub source_instance_id: String,
+    /// The source's newest `sync` receipt — the last successful
+    /// committed sync.
+    pub last_sync: Option<SourceReceipt>,
+    /// The source's newest `import` receipt — the last completed
+    /// manual import, with the run's observed date range.
+    pub last_import: Option<SourceReceipt>,
+}
+
+/// The vault's archive health as **three separate facts**: per-source
+/// sync evidence, per-source import evidence, and the vault-level last
+/// **verified** backup — plus the finished-jobs ledger's unresolved
+/// failure counts. The separation is the contract: this type has no
+/// field that could merge them, because a successful sync is never a
+/// backup and a verified backup never reads as "everything up to
+/// date". The words "backup" and "sync" never meet in one shared
+/// status claim here; renderers must keep them apart the same way.
+///
+/// Failure counts come from the bounded `job_ledger` tail, whose rows
+/// carry no source identity, so they are vault-wide and keyed by job
+/// kind — never attributed to a source the ledger cannot name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveHealth {
+    /// One entry per durable source instance, in the registry's
+    /// oldest-first order. A registered source with no completed run
+    /// carries `None` facts, not invented ones.
+    pub sources: Vec<SourceHealth>,
+    /// Unresolved failed jobs by kind: a failed ledger row counts
+    /// until a newer **succeeded** row of the same kind resolves it.
+    /// Cancelled rows are the user's own action — they neither fail
+    /// nor resolve. The counts cover the ledger's bounded newest tail
+    /// ([`JOB_LEDGER_KEEP`] rows), so they are evidence of recent
+    /// failures, not a permanent history.
+    pub unresolved_job_failures: BTreeMap<String, u64>,
+    /// The last **verified** backup, read from the persisted
+    /// [`crate::backup::LAST_BACKUP_KEY`] record: `None` when this
+    /// vault never finished verifying one — never advanced by a sync
+    /// or an import.
+    pub last_verified_backup: Option<LastBackupRecord>,
+}
+
+/// Read the vault's archive health from committed facts only: source
+/// receipts, the finished-jobs ledger, and the persisted
+/// last-verified-backup record — never a frontend timer. Absent
+/// evidence reads as `None` or an empty map (the explicit never-done
+/// answers), and an unreadable stored record degrades to the same
+/// quiet answers rather than an error.
+pub fn archive_health(storage: &Storage) -> Result<ArchiveHealth> {
+    let mut sources = Vec::new();
+    for instance in storage.list_source_instances()? {
+        let receipts = storage.list_source_receipts(&instance.id, SOURCE_RECEIPT_SCAN)?;
+        let last_sync = receipts
+            .iter()
+            .find(|receipt| receipt.kind == SourceReceiptKind::Sync)
+            .cloned();
+        let last_import = receipts
+            .iter()
+            .find(|receipt| receipt.kind == SourceReceiptKind::Import)
+            .cloned();
+        sources.push(SourceHealth {
+            source_instance_id: instance.id,
+            last_sync,
+            last_import,
+        });
+    }
+    Ok(ArchiveHealth {
+        sources,
+        unresolved_job_failures: unresolved_failures(storage)?,
+        last_verified_backup: crate::backup::last_backup_record(storage)?,
+    })
+}
+
+/// Count the ledger's unresolved failures. Rows arrive newest first,
+/// so a failed row counts for its kind until a newer succeeded row of
+/// the same kind resolves it; anything older than that success is
+/// already resolved and skipped.
+fn unresolved_failures(storage: &Storage) -> Result<BTreeMap<String, u64>> {
+    let mut unresolved: BTreeMap<String, u64> = BTreeMap::new();
+    let mut resolved_kinds: BTreeSet<String> = BTreeSet::new();
+    for row in storage.job_ledger_recent(JOB_LEDGER_KEEP as u32)? {
+        if resolved_kinds.contains(&row.kind) {
+            continue;
+        }
+        match row.state.as_str() {
+            "succeeded" => {
+                resolved_kinds.insert(row.kind);
+            }
+            "failed" => *unresolved.entry(row.kind).or_default() += 1,
+            _ => {}
+        }
+    }
+    Ok(unresolved)
 }

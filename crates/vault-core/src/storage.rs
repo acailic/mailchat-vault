@@ -1322,14 +1322,14 @@ impl Storage {
             let registry_only =
                 messages.is_empty() && issues.is_empty() && !media_objects.is_empty();
             if !registry_only {
-                record_import_receipt_in_tx(
+                counts.receipt = Some(record_import_receipt_in_tx(
                     &tx,
                     import_id,
                     source,
                     messages,
                     new_records,
                     present_records,
-                )?;
+                )?);
             }
         } else {
             tx.execute(
@@ -4584,7 +4584,8 @@ fn insert_message_in_tx(
 /// failures from `import_issues`, observed bounds and file outcomes
 /// over the messages this import's occurrences point at), so an
 /// interrupted-and-resumed run reports the same facts a clean run
-/// would. No message bodies.
+/// would. No message bodies. Returns the stored row so the completing
+/// commit's counts can carry it to the caller (A2b).
 fn record_import_receipt_in_tx(
     tx: &Transaction<'_>,
     import_id: &str,
@@ -4592,7 +4593,7 @@ fn record_import_receipt_in_tx(
     messages: &[NewMessage],
     new_records: u64,
     present_records: u64,
-) -> Result<()> {
+) -> Result<SourceReceipt> {
     // The instance the run stored under: the batch's first message
     // names it (a bounded import is one source); an empty completing
     // batch falls back to the checkpoint's namespace.
@@ -4664,7 +4665,20 @@ fn record_import_receipt_in_tx(
             files_missing,
             facts_json: &facts_json,
         },
+    )?;
+    // Read the row back for the columns the INSERT generates (`id`,
+    // `completed_at`), so what the caller receives is exactly what the
+    // listing serves.
+    tx.query_row(
+        "SELECT id, source_instance_id, kind, completed_at,
+                observed_min, observed_max,
+                new_records, present_records, failed_records,
+                files_preserved, files_missing, facts_json
+         FROM source_receipts WHERE id = last_insert_rowid()",
+        [],
+        source_receipt_from_row,
     )
+    .map_err(Into::into)
 }
 
 /// Increment `archive_meta.archive_revision` inside a content-changing
@@ -6035,7 +6049,7 @@ pub struct ImportIssue {
 }
 
 /// Per-batch counters returned by [`Storage::commit_import_batch`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ImportBatchCounts {
     /// Messages newly stored by this batch.
     pub inserted: u64,
@@ -6044,6 +6058,12 @@ pub struct ImportBatchCounts {
     /// Messages whose media links were written or backfilled (inserts
     /// carrying a `media` array plus duplicates that gained entries).
     pub media_linked: u64,
+    /// The completed import's receipt, written by the completing commit
+    /// in the same transaction as the batch it summarizes (run-total
+    /// new/present/failed counts, file outcomes, observed bounds).
+    /// `None` on intermediate batches and on the registry-only commit
+    /// that follows an already-completed import.
+    pub receipt: Option<SourceReceipt>,
 }
 
 /// How many finished jobs the ledger keeps (migration 16). A write prunes
