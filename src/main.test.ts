@@ -5632,17 +5632,23 @@ describe("workspace shell", () => {
     expect(active?.closest(".hit-item")?.getAttribute("aria-current")).toBe("true");
   });
 
-  it("Ctrl/Cmd+K focuses the search box from anywhere", async () => {
+  it("Ctrl/Cmd+K opens the command palette (not the search box)", async () => {
     await boot();
     $("h1").focus();
     win.document.dispatchEvent(
       new win.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true }),
     );
-    expect(win.document.activeElement?.id).toBe("search");
+    const input = win.document.querySelector<HTMLInputElement>("#command-palette-input")!;
+    expect(input).toBeTruthy();
+    expect(input.getAttribute("role")).toBe("combobox");
+    expect(win.document.activeElement).toBe(input);
+    expect(win.document.activeElement?.id).not.toBe("search");
+    // The Cmd variant toggles it closed again; focus returns to the trigger.
     win.document.dispatchEvent(
       new win.KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true, cancelable: true }),
     );
-    expect(win.document.activeElement?.id).toBe("search");
+    expect(win.document.querySelector<HTMLElement>(".command-palette-overlay")!.hidden).toBe(true);
+    expect(win.document.activeElement?.tagName).toBe("H1");
   });
 
   it("'/' is ignored while typing in a field", async () => {
@@ -5682,7 +5688,7 @@ describe("workspace tabs (Search / Ask) and the hideable sidebar", () => {
     expect(app().dataset.workspaceSection).toBe("search");
   });
 
-  it("leaving and returning keeps the active tab; Ctrl+K lands on Search", async () => {
+  it("leaving and returning keeps the active tab; '/' lands on Search", async () => {
     await boot();
     ($("#tab-ask") as HTMLElement).click();
     expect(app().dataset.workspaceSection).toBe("ask");
@@ -5690,9 +5696,7 @@ describe("workspace tabs (Search / Ask) and the hideable sidebar", () => {
     expect(app().dataset.view).toBe("settings");
     $(".nav-view-btn[data-view-target='workspace']").click();
     expect(app().dataset.workspaceSection).toBe("ask"); // preserved
-    win.document.dispatchEvent(
-      new win.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true }),
-    );
+    pressKey(win.document.body, "/");
     expect(app().dataset.workspaceSection).toBe("search");
     expect(win.document.activeElement?.id).toBe("search");
   });
@@ -5720,6 +5724,73 @@ describe("workspace tabs (Search / Ask) and the hideable sidebar", () => {
     expect(app().dataset.navCollapsed).toBe("false"); // untouched
     toggle.click();
     expect(app().dataset.nav).toBe("closed");
+  });
+});
+
+describe("command palette (Cmd/Ctrl+K)", () => {
+  function openPalette(): HTMLInputElement {
+    win.document.dispatchEvent(
+      new win.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true }),
+    );
+    const input = win.document.querySelector<HTMLInputElement>("#command-palette-input");
+    if (!input) throw new Error("palette did not open");
+    return input;
+  }
+
+  function typeIn(input: HTMLInputElement, text: string): void {
+    input.value = text;
+    input.dispatchEvent(new win.Event("input", { bubbles: true }));
+  }
+
+  it("seeds the view commands; Enter navigates end-to-end", async () => {
+    await boot();
+    const input = openPalette();
+    typeIn(input, "jobs");
+    const active = win.document.querySelector('[role="option"][aria-selected="true"]') as HTMLElement;
+    expect(active.id).toBe("palette-cmd-view.jobs");
+    pressKey(input, "Enter");
+    expect($("#app").dataset.view).toBe("activity");
+    expect(win.document.querySelector<HTMLElement>(".command-palette-overlay")!.hidden).toBe(true);
+  });
+
+  it("theme commands ride the existing theme select", async () => {
+    await boot();
+    const input = openPalette();
+    typeIn(input, "vesper");
+    pressKey(input, "Enter");
+    expect(win.document.documentElement.dataset.theme).toBe("vesper");
+    expect($<HTMLSelectElement>("#theme").value).toBe("vesper");
+  });
+
+  it("the Focus search command preserves the old Ctrl+K flow", async () => {
+    await boot();
+    const input = openPalette();
+    typeIn(input, "focus");
+    pressKey(input, "Enter");
+    expect($("#app").dataset.workspaceSection).toBe("search");
+    expect(win.document.activeElement?.id).toBe("search");
+  });
+
+  it("Enter on unmatched text runs a search and records the recent", async () => {
+    await boot();
+    searchRespondsWith(() => pageOf(HITS, 3));
+    const input = openPalette();
+    typeIn(input, "vault notes");
+    pressKey(input, "Enter");
+    await vi.waitFor(() => expect(searchCalls()).toHaveLength(1));
+    expect((searchCalls()[0].args as { request: { text: string } }).request.text).toBe("vault notes");
+    expect(win.localStorage.getItem("mcv.paletteRecents")).toBe(JSON.stringify(["vault notes"]));
+    await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
+  });
+
+  it("Escape closes and returns focus to the trigger", async () => {
+    await boot();
+    $("h1").focus();
+    const input = openPalette();
+    expect(win.document.activeElement).toBe(input);
+    pressKey(input, "Escape");
+    expect(win.document.querySelector<HTMLElement>(".command-palette-overlay")!.hidden).toBe(true);
+    expect(win.document.activeElement?.tagName).toBe("H1");
   });
 });
 

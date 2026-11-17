@@ -1444,6 +1444,97 @@ label.field-check input { margin: 0; }
 
 #nav-scrim { display: none; }
 
+/* --- Command palette (Cmd/Ctrl+K) -----------------------------------------
+ * Keyboard-first surface over the committed panel/selection/match token
+ * pairs, so the a11y contrast gate keeps covering it. Keyboard opens
+ * mount with no transition at all (high-frequency action, Rauno
+ * frequency rule); only the pointer path fades in, opacity-only, and
+ * the consolidated reduced-motion block below removes even that. */
+
+.command-palette-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60; /* above the drawer (40) and scrim (30), below the skip link */
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 12vh var(--sp-3) var(--sp-3);
+  background: color-mix(in srgb, var(--text) 25%, transparent);
+}
+.command-palette-overlay[hidden] { display: none; }
+
+/* Pointer-open only: opacity-only enter. */
+.command-palette-overlay.palette-enter {
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+
+.command-palette {
+  width: min(560px, 100%);
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  box-shadow: var(--shadow);
+}
+
+.command-palette-inputrow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border);
+}
+.command-palette-inputrow input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: var(--text);
+  background: transparent;
+  border: none;
+}
+.command-palette-inputrow input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-s);
+}
+
+.command-palette-list {
+  overflow-y: auto;
+  padding: var(--sp-1);
+}
+
+.command-palette-section {
+  padding: var(--sp-2) var(--sp-2) var(--sp-1);
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.command-palette-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-2);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+.command-palette-option[aria-selected="true"] {
+  background: var(--selection);
+}
+/* Fuzzy-matched letters carry the same measured amber pair as mark.hit. */
+.command-palette-option mark {
+  background: var(--match);
+  color: var(--match-ink);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.command-palette-option kbd { flex: none; }
+
 /* --- Motion vocabulary (tokens.css --motion-* / --ease-*) ------------------
  * Every transition consumes the shared tokens: no raw durations, no
  * raw easing curves. Movement means transform only; opacity and color
@@ -1538,5 +1629,11 @@ button,
   .progress-track.indeterminate::after {
     animation: none;
     left: 35%;
+  }
+
+  /* Command palette: the pointer-open fade is removed entirely (the
+   * keyboard path never transitioned in the first place). */
+  .command-palette-overlay.palette-enter {
+    transition: none;
   }
 }
