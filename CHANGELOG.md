@@ -4,7 +4,7 @@ Notable, user-facing changes per release. Internal-only work (docs
 grounding, test plumbing) is summarized where it changes what testers
 and packagers run, not item by item.
 
-## [0.2.0] - pending tag
+## [0.2.0] - 2026-11-17
 
 ### Changed (Vesper is the default theme)
 
