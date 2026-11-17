@@ -1551,7 +1551,10 @@ fn run_ask(
                 llm::rank_hybrid_scoped(
                     s,
                     embedder,
-                    question,
+                    // The dense leg embeds the raw question here; the
+                    // optional HyDE draft is a follow-up wiring (core:
+                    // llm::ask_with_semantic_draft).
+                    llm::DenseQuery::raw(question),
                     &planned,
                     &fts_results,
                     scope.as_ref(),

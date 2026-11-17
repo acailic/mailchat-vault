@@ -375,6 +375,15 @@ pub struct Options {
     /// Strictly opt-in; older files default to disabled.
     #[serde(default)]
     pub start_at_login: bool,
+    /// Improve semantic search with a generated draft (HyDE, Gao et
+    /// al. ACL 2023): when a consented provider backend exists, one
+    /// extra provider call writes a short hypothetical answer to the
+    /// question and that text — not the raw question — is embedded as
+    /// the dense query vector. Strictly opt-in (it sends the question
+    /// to the provider, the same data translate already sends); older
+    /// settings files without the field default to **disabled**.
+    #[serde(default)]
+    pub semantic_draft: bool,
 }
 
 /// `Options::notifications` serde default (see the field docs).
@@ -390,6 +399,7 @@ impl Default for Options {
             notifications: default_notifications(),
             keep_running_in_background: false,
             start_at_login: false,
+            semantic_draft: false,
         }
     }
 }
@@ -1150,6 +1160,40 @@ mod tests {
         assert!(reloaded.options.start_at_login);
         assert!(!reloaded.options.notifications);
         assert_eq!(reloaded, s);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn semantic_draft_option_round_trips_and_backfills_off() {
+        assert!(
+            !Settings::default().options.semantic_draft,
+            "the HyDE draft is strictly opt-in: a fresh install never drafts"
+        );
+        let dir = std::env::temp_dir().join(format!("mcv-settings-hyde-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        // A file written before the option existed: the field is absent
+        // and must backfill to OFF, not refuse to load.
+        let older = serde_json::json!({
+            "version": SETTINGS_VERSION,
+            "providers": [],
+            "default_provider": null,
+            "options": {"theme": "system", "summarize_top": 8}
+        });
+        fs::write(&path, serde_json::to_vec(&older).unwrap()).unwrap();
+        let loaded = Settings::load(&path).unwrap().expect("file exists");
+        assert!(!loaded.options.semantic_draft);
+        // An explicit opt-in survives a save/load round trip.
+        let mut s = loaded;
+        s.options.semantic_draft = true;
+        s.save(&path).unwrap();
+        assert!(
+            Settings::load(&path)
+                .unwrap()
+                .unwrap()
+                .options
+                .semantic_draft
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
