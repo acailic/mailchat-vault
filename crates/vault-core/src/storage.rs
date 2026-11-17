@@ -891,6 +891,53 @@ const MIGRATIONS: &[(i64, &str)] = &[
             ON archive_messages (created_at, source_instance_id);
         "#,
     ),
+    (
+        22,
+        // The attachment projection (A6): one row per attachment
+        // reference a message records in its `raw_json` `media` array,
+        // plus the registry side (`media_objects`) at read time. Linked
+        // attachments previously lived only inside each message's raw
+        // JSON; this index spans them without mutating any raw record
+        // (the backfill in `crate::files` is the single writer). Like
+        // `collection_members`, `message_id` deliberately carries no
+        // foreign key: the projection is derived from raw rows, and a
+        // dangling row (a vault restored from an older snapshot)
+        // surfaces as an unusable reference instead of silently
+        // vanishing — re-running the backfill repairs it. `UNIQUE
+        // (message_id, ref_index)` makes upserts idempotent, so the
+        // resumable backfill can stop and restart on any boundary.
+        r#"
+        CREATE TABLE attachment_refs (
+            id                 INTEGER PRIMARY KEY,
+            message_id         INTEGER NOT NULL,
+            -- Index of the entry inside the message's media array.
+            ref_index          INTEGER NOT NULL,
+            source_instance_id TEXT NOT NULL DEFAULT '',
+            -- Bounded import run that first observed the message (its
+            -- earliest occurrence's import_id; '' when unrecorded).
+            import_id          TEXT NOT NULL DEFAULT '',
+            name               TEXT NOT NULL DEFAULT '',
+            kind               TEXT NOT NULL DEFAULT '',
+            size               INTEGER NOT NULL DEFAULT 0,
+            -- NULL when the reference's bytes were never preserved (the
+            -- raw entry carries `missing` plus a reason instead).
+            sha256             TEXT,
+            -- 'preserved' = preserved-by-reference (a digest is
+            -- recorded; verifying the bytes on disk stays with the
+            -- existing reconcile surface). 'missing' = the raw entry
+            -- records an unpreserved reference. The CHECK keeps the
+            -- two representations exactly in step: a digest exists if
+            -- and only if the reference is preserved.
+            availability       TEXT NOT NULL
+                CHECK (availability IN ('preserved', 'missing')),
+            reason             TEXT NOT NULL DEFAULT '',
+            UNIQUE (message_id, ref_index),
+            CHECK ((sha256 IS NULL) = (availability = 'missing'))
+        );
+        CREATE INDEX idx_attachment_refs_sha256 ON attachment_refs (sha256);
+        CREATE INDEX idx_attachment_refs_message ON attachment_refs (message_id);
+        "#,
+    ),
 ];
 
 /// Rust halves of migrations, for backfill logic that SQL alone cannot
