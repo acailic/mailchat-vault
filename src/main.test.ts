@@ -29,6 +29,7 @@ import type {
   MessageSummary,
   SearchArchivePage,
 } from "./v2types";
+import { buildRequest, DEFAULT_FILTERS } from "./searchstate";
 
 // Timestamps must render timezone-independently here (same approach as
 // render.test.ts); formatSentAt itself is covered by format.test.ts.
@@ -500,6 +501,62 @@ describe("search box", () => {
     const buttons = pageButtons();
     expect(buttons.map((b) => b.disabled)).toEqual([true, true]);
     expect(win.document.querySelectorAll("#results .group, #results .hit-item").length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Search operators (P1·05): typed operator queries map onto the v2
+// request fields; unsupported/unknown/malformed tokens leave a hint
+// under the box while the rest of the query still runs.
+// ---------------------------------------------------------------------------
+
+describe("search operators", () => {
+  it("a typed operator query issues the request of the equivalent UI filters", async () => {
+    await boot();
+    searchRespondsWith(() => pageOf(HITS, 3));
+    await runQuery("from:ana has:attachment before:2026-01-03");
+    const expected = buildRequest(
+      { ...DEFAULT_FILTERS, author: "ana", hasAttachment: true, toDate: "2026-01-02" },
+      50,
+      0,
+    );
+    expect((searchCalls().at(-1)!.args as { request: unknown }).request).toEqual(expected);
+    // A clean operator query leaves no hint line.
+    expect($("#search-hint").textContent).toBe("");
+    await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
+  });
+
+  it("source: resolves the instance id the chip bar keys on", async () => {
+    await boot();
+    searchRespondsWith(() => pageOf(HITS, 3));
+    await runQuery("source:mbox vault");
+    const request = (searchCalls().at(-1)!.args as { request: { source_ids: string[]; text: string } })
+      .request;
+    expect(request.source_ids).toEqual(["inst-mbox"]);
+    expect(request.text).toBe("vault");
+  });
+
+  it("an unknown operator renders its hint under the box while the search still runs", async () => {
+    await boot();
+    searchRespondsWith(() => pageOf(HITS, 3));
+    await runQuery("frobnicate:x vault");
+    const request = (searchCalls().at(-1)!.args as { request: { text: string } }).request;
+    expect(request.text).toBe("vault");
+    expect($("#search-hint").textContent).toContain("unknown operator frobnicate:");
+    await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
+  });
+
+  it("hints stack in one line and clear when the query is clean again", async () => {
+    await boot();
+    searchRespondsWith(() => pageOf(HITS, 3));
+    await runQuery("subject:report is:unread vault");
+    const hint = $("#search-hint").textContent ?? "";
+    expect(hint).toContain("subject: is not supported yet");
+    expect(hint).toContain("read state is not tracked");
+    // The plain term still ran the search.
+    await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
+    await runQuery("vault");
+    await vi.waitFor(() => expect($("#search-hint").textContent).toBe(""));
   });
 });
 
