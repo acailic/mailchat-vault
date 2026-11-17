@@ -1346,15 +1346,21 @@ function firstValidationError(): string | null {
 /** The vesper theme choice persists across launches (machine-local). The
  * backend theme enum does not know "vesper", so settings.json keeps
  * saving "dark" while this flag records the actual choice; renderSettings
- * applies it over the saved theme. Guarded: storage is absent in some
- * test/restricted-webview environments (same stance as mcv.navCollapsed). */
+ * applies it over the saved theme. It is also the seam that makes Vesper
+ * the default: a fresh vault (saved theme System, no recorded choice)
+ * resolves to Vesper here without any settings-file migration. Guarded:
+ * storage is absent in some test/restricted-webview environments (same
+ * stance as mcv.navCollapsed). */
 const THEME_VESPER_KEY = "mcv.themeVesper";
 
-function readThemeVesper(): boolean {
+/** The recorded machine-local choice: true/false for an explicit
+ * vesper/non-vesper pick, null when nothing is recorded yet. */
+function readThemeVesper(): boolean | null {
   try {
-    return window.localStorage.getItem(THEME_VESPER_KEY) === "1";
+    const value = window.localStorage.getItem(THEME_VESPER_KEY);
+    return value === null ? null : value === "1";
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -1366,12 +1372,32 @@ function persistThemeVesper(vesper: boolean): void {
   }
 }
 
+/** Resolve the theme for a settings render. A recorded choice wins ("1"
+ * → vesper over the "dark" placeholder the backend saves for it;
+ * anything else → the saved theme). With no record, a vault whose saved
+ * theme is System — a fresh install, or a user who chose System before
+ * this record existed (the two are indistinguishable without a backend
+ * change) — resolves to Vesper, the product default, and records the
+ * choice immediately so restarts stay Vesper and every later selection
+ * stays user-owned. A saved Light/Dark theme wins as saved, with no
+ * record written. */
+function resolveTheme(view: SettingsView): Theme {
+  const recorded = readThemeVesper();
+  if (recorded === null && view.theme === "system") {
+    persistThemeVesper(true);
+    return "vesper";
+  }
+  return recorded === true ? "vesper" : view.theme;
+}
+
 /** Render the whole Settings form from a view (after boot and after every
  * successful save or key clear). */
 function renderSettings(view: SettingsView): void {
-  // The vesper override wins over the saved theme (which reads "dark"
-  // while vesper is active — the backend enum has no vesper variant).
-  const theme: Theme = readThemeVesper() ? "vesper" : view.theme;
+  // The recorded vesper override wins over the saved theme (which reads
+  // "dark" while vesper is active — the backend enum has no vesper
+  // variant); with nothing recorded, a System-saved vault defaults to
+  // vesper (see resolveTheme).
+  const theme: Theme = resolveTheme(view);
   settingsRendered = true;
   activeProviderSummaryLine.textContent = activeProviderSummary(view);
   providerRows.replaceChildren(
