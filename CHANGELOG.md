@@ -6,6 +6,15 @@ and packagers run, not item by item.
 
 ## [0.2.0] - pending tag
 
+### Changed (Vesper is the default theme)
+
+- A fresh vault now opens in Vesper: with no saved theme choice (and no
+  machine-local record), the first settings render applies the Vesper
+  palette and records the choice, so restarts stay Vesper regardless of
+  the OS color scheme. Vaults that saved Light or Dark keep their theme,
+  and picking Light, Dark, or System — including switching back from the
+  Vesper default — records the explicit choice so it sticks.
+
 ### Added (per-source status on the navigation chips)
 
 - Every source chip in the navigation column now says what state its
