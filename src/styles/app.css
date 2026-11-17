@@ -664,6 +664,13 @@ kbd {
   background: var(--panel);
 }
 
+.first-run-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
 .first-run-title {
   font-size: var(--text-section);
   font-weight: var(--text-display-weight);
@@ -672,6 +679,48 @@ kbd {
 }
 
 #first-run .row { margin-top: var(--sp-3); }
+
+/* --- Empty states (src/emptystate.ts) ---------------------------------
+ * One group per named state: illustration → display headline →
+ * two-sentence copy → one CTA. The illustration is line art on the
+ * sprite's 48-grid, colored by the accent token; the headline rides
+ * the display step of the type ramp. The staggered entrance lives
+ * with the motion vocabulary (see `.empty-state > *` below). */
+.empty-state {
+  display: grid;
+  justify-items: start;
+  gap: var(--sp-2);
+  margin: var(--sp-4) 0;
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--panel);
+}
+#results .empty-state {
+  /* The search empty state sits inside the results column, not on a
+   * card of its own — the panel tint would double the surface. */
+  border: none;
+  background: none;
+  padding: var(--sp-4) var(--pane-pad-x);
+}
+.empty-state-art {
+  width: 64px;
+  height: 64px;
+  color: var(--accent);
+}
+.empty-state-headline {
+  font-size: var(--text-2xl);
+  font-weight: var(--text-display-weight);
+  letter-spacing: var(--text-display-tracking);
+  line-height: var(--lh-compact);
+  margin: 0;
+}
+.empty-state-copy {
+  margin: 0;
+  max-width: 44ch;
+  color: var(--muted); /* recorded AA on panel/panel-2 (tokens.css) */
+}
+.empty-state-cta { margin-top: var(--sp-1); }
 
 /* Drop zones (whole-window drag-drop import): static copy whose only
  * dynamic behavior is the highlight class the Tauri drag-drop events
@@ -1526,6 +1575,25 @@ button,
     color var(--motion-fast) var(--ease-out);
 }
 
+/* Empty-state entrances: the one sanctioned staggered group (rare,
+ * once — illustration → headline → copy → CTA). Children fade and
+ * rise 4px over the slow token, each step delayed by half a slow
+ * token. The animation runs once per view-mount (elements are built
+ * fresh by the empty-state builder); it is NOT a transition, so the
+ * tokenized-transition contract above is untouched. Reduced motion
+ * disables it in the consolidated block below — the group then shows
+ * identical content instantly. */
+@keyframes empty-state-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+.empty-state > * {
+  animation: empty-state-in var(--motion-slow) var(--ease-out) both;
+}
+.empty-state > *:nth-child(2) { animation-delay: calc(var(--motion-slow) / 2); }
+.empty-state > *:nth-child(3) { animation-delay: var(--motion-slow); }
+.empty-state > *:nth-child(4) { animation-delay: calc(var(--motion-slow) * 1.5); }
+
 /* Reduced motion: the one consolidated block. All movement (transform
  * transitions, ambient keyframe animation) is removed; the opacity and
  * color transitions above keep their token durations. The tokens
@@ -1565,5 +1633,11 @@ button,
   .progress-track.indeterminate::after {
     animation: none;
     left: 35%;
+  }
+
+  /* Empty-state entrance off: no fade, no rise — the identical
+   * static group renders at once. */
+  .empty-state > * {
+    animation: none;
   }
 }

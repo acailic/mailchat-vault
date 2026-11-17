@@ -14,6 +14,7 @@ import type { AccountView, SourceCount, SourceInstance } from "./types";
 import type { ImapAuthMode } from "./ipc";
 import { friendlySourceLabel } from "./format";
 import { iconEl, type IconName } from "./icons";
+import { emptyStateEl } from "./emptystate";
 
 /** The arguments of one `sync_imap` invocation for a stored account. */
 export interface SyncNowRequest {
@@ -165,11 +166,6 @@ export function sourceChipStatus(account: AccountView, syncing: boolean): string
   return account.last_success_at ? `Last synced ${account.last_success_at}` : "Never synced";
 }
 
-/** The empty-state line when no source exists yet. */
-export function sourcesEmptyLine(): string {
-  return "No sources yet — import an export or connect an email account and it appears here.";
-}
-
 /** Where one just-saved password lives, as the user must be told it:
  * the OS keyring persists across restarts; session memory is cleared
  * when the app exits — the honest-credential rule (a failed sync that
@@ -305,6 +301,8 @@ export interface RenderSourcesListOptions {
   onUpdateCredentials: (account: AccountView) => void;
   onForget: (account: AccountView) => void;
   onDisconnect: (account: AccountView) => void;
+  /** The no-sources empty state's CTA: open the Add source chooser. */
+  onAddSource: () => void;
 }
 
 /** Render the Sources list (replaces children): one row per source —
@@ -312,7 +310,8 @@ export interface RenderSourcesListOptions {
  * email) as the primary actions, and pause/credentials/disconnect behind
  * a Details fold. Every control is a real focusable button with an
  * account-scoped accessible name. Disconnect is two-step: the first
- * click arms the confirmation, the second fires; a re-render disarms. */
+ * click arms the confirmation, the second fires; a re-render disarms.
+ * An empty list renders the illustrated empty state (one row, one CTA). */
 export function renderSourcesList(
   el: HTMLElement,
   accounts: AccountView[],
@@ -321,10 +320,18 @@ export function renderSourcesList(
   if (accounts.length === 0) {
     const empty = document.createElement("li");
     empty.className = "account-row empty";
-    const line = document.createElement("span");
-    line.className = "meta";
-    line.textContent = sourcesEmptyLine();
-    empty.append(line);
+    empty.append(
+      emptyStateEl({
+        icon: "empty-sources",
+        headline: "No sources yet",
+        copy:
+          "This list shows every import and email account that feeds your archive. " +
+          "Add your first source and it appears here.",
+        ctaLabel: "Add source…",
+        ctaTitle: "Import an export or connect an email account",
+        onCta: opts.onAddSource,
+      }),
+    );
     el.replaceChildren(empty);
     return;
   }

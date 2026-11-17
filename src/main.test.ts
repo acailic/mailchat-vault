@@ -295,7 +295,9 @@ async function runQuery(text: string): Promise<void> {
   await vi.waitFor(() => expect(searchCalls().length).toBeGreaterThan(0));
 }
 
-async function boot(opts: { themeVesper?: string } = {}): Promise<void> {
+async function boot(
+  opts: { themeVesper?: string; firstRunDismissed?: boolean } = {},
+): Promise<void> {
   win = new Window();
   vi.stubGlobal("window", win);
   vi.stubGlobal("document", win.document);
@@ -304,6 +306,9 @@ async function boot(opts: { themeVesper?: string } = {}): Promise<void> {
   // prior explicit choice; without one the fresh-machine default applies.
   if (opts.themeVesper !== undefined)
     win.localStorage.setItem("mcv.themeVesper", opts.themeVesper);
+  // A pre-seeded dismissal record stands in for a prior session that
+  // dismissed the getting-started card (it persists in localStorage).
+  if (opts.firstRunDismissed) win.localStorage.setItem("mcv.firstRunDismissed", "1");
   // Note: the happy-dom environment replaces the global URL class, so the
   // index.html path is resolved through node:url instead of new URL().
   const indexHtml = join(dirname(fileURLToPath(import.meta.url)), "..", "index.html");
@@ -2680,6 +2685,51 @@ describe("first-run state and the isolated sample archive (U02)", () => {
     await vi.waitFor(() => expect($("#demo-banner").getAttribute("hidden")).toBeNull());
     // The demo vault's stats browse, not the empty personal vault.
     await vi.waitFor(() => expect($("#first-run").getAttribute("hidden")).not.toBeNull());
+  });
+
+  it("the guided CTA leads with importing the first archive", async () => {
+    tauri.handlers.set("stats", () => ({ total: 0, by_source: [] }));
+    await boot();
+    await vi.waitFor(() => expect($("#first-run").getAttribute("hidden")).toBeNull());
+    expect($("#first-run-import-btn").textContent).toBe("Import your first archive…");
+    // The CTA routes to the import section and focuses its picker.
+    ($("#first-run-import-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("import"),
+    );
+    expect(document.activeElement?.id).toBe("import-pick-btn");
+  });
+
+  it("dismissing the card hides it and records the choice in localStorage", async () => {
+    tauri.handlers.set("stats", () => ({ total: 0, by_source: [] }));
+    await boot();
+    await vi.waitFor(() => expect($("#first-run").getAttribute("hidden")).toBeNull());
+    ($("#first-run-dismiss-btn") as HTMLElement).click();
+    expect($("#first-run").getAttribute("hidden")).not.toBeNull();
+    expect(win.localStorage.getItem("mcv.firstRunDismissed")).toBe("1");
+    // A stats refresh re-runs the vault chrome (Clear → refreshStats →
+    // updateVaultChrome) and must not resurrect the dismissed card: the
+    // flag is read back from localStorage, not held in memory alone.
+    ($("#clear-filters") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(tauri.calls.filter((c) => c.cmd === "stats").length).toBeGreaterThan(0),
+    );
+    await flush();
+    expect($("#first-run").getAttribute("hidden")).not.toBeNull();
+  });
+
+  it("a recorded dismissal keeps the card hidden on a fresh session (reload)", async () => {
+    tauri.handlers.set("stats", () => ({ total: 0, by_source: [] }));
+    // The pre-seeded record stands in for the localStorage a restart
+    // re-reads: the empty archive stays, the card does not return.
+    await boot({ firstRunDismissed: true });
+    await vi.waitFor(() => expect($("#stats").textContent).not.toBe("…"));
+    await vi.waitFor(() =>
+      expect($("#status").textContent).toBe("Your archive is empty — add a source to get started."),
+    );
+    expect($("#first-run").getAttribute("hidden")).not.toBeNull();
+    // The dismissal itself is untouched by the boot.
+    expect(win.localStorage.getItem("mcv.firstRunDismissed")).toBe("1");
   });
 });
 
@@ -6722,14 +6772,31 @@ describe("storage & backup panel (U05)", () => {
     expect($("#backup-status").textContent).toContain("/media/vault-2026-11-27.mcbackup");
   });
 
-  it("the empty state explains what the last-backup line means", async () => {
+  it("backup never-run renders the illustrated empty state with one CTA", async () => {
     tauri.handlers.set("last_backup", () => null);
     await boot();
     $(".nav-view-btn[data-view-target='settings']").click();
     $('.settings-nav-btn[data-settings-target="storage"]').click();
-    await vi.waitFor(() =>
-      expect($("#backup-status").textContent).toContain("No verified backup yet"),
+    // The quiet line is gone; the illustrated group owns the state.
+    await vi.waitFor(() => expect($("#backup-empty .empty-state")).toBeTruthy());
+    expect($("#backup-status").textContent).toBe("");
+    const group = $("#backup-empty .empty-state");
+    expect(group.querySelector(".empty-state-art use")?.getAttribute("href")).toBe(
+      "#i-empty-backup",
     );
+    expect(group.querySelector(".empty-state-headline")!.textContent).toBe("No backup yet");
+    expect(group.querySelector(".empty-state-copy")!.textContent).toContain(
+      "one versioned file",
+    );
+    // The single CTA starts the same backup flow as the panel button:
+    // pick a destination, then the backup_create job is submitted.
+    dialog.savedPath = "/tmp/vault-2026-11-17.mcbackup";
+    tauri.handlers.set("job_submit", () => ({ id: 7, title: "backup" }));
+    (group.querySelector(".empty-state-cta button") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(tauri.calls.some((c) => c.cmd === "job_submit")).toBe(true),
+    );
+    expect($("#backup-status").textContent).toContain("Backing up to");
   });
 
   it("a flag is raised when the recorded container is no longer on disk", async () => {
