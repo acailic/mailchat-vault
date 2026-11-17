@@ -415,7 +415,8 @@ impl PageWriter {
         let _ = write!(
             self.buf,
             "<section class=\"message\" id=\"m-{id}\">\n\
-             <p class=\"meta\">source: {source} · author: {author} · sent: {sent} · channel: {channel}</p>\n\
+             <p class=\"meta\">source: {source} · author: {author}</p>\n\
+             <p class=\"meta\">sent: {sent} · channel: {channel}</p>\n\
              <pre class=\"body\">{body}</pre>\n",
             id = m.id,
             source = escape(&m.source),
@@ -428,8 +429,10 @@ impl PageWriter {
         if let Some(html) = retained_html(&m.raw_json) {
             let _ = write!(
                 self.buf,
-                "<details class=\"rendered\"><summary>Rendered original HTML (sandboxed)</summary>\n\
-                 <iframe sandbox=\"\" title=\"Rendered message body\" srcdoc=\"{srcdoc}\"></iframe>\n\
+                "<details class=\"rendered\">\
+                 <summary>Rendered original HTML (sandboxed)</summary>\n\
+                 <iframe sandbox=\"\" title=\"Rendered message body\" \
+                 srcdoc=\"{srcdoc}\"></iframe>\n\
                  </details>\n",
                 // The retained HTML rides ONLY inside this escaped
                 // srcdoc attribute: the outer document never receives

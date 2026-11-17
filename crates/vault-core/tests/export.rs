@@ -1859,13 +1859,13 @@ fn html_search_bundle_matches_the_v2_stream_scope() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("html");
     let objects = vault_core::object_store::ObjectStore::new(dir.path());
-    let summary =
-        match vault_core::export_html::export_html(&s, &vault_core::export_html::HtmlExportScope::Search { request }, &dest, &objects, &|| false)
-            .unwrap()
-        {
-            Some(vault_core::export_html::HtmlExportOutcome::Complete(summary)) => summary,
-            other => panic!("expected a completed HTML export, got {other:?}"),
-        };
+    let scope = vault_core::export_html::HtmlExportScope::Search { request };
+    let outcome =
+        vault_core::export_html::export_html(&s, &scope, &dest, &objects, &|| false).unwrap();
+    let summary = match outcome {
+        Some(vault_core::export_html::HtmlExportOutcome::Complete(summary)) => summary,
+        other => panic!("expected a completed HTML export, got {other:?}"),
+    };
 
     assert_eq!(streamed, 3, "two emails plus the chat row carry zebra");
     assert_eq!(summary.count, 3, "plan count equals the streamed scope");
