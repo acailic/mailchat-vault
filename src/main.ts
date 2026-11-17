@@ -56,6 +56,7 @@ import {
 } from "./llmview";
 import {
   fillImportScopes,
+  MAX_RENDERED_ROWS,
   renderDashboard,
   renderDetail2,
   renderEraChips,
@@ -64,6 +65,8 @@ import {
   renderPagination,
   renderRefreshNotice,
   renderSourceChips,
+  SENTINEL_LOAD_EVENT,
+  type DensityMode,
 } from "./render2";
 import {
   activeEraIndex,
@@ -155,7 +158,7 @@ import type {
   SyncScheduleView,
   WatchSnapshot,
 } from "./types";
-import { moveIndex, pageModel, splitTerms } from "./viewmodel";
+import { highlightTerms, moveIndex } from "./viewmodel";
 import {
   activeJobCount,
   applyJobEvent,
@@ -679,8 +682,85 @@ function renderFiltersSummary(count: number): void {
   filtersSummary.classList.toggle("on", count > 0);
 }
 
+// ---------------------------------------------------------------------------
+// Results density + capped scroll (the results footer's machinery)
+// ---------------------------------------------------------------------------
+
+/** The results-list density choice persists across launches (the same
+ * machine-local stance as mcv.themeVesper; guarded — storage is absent
+ * in some test/restricted-webview environments). */
+const DENSITY_KEY = "mcv.density";
+
+function readDensity(): DensityMode {
+  try {
+    return window.localStorage.getItem(DENSITY_KEY) === "compact" ? "compact" : "comfortable";
+  } catch {
+    return "comfortable";
+  }
+}
+
+let density: DensityMode = readDensity();
+
+function toggleDensity(): void {
+  density = density === "compact" ? "comfortable" : "compact";
+  try {
+    window.localStorage.setItem(DENSITY_KEY, density);
+  } catch {
+    // best effort only
+  }
+  renderAll();
+}
+
+/** The rendered-row ceiling for the current query: sentinel loading
+ * appends pages up to MAX_RENDERED_ROWS, then each explicit Load more
+ * press raises it by one page (user-driven growth is never silent). */
+let renderLimit = MAX_RENDERED_ROWS;
+
+/** Append the next page (sentinel path — capped at renderLimit). */
+function loadNextPage(): void {
+  if (state.hits.length >= renderLimit) return;
+  if (state.total <= state.hits.length) return;
+  void runSearch(state.hits.length);
+}
+
+/** Explicit Load more: raise the cap by one page, then fill it. */
+function loadMoreResults(): void {
+  renderLimit += PAGE_SIZE;
+  if (state.total > state.hits.length) void runSearch(state.hits.length);
+  else renderAll();
+}
+
+/** The live sentinel element's observer (disconnect + rewire per
+ * render — the footer rebuilds the element every time). */
+let sentinelObserver: IntersectionObserver | null = null;
+
+/**
+ * Wire the freshly rendered sentinel: a real IntersectionObserver when
+ * the platform has one, plus the SENTINEL_LOAD_EVENT DOM seam so tests
+ * (and environments without an observer) can trigger the load directly.
+ * No scroll-jacking — the sentinel only ever observes.
+ */
+function wireSentinel(): void {
+  sentinelObserver?.disconnect();
+  sentinelObserver = null;
+  const sentinel = pagination.querySelector(".load-sentinel");
+  if (!sentinel) return;
+  sentinel.addEventListener(SENTINEL_LOAD_EVENT, () => loadNextPage());
+  if (typeof IntersectionObserver !== "function") return;
+  sentinelObserver = new IntersectionObserver((entries) => {
+    if (entries.some((entry) => entry.isIntersecting)) loadNextPage();
+  });
+  sentinelObserver.observe(sentinel);
+}
+
 function renderAll(): void {
-  const terms = splitTerms(state.filters.text);
+  // Signature surface: matched terms marked across the rows — the free
+  // terms plus the applied author value (from:/to: or the filter).
+  const terms = highlightTerms(state.filters);
+  // The one allowed entrance transition: the empty→results paint
+  // animates the list as a single group (no per-row stagger), once,
+  // then removes itself. Reduced-motion zeroes it in app.css.
+  const wasEmpty = resultsList.querySelector(".hit-item") === null;
   renderFlatResults(resultsList, {
     hits: state.hits,
     activeIndex: state.activeIndex,
@@ -688,6 +768,8 @@ function renderAll(): void {
     selection: state.selection,
     expandedFolds: state.expandedFolds,
     terms,
+    density,
+    renderCap: renderLimit,
     onOpen: (id: number) => {
       const at = state.hits.findIndex((h) => h.id === id);
       if (at >= 0) state.activeIndex = at;
@@ -696,10 +778,19 @@ function renderAll(): void {
     onToggleSelect: toggleRowSelection,
     onToggleFold: toggleFoldRow,
   });
-  renderPagination(pagination, pageModel(state.total, state.offset, PAGE_SIZE), {
-    onPrev: () => void runSearch(state.offset - PAGE_SIZE),
-    onNext: () => void runSearch(state.offset + PAGE_SIZE),
+  if (wasEmpty && resultsList.querySelector(".hit-item") !== null) {
+    resultsList.classList.add("enter-results");
+    window.setTimeout(() => resultsList.classList.remove("enter-results"), 300);
+  }
+  renderPagination(pagination, {
+    loaded: state.hits.length,
+    total: state.total,
+    density,
+    renderCap: renderLimit,
+    onLoadMore: loadMoreResults,
+    onToggleDensity: toggleDensity,
   });
+  wireSentinel();
   const chips = filterChips(state.filters, {
     source: (id) =>
       sourceChipLabels.get(id) ?? sourceInstances.find((s) => s.id === id)?.label ?? id,
@@ -1939,21 +2030,29 @@ async function runSearch(offset = 0): Promise<void> {
       state.pageRevision = page.archive_revision;
     }
     state.filters = filters;
-    state.hits = page.hits;
+    if (fresh) {
+      state.hits = page.hits;
+    } else {
+      // Sentinel/load-more append: accumulate pages, never replace the
+      // rows above (ids dedupe a double-fire of the sentinel).
+      const seen = new Set(state.hits.map((h) => h.id));
+      state.hits = [...state.hits, ...page.hits.filter((h) => !seen.has(h.id))];
+    }
     state.total = page.total;
     state.offset = page.offset;
     if (fresh) {
-      // A fresh submission resets selection and page.
+      // A fresh submission resets selection and the rendered-row cap.
       state.activeIndex = -1;
       state.selectedId = null;
       state.selection.clear();
       state.expandedFolds = resetFolds();
       state.resultsSnapshot = null;
+      renderLimit = MAX_RENDERED_ROWS;
     }
     const range =
-      page.total === 0
+      state.total === 0
         ? "0 results"
-        : `${page.offset + 1}–${Math.min(page.offset + PAGE_SIZE, page.total)} of ${page.total}`;
+        : `1–${state.hits.length} of ${state.total}`;
     setStatus(
       `${range}${state.filters.text ? ` for “${state.filters.text}”` : ""}` +
         (state.refreshNeeded ? " · new data available" : ""),
@@ -2193,16 +2292,22 @@ document.addEventListener("keydown", (event) => {
 
   if (inEditable) return;
 
-  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-    if (state.hits.length === 0) return;
+  // j/k beside the arrows (keyboard-first result navigation); the
+  // selection clamps to the rendered rows (the capped list never
+  // strays past the visible window).
+  const down = event.key === "ArrowDown" || event.key === "j";
+  const up = event.key === "ArrowUp" || event.key === "k";
+  if (down || up) {
+    const rendered = Math.min(state.hits.length, renderLimit);
+    if (rendered === 0) return;
     const rowFocused = resultsList.contains(document.activeElement);
-    const delta = event.key === "ArrowDown" ? 1 : -1;
-    state.activeIndex = moveIndex(state.activeIndex, state.hits.length, delta);
+    const delta = down ? 1 : -1;
+    state.activeIndex = moveIndex(state.activeIndex, rendered, delta);
     renderAll();
     const activeRow = resultsList.querySelector<HTMLElement>(".hit-item.active");
     activeRow?.scrollIntoView({ block: "nearest" });
     // The row's button (role=button .hit-main) is the focus target; the
-    // li itself is a plain list item.
+    // li itself is a plain grid row.
     if (rowFocused) activeRow?.querySelector<HTMLElement>(".hit-main")?.focus();
     event.preventDefault();
   } else if (event.key === "Enter") {
