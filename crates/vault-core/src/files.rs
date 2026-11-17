@@ -633,10 +633,7 @@ pub fn files_search(storage: &Storage, request: &FilesSearchRequest) -> Result<F
     } else {
         None
     };
-    Ok(FilesSearchPage {
-        files,
-        next_cursor,
-    })
+    Ok(FilesSearchPage { files, next_cursor })
 }
 
 /// Filters shared by the two message-anchored group queries.
