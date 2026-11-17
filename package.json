@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
     "test": "vitest run",
+    "check:docs": "node scripts/check-readme-links.mjs",
     "tauri": "tauri",
     "test:e2e": "node tests/e2e/run.mjs"
   },
