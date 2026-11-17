@@ -191,12 +191,13 @@ pub fn run_backfill_job(
     // Progress positions are message ids (checkpoint vs the newest id):
     // monotone, and the denominator stays true while imports run.
     let total = ctx.read(|s| {
-        s.connection().query_row(
-            "SELECT COALESCE(MAX(id), 0) FROM archive_messages",
-            [],
-            |r| r.get::<_, i64>(0),
-        )
-        .map_err(Error::from)
+        s.connection()
+            .query_row(
+                "SELECT COALESCE(MAX(id), 0) FROM archive_messages",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(Error::from)
     })?;
     let mut after = outcome.resumed_from;
     loop {
@@ -214,7 +215,11 @@ pub fn run_backfill_job(
         outcome.scanned_messages += batch.scanned;
         outcome.refs_upserted += batch.refs_upserted;
         after = batch.last_id;
-        ctx.progress(after.max(0) as u64, total.max(0) as u64, "building the attachment index");
+        ctx.progress(
+            after.max(0) as u64,
+            total.max(0) as u64,
+            "building the attachment index",
+        );
         if batch.scanned < take {
             outcome.completed = true;
             break;
@@ -422,8 +427,8 @@ fn media_entry_objects(raw_json: &str) -> Vec<serde_json::Map<String, Value>> {
 pub fn coverage_check(conn: &Connection) -> Result<FilesCoverage> {
     let mut raw_references = 0u64;
     {
-        let mut stmt =
-            conn.prepare("SELECT raw_json FROM archive_messages WHERE raw_json LIKE '%\"media\"%'")?;
+        let mut stmt = conn
+            .prepare("SELECT raw_json FROM archive_messages WHERE raw_json LIKE '%\"media\"%'")?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let raw_json: String = row.get(0)?;
@@ -532,7 +537,10 @@ pub struct FilesSearchRequest {
 /// (whose completion includes the coverage check) before depending on
 /// it.
 pub fn files_search(storage: &Storage, request: &FilesSearchRequest) -> Result<FilesSearchPage> {
-    let limit = request.limit.unwrap_or(FILES_DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let limit = request
+        .limit
+        .unwrap_or(FILES_DEFAULT_LIMIT)
+        .clamp(1, MAX_LIMIT);
     let availability = match request.availability.as_deref().map(str::trim) {
         None | Some("") => None,
         Some("preserved") => Some("preserved"),
@@ -568,29 +576,35 @@ pub fn files_search(storage: &Storage, request: &FilesSearchRequest) -> Result<F
     let mut groups: Vec<(String, FileSummary)> = Vec::new();
 
     if availability != Some("missing") {
-        for group in digest_groups(storage, GroupFilters {
-            kind: kind.as_deref(),
-            source: source.as_deref(),
-            from_date: from_date.as_deref(),
-            to_date: to_date.as_deref(),
-            after_key: cursor.as_deref(),
-            fetch,
-            dated,
-        })? {
+        for group in digest_groups(
+            storage,
+            GroupFilters {
+                kind: kind.as_deref(),
+                source: source.as_deref(),
+                from_date: from_date.as_deref(),
+                to_date: to_date.as_deref(),
+                after_key: cursor.as_deref(),
+                fetch,
+                dated,
+            },
+        )? {
             let key = group.sha256.clone().expect("digest group");
             groups.push((key, group));
         }
     }
     if availability != Some("preserved") {
-        for group in missing_groups(storage, GroupFilters {
-            kind: kind.as_deref(),
-            source: source.as_deref(),
-            from_date: from_date.as_deref(),
-            to_date: to_date.as_deref(),
-            after_key: cursor.as_deref(),
-            fetch,
-            dated,
-        })? {
+        for group in missing_groups(
+            storage,
+            GroupFilters {
+                kind: kind.as_deref(),
+                source: source.as_deref(),
+                from_date: from_date.as_deref(),
+                to_date: to_date.as_deref(),
+                after_key: cursor.as_deref(),
+                fetch,
+                dated,
+            },
+        )? {
             let name = group.name.clone();
             let kind_key = group.kind.clone();
             groups.push((missing_group_key(&name, &kind_key), group));
@@ -795,19 +809,18 @@ fn registry_groups(
          LIMIT ?"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
-        .query_map(params_from_iter(values.iter()), |row| {
-            Ok(FileSummary {
-                sha256: Some(row.get(0)?),
-                name: row.get(1)?,
-                kind: row.get(2)?,
-                size: row.get::<_, i64>(3)?.max(0) as u64,
-                occurrences: 0,
-                availability: "preserved".to_string(),
-                reason: String::new(),
-                unlinked: true,
-            })
-        })?;
+    let rows = stmt.query_map(params_from_iter(values.iter()), |row| {
+        Ok(FileSummary {
+            sha256: Some(row.get(0)?),
+            name: row.get(1)?,
+            kind: row.get(2)?,
+            size: row.get::<_, i64>(3)?.max(0) as u64,
+            occurrences: 0,
+            availability: "preserved".to_string(),
+            reason: String::new(),
+            unlinked: true,
+        })
+    })?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 

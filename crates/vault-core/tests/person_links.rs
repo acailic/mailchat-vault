@@ -602,7 +602,13 @@ fn preview_commit_then_stale_commit_is_rejected_with_the_current_revision() {
         "ana@example.com",
         "second message, bare address",
     );
-    insert_one(&storage, "mbox", "m3", "Bo <bo@example.com>", "other person");
+    insert_one(
+        &storage,
+        "mbox",
+        "m3",
+        "Bo <bo@example.com>",
+        "other person",
+    );
 
     let person = storage.create_person("Ana Ilic").unwrap();
     let instance = instance_for(&storage, "mbox");
@@ -626,11 +632,19 @@ fn preview_commit_then_stale_commit_is_rejected_with_the_current_revision() {
         "few matches are all representative"
     );
     assert_eq!(entry.representative_messages[0].id, m1);
-    assert_eq!(entry.representative_messages[0].author, "Ana <ana@example.com>");
-    assert!(entry.representative_messages[0].snippet.contains("first message"));
+    assert_eq!(
+        entry.representative_messages[0].author,
+        "Ana <ana@example.com>"
+    );
+    assert!(entry.representative_messages[0]
+        .snippet
+        .contains("first message"));
     assert!(entry.current_owner.is_none());
     // A preview writes nothing.
-    assert!(storage.person_identity_links(&person.id).unwrap().is_empty());
+    assert!(storage
+        .person_identity_links(&person.id)
+        .unwrap()
+        .is_empty());
     assert_eq!(storage.organization_revision().unwrap(), 0);
 
     let commit = storage.person_links_commit(0, &ops).unwrap();
@@ -681,10 +695,7 @@ fn preview_commit_then_stale_commit_is_rejected_with_the_current_revision() {
         .person_links_commit(fresh.organization_revision, &stale_ops)
         .unwrap();
     assert_eq!(storage.organization_revision().unwrap(), 2);
-    assert_eq!(
-        storage.person_identity_links(&person.id).unwrap().len(),
-        2
-    );
+    assert_eq!(storage.person_identity_links(&person.id).unwrap().len(), 2);
 }
 
 /// The stable-key preview matches only real address evidence: both
@@ -870,7 +881,8 @@ fn same_label_identities_stay_distinct_through_preview_and_commit() {
         "same label, two identities: one entry each, never merged"
     );
     assert_ne!(
-        preview.entries[0].source_instance_id, preview.entries[1].source_instance_id
+        preview.entries[0].source_instance_id,
+        preview.entries[1].source_instance_id
     );
     assert_eq!(preview.entries[0].matched_messages, 2);
     assert_eq!(preview.entries[1].matched_messages, 1);
@@ -951,13 +963,16 @@ fn preview_forecasts_conflicts_and_commit_refuses_them_atomically() {
     assert!(matches!(err, Error::IdentityLinkConflict { .. }));
     // One transaction: the refusable set applied nothing, not even its
     // acceptable half, and the revision did not move.
-    assert!(storage.person_identity_links(&impostor.id).unwrap().is_empty());
-    assert_eq!(
-        storage.person_identity_links(&ana.id).unwrap().len(),
-        1
-    );
+    assert!(storage
+        .person_identity_links(&impostor.id)
+        .unwrap()
+        .is_empty());
+    assert_eq!(storage.person_identity_links(&ana.id).unwrap().len(), 1);
     assert_eq!(storage.organization_revision().unwrap(), 1);
-    assert!(storage.person_link_history(&impostor.id).unwrap().is_empty());
+    assert!(storage
+        .person_link_history(&impostor.id)
+        .unwrap()
+        .is_empty());
 }
 
 /// Deleting a person removes organization only: the audit ledger —

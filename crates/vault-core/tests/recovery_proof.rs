@@ -34,7 +34,7 @@ use vault_core::object_store::{Capacity, ObjectStore};
 use vault_core::search2::SearchArchiveRequest;
 use vault_core::settings::{Settings, SETTINGS_FILE};
 use vault_core::storage::{
-    Collection, NewPersonIdentityLink, PersonAnchorKind, Person, SavedSearch, SourceInstance,
+    Collection, NewPersonIdentityLink, Person, PersonAnchorKind, SavedSearch, SourceInstance,
     Storage, VaultFingerprint,
 };
 
@@ -233,7 +233,11 @@ fn seed_populated_vault(sb: &Sandbox) -> (PathBuf, Seeded) {
     // Source 2 (chat namespace): three plain messages.
     for i in 0..3usize {
         let import_id = "recovery-proof-chat-import".to_string();
-        let author = if i == 0 { "Ana".to_string() } else { format!("Chatter {i}") };
+        let author = if i == 0 {
+            "Ana".to_string()
+        } else {
+            format!("Chatter {i}")
+        };
         let msg = vault_core::message::NewMessage::new(
             CHAT_SOURCE,
             format!("chat-{i}"),
@@ -362,19 +366,21 @@ fn seed_populated_vault(sb: &Sandbox) -> (PathBuf, Seeded) {
 
     // A settings file (provider profile, no key material).
     let mut settings = Settings::default();
-    settings.providers.push(vault_core::settings::ProviderProfile {
-        id: PROFILE_ID.to_string(),
-        name: "Recovery proof".to_string(),
-        kind: vault_core::settings::ProviderKind::Custom,
-        base_url: "https://example.invalid/api".to_string(),
-        model: "proof-model".to_string(),
-        temperature: None,
-        max_tokens: None,
-        timeout_secs: None,
-        deployment_name: None,
-        api_version: None,
-        region: None,
-    });
+    settings
+        .providers
+        .push(vault_core::settings::ProviderProfile {
+            id: PROFILE_ID.to_string(),
+            name: "Recovery proof".to_string(),
+            kind: vault_core::settings::ProviderKind::Custom,
+            base_url: "https://example.invalid/api".to_string(),
+            model: "proof-model".to_string(),
+            temperature: None,
+            max_tokens: None,
+            timeout_secs: None,
+            deployment_name: None,
+            api_version: None,
+            region: None,
+        });
     settings.save(&data_dir.join(SETTINGS_FILE)).unwrap();
 
     (
@@ -487,11 +493,8 @@ fn a_verified_backup_exists_after_the_source_inputs_are_deleted() {
     assert_eq!(verified.counts.media_objects, 1);
     assert!(verified.settings.is_some(), "settings are carried");
 
-    let mut manifest_digests: Vec<String> = verified
-        .objects
-        .iter()
-        .map(|o| o.sha256.clone())
-        .collect();
+    let mut manifest_digests: Vec<String> =
+        verified.objects.iter().map(|o| o.sha256.clone()).collect();
     manifest_digests.sort();
     assert_eq!(manifest_digests, all_expected_digests(&sc));
 }
@@ -508,8 +511,7 @@ fn restore_into_a_fresh_directory_preserves_the_archive_and_organization() {
     assert_eq!(fingerprint.media_objects, 1);
 
     // Saved searches survive with their definitions intact.
-    let restored_searches: Vec<SavedSearch> =
-        sc.fresh.with_pool(|s| s.saved_searches().unwrap());
+    let restored_searches: Vec<SavedSearch> = sc.fresh.with_pool(|s| s.saved_searches().unwrap());
     assert_eq!(
         restored_searches.len(),
         sc.seed.saved_searches.len(),
@@ -527,7 +529,10 @@ fn restore_into_a_fresh_directory_preserves_the_archive_and_organization() {
     // Collections survive with their membership intact.
     let restored_collections: Vec<Collection> =
         sc.fresh.with_pool(|s| s.list_collections().unwrap());
-    let restored_names: Vec<String> = restored_collections.iter().map(|c| c.name.clone()).collect();
+    let restored_names: Vec<String> = restored_collections
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
     let seeded_names: Vec<String> = sc.seed.collections.iter().map(|c| c.name.clone()).collect();
     assert_eq!(restored_names, seeded_names);
     for (seed_collection_id, expected_members) in &sc.seed.collection_members {

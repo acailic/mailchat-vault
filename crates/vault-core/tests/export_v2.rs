@@ -576,7 +576,9 @@ fn honesty_seeded() -> (Storage, std::collections::BTreeMap<&'static str, i64>) 
 
     // Time: exact, confirmed, derived legacy_assumed, derived missing.
     insert("exact", 1, &|_| {});
-    insert("confirmed", 2, &|m| m.time_confidence = "user_confirmed".into());
+    insert("confirmed", 2, &|m| {
+        m.time_confidence = "user_confirmed".into()
+    });
     insert("assumed", 3, &|m| m.time_confidence = String::new());
     insert("notime", 0, &|_| {});
     // Grouping: verified provider key, legacy chat-name grouping, standalone.
@@ -646,15 +648,30 @@ fn honesty_filters_export_parity_matches_search_hits_and_totals() {
             "time_assumed",
             vec!["assumed", "notime"],
             vec![
-                "exact", "confirmed", "verified-group", "legacy-group", "standalone", "stored",
-                "gone", "placeholder", "plain",
+                "exact",
+                "confirmed",
+                "verified-group",
+                "legacy-group",
+                "standalone",
+                "stored",
+                "gone",
+                "placeholder",
+                "plain",
             ],
         ),
         (
             "grouping_unverified",
             vec![
-                "exact", "confirmed", "assumed", "notime", "legacy-group", "standalone",
-                "stored", "gone", "placeholder", "plain",
+                "exact",
+                "confirmed",
+                "assumed",
+                "notime",
+                "legacy-group",
+                "standalone",
+                "stored",
+                "gone",
+                "placeholder",
+                "plain",
             ],
             vec!["verified-group"],
         ),
@@ -662,8 +679,15 @@ fn honesty_filters_export_parity_matches_search_hits_and_totals() {
             "files_missing",
             vec!["gone", "placeholder"],
             vec![
-                "exact", "confirmed", "assumed", "notime", "verified-group", "legacy-group",
-                "standalone", "stored", "plain",
+                "exact",
+                "confirmed",
+                "assumed",
+                "notime",
+                "verified-group",
+                "legacy-group",
+                "standalone",
+                "stored",
+                "plain",
             ],
         ),
     ] {
@@ -693,8 +717,7 @@ fn honesty_filters_export_parity_matches_search_hits_and_totals() {
             // and reports the same total.
             let (summary, exported) = export_json(&storage, &paged);
             assert_eq!(
-                summary.written,
-                page.total,
+                summary.written, page.total,
                 "{label}={setting:?}: summary.written equals page.total"
             );
             let mut exported_ids: Vec<i64> = exported.iter().map(|m| m.id).collect();
@@ -720,4 +743,3 @@ fn honesty_filters_export_parity_matches_search_hits_and_totals() {
         }
     }
 }
-

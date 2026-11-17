@@ -1481,8 +1481,10 @@ mod tests {
                 ProviderKind::AzureOpenai | ProviderKind::Custom => {
                     assert_eq!(defaults.model, "", "{} model is user-supplied", kind.id());
                     assert_eq!(
-                        defaults.base_url, "",
-                        "{} base URL is user-supplied", kind.id()
+                        defaults.base_url,
+                        "",
+                        "{} base URL is user-supplied",
+                        kind.id()
                     );
                 }
                 ProviderKind::Bedrock => {
@@ -1594,7 +1596,11 @@ mod tests {
         assert_eq!(loaded.default_provider.as_deref(), Some("ollama-local"));
         // Credential references (keyring ids) survive.
         assert_eq!(
-            loaded.providers.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            loaded
+                .providers
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
             ["openai-main", "ollama-local"]
         );
         // The three sampling fields survive per provider, without
@@ -1611,15 +1617,27 @@ mod tests {
         // Effective values follow each profile's own overrides/kind.
         assert_eq!(openai.effective_temperature(), 0.7);
         assert_eq!(openai.effective_max_tokens(), 512);
-        assert_eq!(openai.effective_timeout(), std::time::Duration::from_secs(45));
+        assert_eq!(
+            openai.effective_timeout(),
+            std::time::Duration::from_secs(45)
+        );
         assert_eq!(ollama.effective_temperature(), 0.0);
         assert_eq!(ollama.effective_max_tokens(), 2048);
-        assert_eq!(ollama.effective_timeout(), std::time::Duration::from_secs(300));
+        assert_eq!(
+            ollama.effective_timeout(),
+            std::time::Duration::from_secs(300)
+        );
         // An untouched profile uses the kind defaults (no crosstalk from
         // the sibling's overrides either).
         let plain = profile("g", ProviderKind::Groq, "", "");
-        assert_eq!(plain.effective_temperature(), ProviderKind::Groq.defaults().temperature);
-        assert_eq!(plain.effective_max_tokens(), ProviderKind::Groq.defaults().max_tokens);
+        assert_eq!(
+            plain.effective_temperature(),
+            ProviderKind::Groq.defaults().temperature
+        );
+        assert_eq!(
+            plain.effective_max_tokens(),
+            ProviderKind::Groq.defaults().max_tokens
+        );
         assert_eq!(
             plain.effective_timeout(),
             std::time::Duration::from_secs(ProviderKind::Groq.defaults().timeout_secs)
@@ -1697,18 +1715,29 @@ mod tests {
             "gpt-4o",
         )]);
         s.validate().unwrap();
-        assert_eq!(s.providers[0].effective_base_url(), "https://proxy.example.com/v1");
+        assert_eq!(
+            s.providers[0].effective_base_url(),
+            "https://proxy.example.com/v1"
+        );
         // …a malformed URL is refused, and plaintext http off loopback
         // is refused for hosted kinds too.
         let s = settings_with(vec![profile("oai", ProviderKind::Openai, "not a url", "")]);
-        assert!(s.validate().unwrap_err().to_string().contains("http(s) URL"));
+        assert!(s
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("http(s) URL"));
         let s = settings_with(vec![profile(
             "groq",
             ProviderKind::Groq,
             "http://api.groq.com/openai/v1",
             "",
         )]);
-        assert!(s.validate().unwrap_err().to_string().contains("plaintext http"));
+        assert!(s
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("plaintext http"));
         // Ollama's default is loopback http: allowed as-is.
         let s = settings_with(vec![profile("loc", ProviderKind::Ollama, "", "")]);
         s.validate().unwrap();

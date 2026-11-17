@@ -228,11 +228,7 @@ pub fn input_fingerprint(picked: &Path) -> Result<String> {
             }
             hasher.update(&buf[..n]);
         }
-        return Ok(format!(
-            "sha256:{:x}:{}",
-            hasher.finalize(),
-            metadata.len()
-        ));
+        return Ok(format!("sha256:{:x}:{}", hasher.finalize(), metadata.len()));
     }
     if metadata.is_dir() {
         // Sorted so the manifest does not depend on directory iteration
