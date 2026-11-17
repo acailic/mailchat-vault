@@ -418,6 +418,31 @@ fn summary_prompt_carries_exactly_the_default_top_8() {
 }
 
 #[test]
+fn summary_prompt_demands_a_citation_on_every_factual_sentence() {
+    // Citation grounding (arXiv:2305.14627): the summary prompt must
+    // demand a supporting [k] on every factual sentence and the omission
+    // of any sentence no listed message supports, so unsupported claims
+    // are never asserted — and any [k] the model still emits without a
+    // sent passage is flagged client-side, never silently stripped.
+    let s = seeded(2, "cite marker");
+    let llm = MockLlm::with_replies(["summary"]);
+    let results = s
+        .search_filtered(&build_match_query("vault"), None, None, None, false, 50)
+        .unwrap();
+    let summarized = summarize_results(&llm, "vault?", &results, DEFAULT_SUMMARIZE_TOP, &[]);
+    assert_eq!(summarized.answer.as_deref(), Some("summary"));
+    let system = &llm.prompts()[0].0;
+    assert!(
+        system.contains("Every factual sentence ends with a [k] citing a listed message"),
+        "the strict citation rule must ride in every summary prompt: {system}"
+    );
+    assert!(
+        system.contains("a sentence no listed message supports is omitted"),
+        "the omission clause must ride in every summary prompt: {system}"
+    );
+}
+
+#[test]
 fn summary_prompt_truncates_long_bodies() {
     // Mirrors the private SUMMARY_BODY_LIMIT (500 chars) after which the
     // context block is cut with an ellipsis, so one huge message cannot

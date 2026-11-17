@@ -851,6 +851,7 @@ const SUMMARY_SYSTEM_PROMPT: &str =
      - Answer in the same language as the question.\n\
      - At most 6 sentences.\n\
      - Use only the listed messages; cite them inline as [1], [2] in order of reliance.\n\
+     - Every factual sentence ends with a [k] citing a listed message that supports it; a sentence no listed message supports is omitted.\n\
      - If the messages do not answer the question, say so plainly and suggest better search terms.";
 
 /// One numbered, truncated context block per message.

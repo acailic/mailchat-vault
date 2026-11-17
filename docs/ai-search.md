@@ -6,7 +6,7 @@ Ask a natural-language question (“what was said about the vault in October?”
 
 1. **Translate** — the question is sent to the LLM, which replies with a JSON plan: an FTS5 MATCH expression over `body`/`author` plus an optional sent-date range (it understands relative wording like “last march” against today's date).
 2. **Search & rank** — the plan runs locally against SQLite. The LLM's expression is validated against the index first; anything unparseable or referring to unknown columns is replaced by a plain term search (usable date filters are kept). The expression is always passed as a bound MATCH parameter, never spliced into SQL. The FTS ranking is then fused with the local vector leg (see [Local embeddings](#local-embeddings--hybrid-search-v1)) when embeddings exist — a fully local step.
-3. **Summarize** — a short answer is synthesized from **only the top 8 result rows** (bodies truncated to 500 chars), cited as [1], [2], …
+3. **Summarize** — a short answer is synthesized from **only the top 8 result rows** (bodies truncated to 500 chars), cited as [1], [2], … The prompt's strict citation rule: every factual sentence ends with a `[k]` citing a listed passage that supports it, and a sentence no listed passage supports is omitted — unsupported claims are dropped rather than asserted.
 
 The UI always shows the plan actually used (`FTS: … · dates: … · ranked: … · planned by LLM / fallback`) plus a privacy note describing exactly what the current mode sends.
 
