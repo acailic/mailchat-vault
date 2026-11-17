@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="mcv-t mcv-d">
+  <title id="mcv-t">Demo GIF placeholder</title>
+  <desc id="mcv-d">Drop a Takeout export onto the window, watch the import progress, search, and see the hit highlighted in the reading pane. 10-15 seconds, 1200 px wide.</desc>
+  <rect width="1200" height="420" fill="#f6f5f4"/>
+  <rect x="24" y="24" width="1152" height="372" fill="none" stroke="#a8a29e" stroke-width="3" stroke-dasharray="14 10" rx="14"/>
+  <text x="600" y="150" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="38" font-weight="600" fill="#44403c">Demo GIF placeholder &#8212; to be recorded</text>
+  <text x="600" y="210" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="26" fill="#78716c">1. Drop a Takeout export&#160;&#160;&#8594;&#160;&#160;2. Import progress&#160;&#160;&#8594;&#160;&#160;3. Search hit highlighted</text>
+  <text x="600" y="260" text-anchor="middle" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="24" fill="#a8a29e">10&#8211;15 s &#183; window 1200 px wide &#183; save as docs/screenshots/demo.gif and swap the README reference</text>
+</svg>

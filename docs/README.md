@@ -20,6 +20,7 @@ Hands-on guides sit alongside the specification set:
 | [Release](release.md) | Installers, local builds, smoke tests, checksums, publishing |
 | [Native verification runbook](native-verification.md) | The G1/A14 procedure for real macOS/Windows verification hosts: exact commands per OS, evidence binding (artifact SHA-256, tester, date), and the templates native runs fill |
 | [Support matrix](support-matrix.md) | Current capability and claim status with evidence links, plus open go-public blockers |
+| [Landing page](landing.md) | Deploy-ready public landing copy: the README's one-sentence promise and comparison table with a single call to action — one self-contained file with no external assets, paste into any static host |
 
 ## Reading order
 
@@ -41,7 +42,7 @@ Internal working documents (the product review, user success plan, research play
 
 For product decisions, start with the product review and user success plan. For implementation, start with the project assessment and product plan, then read the roadmap entry and linked UX and contract sections. Mark a slice complete only with recorded validation evidence.
 
-**Launch-strategy and monetization material (the go-public plan, the app-landscape research, the go-public review, and anything payment- or pricing-related) deliberately does not live in this repository.** It is kept outside the git tree by decision (2026-11-14) so the repository can later be made public without leaking business strategy; `.gitignore` blocks `docs/private/` as a guard.
+**Public launch copy is in the repository; launch strategy and monetization stay out.** The public front door — the README first screen (promise, demo GIF slot, download buttons, comparison table) and the deploy-ready [landing page](landing.md) — is repository content, fact-checked against vendor pages (2026-11). Launch-strategy and monetization material (the go-public plan, the app-landscape research, the go-public review, posting schedules, and anything about how Mailchat Vault itself might be priced or monetized) deliberately does not live in this repository. It is kept outside the git tree by decision (2026-11-14) so the repository can later be made public without leaking business strategy; `.gitignore` blocks `docs/private/` as a guard.
 
 ## Authority and status
 
