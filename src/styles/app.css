@@ -981,11 +981,6 @@ mark.hit {
 
 /* Pagination + export */
 #pagination { display: flex; gap: 10px; align-items: center; margin-top: var(--sp-3); }
-<<<<<<< HEAD
-.page-info { font-size: var(--text-meta); color: var(--muted); font-variant-numeric: tabular-nums; }
-||||||| parent of 15e272e (feat(ui): mark matched terms in result rows, density modes, capped footer)
-.page-info { font-size: var(--text-meta); color: var(--muted); }
-=======
 /* The count line pairs with #status (both carry the N–M of T ranges):
  * tabular numerals keep the digits from jittering as counts change
  * (same precedent as the chart axis labels below). */
@@ -1001,7 +996,6 @@ mark.hit {
 /* The load sentinel: an inert strip the observer watches — no visible
  * chrome, no scroll-jacking; it only ever occupies a sliver of space. */
 .load-sentinel { height: 1px; width: 100%; }
->>>>>>> 15e272e (feat(ui): mark matched terms in result rows, density modes, capped footer)
 /* One Export… action: the picker folds behind the summary; the outcome
  * line stays readable below it once the picker is closed again. */
 #export-controls { margin-top: var(--sp-2); }
@@ -1874,7 +1868,6 @@ summary:active:not(:disabled),
     left: 35%;
   }
 
-<<<<<<< HEAD
   /* Command palette: the pointer-open fade is removed entirely (the
    * keyboard path never transitioned in the first place). */
   .command-palette-overlay.palette-enter {
@@ -1884,12 +1877,14 @@ summary:active:not(:disabled),
   /* Empty-state entrance off: no fade, no rise — the identical
    * static group renders at once. */
   .empty-state > * {
-||||||| parent of 15e272e (feat(ui): mark matched terms in result rows, density modes, capped footer)
-=======
+    animation: none;
+  }
+
   /* The results entrance is OFF entirely for reduced-motion users — no
    * entrance transition of any kind on the list. */
   #results.enter-results {
->>>>>>> 15e272e (feat(ui): mark matched terms in result rows, density modes, capped footer)
+    animation: none;
+  }
     animation: none;
   }
 }

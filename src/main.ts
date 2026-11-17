@@ -2052,7 +2052,7 @@ async function runSearch(offset = 0): Promise<void> {
     const range =
       state.total === 0
         ? "0 results"
-        : `1–${state.hits.length} of ${state.total}`;
+        : `1–${Math.min(state.hits.length, state.total)} of ${state.total}`;
     setStatus(
       `${range}${state.filters.text ? ` for “${state.filters.text}”` : ""}` +
         (state.refreshNeeded ? " · new data available" : ""),

@@ -254,8 +254,11 @@ function input(sel: string): HTMLInputElement {
   return $<HTMLInputElement>(sel);
 }
 
-function pageButtons(): HTMLButtonElement[] {
-  return [...win.document.querySelectorAll(".page-btn")] as unknown as HTMLButtonElement[];
+/** Trigger the load sentinel's DOM seam (the same event the real
+ * IntersectionObserver path calls; no observer needed in happy-dom). */
+function triggerSentinel(): void {
+  const sentinel: DispatchTarget = $(".load-sentinel");
+  sentinel.dispatchEvent(new win.Event("mcv:load-more"));
 }
 
 function pressKey(target: DispatchTarget, key: string): void {
@@ -296,7 +299,7 @@ async function runQuery(text: string): Promise<void> {
 }
 
 async function boot(
-  opts: { themeVesper?: string; firstRunDismissed?: boolean } = {},
+  opts: { themeVesper?: string; firstRunDismissed?: boolean; density?: string } = {},
 ): Promise<void> {
   win = new Window();
   vi.stubGlobal("window", win);
@@ -309,6 +312,8 @@ async function boot(
   // A pre-seeded dismissal record stands in for a prior session that
   // dismissed the getting-started card (it persists in localStorage).
   if (opts.firstRunDismissed) win.localStorage.setItem("mcv.firstRunDismissed", "1");
+  // A pre-seeded density record stands in for a persisted choice.
+  if (opts.density !== undefined) win.localStorage.setItem("mcv.density", opts.density);
   // Note: the happy-dom environment replaces the global URL class, so the
   // index.html path is resolved through node:url instead of new URL().
   const indexHtml = join(dirname(fileURLToPath(import.meta.url)), "..", "index.html");
@@ -503,8 +508,9 @@ describe("search box", () => {
     await runQuery("nothing-matches");
     await vi.waitFor(() => expect($("#status").textContent).toBe("0 results for “nothing-matches”"));
     expect($(".page-info").textContent).toBe("0 results");
-    const buttons = pageButtons();
-    expect(buttons.map((b) => b.disabled)).toEqual([true, true]);
+    // Zero hits: no growth control, just the count line and the toggle.
+    expect(win.document.querySelector(".load-sentinel")).toBeNull();
+    expect(win.document.querySelector(".load-more-btn")).toBeNull();
     expect(win.document.querySelectorAll("#results .group, #results .hit-item").length).toBe(0);
     // The illustrated group replaces the bare empty list: art, headline,
     // copy, one CTA — while the status line keeps the count above.
@@ -618,27 +624,27 @@ describe("stale-response guard", () => {
     expect($("#status").classList.contains("error")).toBe(false);
   });
 
-  it("a late pagination response does not overwrite a newer query's results", async () => {
+  it("a late sentinel append does not overwrite a newer query's results", async () => {
     await boot();
     searchRespondsWith(() => pageOf(HITS.slice(0, 2), 120));
     await runQuery("vault");
-    await vi.waitFor(() => expect($(".page-info").textContent).toBe("1–50 of 120 · page 1/3"));
+    await vi.waitFor(() => expect($(".page-info").textContent).toBe("1–2 of 120"));
 
-    // Next page request is slow; meanwhile a new query races past it.
+    // Sentinel append request is slow; meanwhile a new query races past it.
     const slowPage = deferred<SearchArchivePage>();
     queueResponses([slowPage.promise, Promise.resolve(pageOf(HITS, 3, 0))]);
-    pageButtons()[1].click(); // Next → offset 50, slow
+    triggerSentinel(); // append → offset 2, slow
     input("#search").value = "other";
     pressKey(input("#search"), "Enter"); // newer query → offset 0, fast
     await vi.waitFor(() => expect($("#status").textContent).toContain("1–3 of 3"));
 
-    slowPage.resolve(pageOf(HITS.slice(0, 2), 120, 50));
+    slowPage.resolve(pageOf(HITS.slice(0, 2), 120, 2));
     await flush();
     expect($("#status").textContent).toBe("1–3 of 3 for “other”");
-    expect($(".page-info").textContent).toBe("1–3 of 3 · page 1/1");
+    expect($(".page-info").textContent).toBe("1–3 of 3");
     expect(
       searchCalls().map((c) => (c.args as { request: { offset: number } }).request.offset),
-    ).toEqual([0, 50, 0]);
+    ).toEqual([0, 2, 0]);
   });
 });
 
@@ -656,8 +662,9 @@ describe("filters", () => {
     expect(searchCalls()[0].args).toMatchObject({
       request: { text: "", source_ids: ["inst-mbox"] },
     });
-    // Browse mode: no query echo in the status line.
-    expect($("#status").textContent).toBe("1–6 of 6");
+    // Browse mode: no query echo in the status line; the range counts
+    // the rows actually loaded (accumulated pages).
+    expect($("#status").textContent).toBe("1–1 of 6");
     const chip = $('[data-source="inst-mbox"]');
     expect(chip.classList.contains("on")).toBe(true);
     expect(chip.getAttribute("aria-pressed")).toBe("true");
@@ -672,7 +679,7 @@ describe("filters", () => {
     });
     expect($('[data-source="inst-mbox"]')).not.toBeNull();
     expect($('[data-source="inst-mbox"]').classList.contains("on")).toBe(false);
-    expect($("#status").textContent).toBe("1–9 of 9");
+    expect($("#status").textContent).toBe("1–3 of 9");
     expect(win.document.querySelectorAll("#results .hit-item").length).toBe(3);
   });
 
@@ -911,7 +918,7 @@ describe("filters", () => {
     expect(input("#to-date").value).toBe("");
     expect($('[data-source="inst-mbox"]').classList.contains("on")).toBe(false);
     expect($('[data-source="inst-mbox"]').getAttribute("aria-pressed")).toBe("false");
-    expect($("#status").textContent).toBe("1–9 of 9");
+    expect($("#status").textContent).toBe("1–3 of 9");
   });
 });
 
@@ -919,27 +926,55 @@ describe("filters", () => {
 // Pagination
 // ---------------------------------------------------------------------------
 
-describe("pagination", () => {
-  it("steps through pages via Next/Prev with the right offsets", async () => {
+describe("capped scroll (sentinel loading)", () => {
+  it("the sentinel appends the next page at the accumulated offset", async () => {
     await boot();
     searchRespondsWith(() => pageOf(HITS.slice(0, 2), 120, 0));
     await runQuery("vault");
-    await vi.waitFor(() => expect($(".page-info").textContent).toBe("1–50 of 120 · page 1/3"));
-    const [prev, next] = pageButtons();
-    expect(prev.disabled).toBe(true);
-    expect(next.disabled).toBe(false);
+    await vi.waitFor(() => expect($(".page-info").textContent).toBe("1–2 of 120"));
+    expect(win.document.querySelectorAll("#results .hit-item").length).toBe(2);
+    expect(win.document.querySelector(".load-sentinel")).toBeTruthy();
 
-    searchRespondsWith(() => pageOf(HITS.slice(0, 2), 120, 50));
-    next.click();
-    await vi.waitFor(() => expect($(".page-info").textContent).toBe("51–100 of 120 · page 2/3"));
-    expect(pageButtons()[0].disabled).toBe(false);
-
-    searchRespondsWith(() => pageOf(HITS.slice(0, 2), 120, 0));
-    pageButtons()[0].click();
-    await vi.waitFor(() => expect($(".page-info").textContent).toBe("1–50 of 120 · page 1/3"));
+    searchRespondsWith(() => pageOf(HITS.slice(2), 120, 2));
+    triggerSentinel();
+    await vi.waitFor(() =>
+      expect(win.document.querySelectorAll("#results .hit-item").length).toBe(3),
+    );
+    // Rows accumulate — the earlier page is still rendered above.
+    expect(
+      [...win.document.querySelectorAll("#results .hit-item")].map(
+        (r) => (r as unknown as HTMLElement).dataset.id,
+      ),
+    ).toEqual(["1", "2", "3"]);
+    expect($(".page-info").textContent).toBe("1–3 of 120");
     expect(
       searchCalls().map((c) => (c.args as { request: { offset: number } }).request.offset),
-    ).toEqual([0, 50, 0]);
+    ).toEqual([0, 2]);
+  });
+
+  it("sentinel loading stops at the 200-row cap; Load more extends it", async () => {
+    await boot();
+    let offset = 0;
+    searchRespondsWith(() => {
+      const hits = Array.from({ length: 50 }, (_, i) =>
+        summary(offset + i + 1, "mbox", "thread-a", "ana", "vault …"),
+      );
+      const page = pageOf(hits, 320, offset);
+      offset += 50;
+      return page;
+    });
+    await runQuery("vault");
+    const rows = () => win.document.querySelectorAll("#results .hit-item").length;
+    await vi.waitFor(() => expect(rows()).toBe(50));
+    for (const grown of [100, 150, 200]) {
+      triggerSentinel();
+      await vi.waitFor(() => expect(rows()).toBe(grown));
+    }
+    // At the cap the sentinel is gone; the explicit control takes over.
+    expect(win.document.querySelector(".load-sentinel")).toBeNull();
+    ($(".load-more-btn") as HTMLElement).click();
+    await vi.waitFor(() => expect(rows()).toBe(250));
+    expect($(".page-info").textContent).toBe("1–250 of 320");
   });
 });
 
@@ -1452,13 +1487,13 @@ describe("archive revision refresh (A07)", () => {
     await boot();
     searchRespondsWith(() => pageOf(HITS.slice(0, 2), 120, 0, 5));
     await runQuery("vault");
-    await vi.waitFor(() => expect($(".page-info").textContent).toBe("1–50 of 120 · page 1/3"));
+    await vi.waitFor(() => expect($(".page-info").textContent).toBe("1–2 of 120"));
     expect($("#refresh-notice").hidden).toBe(true);
 
-    // The archive changed while paginating: the next page carries a new
-    // revision — a refresh offer appears, rows are not silently reset.
-    searchRespondsWith(() => pageOf(HITS.slice(0, 2), 121, 50, 6));
-    pageButtons()[1].click();
+    // The archive changed while loading more: the next page carries a
+    // new revision — a refresh offer appears, rows are not silently reset.
+    searchRespondsWith(() => pageOf(HITS.slice(0, 2), 121, 2, 6));
+    triggerSentinel();
     await vi.waitFor(() => expect($("#refresh-notice").hidden).toBe(false));
     expect($("#refresh-notice").textContent).toContain("archive changed");
     expect($("#status").textContent).toContain("new data available");
@@ -1502,26 +1537,29 @@ describe("selection export and copy actions", () => {
 
   it("exporting a selection built across pages exports every checked id", async () => {
     await bootSearched();
-    // Page 1 of a 51-result archive, then the Next page (offset 50).
-    queueResponses([pageOf(HITS, 51), pageOf([summary(51, "mbox", null, "ana")], 51, 50)]);
+    // Page 1 of a 51-result archive, then the sentinel-appended page.
+    queueResponses([pageOf(HITS, 51), pageOf([summary(51, "mbox", null, "ana")], 51, 3)]);
     await runQuery("vault");
     const boxesOn = () =>
       [...win.document.querySelectorAll("#results input.row-select")] as unknown as HTMLInputElement[];
     boxesOn()[0].checked = true;
     fireChange(boxesOn()[0]);
-    pageButtons()[1].click();
+    triggerSentinel();
     await vi.waitFor(() =>
-      expect(win.document.querySelector("#results .hit-item")?.getAttribute("data-id")).toBe("51"),
+      expect(
+        win.document.querySelector("#results .hit-item:last-child")?.getAttribute("data-id"),
+      ).toBe("51"),
     );
-    boxesOn()[0].checked = true;
-    fireChange(boxesOn()[0]);
+    const appended = boxesOn().at(-1)!;
+    appended.checked = true;
+    fireChange(appended);
     await vi.waitFor(() => expect($("#export-selection-btn").textContent).toBe("Export selected (2)…"));
     dialog.savedPath = "/tmp/selection.txt";
     tauri.handlers.set("export_messages_v2", () => ({ format: "text", written: 2, missing: 0 }));
     ($("#export-selection-btn") as HTMLElement).click();
     await vi.waitFor(() => expect($("#selection-status").textContent).toBe("Exported 2 messages."));
     const call = tauri.calls.find((c) => c.cmd === "export_messages_v2");
-    expect(call?.args).toEqual({ ids: [51, 1], format: "text", path: "/tmp/selection.txt" });
+    expect(call?.args).toEqual({ ids: [1, 51], format: "text", path: "/tmp/selection.txt" });
   });
 
   it("an export with vanished ids reports the skipped count honestly", async () => {
@@ -1668,6 +1706,30 @@ describe("keyboard navigation", () => {
     expect(win.document.querySelector('[aria-current="true"]')).toBeNull();
   });
 
+  it("j/k move the selection like the arrows and announce aria-selected", async () => {
+    await bootSearched();
+    pressKey(win.document.body, "j");
+    expect($('[data-index="0"]').classList.contains("active")).toBe(true);
+
+    pressKey(win.document.body, "j");
+    expect($('[data-index="1"]').classList.contains("active")).toBe(true);
+
+    pressKey(win.document.body, "k");
+    expect($('[data-index="0"]').classList.contains("active")).toBe(true);
+    // Grid rows announce the selection state alongside the visual edge.
+    expect($("#results").getAttribute("role")).toBe("grid");
+    expect($('[data-index="0"]').getAttribute("aria-selected")).toBe("true");
+    expect($('[data-index="1"]').getAttribute("aria-selected")).toBe("false");
+  });
+
+  it("j/k clamp at the ends like the arrows", async () => {
+    await bootSearched();
+    pressKey(win.document.body, "k");
+    expect($('[data-index="0"]').classList.contains("active")).toBe(true);
+    for (let i = 0; i < 5; i++) pressKey(win.document.body, "j");
+    expect($('[data-index="2"]').classList.contains("active")).toBe(true);
+  });
+
   it("Enter opens the detail view for the active hit", async () => {
     await bootSearched();
     pressKey(win.document.body, "ArrowDown");
@@ -1695,6 +1757,42 @@ describe("keyboard navigation", () => {
     await flush();
     expect($('[data-index="0"]').classList.contains("active")).toBe(true);
     expect(win.document.querySelectorAll(".hit-item.active").length).toBe(1);
+  });
+
+  it("j typed into the search box does not move the selection", async () => {
+    await bootSearched();
+    input("#search").focus();
+    pressKey(input("#search"), "j");
+    pressKey(input("#search"), "k");
+    await flush();
+    expect(win.document.querySelector(".hit-item.active")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Results density (persisted Comfortable/Compact)
+// ---------------------------------------------------------------------------
+
+describe("results density", () => {
+  it("defaults to comfortable; the toggle flips and persists compact", async () => {
+    await boot();
+    expect(win.localStorage.getItem("mcv.density")).toBeNull();
+    await vi.waitFor(() => expect($("#results").dataset.density).toBe("comfortable"));
+
+    ($(".density-toggle") as HTMLElement).click();
+    expect($("#results").dataset.density).toBe("compact");
+    expect(($(".density-toggle") as HTMLElement).getAttribute("aria-pressed")).toBe("true");
+    expect(win.localStorage.getItem("mcv.density")).toBe("compact");
+
+    ($(".density-toggle") as HTMLElement).click();
+    expect($("#results").dataset.density).toBe("comfortable");
+    expect(win.localStorage.getItem("mcv.density")).toBe("comfortable");
+  });
+
+  it("a recorded compact choice applies on the next boot", async () => {
+    await boot({ density: "compact" });
+    await vi.waitFor(() => expect($("#results").dataset.density).toBe("compact"));
+    expect(($(".density-toggle") as HTMLElement).getAttribute("aria-pressed")).toBe("true");
   });
 });
 
@@ -2850,8 +2948,9 @@ describe("first-run state and the isolated sample archive (U02)", () => {
       expect($("#stats").textContent).toBe("6 messages (demo: 6)"),
     );
     await vi.waitFor(() => expect($("#demo-banner").getAttribute("hidden")).toBeNull());
-    // The demo archive browses immediately (U04 under the demo).
-    await vi.waitFor(() => expect($("#status").textContent).toBe("1–6 of 6"));
+    // The demo archive browses immediately (U04 under the demo); the
+    // range counts the rows actually loaded.
+    await vi.waitFor(() => expect($("#status").textContent).toBe("1–1 of 6"));
     // Source controls are locked while the demo is open (the backend
     // refuses writes regardless).
     expect(($("#import-pick-btn") as HTMLButtonElement).disabled).toBe(true);
@@ -2864,7 +2963,7 @@ describe("first-run state and the isolated sample archive (U02)", () => {
       expect($("#stats").textContent).toBe("9 messages (Mail import: 6, demo: 3)"),
     );
     await vi.waitFor(() => expect($("#demo-banner").getAttribute("hidden")).not.toBeNull());
-    await vi.waitFor(() => expect($("#status").textContent).toBe("1–9 of 9"));
+    await vi.waitFor(() => expect($("#status").textContent).toBe("1–3 of 9"));
     expect(($("#import-pick-btn") as HTMLButtonElement).disabled).toBe(false);
   });
 
@@ -2973,7 +3072,7 @@ describe("export", () => {
     select("#sort-order", "newest");
     $('#source-chips .chip[data-source="inst-mbox"]').click();
     await runQuery("vault");
-    await vi.waitFor(() => expect($("#status").textContent).toContain("1–50 of 120"));
+    await vi.waitFor(() => expect($("#status").textContent).toContain("1–2 of 120"));
 
     dialog.savedPath = "/tmp/out.csv";
     tauri.handlers.set("export_search_v2", () => ({ format: "csv", written: 120, skipped: 0 }));
