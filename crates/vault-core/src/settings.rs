@@ -109,6 +109,22 @@ pub fn bedrock_base_url(region: &str) -> String {
     format!("https://bedrock-runtime.{region}.amazonaws.com")
 }
 
+/// Cross-region inference-profile prefix Bedrock serves a default model
+/// through in `region`: `us.`/`eu.`/`apac.` for the US, Europe and
+/// Asia-Pacific region families, empty elsewhere (regions without a
+/// cross-region profile keep the unprefixed, region-local model id).
+fn bedrock_model_prefix(region: &str) -> &'static str {
+    if region.starts_with("us") {
+        "us."
+    } else if region.starts_with("eu") {
+        "eu."
+    } else if region.starts_with("ap") {
+        "apac."
+    } else {
+        ""
+    }
+}
+
 /// How a kind authenticates (data for the client path; the API key
 /// itself lives in the OS keyring, never in settings).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -471,6 +487,17 @@ impl ProviderProfile {
                     .map(str::trim)
                     .unwrap_or_default()
                     .to_string(),
+                // On Bedrock the default model rides the region's
+                // cross-region inference profile (`us.`/`eu.`/`apac.` —
+                // see [`bedrock_model_prefix`]); `defaults()` keeps the
+                // unprefixed constant and the prefix is applied per
+                // profile. An explicit model still wins (the match arm
+                // above).
+                ProviderKind::Bedrock => format!(
+                    "{}{}",
+                    bedrock_model_prefix(&self.effective_region()),
+                    self.kind.defaults().model
+                ),
                 _ => self.kind.defaults().model.to_string(),
             }
         }
@@ -714,6 +741,21 @@ pub fn check_profile_pairing(profile: &ProviderProfile) -> crate::Result<()> {
                 if !is_http_url(&profile.base_url) {
                     return Err(settings_error(format!(
                         "provider “{name}”: base URL must be an absolute http(s) URL"
+                    )));
+                }
+                // Host pinning: Bedrock credentials (SigV4-signed for the
+                // region) are only ever sent to the chosen region's
+                // Bedrock runtime host — not another region's runtime,
+                // an unrelated endpoint, or the z.ai host.
+                let expected = bedrock_base_url(&profile.effective_region());
+                if endpoint_host(&profile.base_url).as_deref()
+                    != endpoint_host(&expected).as_deref()
+                {
+                    return Err(settings_error(format!(
+                        "provider “{name}”: Bedrock credentials are only ever sent to the \
+                         region's Bedrock runtime endpoint, but the base URL points at {}. \
+                         Remove the base URL to use the default {expected}",
+                        profile.host()
                     )));
                 }
                 check_no_plaintext_http(&format!("provider “{name}”"), &profile.base_url)?;
@@ -1779,5 +1821,130 @@ mod tests {
         s.providers[0].region = Some("Not A Region".into());
         let err = s.validate().unwrap_err().to_string();
         assert!(err.contains("not a valid region slug"), "got: {err}");
+        // The defaults table keeps the unprefixed model constant; the
+        // region prefix is applied per profile (see below).
+        assert_eq!(
+            ProviderKind::Bedrock.defaults().model,
+            "anthropic.claude-sonnet-4-5"
+        );
+    }
+
+    #[test]
+    fn bedrock_pairs_only_with_the_regions_runtime_host() {
+        // An explicit base URL is accepted only when its host is the
+        // chosen region's Bedrock runtime host (any spelling, port,
+        // path — same host-comparison semantics as the z.ai pairing).
+        let ok = [
+            "https://bedrock-runtime.us-east-1.amazonaws.com",
+            "https://bedrock-runtime.us-east-1.amazonaws.com/",
+            "https://BEDROCK-RUNTIME.US-EAST-1.AMAZONAWS.COM",
+            "https://bedrock-runtime.us-east-1.amazonaws.com:443",
+        ];
+        for url in ok {
+            let s = settings_with(vec![profile("b", ProviderKind::Bedrock, url, "")]);
+            s.validate()
+                .unwrap_or_else(|e| panic!("{url} should pass: {e}"));
+        }
+        // An explicit region pairs with that region's runtime host.
+        let mut s = settings_with(vec![profile(
+            "b",
+            ProviderKind::Bedrock,
+            "https://bedrock-runtime.eu-central-1.amazonaws.com",
+            "",
+        )]);
+        s.providers[0].region = Some("eu-central-1".into());
+        s.validate().unwrap();
+
+        // Another region's runtime host: refused — the credentials are
+        // SigV4-signed for the chosen region, not that one.
+        let mut s = settings_with(vec![profile(
+            "b",
+            ProviderKind::Bedrock,
+            "https://bedrock-runtime.us-east-1.amazonaws.com",
+            "",
+        )]);
+        s.providers[0].region = Some("eu-central-1".into());
+        let err = s.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("Bedrock credentials are only ever sent to the region's Bedrock \
+                          runtime endpoint"),
+            "got: {err}"
+        );
+
+        // An unrelated https host, another spelling of another region's
+        // runtime, and the z.ai endpoint: all refused with the pairing
+        // error — the credentials are SigV4-signed for the chosen
+        // region's runtime only.
+        for url in [
+            "https://api.openai.com/v1",
+            "https://api.z.ai",
+            "https://bedrock-runtime.us-west-2.amazonaws.com",
+        ] {
+            let s = settings_with(vec![profile("b", ProviderKind::Bedrock, url, "")]);
+            let err = s.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("only ever sent to the region's Bedrock runtime endpoint"),
+                "{url}: {err}"
+            );
+        }
+        // The unparseable one is refused as a URL shape problem.
+        let s = settings_with(vec![profile("b", ProviderKind::Bedrock, "not a url", "")]);
+        let err = s.validate().unwrap_err().to_string();
+        assert!(err.contains("absolute http(s) URL"), "got: {err}");
+        // Plaintext http to the pinned host stays refused (encrypted
+        // transport only); loopback stays allowed for local mocks.
+        let s = settings_with(vec![profile(
+            "b",
+            ProviderKind::Bedrock,
+            "http://bedrock-runtime.us-east-1.amazonaws.com",
+            "",
+        )]);
+        let err = s.validate().unwrap_err().to_string();
+        assert!(err.contains("plaintext http"), "got: {err}");
+    }
+
+    #[test]
+    fn bedrock_default_model_follows_region_inference_profile() {
+        // The default model rides the region's cross-region inference
+        // profile prefix; an explicit model always wins.
+        let cases = [
+            ("us-east-1", "us.anthropic.claude-sonnet-4-5"),
+            ("us-west-2", "us.anthropic.claude-sonnet-4-5"),
+            ("eu-central-1", "eu.anthropic.claude-sonnet-4-5"),
+            ("eu-west-3", "eu.anthropic.claude-sonnet-4-5"),
+            ("ap-south-1", "apac.anthropic.claude-sonnet-4-5"),
+            ("ap-northeast-1", "apac.anthropic.claude-sonnet-4-5"),
+            // Regions outside the three inference-profile families keep
+            // the unprefixed, region-local model id.
+            ("ca-central-1", "anthropic.claude-sonnet-4-5"),
+            ("sa-east-1", "anthropic.claude-sonnet-4-5"),
+            ("me-central-1", "anthropic.claude-sonnet-4-5"),
+            ("af-south-1", "anthropic.claude-sonnet-4-5"),
+        ];
+        for (region, expected) in cases {
+            let mut s = settings_with(vec![profile("b", ProviderKind::Bedrock, "", "")]);
+            s.providers[0].region = Some(region.into());
+            assert_eq!(
+                s.providers[0].effective_model(),
+                expected,
+                "region {region}"
+            );
+        }
+        // No region: the default region's prefix applies.
+        let s = settings_with(vec![profile("b", ProviderKind::Bedrock, "", "")]);
+        assert_eq!(
+            s.providers[0].effective_model(),
+            "us.anthropic.claude-sonnet-4-5"
+        );
+        // An explicit model wins over any region-derived default.
+        let mut s = settings_with(vec![profile(
+            "b",
+            ProviderKind::Bedrock,
+            "",
+            " my-own-model ",
+        )]);
+        s.providers[0].region = Some("ap-south-1".into());
+        s.normalize();
+        assert_eq!(s.providers[0].effective_model(), "my-own-model");
     }
 }
