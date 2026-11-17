@@ -3746,6 +3746,32 @@ impl Storage {
         Ok(value)
     }
 
+    /// One message's facts for the export verification manifest: the
+    /// stored `content_hash` digest and the source instance whose
+    /// `source_receipts` rows cover the message (the instance the
+    /// row itself names — the read-only counterpart of the
+    /// `resolve_legacy_instance` seam imports resolve through).
+    /// Read-only over existing tables; `Ok(None)` when no such
+    /// message exists.
+    pub fn message_verification(&self, message_id: i64) -> Result<Option<MessageVerification>> {
+        let value = self
+            .conn
+            .query_row(
+                "SELECT content_hash, source_instance_id
+                 FROM archive_messages
+                 WHERE id = ?1",
+                params![message_id],
+                |row| {
+                    Ok(MessageVerification {
+                        content_hash: row.get(0)?,
+                        source_instance_id: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(value)
+    }
+
     /// The digests referenced by stored messages only (the
     /// message-linked side of the reference set — what the M4.2
     /// unlinked pass skips as already reachable).
@@ -6601,6 +6627,19 @@ pub struct OriginalObject {
     pub kind: String,
     /// When the bytes were first retained.
     pub retained_at: String,
+}
+
+/// One message's verification facts for the export manifest (A9):
+/// the stored content digest and the covering source instance. See
+/// [`Storage::message_verification`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageVerification {
+    /// The stored `content_hash` (sha256 over external id, author,
+    /// sent instant, and body, joined by U+001F).
+    pub content_hash: String,
+    /// The `source_instances.id` whose receipt rows cover the
+    /// message.
+    pub source_instance_id: String,
 }
 
 /// One archived message that references a media digest (the resolution

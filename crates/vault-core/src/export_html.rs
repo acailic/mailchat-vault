@@ -11,13 +11,17 @@
 //!   page-0001.html    up to [`PAGE_MESSAGES`] messages, oldest-relevant
 //!   …                 order per scope, relative links only
 //!   assets/           copied media objects, assets/<sha256>.<ext>
+//!   manifest.json     the tamper-evident verification manifest (A9)
+//!   README.md         what the manifest proves and what it does not
 //!   manifest          provenance + missing-file report, written LAST
 //! ```
 //!
 //! The `manifest`'s presence is the completeness marker: it is streamed
 //! into a dot-prefixed `.manifest.part` and renamed into place only
 //! after every page and asset is written, so a bundle without it is
-//! clearly incomplete by construction.
+//! clearly incomplete by construction. The verification `manifest.json`
+//! and its `README.md` are written into the staged bundle before that
+//! rename (see [`crate::export_manifest`]).
 //!
 //! # Invariants
 //!
@@ -57,7 +61,7 @@
 //! the app-shell registration lands with the frontend slice.
 
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
@@ -65,6 +69,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::export_manifest::VerificationCollector;
 use crate::message::Message;
 use crate::object_store::{sanitize_ext, ObjectStore};
 use crate::storage::Storage;
@@ -142,6 +147,10 @@ pub struct HtmlExportSummary {
     pub assets_missing: u64,
     /// The fidelity wording the manifest also carries.
     pub fidelity: String,
+    /// The verification manifest's head hash ([`crate::export_manifest`]):
+    /// stable across re-exports of the same data, broken by any later
+    /// change to the chained pages, assets, or digests.
+    pub head_hash: String,
 }
 
 /// How an export ended: completed, or cancelled mid-run (no finished
@@ -286,6 +295,7 @@ fn write_bundle(
 ) -> Result<HtmlExportOutcome> {
     let mut pages = PageWriter::new();
     let mut manifest = ManifestWriter::new(staging, plan)?;
+    let mut verification = VerificationCollector::new(storage);
     let cancelled_seen = Cell::new(false);
     let mut copied: HashSet<String> = HashSet::new();
     let written = match scope {
@@ -297,7 +307,14 @@ fn write_bundle(
                 }
                 match storage.get(*id)? {
                     Some(m) => {
-                        pages.message(&m, &mut manifest, staging, objects, &mut copied)?;
+                        pages.message(
+                            &m,
+                            &mut manifest,
+                            &mut verification,
+                            staging,
+                            objects,
+                            &mut copied,
+                        )?;
                         written += 1;
                     }
                     None => manifest.selection_missing(*id),
@@ -313,7 +330,14 @@ fn write_bundle(
                     // built.
                     return Err(Error::Jobs(CANCEL_MARKER.into()));
                 }
-                pages.message(m, &mut manifest, staging, objects, &mut copied)
+                pages.message(
+                    m,
+                    &mut manifest,
+                    &mut verification,
+                    staging,
+                    objects,
+                    &mut copied,
+                )
             };
             match storage.search_archive_export_stream(request, &mut sink) {
                 Ok(n) => Some(n),
@@ -327,7 +351,14 @@ fn write_bundle(
                     cancelled_seen.set(true);
                     return Err(Error::Jobs(CANCEL_MARKER.into()));
                 }
-                pages.message(m, &mut manifest, staging, objects, &mut copied)
+                pages.message(
+                    m,
+                    &mut manifest,
+                    &mut verification,
+                    staging,
+                    objects,
+                    &mut copied,
+                )
             };
             match storage.conversation_thread_stream(*anchor_id, &mut sink) {
                 Ok(()) => None,
@@ -342,14 +373,28 @@ fn write_bundle(
     };
 
     let page_count = pages.finish(staging)?;
+    // The verification manifest and its README land in the staged
+    // bundle before the completeness rename, so an incomplete bundle
+    // never carries either.
+    let assets: BTreeSet<String> = copied.into_iter().collect();
+    let verification = verification.finish(
+        staging,
+        page_count,
+        &assets,
+        &plan.scope_label,
+        plan.count,
+        written,
+        FIDELITY_LABEL,
+    )?;
     let summary = HtmlExportSummary {
         scope_label: plan.scope_label.clone(),
         count: plan.count,
         written,
         pages: page_count,
-        assets_copied: copied.len() as u64,
+        assets_copied: assets.len() as u64,
         assets_missing: manifest.missing,
         fidelity: FIDELITY_LABEL.to_string(),
+        head_hash: verification.head_hash,
     };
     manifest.finish(staging, &summary)?;
     write_index(staging, &summary)?;
@@ -397,13 +442,15 @@ impl PageWriter {
     }
 
     /// Render one message into the current page, copying its media
-    /// objects and recording provenance/missing lines. Bounded: the
-    /// message fields are read one at a time; the page flushes to disk
-    /// every [`PAGE_MESSAGES`] messages.
+    /// objects and recording provenance/missing lines plus the
+    /// verification manifest's message line. Bounded: the message
+    /// fields are read one at a time; the page flushes to disk every
+    /// [`PAGE_MESSAGES`] messages.
     fn message(
         &mut self,
         m: &Message,
         manifest: &mut ManifestWriter,
+        verification: &mut VerificationCollector<'_>,
         staging: &Path,
         objects: &ObjectStore,
         copied: &mut HashSet<String>,
@@ -440,6 +487,7 @@ impl PageWriter {
         self.buf.push_str("</section>\n");
         self.written += 1;
         manifest.provenance(self.page_no, m)?;
+        verification.message(page_name(self.page_no), m)?;
 
         self.in_page += 1;
         if self.in_page >= PAGE_MESSAGES {
@@ -563,7 +611,7 @@ impl PageWriter {
 }
 
 /// The `page-NNNN.html` file name of a 1-based page number.
-fn page_name(page_no: u64) -> String {
+pub(crate) fn page_name(page_no: u64) -> String {
     format!("page-{page_no:04}.html")
 }
 
@@ -688,6 +736,12 @@ impl ManifestWriter {
             "written: {} messages across {} pages; {} assets copied; {} files missing or skipped",
             summary.written, summary.pages, summary.assets_copied, summary.assets_missing
         )?;
+        writeln!(
+            self.out,
+            "verification: {} head {}",
+            crate::export_manifest::MANIFEST_JSON,
+            summary.head_hash
+        )?;
         self.out.flush()?;
         File::open(&self.path)?.sync_all()?;
         let manifest = staging.join("manifest");
@@ -723,13 +777,20 @@ fn write_index(staging: &Path, summary: &HtmlExportSummary) -> Result<()> {
             name = escape(&page_name(page)),
         );
     }
-    html.push_str("</ul>\n</nav>\n<p><a href=\"manifest\">manifest</a></p>\n</body>\n</html>\n");
+    html.push_str("</ul>\n</nav>\n<p><a href=\"manifest\">manifest</a></p>\n");
+    let _ = write!(
+        html,
+        "<p><a href=\"{manifest_json}\">{manifest_json}</a> · \
+         <a href=\"{readme}\">{readme}</a></p>\n</body>\n</html>\n",
+        manifest_json = escape(crate::export_manifest::MANIFEST_JSON),
+        readme = escape(crate::export_manifest::BUNDLE_README),
+    );
     write_synced(&staging.join("index.html"), html.as_bytes())
 }
 
 /// Write and fsync one staged file (the staged-file idiom of
 /// [`crate::staged_write`] and [`crate::backup`]).
-fn write_synced(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_synced(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = File::create(path)?;
     file.write_all(bytes)?;
     file.sync_all()?;

@@ -6,6 +6,27 @@ and packagers run, not item by item.
 
 ## [0.2.0] - 2026-11-17
 
+### Added (tamper-evident export verification)
+
+- Every readable offline HTML export bundle now carries a
+  `manifest.json`: one entry per exported message (its external id, the
+  archive's stored digest of the message, and the digest of its retained
+  original bytes when the archive retained one), the run receipts of the
+  import/sync runs that covered each message's source, and the SHA-256
+  of every page and asset file — all chained together git-commit-style
+  (each line hashes the previous) into a single head hash. Re-exporting
+  unchanged data reproduces the same head hash; changing any chained
+  page, asset, or recorded digest afterward breaks it. The vault-core
+  verifier (`verify_bundle`) recomputes the chain from the bundle alone
+  and names the first divergence — the message, page, or asset that no
+  longer matches; a bundle without its manifest reports clearly
+  incomplete. A `README.md` inside the bundle states plainly what the
+  manifest proves and what it does not: it is tamper evidence from the
+  moment of export, not third-party notarization, and receipts are
+  evidence of what runs observed, not a completeness claim. (The in-app
+  "Verify an export" surface ships with the frontend slice; the verifier
+  is a vault-core API today.)
+
 ### Changed (Vesper is the default theme)
 
 - A fresh vault now opens in Vesper: with no saved theme choice (and no

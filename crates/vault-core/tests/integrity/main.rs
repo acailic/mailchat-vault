@@ -13,6 +13,7 @@ mod canonical;
 mod conversation_keys;
 mod corruption;
 mod dedup;
+mod export_manifest;
 mod migrations;
 mod roundtrip;
 mod safe_migration;
