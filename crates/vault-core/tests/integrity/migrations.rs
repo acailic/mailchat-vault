@@ -21,8 +21,8 @@ const KNOWN_VERSION: i64 = 25;
 // (renumbered from its original 20 for this merge), 22 the
 // attachment_refs projection (A6), 23 the person link history
 // ledger (A5a), 24 the durable source receipts table plus the
-// import-checkpoint count totals, and 25 the original-retention
-// tables (A3b: original_objects by digest plus original_references).
+// import-checkpoint count totals, and 25 the manual-export reminder
+// preferences (A9).
 const APPLIED_VERSIONS: &[i64] = &[
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
 ];

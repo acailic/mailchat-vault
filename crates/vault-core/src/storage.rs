@@ -52,7 +52,7 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{Datelike, Days, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Days, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, Transaction};
 use serde::{Deserialize, Serialize};
@@ -1023,35 +1023,34 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
     (
         25,
-        // Original retention for new mail imports (A3b): one row per
-        // distinct retained original *object* — the raw RFC 5322 bytes
-        // of a message, stored through the object store and identified
-        // by its digest (identical bytes are one object, re-imports and
-        // cross-message duplicates dedup on the PK) — plus one
-        // reference row per archived message that has a retained
-        // original. A message with no reference row was archived
-        // without retention (every pre-A3b row, and any import that
-        // did not opt in) and its export fidelity label is
-        // `crate::ORIGINAL_NOT_RETAINED`; nothing is ever backfilled.
-        // Both tables are additive rows only; `message_id` and `digest`
-        // deliberately carry no foreign keys, following migration 22:
-        // the projection is derived from import runs, and a dangling
-        // row (a vault restored from a partial copy) surfaces through
-        // reconciliation instead of silently vanishing.
+        // The manual-export reminder preferences (A9, plan §5.4): one
+        // row per source the user opted in — device-local scheduling
+        // facts only: the interval, the single next-due deadline (RFC
+        // 3339 UTC), and the snooze state. No row means no reminders
+        // (the opt-in default). Content-free by construction: nothing
+        // but these scheduling facts is ever stored. Dismissal is a
+        // transition, not a column — it advances `next_due_at` and
+        // clears `snoozed_until`. And nothing here promises OS
+        // background execution after Quit: a deadline that passes while
+        // the app is closed is simply due at the next launch — one
+        // reminder, never a burst, because a single instant cannot
+        // queue missed ones.
         r#"
-        CREATE TABLE original_objects (
-            digest      TEXT PRIMARY KEY,
-            size        INTEGER NOT NULL,
-            retained_at TEXT NOT NULL DEFAULT (datetime('now')),
-            kind        TEXT NOT NULL DEFAULT 'rfc5322'
+        CREATE TABLE reminder_preferences (
+            source_instance_id TEXT    PRIMARY KEY,
+            enabled            INTEGER NOT NULL DEFAULT 0,
+            -- Period between reminders, milliseconds (default monthly;
+            -- kept inside the reminder core's bounds by its setters).
+            interval_ms        INTEGER NOT NULL DEFAULT 2592000000,
+            -- RFC 3339 UTC instant the next reminder may be presented
+            -- at; NULL only on a row that never armed.
+            next_due_at        TEXT,
+            -- While set and still in the future: the user snoozed the
+            -- due reminder; present again at/after this instant without
+            -- moving `next_due_at`.
+            snoozed_until      TEXT,
+            updated_at         TEXT    NOT NULL DEFAULT (datetime('now'))
         );
-
-        CREATE TABLE original_references (
-            message_id INTEGER NOT NULL,
-            digest     TEXT NOT NULL,
-            PRIMARY KEY (message_id, digest)
-        );
-        CREATE INDEX idx_original_references_digest ON original_references (digest);
         "#,
     ),
 ];
@@ -3109,6 +3108,100 @@ impl Storage {
             params![schedule.enabled as i64, schedule.interval_ms],
         )?;
         Ok(schedule)
+    }
+
+    /// The manual-export reminder preference for one source (A9, plan
+    /// §5.4): whether the device-local, content-free nudge is on, its
+    /// interval, and the single deadline plus snooze state. `None`
+    /// until the user opts that source in — absence is the opt-out
+    /// default, exactly like a fresh vault schedules nothing.
+    pub fn reminder_preference(
+        &self,
+        source_instance_id: &str,
+    ) -> Result<Option<crate::reminders::ReminderPreference>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT enabled, interval_ms, next_due_at, snoozed_until
+                 FROM reminder_preferences WHERE source_instance_id = ?1",
+                params![source_instance_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)? != 0,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let (enabled, interval_ms, next_due_at, snoozed_until) = match row {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        Ok(Some(crate::reminders::ReminderPreference {
+            source_instance_id: source_instance_id.to_string(),
+            enabled,
+            interval_ms,
+            next_due_at: reminder_instant(next_due_at)?,
+            snoozed_until: reminder_instant(snoozed_until)?,
+        }))
+    }
+
+    /// Every reminder preference (A9): what a launch evaluates to find
+    /// due reminders. Ordering is stable (by source) so callers can
+    /// present them deterministically.
+    pub fn reminder_preferences(&self) -> Result<Vec<crate::reminders::ReminderPreference>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source_instance_id, enabled, interval_ms, next_due_at, snoozed_until
+             FROM reminder_preferences ORDER BY source_instance_id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(crate::reminders::ReminderPreference {
+                    source_instance_id: row.get(0)?,
+                    enabled: row.get::<_, i64>(1)? != 0,
+                    interval_ms: row.get(2)?,
+                    next_due_at: reminder_instant(row.get::<_, Option<String>>(3)?)?,
+                    snoozed_until: reminder_instant(row.get::<_, Option<String>>(4)?)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Upsert one source's reminder preference (A9). Stores what it is
+    /// given — the reminder core (the single writer) clamps intervals
+    /// to its configured bounds before calling this. `next_due_at` /
+    /// `snoozed_until` are persisted as RFC 3339 UTC so a deadline that
+    /// passes while the app is closed survives restart and is simply
+    /// due at the next launch.
+    pub fn set_reminder_preference(
+        &self,
+        pref: crate::reminders::ReminderPreference,
+    ) -> Result<crate::reminders::ReminderPreference> {
+        let fmt = |t: Option<DateTime<Utc>>| {
+            t.map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        };
+        self.conn.execute(
+            "INSERT INTO reminder_preferences
+                 (source_instance_id, enabled, interval_ms, next_due_at, snoozed_until, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
+             ON CONFLICT(source_instance_id) DO UPDATE SET
+                 enabled = excluded.enabled,
+                 interval_ms = excluded.interval_ms,
+                 next_due_at = excluded.next_due_at,
+                 snoozed_until = excluded.snoozed_until,
+                 updated_at = excluded.updated_at",
+            params![
+                pref.source_instance_id,
+                pref.enabled as i64,
+                pref.interval_ms as i64,
+                fmt(pref.next_due_at),
+                fmt(pref.snoozed_until)
+            ],
+        )?;
+        Ok(pref)
     }
 
     /// The failed-item ledger: every item a sync observed but could not
@@ -6717,6 +6810,27 @@ impl QueryFilters {
 
     fn bind(&self) -> Vec<SqlValue> {
         self.values.clone()
+    }
+}
+
+/// Decode one reminder timestamp column (migration 25): RFC 3339,
+/// NULL for "not set". A stored instant this build cannot parse fails
+/// loudly instead of silently disarming a reminder — the scheduling
+/// state is honest or it is nothing.
+fn reminder_instant(
+    text: Option<String>,
+) -> std::result::Result<Option<DateTime<Utc>>, rusqlite::Error> {
+    match text {
+        None => Ok(None),
+        Some(t) => DateTime::parse_from_rfc3339(&t)
+            .map(|d| Some(d.with_timezone(&Utc)))
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            }),
     }
 }
 

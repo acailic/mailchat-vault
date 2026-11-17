@@ -305,6 +305,7 @@ fn version17_db(db: &std::path::Path) -> i64 {
     // a missed object resurfaces as "already exists" on reopen.
     conn.execute_batch(
         "DROP TABLE IF EXISTS source_receipts;
+         DROP TABLE IF EXISTS reminder_preferences;
          DROP TABLE IF EXISTS person_link_history;
          DROP TABLE IF EXISTS attachment_refs;
          DROP TABLE IF EXISTS person_identity_links;
