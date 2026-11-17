@@ -19,6 +19,7 @@
 //! - `a_verified_backup_exists_after_the_source_inputs_are_deleted`
 //! - `restore_into_a_fresh_directory_preserves_the_archive_and_organization`
 //! - `restored_media_objects_verify_by_their_manifest_digests`
+//! - `retained_originals_round_trip_and_verify_by_digest` (A3b)
 //! - `restored_accounts_require_reconnection_and_no_credentials_are_carried`
 //! - `the_replaced_fresh_vault_is_kept_as_a_previous_slot_that_still_opens`
 
@@ -46,6 +47,15 @@ const MEDIA_FIXTURES: [&str; 3] = ["photo.jpg", "beep.wav", "plan.pdf"];
 const MAIL_SOURCE: &str = "proof-mail";
 const CHAT_SOURCE: &str = "proof-chat";
 const PROFILE_ID: &str = "recovery-proof-profile";
+
+/// The A3b seed: two messages imported from a retained mbox with
+/// original retention on. The retained bytes are each part *without*
+/// its `From ` separator line (the separator is an mbox container
+/// artifact, not part of the RFC 5322 message).
+const RETAINED_PARTS: [&str; 2] = [
+    "From: Ana <ana@example.com>\nSubject: retained one\nMessage-ID: <retained-1@example.org>\nDate: Sat, 14 Nov 2026 09:00:00 +0100\n\nretained original one about the invoice\n",
+    "From: Ana <ana@example.com>\nSubject: retained two\nMessage-ID: <retained-2@example.org>\nDate: Sat, 14 Nov 2026 09:05:00 +0100\n\nretained original two about the invoice\n",
+];
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(FIXTURES).join(name)
@@ -162,6 +172,9 @@ struct Seeded {
     sources: u64,
     attachment_digests: Vec<String>,
     unlinked_digest: String,
+    /// A3b: digests of the retained originals, in `RETAINED_PARTS`
+    /// order.
+    original_digests: Vec<String>,
     saved_searches: Vec<SavedSearch>,
     collections: Vec<Collection>,
     collection_members: Vec<(String, Vec<i64>)>,
@@ -250,6 +263,46 @@ fn seed_populated_vault(sb: &Sandbox) -> (PathBuf, Seeded) {
                 .map(|_| ())
         })
         .unwrap();
+    }
+
+    // Source 3 (mbox namespace, A3b): a mail file import with original
+    // retention on, driven through the real bounded path from a copy of
+    // the retained mbox in `inputs/` — the raw RFC 5322 bytes must ride
+    // the backup/restore cycle exactly like media objects already do.
+    fs::write(
+        inputs.join("retained.mbox"),
+        format!(
+            "From ana@example.com Sat Nov 14 09:00:00 2026\n{}From ana@example.com Sat Nov 14 09:05:00 2026\n{}",
+            RETAINED_PARTS[0], RETAINED_PARTS[1],
+        ),
+    )
+    .unwrap();
+    let original_digests: Vec<String> = RETAINED_PARTS
+        .iter()
+        .map(|part| {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(part.as_bytes());
+            format!("{:x}", hasher.finalize())
+        })
+        .collect();
+    {
+        let mut sink = vault_core::jobs::PoolSink(&pool);
+        let outcome = vault_core::mbox::import_pick_bounded_with_retention(
+            &mut sink,
+            &inputs.join("retained.mbox"),
+            &data_dir,
+            true,
+            &|| false,
+            &mut |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(outcome.summary.inserted, 2);
+        assert_eq!(
+            outcome.originals.unwrap().stored,
+            2,
+            "the seeded import retained both originals"
+        );
     }
 
     // One unlinked registry object (plan.pdf): stored and registered,
@@ -390,6 +443,7 @@ fn seed_populated_vault(sb: &Sandbox) -> (PathBuf, Seeded) {
             sources: fingerprint.sources,
             attachment_digests,
             unlinked_digest,
+            original_digests,
             saved_searches,
             collections,
             collection_members,
@@ -462,10 +516,12 @@ fn recovered_scenario() -> Scenario {
 }
 
 /// All media-object digests the scenario vault holds (two message
-/// attachments plus the unlinked registry object), sorted.
+/// attachments, the unlinked registry object, and the two retained
+/// originals), sorted.
 fn all_expected_digests(sc: &Scenario) -> Vec<String> {
     let mut expected = sc.seed.attachment_digests.clone();
     expected.push(sc.seed.unlinked_digest.clone());
+    expected.extend(sc.seed.original_digests.iter().cloned());
     expected.sort();
     expected
 }
@@ -620,13 +676,72 @@ fn restored_media_objects_verify_by_their_manifest_digests() {
 }
 
 #[test]
+fn retained_originals_round_trip_and_verify_by_digest() {
+    // A3b: the retained original bytes — raw RFC 5322, stored by digest
+    // through the object store — survive the backup/restore cycle with
+    // the source inputs long deleted, and re-verify by digest on the
+    // restored side.
+    let sc = recovered_scenario();
+    assert_eq!(sc.seed.original_digests.len(), 2);
+
+    // Every original is carried in the container's object set.
+    let mut manifest_digests: Vec<String> = sc
+        .summary
+        .manifest
+        .objects
+        .iter()
+        .map(|o| o.sha256.clone())
+        .collect();
+    manifest_digests.sort();
+    assert!(manifest_digests.contains(&sc.seed.original_digests[0]));
+    assert!(manifest_digests.contains(&sc.seed.original_digests[1]));
+
+    // On the restored side: each retained message still names its
+    // original, and the stored bytes re-hash to that digest and match
+    // the original message content byte for byte.
+    let store = sc.fresh.store();
+    for (digest, part) in sc.seed.original_digests.iter().zip(RETAINED_PARTS.iter()) {
+        let name = store
+            .object_name(digest)
+            .expect("the restored store holds the original object");
+        let path = store.resolve_object(&format!("media/{name}")).unwrap();
+        assert_eq!(
+            sha256_hex(&path),
+            *digest,
+            "restored original re-hashes to its recorded digest"
+        );
+        assert_eq!(fs::read(&path).unwrap(), part.as_bytes());
+    }
+    for external in ["retained-1@example.org", "retained-2@example.org"] {
+        let id = sc.fresh.with_pool(|s| message_id(s, external));
+        let original = sc
+            .fresh
+            .with_pool(move |s| s.original_for_message(id).unwrap())
+            .expect("the restored record still names its retained original");
+        assert!(sc.seed.original_digests.contains(&original.digest));
+        assert_eq!(original.kind, "rfc5322");
+    }
+
+    // The honesty boundary survived too: a message archived without
+    // retention has no original after the restore — it must not gain a
+    // fabricated one.
+    let plain = sc.fresh.with_pool(|s| message_id(s, "mail-1@example.org"));
+    assert!(
+        sc.fresh
+            .with_pool(move |s| s.original_for_message(plain).unwrap())
+            .is_none(),
+        "a record archived without retention stays without an original"
+    );
+}
+
+#[test]
 fn restored_accounts_require_reconnection_and_no_credentials_are_carried() {
     let sc = recovered_scenario();
 
     // The cross-machine shape: the per-source credential check reports
     // every source missing, so the reconnection count equals the source
     // count.
-    assert_eq!(sc.seed.sources, 2, "fixture carries two sources");
+    assert_eq!(sc.seed.sources, 3, "fixture carries three sources");
     assert_eq!(sc.outcome.sources_needing_reauth, sc.seed.sources);
     assert_eq!(sc.outcome.manifest.counts.sources, sc.seed.sources);
 

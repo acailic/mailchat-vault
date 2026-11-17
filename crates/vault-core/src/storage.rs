@@ -52,7 +52,7 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{Datelike, Days, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, Datelike, Days, Local, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row, Transaction};
 use serde::{Deserialize, Serialize};
@@ -1021,6 +1021,38 @@ const MIGRATIONS: &[(i64, &str)] = &[
             INTEGER NOT NULL DEFAULT 0;
         "#,
     ),
+    (
+        25,
+        // The manual-export reminder preferences (A9, plan §5.4): one
+        // row per source the user opted in — device-local scheduling
+        // facts only: the interval, the single next-due deadline (RFC
+        // 3339 UTC), and the snooze state. No row means no reminders
+        // (the opt-in default). Content-free by construction: nothing
+        // but these scheduling facts is ever stored. Dismissal is a
+        // transition, not a column — it advances `next_due_at` and
+        // clears `snoozed_until`. And nothing here promises OS
+        // background execution after Quit: a deadline that passes while
+        // the app is closed is simply due at the next launch — one
+        // reminder, never a burst, because a single instant cannot
+        // queue missed ones.
+        r#"
+        CREATE TABLE reminder_preferences (
+            source_instance_id TEXT    PRIMARY KEY,
+            enabled            INTEGER NOT NULL DEFAULT 0,
+            -- Period between reminders, milliseconds (default monthly;
+            -- kept inside the reminder core's bounds by its setters).
+            interval_ms        INTEGER NOT NULL DEFAULT 2592000000,
+            -- RFC 3339 UTC instant the next reminder may be presented
+            -- at; NULL only on a row that never armed.
+            next_due_at        TEXT,
+            -- While set and still in the future: the user snoozed the
+            -- due reminder; present again at/after this instant without
+            -- moving `next_due_at`.
+            snoozed_until      TEXT,
+            updated_at         TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+        "#,
+    ),
 ];
 
 /// Rust halves of migrations, for backfill logic that SQL alone cannot
@@ -1244,10 +1276,13 @@ impl Storage {
         let mut counts = ImportBatchCounts::default();
         for msg in messages {
             match insert_message_in_tx(&tx, import_id, msg)? {
-                InsertOutcome::Inserted(_) => {
+                InsertOutcome::Inserted(id) => {
                     counts.inserted += 1;
                     if !media_entries(&msg.raw_json).is_empty() {
                         counts.media_linked += 1;
+                    }
+                    if let Some(object) = &msg.original_ref {
+                        record_original_in_tx(&tx, id, object)?;
                     }
                 }
                 InsertOutcome::Duplicate(id) => {
@@ -1255,6 +1290,13 @@ impl Storage {
                     let entries = media_entries(&msg.raw_json);
                     if !entries.is_empty() && attach_media_in_tx(&tx, id, &entries)? {
                         counts.media_linked += 1;
+                    }
+                    // A re-import that retained the bytes still links the
+                    // original to the existing row: the reference says
+                    // "these exact bytes are stored", never anything
+                    // about which run first saw the message.
+                    if let Some(object) = &msg.original_ref {
+                        record_original_in_tx(&tx, id, object)?;
                     }
                 }
             }
@@ -3068,6 +3110,100 @@ impl Storage {
         Ok(schedule)
     }
 
+    /// The manual-export reminder preference for one source (A9, plan
+    /// §5.4): whether the device-local, content-free nudge is on, its
+    /// interval, and the single deadline plus snooze state. `None`
+    /// until the user opts that source in — absence is the opt-out
+    /// default, exactly like a fresh vault schedules nothing.
+    pub fn reminder_preference(
+        &self,
+        source_instance_id: &str,
+    ) -> Result<Option<crate::reminders::ReminderPreference>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT enabled, interval_ms, next_due_at, snoozed_until
+                 FROM reminder_preferences WHERE source_instance_id = ?1",
+                params![source_instance_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)? != 0,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let (enabled, interval_ms, next_due_at, snoozed_until) = match row {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        Ok(Some(crate::reminders::ReminderPreference {
+            source_instance_id: source_instance_id.to_string(),
+            enabled,
+            interval_ms,
+            next_due_at: reminder_instant(next_due_at)?,
+            snoozed_until: reminder_instant(snoozed_until)?,
+        }))
+    }
+
+    /// Every reminder preference (A9): what a launch evaluates to find
+    /// due reminders. Ordering is stable (by source) so callers can
+    /// present them deterministically.
+    pub fn reminder_preferences(&self) -> Result<Vec<crate::reminders::ReminderPreference>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source_instance_id, enabled, interval_ms, next_due_at, snoozed_until
+             FROM reminder_preferences ORDER BY source_instance_id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(crate::reminders::ReminderPreference {
+                    source_instance_id: row.get(0)?,
+                    enabled: row.get::<_, i64>(1)? != 0,
+                    interval_ms: row.get(2)?,
+                    next_due_at: reminder_instant(row.get::<_, Option<String>>(3)?)?,
+                    snoozed_until: reminder_instant(row.get::<_, Option<String>>(4)?)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Upsert one source's reminder preference (A9). Stores what it is
+    /// given — the reminder core (the single writer) clamps intervals
+    /// to its configured bounds before calling this. `next_due_at` /
+    /// `snoozed_until` are persisted as RFC 3339 UTC so a deadline that
+    /// passes while the app is closed survives restart and is simply
+    /// due at the next launch.
+    pub fn set_reminder_preference(
+        &self,
+        pref: crate::reminders::ReminderPreference,
+    ) -> Result<crate::reminders::ReminderPreference> {
+        let fmt = |t: Option<DateTime<Utc>>| {
+            t.map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        };
+        self.conn.execute(
+            "INSERT INTO reminder_preferences
+                 (source_instance_id, enabled, interval_ms, next_due_at, snoozed_until, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
+             ON CONFLICT(source_instance_id) DO UPDATE SET
+                 enabled = excluded.enabled,
+                 interval_ms = excluded.interval_ms,
+                 next_due_at = excluded.next_due_at,
+                 snoozed_until = excluded.snoozed_until,
+                 updated_at = excluded.updated_at",
+            params![
+                pref.source_instance_id,
+                pref.enabled as i64,
+                pref.interval_ms as i64,
+                fmt(pref.next_due_at),
+                fmt(pref.snoozed_until)
+            ],
+        )?;
+        Ok(pref)
+    }
+
     /// The failed-item ledger: every item a sync observed but could not
     /// store, with the reason and attempt count — the durable
     /// "what fell and why" accounting (M2.3). `instance` filters to one
@@ -3482,6 +3618,35 @@ impl Storage {
     /// [`crate::object_store::ObjectStore::reconcile`]).
     pub fn media_digests(&self) -> Result<std::collections::HashSet<String>> {
         media_digests_on(&self.conn)
+    }
+
+    /// The retained original of one archived message (A3b): the digest
+    /// of its raw RFC 5322 bytes as stored in the object store, or
+    /// `None` when the record has no retained original — every row
+    /// archived without retention, whose export fidelity label is then
+    /// [`crate::ORIGINAL_NOT_RETAINED`]. The bytes themselves are
+    /// opened through the object store
+    /// ([`crate::object_store::ObjectStore`]) by digest.
+    pub fn original_for_message(&self, message_id: i64) -> Result<Option<OriginalObject>> {
+        let value = self
+            .conn
+            .query_row(
+                "SELECT o.digest, o.size, o.kind, o.retained_at
+                 FROM original_references r
+                 JOIN original_objects o ON o.digest = r.digest
+                 WHERE r.message_id = ?1",
+                params![message_id],
+                |row| {
+                    Ok(OriginalObject {
+                        digest: row.get(0)?,
+                        size: row.get::<_, i64>(1)?.max(0) as u64,
+                        kind: row.get(2)?,
+                        retained_at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(value)
     }
 
     /// The digests referenced by stored messages only (the
@@ -4791,6 +4956,18 @@ pub(crate) fn media_digests_on(conn: &Connection) -> Result<std::collections::Ha
             digests.insert(sha);
         }
     }
+    // Retained originals (A3b): the raw RFC 5322 bytes are objects in
+    // the same store, referenced by the `original_objects` registry —
+    // backup carries them and reconciliation covers them exactly like
+    // media objects.
+    if table_exists_on(conn, "original_objects")? {
+        let mut stmt = conn.prepare("SELECT digest FROM original_objects")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let sha: String = row.get(0)?;
+            digests.insert(sha);
+        }
+    }
     Ok(digests)
 }
 
@@ -4931,6 +5108,30 @@ fn attach_media_in_tx(
         )?;
     }
     Ok(changed)
+}
+
+/// Record one retained original for `message_id` inside an open ingest
+/// transaction (A3b): the object row is idempotent on the digest (the
+/// retention pass already stored/deduped the bytes through the object
+/// store before this transaction — reference rows land *after* promote,
+/// mirroring the media-reference order), and the reference row is
+/// idempotent on the pair, so re-imports write nothing new.
+fn record_original_in_tx(
+    tx: &Transaction<'_>,
+    message_id: i64,
+    object: &crate::object_store::ObjectRef,
+) -> Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO original_objects (digest, size, kind)
+         VALUES (?1, ?2, 'rfc5322')",
+        params![object.sha256, object.size],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO original_references (message_id, digest)
+         VALUES (?1, ?2)",
+        params![message_id, object.sha256],
+    )?;
+    Ok(())
 }
 
 /// Find the legacy source instance for `namespace`, creating an
@@ -6280,6 +6481,21 @@ pub struct RegisteredMediaObject {
     pub first_seen: String,
 }
 
+/// One retained original object (A3b, `original_objects`): the raw
+/// RFC 5322 bytes of a message, stored by digest in the object store.
+/// See [`Storage::original_for_message`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OriginalObject {
+    /// SHA-256 of the retained bytes — the object-store digest.
+    pub digest: String,
+    /// Size of the retained bytes.
+    pub size: u64,
+    /// What the bytes are (`"rfc5322"`).
+    pub kind: String,
+    /// When the bytes were first retained.
+    pub retained_at: String,
+}
+
 /// One archived message that references a media digest (the resolution
 /// of an integrity finding to the messages it affects, see
 /// [`Storage::media_digest_references`]): the id every reading surface
@@ -6594,6 +6810,27 @@ impl QueryFilters {
 
     fn bind(&self) -> Vec<SqlValue> {
         self.values.clone()
+    }
+}
+
+/// Decode one reminder timestamp column (migration 25): RFC 3339,
+/// NULL for "not set". A stored instant this build cannot parse fails
+/// loudly instead of silently disarming a reminder — the scheduling
+/// state is honest or it is nothing.
+fn reminder_instant(
+    text: Option<String>,
+) -> std::result::Result<Option<DateTime<Utc>>, rusqlite::Error> {
+    match text {
+        None => Ok(None),
+        Some(t) => DateTime::parse_from_rfc3339(&t)
+            .map(|d| Some(d.with_timezone(&Utc)))
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            }),
     }
 }
 

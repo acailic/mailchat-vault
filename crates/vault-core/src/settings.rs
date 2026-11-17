@@ -1597,33 +1597,33 @@ mod tests {
         // into the other through a save + reopen.
         let mut s = Settings {
             providers: vec![
-            ProviderProfile {
-                id: "openai-main".into(),
-                name: "OpenAI".into(),
-                kind: ProviderKind::Openai,
-                base_url: String::new(),
-                model: String::new(),
-                temperature: Some(0.7),
-                max_tokens: Some(512),
-                timeout_secs: Some(45),
-                deployment_name: None,
-                api_version: None,
-                region: None,
-            },
-            ProviderProfile {
-                id: "ollama-local".into(),
-                name: "Local Ollama".into(),
-                kind: ProviderKind::Ollama,
-                base_url: "http://127.0.0.1:11434/v1".into(),
-                model: "llama3.2".into(),
-                temperature: Some(0.0),
-                max_tokens: Some(2048),
-                timeout_secs: Some(300),
-                deployment_name: None,
-                api_version: None,
-                region: None,
-            },
-        ],
+                ProviderProfile {
+                    id: "openai-main".into(),
+                    name: "OpenAI".into(),
+                    kind: ProviderKind::Openai,
+                    base_url: String::new(),
+                    model: String::new(),
+                    temperature: Some(0.7),
+                    max_tokens: Some(512),
+                    timeout_secs: Some(45),
+                    deployment_name: None,
+                    api_version: None,
+                    region: None,
+                },
+                ProviderProfile {
+                    id: "ollama-local".into(),
+                    name: "Local Ollama".into(),
+                    kind: ProviderKind::Ollama,
+                    base_url: "http://127.0.0.1:11434/v1".into(),
+                    model: "llama3.2".into(),
+                    temperature: Some(0.0),
+                    max_tokens: Some(2048),
+                    timeout_secs: Some(300),
+                    deployment_name: None,
+                    api_version: None,
+                    region: None,
+                },
+            ],
             default_provider: Some("ollama-local".into()),
             ..Settings::default()
         };
@@ -1895,8 +1895,10 @@ mod tests {
         s.providers[0].region = Some("eu-central-1".into());
         let err = s.validate().unwrap_err().to_string();
         assert!(
-            err.contains("Bedrock credentials are only ever sent to the region's Bedrock \
-                          runtime endpoint"),
+            err.contains(
+                "Bedrock credentials are only ever sent to the region's Bedrock \
+                          runtime endpoint"
+            ),
             "got: {err}"
         );
 
