@@ -163,3 +163,28 @@ describe("tokenized transitions (app.css)", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// app.css: the results-list entrance + count line (signature surface)
+// ---------------------------------------------------------------------------
+
+describe("results-list motion and numerals (app.css)", () => {
+  it("the empty→results entrance runs once as a single group at the standard token", () => {
+    const body = ruleBody(appCss, "#results.enter-results");
+    expect(body).toMatch(
+      /animation:\s*results-enter var\(--motion-standard\) var\(--ease-out\)/,
+    );
+  });
+
+  it("reduced motion disables the entrance entirely", () => {
+    const at = appCss.indexOf("@media (prefers-reduced-motion: reduce)");
+    expect(at).toBeGreaterThanOrEqual(0);
+    const block = appCss.slice(at);
+    expect(block).toMatch(/#results\.enter-results\s*\{\s*animation:\s*none;\s*\}/);
+  });
+
+  it("the count lines render tabular numerals", () => {
+    expect(ruleBody(appCss, ".page-info")).toMatch(/font-variant-numeric:\s*tabular-nums/);
+    expect(ruleBody(appCss, "#status")).toMatch(/font-variant-numeric:\s*tabular-nums/);
+  });
+});

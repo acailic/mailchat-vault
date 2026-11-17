@@ -645,6 +645,9 @@ summary:hover { background: var(--panel-2); }
   font-size: var(--text-meta);
   color: var(--muted);
   min-height: 1em;
+  /* The N–M of T ranges stop jittering as counts change (same
+   * tabular-numerals precedent as the chart axis labels). */
+  font-variant-numeric: tabular-nums;
 }
 #status.error, .error { color: var(--danger); }
 
@@ -981,15 +984,13 @@ mark.hit {
 
 /* Pagination + export */
 #pagination { display: flex; gap: 10px; align-items: center; margin-top: var(--sp-3); }
-/* The count line pairs with #status (both carry the N–M of T ranges):
- * tabular numerals keep the digits from jittering as counts change
- * (same precedent as the chart axis labels below). */
+/* The count line in the footer pairs with #status (both carry the
+ * N–M of T ranges) — tabular numerals there too. */
 .page-info {
   font-size: var(--text-meta);
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
-#status { font-variant-numeric: tabular-nums; }
 /* The density toggle sits beside the count line: a plain pressed-style
  * toggle (aria-pressed carries the state). */
 .density-toggle { font-size: var(--text-meta); }

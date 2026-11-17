@@ -11,6 +11,8 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Window } from "happy-dom";
 import { describe, expect, it } from "vitest";
+import { renderFlatResults } from "./render2";
+import type { MessageSummary } from "./v2types";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const tokensCss = readFileSync(join(here, "styles", "tokens.css"), "utf8");
@@ -72,6 +74,17 @@ describe("placeholder contrast (computed from committed token values)", () => {
         const ratio = contrast(theme["muted"], theme[surface]);
         expect(ratio, `${themeName} --muted on --${surface}`).toBeGreaterThanOrEqual(4.5);
       }
+    }
+  });
+
+  it("the search-match pair meets 4.5:1 in every theme (not color-only)", () => {
+    for (const [themeName, theme] of [
+      ["light", light],
+      ["dark", dark],
+      ["vesper", vesper],
+    ] as const) {
+      const ratio = contrast(theme["match-ink"], theme["match"]);
+      expect(ratio, `${themeName} --match-ink on --match`).toBeGreaterThanOrEqual(4.5);
     }
   });
 
@@ -306,5 +319,71 @@ describe("uniform hover, press, disabled states (app.css)", () => {
     expect(disabled).toBeTruthy();
     expect(disabled!.body).toMatch(/color:\s*var\(--muted\)/);
     expect(disabled!.body).toMatch(/cursor:\s*not-allowed/);
+// Results grid semantics (the keyboard-first selection surface)
+// ---------------------------------------------------------------------------
+
+describe("results grid semantics (render2)", () => {
+  const hits: MessageSummary[] = [
+    {
+      id: 1,
+      source_id: "s1",
+      source_label: "mbox",
+      conversation_id: "c1",
+      conversation_label: "thread-a",
+      author: "Ana",
+      subject: "Delivery date",
+      sent_at: "2026-01-02T10:00:00Z",
+      time_confidence: "legacy_assumed",
+      snippet: "",
+      attachment_count: 0,
+      available_attachment_count: 0,
+      has_conflicting_revision: false,
+    },
+    {
+      id: 2,
+      source_id: "s1",
+      source_label: "mbox",
+      conversation_id: "c1",
+      conversation_label: "thread-a",
+      author: "Bo",
+      subject: "Re: Delivery date",
+      sent_at: "2026-01-03T10:00:00Z",
+      time_confidence: "legacy_assumed",
+      snippet: "",
+      attachment_count: 0,
+      available_attachment_count: 0,
+      has_conflicting_revision: false,
+    },
+  ];
+
+  it("exposes grid rows with aria-selected; the button stays the tabbable element", () => {
+    const el = document.createElement("div");
+    renderFlatResults(el, {
+      hits,
+      activeIndex: 0,
+      selectedId: null,
+      selection: new Set(),
+      expandedFolds: new Set(),
+      terms: [],
+      onOpen: () => {},
+      onToggleSelect: () => {},
+      onToggleFold: () => {},
+    });
+    expect(el.getAttribute("role")).toBe("grid");
+    const rows = [...el.querySelectorAll("li.hit-item")] as HTMLElement[];
+    expect(rows.map((r) => r.getAttribute("role"))).toEqual(["row", "row"]);
+    expect(rows.map((r) => r.getAttribute("aria-selected"))).toEqual(["true", "false"]);
+    // Activation discipline intact: role=button + tabindex live on the
+    // row's main area, never on the row, and the selection checkbox is
+    // its sibling — no control nested inside a control.
+    for (const row of rows) {
+      expect(row.getAttribute("tabindex")).toBeNull();
+      const main = row.querySelector(".hit-main") as HTMLElement;
+      expect(main.getAttribute("role")).toBe("button");
+      expect(main.getAttribute("tabindex")).toBe("0");
+      const check = row.querySelector("input.row-select") as HTMLInputElement;
+      expect(check.parentElement).toBe(row);
+      expect(main.parentElement).toBe(row);
+    }
   });
 });

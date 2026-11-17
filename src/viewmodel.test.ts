@@ -9,6 +9,7 @@ import {
   formatCount,
   groupHits,
   highlightSegments,
+  highlightTerms,
   htmlOf,
   mediaOf,
   moveIndex,
@@ -46,6 +47,27 @@ describe("splitTerms", () => {
   it("empty input yields no terms", () => {
     expect(splitTerms("")).toEqual([]);
     expect(splitTerms("   ")).toEqual([]);
+  });
+});
+
+describe("highlightTerms", () => {
+  it("is splitTerms when no author filter applies", () => {
+    expect(highlightTerms({ text: "quarterly vault", author: "" })).toEqual([
+      "quarterly",
+      "vault",
+    ]);
+    expect(highlightTerms({ text: "vault", author: null })).toEqual(["vault"]);
+  });
+
+  it("adds the applied author value (from:/to: or the filter)", () => {
+    expect(highlightTerms({ text: "report", author: "ana" })).toEqual(["report", "ana"]);
+  });
+
+  it("a full author string also contributes its display-name form", () => {
+    expect(highlightTerms({ text: "", author: "Ana Garcia <ana@x.y>" })).toEqual([
+      "Ana Garcia <ana@x.y>",
+      "Ana Garcia",
+    ]);
   });
 });
 
