@@ -748,9 +748,7 @@ pub fn check_profile_pairing(profile: &ProviderProfile) -> crate::Result<()> {
                 // Bedrock runtime host — not another region's runtime,
                 // an unrelated endpoint, or the z.ai host.
                 let expected = bedrock_base_url(&profile.effective_region());
-                if endpoint_host(&profile.base_url).as_deref()
-                    != endpoint_host(&expected).as_deref()
-                {
+                if endpoint_host(&profile.base_url) != endpoint_host(&expected) {
                     return Err(settings_error(format!(
                         "provider “{name}”: Bedrock credentials are only ever sent to the \
                          region's Bedrock runtime endpoint, but the base URL points at {}. \
