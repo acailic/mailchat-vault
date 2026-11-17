@@ -3286,6 +3286,7 @@ fn run_bounded(
     let run = BoundedRun {
         import_id: import_id.into(),
         limits: Default::default(),
+        originals: None,
         media,
     };
     let mut sink = PoolSink(pool);
