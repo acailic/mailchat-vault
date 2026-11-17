@@ -543,6 +543,181 @@ fn same_label_instances_round_trip_through_the_bounded_importer() {
     );
     // The display labels followed the rename; the keys did not move.
     let mut renamed_labels: Vec<&str> = renamed.iter().map(|m| m.source.as_str()).collect();
-    renamed_labels.sort_unstable();
+    renamed_labels.sort();
     assert_eq!(renamed_labels, vec!["Renamed mailbox", "Shared mailbox"]);
 }
+
+// ----------------------------------------------------------------------
+// Honesty filters: export parity — issue #108 reconciliation
+// ----------------------------------------------------------------------
+
+/// Seed the same mixed honesty fixture the search-page suite uses (time
+/// confidence, grouping, media preservation; shapes copied from the lib
+/// tri-state tests in `search2.rs`) and return the storage plus each
+/// row's id by external id.
+fn honesty_seeded() -> (Storage, std::collections::BTreeMap<&'static str, i64>) {
+    let storage = Storage::open_in_memory().unwrap();
+    let mut ids = std::collections::BTreeMap::new();
+    let mut insert = |key: &'static str, day: u32, tune: &dyn Fn(&mut NewMessage)| {
+        let date = if day == 0 {
+            String::new()
+        } else {
+            format!("2026-01-{day:02}T10:00:00Z")
+        };
+        let mut m = message("demo", key, &date, &format!("needle body {key}"));
+        tune(&mut m);
+        match storage.insert_message(&m).unwrap() {
+            vault_core::message::InsertOutcome::Inserted(id) => {
+                ids.insert(key, id);
+            }
+            _ => panic!("fixture row {key} must insert"),
+        }
+    };
+
+    // Time: exact, confirmed, derived legacy_assumed, derived missing.
+    insert("exact", 1, &|_| {});
+    insert("confirmed", 2, &|m| m.time_confidence = "user_confirmed".into());
+    insert("assumed", 3, &|m| m.time_confidence = String::new());
+    insert("notime", 0, &|_| {});
+    // Grouping: verified provider key, legacy chat-name grouping, standalone.
+    insert("verified-group", 4, &|m| {
+        m.channel = "chat".into();
+        m.chat_id = "team".into();
+        m.conversation_key = "telegram:chat:9".into();
+    });
+    insert("legacy-group", 5, &|m| {
+        m.channel = "chat".into();
+        m.chat_id = "oldgroup".into();
+    });
+    insert("standalone", 6, &|_| {});
+    // Files: stored media, recorded-missing media, WhatsApp placeholder, plain.
+    let stored_json = serde_json::json!({
+        "media": [{
+            "sha256": "h",
+            "path": "media/h.jpg",
+            "name": "h.jpg",
+            "kind": "image",
+            "size": 10
+        }]
+    });
+    insert("stored", 7, &|m| m.raw_json = stored_json.to_string());
+    let gone_json = serde_json::json!({
+        "media": [{
+            "name": "gone.jpg",
+            "kind": "image",
+            "missing": true,
+            "reason": "not-in-export"
+        }]
+    });
+    insert("gone", 8, &|m| m.raw_json = gone_json.to_string());
+    insert("placeholder", 9, &|m| {
+        m.raw_json = r#"{"attachment":{"kind":"image","name":"lost.jpg"}}"#.into();
+    });
+    insert("plain", 10, &|_| {});
+    (storage, ids)
+}
+
+/// Apply one honesty filter setting to a request, leaving everything else.
+fn with_honesty_filter(
+    mut request: SearchArchiveRequest,
+    label: &str,
+    setting: Option<bool>,
+) -> SearchArchiveRequest {
+    match label {
+        "time_assumed" => request.time_assumed = setting,
+        "grouping_unverified" => request.grouping_unverified = setting,
+        "files_missing" => request.files_missing = setting,
+        other => unreachable!("unknown filter {other}"),
+    }
+    request
+}
+
+#[test]
+fn honesty_filters_export_parity_matches_search_hits_and_totals() {
+    let (storage, row_ids) = honesty_seeded();
+    let named = |keys: &[&str]| -> Vec<i64> {
+        let mut ids: Vec<i64> = keys.iter().map(|k| row_ids[*k]).collect();
+        ids.sort();
+        ids
+    };
+
+    for (label, true_names, false_names) in [
+        (
+            "time_assumed",
+            vec!["assumed", "notime"],
+            vec![
+                "exact", "confirmed", "verified-group", "legacy-group", "standalone", "stored",
+                "gone", "placeholder", "plain",
+            ],
+        ),
+        (
+            "grouping_unverified",
+            vec![
+                "exact", "confirmed", "assumed", "notime", "legacy-group", "standalone",
+                "stored", "gone", "placeholder", "plain",
+            ],
+            vec!["verified-group"],
+        ),
+        (
+            "files_missing",
+            vec!["gone", "placeholder"],
+            vec![
+                "exact", "confirmed", "assumed", "notime", "verified-group", "legacy-group",
+                "standalone", "stored", "plain",
+            ],
+        ),
+    ] {
+        for (setting, expected_names) in [(Some(true), true_names), (Some(false), false_names)] {
+            let expected = named(&expected_names);
+
+            // A text query one page short of the whole set: the page
+            // truncates while its total keeps the filtered count.
+            let paged = with_honesty_filter(
+                SearchArchiveRequest {
+                    text: "needle".into(),
+                    limit: Some(1),
+                    ..Default::default()
+                },
+                label,
+                setting,
+            );
+            let page = storage.search_archive(&paged).unwrap();
+            assert_eq!(page.hits.len(), 1, "{label}={setting:?}: truncated page");
+            assert_eq!(
+                page.total,
+                expected.len() as u64,
+                "{label}={setting:?}: page.total is the filtered count"
+            );
+
+            // Exporting the same request writes exactly the search hits
+            // and reports the same total.
+            let (summary, exported) = export_json(&storage, &paged);
+            assert_eq!(
+                summary.written,
+                page.total,
+                "{label}={setting:?}: summary.written equals page.total"
+            );
+            let mut exported_ids: Vec<i64> = exported.iter().map(|m| m.id).collect();
+            exported_ids.sort();
+            assert_eq!(
+                exported_ids, expected,
+                "{label}={setting:?}: export writes exactly the filtered hit set"
+            );
+
+            // The full page of the same scope returns the same set back.
+            let full = with_honesty_filter(
+                SearchArchiveRequest {
+                    text: "needle".into(),
+                    ..Default::default()
+                },
+                label,
+                setting,
+            );
+            let full_page = storage.search_archive(&full).unwrap();
+            let mut page_ids: Vec<i64> = full_page.hits.iter().map(|h| h.id).collect();
+            page_ids.sort();
+            assert_eq!(page_ids, expected, "{label}={setting:?}: full page agrees");
+        }
+    }
+}
+
