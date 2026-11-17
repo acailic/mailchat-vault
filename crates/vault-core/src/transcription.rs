@@ -475,19 +475,26 @@ fn find_media_object(media_dir: &Path, sha256: &str) -> Result<Option<PathBuf>> 
     Ok(None)
 }
 
-/// Extract the spoken text from whisper.cpp CLI output: keep each
-/// line's payload, dropping the `[start --> end]` segment timestamps
-/// the CLI prefixes. Stub scripts print the same segment shape.
+/// Extract the spoken text from whisper.cpp CLI output: the segment
+/// lines the CLI prints — `[start --> end] spoken text` — keep only
+/// their payload. Everything else (the loader and timing logs the CLI
+/// also prints, on stderr especially) must never become transcript
+/// text; manual verification against a real whisper-cli found those
+/// log lines on stderr with no segments at all for a tone input, and
+/// the pass below must report "no text" there, not harvest the logs.
+/// Stub scripts print the same segment shape.
 fn parse_whisper_text(raw: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for line in raw.lines() {
-        let payload = match line.find("] ") {
-            Some(idx) => &line[idx + 2..],
-            None => line,
-        };
-        let payload = payload.trim();
-        if !payload.is_empty() {
-            parts.push(payload);
+        let trimmed = line.trim();
+        if !(trimmed.starts_with('[') && trimmed.contains(" --> ")) {
+            continue;
+        }
+        if let Some(idx) = trimmed.find("] ") {
+            let payload = trimmed[idx + 2..].trim();
+            if !payload.is_empty() {
+                parts.push(payload);
+            }
         }
     }
     parts.join(" ")

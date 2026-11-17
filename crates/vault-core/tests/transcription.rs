@@ -317,3 +317,61 @@ fn caps_detection_reports_missing_tools_honestly() {
     let caps = TranscriptionCaps::detect(&sb.stub_model());
     assert!(caps.model.is_some());
 }
+
+/// Manual verification of the real transcription path (the stub tests
+/// prove the plumbing; this proves the sidecar contract — the
+/// `-m model -f wav` invocation and the `[start --> end] text`
+/// segment shape the parser expects). Needs `whisper-cli` and
+/// `ffmpeg` on `PATH` plus `WHISPER_MODEL` pointing at a downloaded
+/// GGML model; never run in CI, exactly like the manual IMAP check:
+///
+/// ```sh
+/// cargo test -p vault-core --test transcription -- --ignored --nocapture
+/// ```
+///
+/// The fixture is a pure tone, so the honest outcomes are both
+/// acceptable: whisper transcribes nothing (the row stays pending and
+/// search stays blind to it) or it hallucinates segments (the row
+/// lands and search finds them). Either way the pass must complete
+/// without error — a real voice note differs only in having speech.
+#[test]
+#[ignore = "needs real whisper-cli + ffmpeg + WHISPER_MODEL; manual verification only"]
+fn real_sidecar_manual_check_on_the_tone_fixture() {
+    let caps = TranscriptionCaps::detect(Path::new("/usr/local/share/whisper/ggml-base.bin"));
+    let missing = caps.missing();
+    if !missing.is_empty() {
+        eprintln!("skipping real-sidecar check, missing: {missing:?}");
+        return;
+    }
+
+    let sb = Sandbox::new("real");
+    let mut storage = Storage::open(sb.data_dir().join("vault.db")).unwrap();
+    voice_note_vault(&sb, &mut storage);
+    files::run_backfill_opt(&storage, None, true).unwrap();
+    assert_eq!(pending_count(&storage).unwrap(), 1);
+
+    let drained = drain_pending(&storage, &sb.data_dir().join("media"), &caps, 10).unwrap();
+    assert_eq!(drained.attempted, 1, "{drained:?}");
+    if drained.transcribed == 1 {
+        // Hallucinated segments on a tone: whatever text landed is
+        // exactly what search must now find.
+        assert_eq!(hits(&storage, "padding"), 0, "tone body is not words");
+        let rows = message_transcripts(&storage, 1)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.status == "done")
+            .count();
+        assert_eq!(rows, 1);
+    } else {
+        assert_eq!(drained.failed, 1, "{drained:?}");
+        assert_eq!(pending_count(&storage).unwrap(), 1);
+        assert!(
+            drained
+                .last_skip_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no text"),
+            "{drained:?}"
+        );
+    }
+}
