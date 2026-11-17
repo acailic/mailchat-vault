@@ -519,7 +519,8 @@ fn restore_into_a_fresh_directory_preserves_the_archive_and_organization() {
     }
 
     // Collections survive with their membership intact.
-    let restored_collections: Vec<Collection> = sc.fresh.with_pool(|s| s.list_collections().unwrap());
+    let restored_collections: Vec<Collection> =
+        sc.fresh.with_pool(|s| s.list_collections().unwrap());
     let restored_names: Vec<String> = restored_collections.iter().map(|c| c.name.clone()).collect();
     let seeded_names: Vec<String> = sc.seed.collections.iter().map(|c| c.name.clone()).collect();
     assert_eq!(restored_names, seeded_names);
@@ -546,7 +547,8 @@ fn restore_into_a_fresh_directory_preserves_the_archive_and_organization() {
         .fresh
         .with_pool(move |s| s.person_identity_links(&person_id).unwrap());
     assert_eq!(links.len(), 2, "both confirmed links survive");
-    let (mail_instance, chat_instance) = (sc.seed.mail_instance.clone(), sc.seed.chat_instance.clone());
+    let (mail_instance, chat_instance) =
+        (sc.seed.mail_instance.clone(), sc.seed.chat_instance.clone());
     let (mail_person, chat_person) = sc.fresh.with_pool(move |s| {
         (
             s.person_for_anchor(
