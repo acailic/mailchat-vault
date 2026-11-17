@@ -1,14 +1,17 @@
 //! Migration contract: reopening an existing database applies migrations as
 //! a strict no-op — schema version is stable, every stored row survives
 //! byte-for-byte, dedup still sees prior rows, and a second open connection
-//! (WAL) observes the same data.
+//! (WAL) observes the same data. The guard test additionally proves the
+//! derived rollback fixtures cover every historical version.
 
 use std::collections::HashMap;
 
 use proptest::prelude::*;
+use rusqlite::Connection;
 
 use vault_core::message::{InsertOutcome, NewMessage};
-use vault_core::storage::Storage;
+use vault_core::migration_rollback::{rollback_column_drops_after, rollback_drops_after};
+use vault_core::storage::{Storage, SUPPORTED_SCHEMA_VERSION};
 
 use crate::fixtures;
 
@@ -137,5 +140,40 @@ fn golden_seed_reopen_preserves_data() {
         let s = Storage::open(&db).unwrap();
         assert_eq!(s.schema_version().unwrap(), version);
         assert_eq!(s.stats().unwrap().total, model.len() as u64);
+    }
+}
+
+/// The rollback fixtures' derivation must cover every migration: for each
+/// version V, a fresh database is rolled back to V with the SQL derived
+/// from the migration ledger (`migration_rollback`) and reopened, which
+/// re-applies V..=head. A migration whose objects the deriver missed —
+/// the shared shape of every stale-fixture incident — fails here with
+/// "already exists" at its own version instead of a week later in some
+/// hand-maintained fixture.
+#[test]
+fn derived_rollback_to_every_version_reopens_at_head() {
+    for v in 1..=SUPPORTED_SCHEMA_VERSION {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("vault.db");
+        drop(Storage::open(&db).unwrap()); // fresh database, at head
+
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(&rollback_drops_after(v - 1).join(";\n"))
+            .unwrap();
+        for stmt in rollback_column_drops_after(v - 1) {
+            let _ = conn.execute(&stmt, []);
+        }
+        conn.execute_batch(&format!(
+            "DELETE FROM schema_migrations WHERE version >= {v};"
+        ))
+        .unwrap();
+        drop(conn);
+
+        let s = Storage::open(&db).unwrap();
+        assert_eq!(
+            s.schema_version().unwrap(),
+            SUPPORTED_SCHEMA_VERSION,
+            "reopen after rollback to version {v} must re-apply {v}..=head"
+        );
     }
 }

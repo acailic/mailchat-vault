@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use rusqlite::Connection;
 use vault_core::backup::{self, RestoreOptions};
 use vault_core::message::{InsertOutcome, NewMessage};
+use vault_core::migration_rollback::{rollback_column_drops_after, rollback_drops_after};
 use vault_core::storage::{
     Collection, CollectionDetail, Storage, VaultFingerprint, SUPPORTED_SCHEMA_VERSION,
 };
@@ -283,10 +284,15 @@ fn reimport_of_an_archived_message_preserves_memberships() {
 
 /// Build a database in the exact shape the previous release (schema
 /// version 17) left behind: full current schema minus the post-17
-/// migrations' tables (collections 19; people/identity links 20 — and,
-/// once the saved-searches slice lands, 18), their bookkeeping rows
-/// absent. Reopening it with this build is the "existing vault upgrades
-/// in place" path. Returns the archived message's row id.
+/// migrations' objects, their bookkeeping rows absent. Reopening it with
+/// this build is the "existing vault upgrades in place" path. Returns
+/// the archived message's row id.
+///
+/// The dropped-object list is not maintained here — it is derived from
+/// the migration ledger itself (see `migration_rollback`, escape hatches
+/// included), so a new migration can no longer be silently missed. The
+/// property target's guard test re-derives this rollback for every
+/// historical version.
 fn version17_db(db: &std::path::Path) -> i64 {
     let s = Storage::open(db).unwrap();
     let id = inserted_id(
@@ -296,38 +302,16 @@ fn version17_db(db: &std::path::Path) -> i64 {
     drop(s);
 
     let conn = Connection::open(db).unwrap();
-    // Roll back to the version-17 shape by removing exactly what
-    // migrations 18+ added (18 saved_searches, 19 collections +
-    // members, 20 people + identity links, 21 the digest index, 22
-    // attachment_refs, 23 person_link_history, 24 source_receipts +
-    // the import_checkpoints count columns, 25 reminder_preferences,
-    // 26 original objects/references, 27 message_fingerprints).
-    // Tables take their indexes with them. Keep this list in step with
-    // new migrations - a missed object resurfaces as "already exists"
-    // on reopen.
-    conn.execute_batch(
-        "DROP TABLE IF EXISTS message_fingerprints;
-         DROP TABLE IF EXISTS source_receipts;
-         DROP TABLE IF EXISTS reminder_preferences;
-         DROP TABLE IF EXISTS original_references;
-         DROP TABLE IF EXISTS original_objects;
-         DROP TABLE IF EXISTS person_link_history;
-         DROP TABLE IF EXISTS attachment_refs;
-         DROP TABLE IF EXISTS person_identity_links;
-         DROP TABLE IF EXISTS people;
-         DROP TABLE IF EXISTS collection_members;
-         DROP TABLE IF EXISTS collections;
-         DROP TABLE IF EXISTS saved_searches;
-         DROP INDEX IF EXISTS idx_archive_messages_created_source;",
-    )
-    .unwrap();
-    // Migration 24 also added run-total columns to an existing table;
-    // SQLite cannot re-add an existing column, so take them back too.
-    for col in ["inserted_total", "skipped_total"] {
-        let _ = conn.execute(
-            &format!("ALTER TABLE import_checkpoints DROP COLUMN {col}"),
-            [],
-        );
+    // Roll back to the version-17 shape by inverting every migration
+    // newer than 17 (tables newest-first, taking their indexes with
+    // them). Migration 24 also added run-total columns to an existing
+    // table; SQLite cannot re-add an existing column and has no
+    // IF EXISTS for columns, so the derived ADD-COLUMN inverses are
+    // best-effort — the guarded semantics this fixture always used.
+    conn.execute_batch(&rollback_drops_after(17).join(";\n"))
+        .unwrap();
+    for stmt in rollback_column_drops_after(17) {
+        let _ = conn.execute(&stmt, []);
     }
     conn.execute_batch("DELETE FROM schema_migrations WHERE version >= 18;")
         .unwrap();
