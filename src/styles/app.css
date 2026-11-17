@@ -713,7 +713,9 @@ summary:hover { background: var(--panel-2); }
 .empty-state-art {
   width: 64px;
   height: 64px;
-  color: var(--accent);
+  /* decorative, not interactive: accent text color is reserved for
+     affordances by the accent-usage invariant */
+  color: var(--text-muted);
 }
 .empty-state-headline {
   font-size: var(--text-2xl);
