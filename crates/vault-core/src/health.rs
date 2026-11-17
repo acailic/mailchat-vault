@@ -324,6 +324,11 @@ pub struct ArchiveHealth {
     /// vault never finished verifying one — never advanced by a sync
     /// or an import.
     pub last_verified_backup: Option<LastBackupRecord>,
+    /// Whether the archive file is encrypted at rest (SQLCipher),
+    /// derived from the database file header at open — the honest
+    /// answer for a plaintext vault even in an encryption-capable
+    /// build. See [`crate::encryption`].
+    pub encrypted: bool,
 }
 
 /// Read the vault's archive health from committed facts only: source
@@ -354,6 +359,7 @@ pub fn archive_health(storage: &Storage) -> Result<ArchiveHealth> {
         sources,
         unresolved_job_failures: unresolved_failures(storage)?,
         last_verified_backup: crate::backup::last_backup_record(storage)?,
+        encrypted: storage.is_encrypted(),
     })
 }
 

@@ -1000,6 +1000,7 @@ fn verify_committable_raises_every_refusal_before_the_switch() {
         &preview.preview_id,
         &sb.fingerprint(),
         &no_progress,
+        None,
     )
     .unwrap();
     let (messages, _, _, _) = sb.vault_shape();
@@ -1023,6 +1024,7 @@ fn verify_committable_raises_every_refusal_before_the_switch() {
         &preview.preview_id,
         &sb.fingerprint(),
         &no_progress,
+        None,
     );
     assert!(matches!(&result, Err(vault_core::Error::Backup(m)) if m.contains("changed since")));
 
@@ -1040,6 +1042,7 @@ fn verify_committable_raises_every_refusal_before_the_switch() {
         &preview.preview_id,
         &sb.fingerprint(),
         &no_progress,
+        None,
     );
     assert!(matches!(&result, Err(vault_core::Error::Backup(m)) if m.contains("newer preview")));
     // The active vault still holds everything the late import wrote.

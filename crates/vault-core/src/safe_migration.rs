@@ -80,8 +80,8 @@ impl MigrationFailPoint {
 }
 
 /// Knobs for [`crate::storage::Storage::open_with`]; the production
-/// [`crate::storage::Storage::open`] uses the default (never fails
-/// on purpose).
+/// [`crate::storage::Storage::open`] uses the default (never fails on
+/// purpose).
 #[derive(Debug, Clone, Default)]
 pub struct OpenOptions {
     /// Inject a failure at the given point (test hook).
@@ -90,6 +90,13 @@ pub struct OpenOptions {
     /// bytes, regardless of the computed snapshot size (test hook for
     /// provoking [`Error::InsufficientSpace`] on any real disk).
     pub min_free_bytes: Option<u64>,
+    /// The 256-bit key of an encrypted (SQLCipher) vault: applied to
+    /// every new database this open creates and required by any
+    /// encrypted one it opens. `None` keeps today's plaintext behavior;
+    /// a plaintext vault opened with a key supplied stays plaintext
+    /// (conversion is a separate explicit operation). See
+    /// [`crate::encryption`].
+    pub vault_key: Option<crate::encryption::VaultKey>,
 }
 
 /// Fail when the options inject a failure at `point`.

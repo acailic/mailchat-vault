@@ -401,6 +401,7 @@ fn fresh_vault_reads_never_done_not_invented_times() {
             sources: Vec::new(),
             unresolved_job_failures: BTreeMap::new(),
             last_verified_backup: None,
+            encrypted: false,
         }
     );
 
@@ -490,7 +491,12 @@ fn sync_import_and_backup_stay_three_separate_facts() {
     model_keys.sort_unstable();
     assert_eq!(
         model_keys,
-        vec!["last_verified_backup", "sources", "unresolved_job_failures"]
+        vec![
+            "encrypted",
+            "last_verified_backup",
+            "sources",
+            "unresolved_job_failures"
+        ]
     );
     let source_value = serde_json::to_value(&health.sources[0]).unwrap();
     let mut source_keys: Vec<&str> = source_value

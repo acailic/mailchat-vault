@@ -1,7 +1,10 @@
 //! SQLite storage: schema migrations, idempotent inserts, and FTS5 search.
 //!
-//! The database bundles SQLite (via `rusqlite`'s `bundled` feature), so no
-//! system SQLite is required. FTS5 is enabled in the bundled build.
+//! The database bundles SQLite with SQLCipher enabled (via `rusqlite`'s
+//! `bundled-sqlcipher-vendored-openssl` feature), so no system SQLite is
+//! required. FTS5 is enabled in the bundled build. At-rest encryption is
+//! opt-in: it engages only when a key is supplied on open (see
+//! [`crate::encryption`]); plaintext files open exactly as before.
 //!
 //! Since schema version 4 the store is **canonical**: every application
 //! read and write targets the `source_instances`, `conversations`,
@@ -1091,6 +1094,17 @@ pub struct Storage {
     /// Private to this module except the v2 query module
     /// ([`crate::search2`]), which owns the v2 IPC read paths.
     pub(crate) conn: Connection,
+    /// The honest at-rest fact established at open: whether the
+    /// underlying file is a SQLCipher-encrypted database. Surfaced
+    /// through [`Storage::is_encrypted`] for the health/inspect read
+    /// models.
+    encrypted: bool,
+    /// The key this open used, present only when the vault is encrypted
+    /// (a plaintext vault keeps `None` even when a key was offered — it
+    /// was not used). Held so connection-creating flows that share this
+    /// open's identity (the backup snapshot) inherit encryption instead
+    /// of writing a plaintext side door.
+    key: Option<crate::encryption::VaultKey>,
 }
 
 /// BM25F column weights every FTS ranking site orders by
@@ -1141,7 +1155,21 @@ impl Storage {
             return Err(Error::MigrationFailed { reason, snapshot });
         }
         let existed = path.try_exists().map_err(Error::Io)?;
-        let conn = Connection::open(path)?;
+        // The keyed open: classifies the file's first page, applies
+        // `PRAGMA key` before anything else can touch the file, refuses
+        // an encrypted vault without its key, and reports whether the
+        // file is encrypted (see `crate::encryption`).
+        let opened = crate::encryption::open_connection(
+            path,
+            rusqlite::OpenFlags::default(),
+            opts.vault_key.as_ref(),
+        )?;
+        let conn = opened.conn;
+        let key = if opened.encrypted {
+            opts.vault_key
+        } else {
+            None
+        };
         // Version probe before anything can touch the file: a newer
         // schema must be refused with zero writes (not even pragmas).
         let current = read_schema_version(&conn)?;
@@ -1159,7 +1187,14 @@ impl Storage {
         } else {
             None
         };
-        match Self::init_with(conn, opts, existed.then_some(path), snapshot.as_deref()) {
+        match Self::init_with(
+            conn,
+            opts,
+            existed.then_some(path),
+            snapshot.as_deref(),
+            opened.encrypted,
+            key,
+        ) {
             Ok(storage) => {
                 // The conversion committed and validated; the snapshot's
                 // job is done.
@@ -1175,7 +1210,7 @@ impl Storage {
     /// Open a private in-memory database (used by tests and demos).
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        Self::init_with(conn, &OpenOptions::default(), None, None)
+        Self::init_with(conn, &OpenOptions::default(), None, None, false, None)
     }
 
     /// Configure pragmas/functions, migrate, and validate — restoring
@@ -1186,10 +1221,16 @@ impl Storage {
         opts: &OpenOptions,
         db_path: Option<&Path>,
         snapshot: Option<&Path>,
+        encrypted: bool,
+        key: Option<crate::encryption::VaultKey>,
     ) -> Result<Self> {
         let converted = Self::configure_and_migrate(&conn, opts);
         match converted {
-            Ok(()) => Ok(Self { conn }),
+            Ok(()) => Ok(Self {
+                conn,
+                encrypted,
+                key,
+            }),
             Err(e) => {
                 // A failed post-conversion validation is deterministic —
                 // the conversion committed but the converted database is
@@ -3614,6 +3655,23 @@ impl Storage {
     /// ordinary callers keep going through the typed methods.
     pub fn connection(&self) -> &Connection {
         &self.conn
+    }
+
+    /// Whether this open's file is an encrypted (SQLCipher) database —
+    /// the honest at-rest fact for the health/inspect read models.
+    /// Derived from the database file header at open; a plaintext vault
+    /// opened in an encryption-capable build still reports `false`.
+    pub fn is_encrypted(&self) -> bool {
+        self.encrypted
+    }
+
+    /// The key this open used (`None` for a plaintext vault, including
+    /// one opened with a key offered but not used). Connection-creating
+    /// flows that share this open's identity — the backup snapshot, the
+    /// verify opens — pass this on so an encrypted vault never grows a
+    /// plaintext side door.
+    pub fn vault_key(&self) -> Option<&crate::encryption::VaultKey> {
+        self.key.as_ref()
     }
 
     /// The identity fingerprint of the archive right now: schema

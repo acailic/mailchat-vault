@@ -20,7 +20,14 @@ imap = { version = "2.4", default-features = false }
 mailparse = "0.16"
 notify = "8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-rusqlite = { version = "0.37", features = ["bundled", "functions", "backup"] }
+# `bundled-sqlcipher-vendored-openssl` replaces the former plain
+# `bundled` feature: libsqlite3-sys compiles the SQLCipher amalgamation
+# (AES-256 at-rest encryption) plus a vendored OpenSSL, so no system
+# OpenSSL is needed. It implies `bundled-sqlcipher`; `functions` and
+# `backup` are kept as before. Encryption itself stays opt-in at the
+# vault-core `encryption` feature — SQLCipher opens plaintext files
+# unchanged, so default builds behave exactly as before.
+rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl", "functions", "backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

@@ -320,12 +320,15 @@ pub enum ExistingContent {
     Empty,
     /// A vault: `vault_id` from a validated `vault.json` (`None` for a
     /// legacy vault with a database but no identity yet), the
-    /// database's schema version when a database exists, and the
-    /// identity's recorded directory name when present.
+    /// database's schema version when a database exists, the
+    /// identity's recorded directory name when present, and whether
+    /// the database file is encrypted at rest (SQLCipher — derived
+    /// from the file header, the honest answer even without a key).
     Vault {
         vault_id: Option<String>,
         schema_version: Option<i64>,
         directory_name: Option<String>,
+        encrypted: bool,
     },
 }
 
@@ -354,6 +357,11 @@ pub struct LocationInspection {
 /// the origin's `vault.json`); a destination already holding a
 /// *different* vault's identity is refused, never overwritten.
 ///
+/// `key` is the moving vault's key when it is encrypted (SQLCipher):
+/// without it an encrypted destination database cannot be opened for
+/// its schema check and the inspection refuses with a clear error —
+/// never a guess and never an unkeyed read.
+///
 /// Refusals are typed ([`MoveError`]); successes report the
 /// measurements. The inspection never writes anything except its own
 /// removed probe file and never mutates the directory's contents.
@@ -361,6 +369,7 @@ pub fn vault_location_inspect(
     path: &Path,
     active_vault_id: Option<&str>,
     mounts: MountTable<'_>,
+    key: Option<&crate::encryption::VaultKey>,
 ) -> Result<LocationInspection, MoveError> {
     if !path.exists() {
         return Err(MoveError::DirectoryMissing(path.to_path_buf()));
@@ -427,32 +436,41 @@ pub fn vault_location_inspect(
 
     // Schema compatibility through the existing supported-version
     // refusal: a database this build cannot open refuses the location.
+    // The open is the keyed one (header classification first): an
+    // encrypted destination opens with `key` or refuses clearly.
     let db_path = canonical.join(vault_session::DB_FILE);
-    let schema_version = if db_path.is_file() {
-        let conn =
-            Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let version = read_schema_version(&conn).map_err(move_err)?;
+    let mut schema_version = None;
+    let mut encrypted = false;
+    if db_path.is_file() {
+        let opened = crate::encryption::open_connection(
+            &db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            key,
+        )
+        .map_err(move_err)?;
+        let version = read_schema_version(&opened.conn).map_err(move_err)?;
         if version > SUPPORTED_SCHEMA_VERSION {
             return Err(MoveError::SchemaTooNew {
                 db: version,
                 supported: SUPPORTED_SCHEMA_VERSION,
             });
         }
-        Some(version)
-    } else {
-        None
-    };
+        schema_version = Some(version);
+        encrypted = opened.encrypted;
+    }
 
     let existing = match (&identity, schema_version) {
         (Some(identity), schema_version) => ExistingContent::Vault {
             vault_id: Some(identity.vault_id.clone()),
             schema_version,
             directory_name: identity.directory_name.clone(),
+            encrypted,
         },
         (None, Some(schema_version)) => ExistingContent::Vault {
             vault_id: None,
             schema_version: Some(schema_version),
             directory_name: None,
+            encrypted,
         },
         (None, None) => {
             let unrelated = fs::read_dir(&canonical)?
@@ -581,11 +599,16 @@ pub struct MovePreview {
 /// Refuses while an unresolved move journal exists. The snapshot is
 /// taken into the origin's recovery directory and discarded once
 /// counted; nothing at the destination is written.
+///
+/// `key` is the vault's key when it is encrypted (SQLCipher): the
+/// preview's estimate snapshot and destination inspection both open
+/// through the keyed path.
 pub fn vault_move_preview(
     origin: &Path,
     destination: &Path,
     conn: &Connection,
     mounts: MountTable<'_>,
+    key: Option<&crate::encryption::VaultKey>,
 ) -> Result<MovePreview, MoveError> {
     ensure_no_open_move(origin)?;
     let origin_canonical = origin
@@ -593,7 +616,7 @@ pub fn vault_move_preview(
         .map_err(|_| MoveError::DirectoryMissing(origin.to_path_buf()))?;
     let active_vault_id = read_origin_identity(&origin_canonical)?;
 
-    let inspection = vault_location_inspect(destination, active_vault_id.as_deref(), mounts)?;
+    let inspection = vault_location_inspect(destination, active_vault_id.as_deref(), mounts, key)?;
 
     // The estimate comes from the snapshot path itself (the same
     // counting a backup trusts), staged in the device-local recovery
@@ -602,7 +625,7 @@ pub fn vault_move_preview(
     fs::create_dir_all(&recovery)?;
     let snapshot_tmp = recovery.join(format!(".move-preview-snapshot-{}", std::process::id()));
     let result = (|| -> Result<MoveEstimate, MoveError> {
-        let plan = backup::snapshot_for_backup(&origin_canonical, conn, &snapshot_tmp)
+        let plan = backup::snapshot_for_backup(&origin_canonical, conn, &snapshot_tmp, key)
             .map_err(move_err)?;
         let db_bytes = fs::metadata(&plan.snapshot)?.len();
         let object_bytes: u64 = plan.objects.iter().map(|o| o.size).sum();

@@ -104,6 +104,11 @@ pub struct PoolConfig {
     pub event_ring: usize,
     /// How many finished [`JobRecord`]s stay queryable after they end.
     pub finished_keep: usize,
+    /// The 256-bit key when the pool opens an encrypted (SQLCipher)
+    /// vault; `None` keeps today's plaintext behavior. The app layer
+    /// resolves it from the OS keyring; tests inject raw keys (see
+    /// [`crate::encryption`]).
+    pub vault_key: Option<crate::encryption::VaultKey>,
 }
 
 impl Default for PoolConfig {
@@ -113,6 +118,7 @@ impl Default for PoolConfig {
             job_queue_capacity: 64,
             event_ring: 1024,
             finished_keep: 100,
+            vault_key: None,
         }
     }
 }
@@ -232,6 +238,13 @@ impl From<Error> for JobError {
                 message: e.to_string(),
             },
             Error::OAuth(_) => JobError::Network {
+                message: e.to_string(),
+            },
+            Error::Encryption(_)
+            | Error::EncryptedVaultLocked { .. }
+            | Error::WrongVaultKey { .. }
+            | Error::EncryptionUnsupported { .. }
+            | Error::KeyWithoutEncryption { .. } => JobError::Storage {
                 message: e.to_string(),
             },
         }
@@ -623,8 +636,14 @@ impl DbPool {
     ) -> Result<Arc<Self>> {
         // Writer first: it owns migration duty. Sequential opens, so a
         // pending migration is applied exactly once before readers see the
-        // file.
-        let writer_storage = Storage::open(path.as_ref())?;
+        // file. Every connection goes through the keyed open with the
+        // pool's key, so an encrypted vault's writer and readers share
+        // one identity.
+        let open_opts = crate::safe_migration::OpenOptions {
+            vault_key: config.vault_key,
+            ..Default::default()
+        };
+        let writer_storage = Storage::open_with(path.as_ref(), &open_opts)?;
         // Finished-jobs ledger (migration 16): the previous sessions'
         // terminal jobs become read-only history in the registry, loaded
         // here — before the threads start, so no live job can be submitted
@@ -636,8 +655,8 @@ impl DbPool {
             .enumerate()
             .map(|(offset, row)| restored_record(row, offset as u64))
             .collect();
-        let reader_a = Storage::open(path.as_ref())?;
-        let reader_b = Storage::open(path.as_ref())?;
+        let reader_a = Storage::open_with(path.as_ref(), &open_opts)?;
+        let reader_b = Storage::open_with(path.as_ref(), &open_opts)?;
         let (write_tx, write_rx) =
             std::sync::mpsc::sync_channel::<WriteCommand>(config.write_queue_capacity.max(1));
         let (job_tx, job_rx) =

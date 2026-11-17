@@ -21,6 +21,7 @@ Hands-on guides sit alongside the specification set:
 | [Release](release.md) | Installers, local builds, smoke tests, checksums, publishing |
 | [Native verification runbook](native-verification.md) | The G1/A14 procedure for real macOS/Windows verification hosts: exact commands per OS, evidence binding (artifact SHA-256, tester, date), and the templates native runs fill |
 | [Support matrix](support-matrix.md) | Current capability and claim status with evidence links, plus open go-public blockers |
+| [Security](security.md) | What the opt-in at-rest encryption (SQLCipher) does and does not protect: memory, swap, pre-migration backups, key custody |
 | [Landing page](landing.md) | Deploy-ready public landing copy: the README's one-sentence promise and comparison table with a single call to action — one self-contained file with no external assets, paste into any static host |
 
 ## Reading order
