@@ -7,16 +7,18 @@
 //! - no explicit id → the settings default provider, else the environment
 //!   fallback (backward compatible with pre-Settings env configuration),
 //!   else local-only;
-//! - a profile without a stored API key degrades to local-only with a
-//!   note — a missing key never turns into an error or a network call.
+//! - a profile of a keyed kind without a stored API key degrades to
+//!   local-only with a note — a missing key never turns into an error or
+//!   a network call. Keyless kinds (`AuthStyle::None`: local Ollama /
+//!   LM Studio) resolve without any key, with an empty `api_key`.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use vault_core::llm::{plaintext_http_off_loopback, LlmConfig, LlmStatus};
 use vault_core::settings::{
-    build_menu, check_profile_pairing, ProviderMenuItem, ProviderProfile, Settings, Theme, ENV_ID,
-    LOCAL_ID,
+    build_menu, check_profile_pairing, AuthStyle, ProviderMenuItem, ProviderProfile, Settings,
+    Theme, ENV_ID, LOCAL_ID,
 };
 
 use crate::secrets::SecretStore;
@@ -206,6 +208,33 @@ impl LlmRegistry {
         }
     }
 
+    /// Resolve one profile into a [`Selection::Provider`] — or the
+    /// local-only downgrade when its key is missing. Keyless kinds
+    /// (`AuthStyle::None`: local Ollama / LM Studio) resolve without a
+    /// stored key, carrying an empty `api_key` (the client sends no auth
+    /// header then); a stored key still wins, for proxied local
+    /// endpoints. `label` names the downgrade message's subject
+    /// (`provider` / `default provider`).
+    fn resolve_profile(&self, profile: &ProviderProfile, label: &str) -> Selection {
+        let api_key = match self.keys.get(&profile.id) {
+            Some(key) => key.clone(),
+            None if profile.kind.auth() == AuthStyle::None => String::new(),
+            None => {
+                return Selection::local(format!(
+                    "{label} “{}” has no API key stored — set one in Settings",
+                    profile.display_name()
+                ))
+            }
+        };
+        let mut config = Self::config_for(profile);
+        config.api_key = api_key;
+        Selection::Provider {
+            id: profile.id.clone(),
+            name: profile.display_name().to_string(),
+            config,
+        }
+    }
+
     /// Resolve what an ask should use. `requested` is the explicit provider
     /// id from the Ask UI menu, if any.
     pub fn select(&self, requested: Option<&str>) -> Selection {
@@ -229,21 +258,7 @@ impl LlmRegistry {
                 )),
             },
             Some(id) => match profile_by_id(id) {
-                Some(profile) => match self.keys.get(id) {
-                    Some(key) => {
-                        let mut config = Self::config_for(profile);
-                        config.api_key = key.clone();
-                        Selection::Provider {
-                            id: id.to_string(),
-                            name: profile.display_name().to_string(),
-                            config,
-                        }
-                    }
-                    None => Selection::local(format!(
-                        "provider “{}” has no API key stored — set one in Settings",
-                        profile.display_name()
-                    )),
-                },
+                Some(profile) => self.resolve_profile(profile, "provider"),
                 None => Selection::local(format!("unknown provider “{id}”")),
             },
             None => self.select_default(),
@@ -257,21 +272,7 @@ impl LlmRegistry {
     fn select_default(&self) -> Selection {
         if let Some(default) = &self.settings.default_provider {
             if let Some(profile) = self.settings.providers.iter().find(|p| &p.id == default) {
-                return match self.keys.get(default) {
-                    Some(key) => {
-                        let mut config = Self::config_for(profile);
-                        config.api_key = key.clone();
-                        Selection::Provider {
-                            id: default.clone(),
-                            name: profile.display_name().to_string(),
-                            config,
-                        }
-                    }
-                    None => Selection::local(format!(
-                        "default provider “{}” has no API key stored — set one in Settings",
-                        profile.display_name()
-                    )),
-                };
+                return self.resolve_profile(profile, "default provider");
             }
         }
         match &self.env {
@@ -765,6 +766,81 @@ mod tests {
                 .unwrap()
                 .available
         );
+    }
+
+    #[test]
+    fn keyless_local_kinds_resolve_without_a_stored_key() {
+        // The keyless local kinds (ollama, lmstudio) resolve as Providers
+        // with an empty api_key when no key is stored; a keyed kind
+        // without a key keeps the local-only downgrade.
+        let settings = settings_with(
+            vec![
+                profile("loc", ProviderKind::Ollama),
+                profile("studio", ProviderKind::Lmstudio),
+                profile("glm", ProviderKind::Zai),
+            ],
+            None,
+        );
+        let r = registry(settings, &[], &[]);
+        match r.select(Some("loc")) {
+            Selection::Provider { id, config, .. } => {
+                assert_eq!(id, "loc");
+                assert_eq!(config.base_url, "http://127.0.0.1:11434/v1");
+                assert_eq!(config.api_key, "", "no auth header material");
+            }
+            other => panic!("keyless ollama should resolve: {other:?}"),
+        }
+        match r.select(Some("studio")) {
+            Selection::Provider { id, config, .. } => {
+                assert_eq!(id, "studio");
+                assert_eq!(config.base_url, "http://127.0.0.1:1234/v1");
+                assert_eq!(config.api_key, "");
+            }
+            other => panic!("keyless lmstudio should resolve: {other:?}"),
+        }
+        match r.select(Some("glm")) {
+            Selection::Local { reason } => {
+                assert!(reason.contains("no API key"), "got: {reason}")
+            }
+            other => panic!("keyed glm without a key must degrade: {other:?}"),
+        }
+        // The menu availability follows: keyless rows selectable, glm not.
+        for (id, available) in [("loc", true), ("studio", true), ("glm", false)] {
+            assert_eq!(
+                r.status()
+                    .providers
+                    .iter()
+                    .find(|i| i.id == id)
+                    .unwrap()
+                    .available,
+                available,
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn keyless_default_resolves_and_a_stored_key_still_wins() {
+        let settings = settings_with(
+            vec![profile("studio", ProviderKind::Lmstudio)],
+            Some("studio"),
+        );
+        let r = registry(settings.clone(), &[], &[]);
+        match r.select(None) {
+            Selection::Provider { id, config, .. } => {
+                assert_eq!(id, "studio");
+                assert_eq!(config.api_key, "");
+            }
+            other => panic!("keyless default should resolve: {other:?}"),
+        }
+        assert!(r.status().enabled, "the default ask is the local server");
+        // A stored key on a keyless kind (a proxied local endpoint) is
+        // still sent — keyless means "no key required", not "no key used".
+        let r = registry(settings, &[("studio", "proxy-key")], &[]);
+        match r.select(None) {
+            Selection::Provider { config, .. } => assert_eq!(config.api_key, "proxy-key"),
+            other => panic!("stored key should ride the keyless kind: {other:?}"),
+        }
     }
 
     #[test]

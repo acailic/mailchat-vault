@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   ALL_KINDS,
   DEFAULT_AZURE_API_VERSION,
+  KEYLESS_KINDS,
   KIND_DEFAULTS,
   SELECTABLE_KINDS,
   activeProviderSummary,
@@ -74,6 +75,29 @@ describe("prefillForKind", () => {
     expect(placeholderForKind("zai", "base_url")).toContain("api.z.ai");
     expect(placeholderForKind("zai", "model")).toContain("glm-5");
   });
+
+  it("the local kinds prefill their endpoints; lmstudio's model stays empty", () => {
+    expect(prefillForKind("ollama")).toEqual({
+      id: "",
+      name: "",
+      kind: "ollama",
+      base_url: "http://127.0.0.1:11434/v1",
+      model: "llama3.2",
+    });
+    expect(prefillForKind("lmstudio")).toEqual({
+      id: "",
+      name: "",
+      kind: "lmstudio",
+      base_url: "http://127.0.0.1:1234/v1",
+      model: "", // the served model is user-loaded in LM Studio
+    });
+    expect(placeholderForKind("lmstudio", "base_url")).toBe(
+      "http://127.0.0.1:1234/v1 (default)",
+    );
+    expect(placeholderForKind("lmstudio", "model")).toBe("model name");
+    expect(placeholderForKind("lmstudio", "timeout_secs")).toBe("120 s (default)");
+    expect(KEYLESS_KINDS).toEqual(["ollama", "lmstudio"]);
+  });
 });
 
 describe("uniqueProviderId", () => {
@@ -100,13 +124,15 @@ describe("labels", () => {
   it("every catalog kind has a label, in catalog order", () => {
     expect(ALL_KINDS).toEqual([
       "zai", "anthropic", "openai", "gemini", "azure_openai", "bedrock",
-      "mistral", "groq", "openrouter", "ollama", "custom",
+      "mistral", "groq", "openrouter", "ollama", "lmstudio", "custom",
     ]);
     for (const kind of ALL_KINDS) {
       expect(kindLabel(kind)).not.toBe("");
     }
     expect(kindLabel("azure_openai")).toBe("Azure OpenAI");
     expect(kindLabel("bedrock")).toBe("AWS Bedrock");
+    expect(kindLabel("ollama")).toBe("Ollama");
+    expect(kindLabel("lmstudio")).toBe("LM Studio");
   });
 
   it("the selectable kinds omit bedrock (its configuration UI is part 3)", () => {
@@ -158,6 +184,14 @@ describe("KIND_DEFAULTS mirror", () => {
       base_url: "http://127.0.0.1:11434/v1",
       timeout_secs: 120, // local inference gets the longer leash
     });
+    expect(KIND_DEFAULTS.lmstudio).toEqual({
+      // the served model is user-loaded in LM Studio: no default id
+      model: "",
+      base_url: "http://127.0.0.1:1234/v1",
+      temperature: 0.2,
+      max_tokens: 1024,
+      timeout_secs: 120,
+    });
     expect(KIND_DEFAULTS.bedrock).toMatchObject({
       model: "anthropic.claude-sonnet-4-5",
       base_url: "", // derived from the region server-side
@@ -165,7 +199,9 @@ describe("KIND_DEFAULTS mirror", () => {
     for (const kind of ALL_KINDS) {
       expect(KIND_DEFAULTS[kind].temperature).toBe(0.2);
       expect(KIND_DEFAULTS[kind].max_tokens).toBe(1024);
-      expect(KIND_DEFAULTS[kind].timeout_secs).toBe(kind === "ollama" ? 120 : 30);
+      expect(KIND_DEFAULTS[kind].timeout_secs).toBe(
+        kind === "ollama" || kind === "lmstudio" ? 120 : 30,
+      );
     }
   });
 
@@ -178,11 +214,14 @@ describe("KIND_DEFAULTS mirror", () => {
 });
 
 describe("kindFieldVisibility", () => {
-  it("the base URL field shows only for azure, ollama, and custom", () => {
+  it("the base URL field shows only for azure, the local kinds, and custom", () => {
     for (const kind of ALL_KINDS) {
       const visible = kindFieldVisibility(kind).base_url;
       expect(visible).toBe(
-        kind === "azure_openai" || kind === "ollama" || kind === "custom",
+        kind === "azure_openai" ||
+          kind === "ollama" ||
+          kind === "lmstudio" ||
+          kind === "custom",
       );
     }
   });
@@ -211,9 +250,10 @@ describe("modelChoicesForKind (dropdown data)", () => {
     expect(modelChoicesForKind("bedrock")).toEqual(["anthropic.claude-sonnet-4-5"]);
   });
 
-  it("azure and custom have no default to offer (typed input)", () => {
+  it("azure, custom, and lmstudio have no default model to offer (typed input)", () => {
     expect(modelChoicesForKind("azure_openai")).toEqual([]);
     expect(modelChoicesForKind("custom")).toEqual([]);
+    expect(modelChoicesForKind("lmstudio")).toEqual([]);
   });
 });
 

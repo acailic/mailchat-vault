@@ -1,6 +1,6 @@
 // Pure display helpers for LLM-assisted search (unit tested, no DOM).
 
-import { LOCAL_ID, type ProviderMenuItem } from "./settings";
+import { KEYLESS_KINDS, LOCAL_ID, type ProviderKind, type ProviderMenuItem } from "./settings";
 
 /** Mirrors `vault_core::llm::QueryPlan` (serde field names). */
 export interface QueryPlan {
@@ -98,7 +98,9 @@ export function privacyNoteFor(item: ProviderMenuItem, summarizeTop: number): st
   const keySentence =
     item.kind === "env"
       ? "the API key is read from the environment only"
-      : "the API key is stored outside the app (OS keyring when available) and is never written to the settings file or the archive database";
+      : KEYLESS_KINDS.includes(item.kind as ProviderKind)
+        ? "the local server needs no API key — nothing to store or send"
+        : "the API key is stored outside the app (OS keyring when available) and is never written to the settings file or the archive database";
   return (
     `LLM assist is on (${item.model} via ${item.host}): your question is sent ` +
     `to the provider to translate it into a search, and afterwards only the top ` +

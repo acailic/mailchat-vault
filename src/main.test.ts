@@ -3939,6 +3939,62 @@ describe("ask provider menu", () => {
     expect(input("#ask-provider").value).toBe("local");
     expect($("#llm-note").textContent).toContain("LLM assist is off");
   });
+
+  it("keyless local providers are selectable and askable via the menu", async () => {
+    // The backend marks keyless kinds (ollama, lmstudio) available with
+    // no stored key; the menu wiring must follow that flag end to end.
+    const OLLAMA_ITEM = {
+      id: "ollama-local",
+      name: "Local Ollama",
+      kind: "ollama",
+      model: "llama3.2",
+      host: "127.0.0.1",
+      available: true,
+    };
+    const LMSTUDIO_ITEM = {
+      id: "studio",
+      name: "LM Studio",
+      kind: "lmstudio",
+      model: "",
+      host: "127.0.0.1",
+      available: true,
+    };
+    tauri.handlers.set("llm_status", () => ({
+      enabled: true,
+      model: "llama3.2",
+      host: "127.0.0.1",
+      summarize_top: 8,
+      providers: [LOCAL_ITEM, OLLAMA_ITEM, LMSTUDIO_ITEM],
+      default_provider: "ollama-local",
+    }));
+    tauri.handlers.set("llm_ask", () => emptyOutcome());
+    await boot();
+    await vi.waitFor(() => expect(input("#ask-provider").value).toBe("ollama-local"));
+    const options = menuOptions();
+    expect(options.find((o) => o.value === "ollama-local")).toMatchObject({
+      disabled: false,
+      text: "Local Ollama (llama3.2 · 127.0.0.1)",
+    });
+    expect(options.find((o) => o.value === "studio")).toMatchObject({
+      disabled: false,
+      text: "LM Studio (default model · 127.0.0.1)",
+    });
+    expect(options.find((o) => o.value === "studio")!.disabled).toBe(false);
+
+    // Selecting the keyless lmstudio provider sends its id with the ask.
+    input("#ask-provider").value = "studio";
+    fireChange(input("#ask-provider"));
+    expect($("#llm-note").textContent).toContain("LLM assist is on");
+    input("#ask").value = "local?";
+    pressKey(input("#ask"), "Enter");
+    await vi.waitFor(() =>
+      expect(tauri.calls.find((c) => c.cmd === "llm_ask")).toBeTruthy(),
+    );
+    expect(tauri.calls.find((c) => c.cmd === "llm_ask")!.args).toMatchObject({
+      provider: "studio",
+      consent: false,
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -4410,6 +4466,52 @@ describe("settings screen", () => {
     expect(rowInput("anthropic", "prov-url").value).toBe("https://api.anthropic.com");
     expect(rowInput("anthropic", "prov-model").value).not.toBe("");
     expect(rowInput("custom", "prov-url").value).toBe("");
+  });
+
+  it("an lmstudio row needs no key: prefilled endpoint, keyless note, keyless save", async () => {
+    tauri.handlers.set("settings_get", () =>
+      viewWith((v) => {
+        v.providers = [];
+        v.default_provider = null;
+      }),
+    );
+    tauri.handlers.set("settings_save", (args: unknown) => {
+      const payload = (args as { payload: { providers: Array<Record<string, unknown>> } })
+        .payload;
+      return viewWith((v) => {
+        v.providers = [{ ...payload.providers[0], has_key: false }];
+        v.default_provider = "lmstudio";
+      });
+    });
+    await boot();
+    input("#add-kind").value = "lmstudio";
+    $("#add-provider-btn").click();
+    await vi.waitFor(() => expect(rowIds()).toEqual(["lmstudio"]));
+    // The local endpoint prefills; the model stays empty (user-loaded).
+    expect(rowInput("lmstudio", "prov-url").value).toBe("http://127.0.0.1:1234/v1");
+    expect(rowInput("lmstudio", "prov-model").value).toBe("");
+    expect(rowInput("lmstudio", "prov-model").placeholder).toBe("model name");
+    expect(fieldHidden("lmstudio", "prov-deployment")).toBe(true);
+    // The keyless note shows and never turns into a missing-key problem.
+    const note = rowEl("lmstudio").querySelector<HTMLElement>(".prov-key-note")!;
+    expect(note.hidden).toBe(false);
+    expect(note.textContent).toContain("LM Studio runs locally — no API key needed");
+    // Saving without typing any key round-trips the profile keyless.
+    $("#settings-save-ai").click();
+    await vi.waitFor(() => expect($("#settings-note").textContent).toContain("Saved."));
+    const save = tauri.calls.find((c) => c.cmd === "settings_save");
+    expect((save!.args as { payload: { providers: unknown[]; api_keys: unknown[] } }).payload)
+      .toMatchObject({
+        providers: [
+          {
+            id: "lmstudio",
+            kind: "lmstudio",
+            base_url: "http://127.0.0.1:1234/v1",
+            model: "",
+          },
+        ],
+        api_keys: [],
+      });
   });
 
   it("saving sends the collected form plus non-empty key updates, and re-renders", async () => {
