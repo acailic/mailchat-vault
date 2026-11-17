@@ -89,6 +89,7 @@ import {
   type FilterChip,
   type SearchFilters,
 } from "./searchstate";
+import { applyQuery, type SourceLabel } from "./queryparser";
 import type {
   AppError,
   AttachmentSummary,
@@ -182,6 +183,7 @@ const PAGE_SIZE = 50;
 
 const searchInput = document.querySelector<HTMLInputElement>("#search")!;
 const searchButton = document.querySelector<HTMLButtonElement>("#search-btn")!;
+const searchHint = document.querySelector<HTMLElement>("#search-hint")!;
 const sourceChips = document.querySelector<HTMLElement>("#source-chips")!;
 const authorInput = document.querySelector<HTMLInputElement>("#author")!;
 const fromDateInput = document.querySelector<HTMLInputElement>("#from-date")!;
@@ -1767,6 +1769,12 @@ function readFilters(text: string): SearchFilters {
   };
 }
 
+/** The label list `source:` values resolve against (the canonical
+ * instance labels — the same ids the chip bar keys on). */
+function sourceQueryLabels(): SourceLabel[] {
+  return sourceInstances.map((s) => ({ id: s.id, label: s.label }));
+}
+
 /** Push a filter model back into the controls (chip removal, Clear). */
 function writeFilters(f: SearchFilters): void {
   state.sources = [...new Set(f.sourceIds)];
@@ -1814,10 +1822,17 @@ async function runSearch(offset = 0): Promise<void> {
   // A pasted message locator opens that message directly (deep link).
   const linked = parseMessageLink(text);
   if (linked !== null) {
+    searchHint.textContent = "";
     void openDetail(linked);
     return;
   }
-  const filters = readFilters(text);
+  // P1·05: operator tokens in the box text override the matching filter
+  // fields (author, dates, sources, attachment); untouched UI filters
+  // survive, and every unsupported/unknown/malformed token leaves a
+  // hint under the box while the rest of the query still runs.
+  const applied = applyQuery(readFilters(text), text, sourceQueryLabels());
+  searchHint.textContent = applied.hints.join(" · ");
+  const filters = applied.filters;
   if (!text && !hasActiveFilters(filters) && !demoActive && archiveTotal === 0) {
     // Empty personal archive: the first-run card owns the empty state
     // (U02) — a dead search prompt is not the first thing a new user
@@ -2622,6 +2637,7 @@ async function refreshAfterVaultSwitch(): Promise<void> {
   // other vault's ids resolve to nothing and would render as a raw-uuid
   // applied chip, so the scope resets with everything else.
   state.sources = [];
+  searchHint.textContent = "";
   await refreshSources();
   await refreshImportScopes();
   await refreshStats();
