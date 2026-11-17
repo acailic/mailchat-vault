@@ -4143,8 +4143,8 @@ pub fn run() {
             // gains its identity here, on first open. The session is
             // held for the app's lifetime in `AppState`, so the lock
             // releases only at exit.
-            let session = VaultSession::open(&data_dir)
-                .map_err(|e| format!("cannot open the vault: {e}"))?;
+            let session =
+                VaultSession::open(&data_dir).map_err(|e| format!("cannot open the vault: {e}"))?;
             // M2.1: one pool over the vault file — writer worker + two
             // read connections. Job events stream to the UI; the same
             // events are recoverable by polling `job_events_since`.

@@ -36,7 +36,11 @@
 //! switch → restart with the old copy retained) plus a byte estimate
 //! derived from the backup snapshot path ([`backup::snapshot_for_backup`]):
 //! database, every referenced object, and the portable settings file
-//! when present. The copy is always a **verified copy** — a
+//! when present. The estimate feeds a capacity preflight: a
+//! destination with less free space than the estimate plus
+//! [`MOVE_SLACK_BYTES`] refuses with
+//! [`MoveError::InsufficientSpace`] before anything is staged. The
+//! copy is always a **verified copy** — a
 //! cross-volume move is never assumed to be an atomic rename, and the
 //! same-volume case makes no rename assumption either.
 //!
@@ -98,6 +102,12 @@ pub const MOVE_JOURNAL_FILE: &str = "move-journal.json";
 /// it).
 pub const MOVE_JOURNAL_VERSION: u32 = 1;
 
+/// Free-space slack added on top of the measured estimate when the
+/// preview preflights the destination's capacity (filesystem
+/// metadata, atomic temp files and renames) — the same convention the
+/// backup preflight uses.
+pub const MOVE_SLACK_BYTES: u64 = 4 * 1024 * 1024;
+
 /// The staging directory a move creates **inside** the destination
 /// root: the staged, checksum-verified copy lands here and is only
 /// finalized into the destination root by the pointer-switch phase.
@@ -150,6 +160,11 @@ pub enum MoveError {
         destination_id: String,
         active_id: String,
     },
+    #[error(
+        "not enough free space to move the vault: need {needed} bytes (estimate plus \
+         move slack), only {available} available"
+    )]
+    InsufficientSpace { needed: u64, available: u64 },
     #[error(
         "archive schema version {db} is newer than this build supports ({supported}); upgrade \
          the app before opening it"
@@ -216,7 +231,11 @@ pub const NETWORK_FILESYSTEMS: &[&str] = &[
     "9p",
     "v9fs",
     "davfs",
+    "davfs2",
     "fuse.davfs2",
+    "gpfs",
+    "beegfs",
+    "fuse.s3fs",
 ];
 
 /// The injectable mount-table source: returns `/proc/self/mounts`
@@ -268,7 +287,10 @@ pub fn filesystem_kind(canonical_path: &Path, mounts: &str) -> FilesystemKind {
         }
     }
     match best {
-        Some((_, fstype)) if NETWORK_FILESYSTEMS.contains(&fstype.as_str()) => {
+        Some((_, fstype)) if NETWORK_FILESYSTEMS
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(&fstype)) =>
+        {
             FilesystemKind::Network(fstype)
         }
         Some((_, fstype)) => FilesystemKind::Local(fstype),
@@ -369,8 +391,9 @@ pub fn vault_location_inspect(
         return Err(MoveError::NotADirectory(path.to_path_buf()));
     }
     let canonical = path.canonicalize()?;
-    let table =
-        mounts().map_err(|e| MoveError::Vault(format!("cannot read the mount table: {e}")))?;
+    // An unreadable mount table reports Unknown — never a guess, and
+    // never a refusal: only a *known network* filesystem is refused.
+    let table = mounts().unwrap_or_default();
     let filesystem = filesystem_kind(&canonical, &table);
     if let FilesystemKind::Network(fstype) = &filesystem {
         return Err(MoveError::NetworkFilesystem {
@@ -542,8 +565,20 @@ pub struct MoveEstimate {
     pub object_bytes: u64,
     /// `Some` only when the vault carries a portable settings file.
     pub settings_bytes: Option<u64>,
-    /// `db_bytes + object_bytes + settings_bytes`.
+    /// `db_bytes + object_bytes + settings_bytes` (the copy's exact
+    /// bytes; the capacity preflight compares this plus
+    /// [`MOVE_SLACK_BYTES`] against the destination's free space).
     pub total_bytes: u64,
+}
+
+impl MoveEstimate {
+    /// The total with the move slack included (saturating).
+    fn with_slack(&self) -> u64 {
+        self.db_bytes
+            .saturating_add(self.object_bytes)
+            .saturating_add(self.settings_bytes.unwrap_or(0))
+            .saturating_add(MOVE_SLACK_BYTES)
+    }
 }
 
 /// What [`vault_move_preview`] reports: the phased plan, the estimate,
@@ -567,10 +602,24 @@ pub struct MovePreview {
     pub destination_free_bytes: u64,
 }
 
+/// Knobs for [`vault_move_preview`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MovePreviewOptions {
+    /// Force the capacity preflight to demand at least this many free
+    /// bytes at the destination (test hook for provoking
+    /// [`MoveError::InsufficientSpace`] on any real disk); `None`
+    /// preflights the estimate plus [`MOVE_SLACK_BYTES`].
+    pub min_free_bytes: Option<u64>,
+}
+
 /// Preview a move of the vault at `origin` into `destination`:
 /// re-inspect the destination (all [`vault_location_inspect`]
 /// refusals apply), take the consistent snapshot + object inventory
-/// through the backup snapshot path, and derive the estimate from it.
+/// through the backup snapshot path, derive the estimate from it, and
+/// preflight the destination's capacity: free space below the
+/// estimate plus [`MOVE_SLACK_BYTES`] (or `opts.min_free_bytes`)
+/// refuses with [`MoveError::InsufficientSpace`] before anything is
+/// staged.
 ///
 /// `conn` is the vault's **writer** connection (through the pool's
 /// write queue at the app layer), exactly as
@@ -586,6 +635,7 @@ pub fn vault_move_preview(
     destination: &Path,
     conn: &Connection,
     mounts: MountTable<'_>,
+    opts: &MovePreviewOptions,
 ) -> Result<MovePreview, MoveError> {
     ensure_no_open_move(origin)?;
     let origin_canonical = origin
@@ -622,6 +672,19 @@ pub fn vault_move_preview(
     })();
     backup::discard_snapshot(&snapshot_tmp);
     let estimate = result?;
+
+    // Capacity preflight: the copy needs the estimate plus slack on
+    // the destination volume. A refusal leaves nothing behind — the
+    // snapshot was already discarded and the destination untouched.
+    let needed = opts
+        .min_free_bytes
+        .map_or_else(|| estimate.with_slack(), |floor| estimate.with_slack().max(floor));
+    if inspection.free_bytes < needed {
+        return Err(MoveError::InsufficientSpace {
+            needed,
+            available: inspection.free_bytes,
+        });
+    }
 
     Ok(MovePreview {
         origin: origin_canonical.clone(),
@@ -868,6 +931,29 @@ pub enum MoveRecovery {
     ActivatedDestination { journal: MoveJournal },
 }
 
+impl MoveRecovery {
+    /// The exactly one vault that may be writable after resolution:
+    /// `None` when no journal existed. An interrupted move must never
+    /// resolve to two writable vaults (plan step 5: only the selected
+    /// copy is writable through this app).
+    pub fn writable_vault(&self) -> Option<&Path> {
+        match self {
+            MoveRecovery::None => None,
+            MoveRecovery::AlreadyCompleted { journal } => {
+                Some(journal.destination.path.as_path())
+            }
+            MoveRecovery::Cancelled { journal }
+            | MoveRecovery::ResumedOrigin { journal, .. }
+            | MoveRecovery::RolledBackToOrigin { journal, .. } => {
+                Some(journal.origin.path.as_path())
+            }
+            MoveRecovery::ActivatedDestination { journal } => {
+                Some(journal.destination.path.as_path())
+            }
+        }
+    }
+}
+
 /// Resolve an interrupted move at startup, **before a pool is
 /// opened**. Each phase has one defined action (see the module
 /// table); the origin is authoritative whenever the commit executor
@@ -1020,5 +1106,21 @@ nas:/export/shared /mnt/nas nfs4 rw 0 0
             filesystem_kind(Path::new("/mnt/share/vault"), &mounts),
             FilesystemKind::Network(fstype.to_string())
         );
+    }
+
+    #[test]
+    fn network_detection_is_case_insensitive_and_covers_the_wider_set() {
+        // A kernel may report the fstype with different casing.
+        let mounts = "dev /mnt/gp GPFS rw 0 0\n".to_string();
+        assert_eq!(
+            filesystem_kind(Path::new("/mnt/gp/vault"), &mounts),
+            FilesystemKind::Network("GPFS".to_string())
+        );
+        for name in ["gpfs", "beegfs", "fuse.s3fs", "davfs2"] {
+            assert!(
+                NETWORK_FILESYSTEMS.contains(&name),
+                "{name} is part of the refused set"
+            );
+        }
     }
 }

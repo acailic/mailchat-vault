@@ -8,11 +8,14 @@
 //!   mismatch, and the newer-schema refusal;
 //! - the preview's estimate includes the database, every referenced
 //!   object, and the portable settings file when present, with the
-//!   plan's phases and the always-verified-copy strategy;
+//!   plan's phases and the always-verified-copy strategy, and the
+//!   capacity preflight refuses a destination without room for the
+//!   estimate plus slack;
 //! - the journal round-trips, and startup resolution turns every
 //!   phase into exactly one defined action with the origin
 //!   authoritative while no commit executor exists — never a second
-//!   writable vault, and a missing post-switch destination surfaces as
+//!   writable vault ([`vault_core::vault_move::MoveRecovery::writable_vault`]
+//!   names the one), and a missing post-switch destination surfaces as
 //!   the typed unavailable fact with the journal left unresolved.
 
 use std::fs;
@@ -189,8 +192,19 @@ impl Sandbox {
     /// Run the preview through the real pool (the writer-connection
     /// contract the backup snapshot path documents).
     fn preview(&self, destination: &Path) -> Result<vault_move::MovePreview, MoveError> {
+        self.preview_with(destination, &vault_move::MovePreviewOptions::default())
+    }
+
+    /// [`Self::preview`] with explicit options (the capacity-preflight
+    /// test hook).
+    fn preview_with(
+        &self,
+        destination: &Path,
+        opts: &vault_move::MovePreviewOptions,
+    ) -> Result<vault_move::MovePreview, MoveError> {
         let data_dir = self.data_dir();
         let dest = destination.to_path_buf();
+        let opts = *opts;
         let pool = self.spawn_pool();
         let result = pool
             .submit_write(move |s| {
@@ -199,6 +213,7 @@ impl Sandbox {
                     &dest,
                     s.connection(),
                     &proc_mounts,
+                    &opts,
                 ))
             })
             .unwrap();
@@ -811,4 +826,102 @@ fn recovery_without_a_journal_does_nothing() {
         recover_interrupted_move(&sb.data_dir()).unwrap(),
         MoveRecovery::None
     );
+    assert_eq!(recover_interrupted_move(&sb.data_dir()).unwrap().writable_vault(), None);
+}
+
+/// A destination without room for the estimate plus slack refuses the
+/// preview with the typed insufficient-space fact, and the refused
+/// preview leaves nothing at the destination.
+#[test]
+fn preview_refuses_insufficient_space() {
+    let sb = Sandbox::new("space");
+    sb.seed_vault("space");
+    sb.ensure_identity();
+    let destination = sb.root.join("destination");
+    fs::create_dir(&destination).unwrap();
+    let opts = vault_move::MovePreviewOptions {
+        min_free_bytes: Some(u64::MAX / 2),
+    };
+    match sb.preview_with(&destination, &opts) {
+        Err(MoveError::InsufficientSpace { needed, .. }) => {
+            assert_eq!(needed, u64::MAX / 2);
+        }
+        other => panic!("expected the space refusal, got {other:?}"),
+    }
+    assert_eq!(
+        fs::read_dir(&destination).unwrap().count(),
+        0,
+        "the refused preview wrote nothing into the destination"
+    );
+
+    // The same destination previews cleanly once the floor is gone:
+    // the refusal is the capacity preflight, nothing else.
+    assert!(sb
+        .preview_with(
+            &destination,
+            &vault_move::MovePreviewOptions::default()
+        )
+        .is_ok());
+}
+
+/// Every resolved journal names exactly one writable vault: the origin
+/// for every pre-pointer outcome, the destination after the pointer
+/// switch and after completion — never both, never neither.
+#[test]
+fn recovery_names_exactly_one_writable_vault() {
+    let pre_pointer = [
+        MovePhase::Intended,
+        MovePhase::Quiesced,
+        MovePhase::Snapshotted,
+        MovePhase::Copying,
+        MovePhase::Copied,
+    ];
+    for phase in pre_pointer {
+        let sb = Sandbox::new("writable");
+        sb.seed_vault("writable");
+        sb.ensure_identity();
+        let destination = sb.root.join("moved-vault");
+        fs::create_dir(&destination).unwrap();
+        let journal = journal_in_phase(&sb.data_dir(), &destination, phase);
+        stage_interrupted(&journal);
+        let recovery = recover_interrupted_move(&sb.data_dir())
+            .unwrap_or_else(|e| panic!("phase {phase:?} resolves: {e}"));
+        assert_eq!(
+            recovery.writable_vault(),
+            Some(journal.origin.path.as_path()),
+            "{phase:?}: the origin is the only writable vault"
+        );
+    }
+
+    let sb = Sandbox::new("writable-switched");
+    sb.seed_vault("writable-switched");
+    sb.ensure_identity();
+    let destination = sb.root.join("moved-vault");
+    fs::create_dir(&destination).unwrap();
+    let journal = journal_in_phase(&sb.data_dir(), &destination, MovePhase::PointerSwitched);
+    stage_finalized_destination(&journal);
+    let recovery = recover_interrupted_move(&sb.data_dir()).unwrap();
+    assert_eq!(recovery.writable_vault(), Some(journal.destination.path.as_path()));
+
+    // A completed journal (a finished move) keeps naming exactly the
+    // destination.
+    let read = read_move_journal(&sb.data_dir()).unwrap().unwrap();
+    let completed = MoveRecovery::AlreadyCompleted { journal: read };
+    assert_eq!(completed.writable_vault(), Some(journal.destination.path.as_path()));
+}
+
+/// An unreadable mount table is an unknown filesystem, never a guess
+/// and never a refusal: only a *known network* filesystem refuses.
+#[test]
+fn inspect_with_an_unreadable_mount_table_reports_unknown_and_proceeds() {
+    let sb = Sandbox::new("no-mounts");
+    sb.seed_vault("no-mounts");
+    let destination = sb.root.join("destination");
+    fs::create_dir(&destination).unwrap();
+    let erroring: fn() -> std::io::Result<String> =
+        || Err(std::io::Error::other("no mount table on this platform"));
+    let inspection =
+        vault_location_inspect(&destination, None, &erroring).expect("unknown is not a refusal");
+    assert_eq!(inspection.filesystem, FilesystemKind::Unknown);
+    assert!(inspection.writable);
 }
