@@ -25,11 +25,23 @@ pub const MBOX_SOURCE: &str = "mbox";
 #[derive(Debug, Clone)]
 pub struct MboxSource {
     path: PathBuf,
+    /// A3b: carry each message's raw RFC 5322 bytes on the streamed
+    /// item (opt-in; the default import retains nothing).
+    retain_originals: bool,
 }
 
 impl MboxSource {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            retain_originals: false,
+        }
+    }
+
+    /// The same source with A3b original retention on.
+    pub fn retaining_originals(mut self) -> Self {
+        self.retain_originals = true;
+        self
     }
 }
 
@@ -65,10 +77,11 @@ impl StreamSource for MboxSource {
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
-        stream_mbox(
+        stream_mbox_with(
             BufReader::new(fs::File::open(&self.path)?),
             &chat_id,
             skip,
+            self.retain_originals,
             emit,
         )
     }
@@ -80,6 +93,8 @@ impl StreamSource for MboxSource {
 #[derive(Debug, Clone)]
 pub struct EmlDirSource {
     path: PathBuf,
+    /// A3b: carry each file's raw bytes on the streamed item.
+    retain_originals: bool,
 }
 
 /// A regular file with the `.eml` extension (case-insensitive).
@@ -93,7 +108,16 @@ fn is_eml_file(path: &Path) -> bool {
 
 impl EmlDirSource {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            retain_originals: false,
+        }
+    }
+
+    /// The same source with A3b original retention on.
+    pub fn retaining_originals(mut self) -> Self {
+        self.retain_originals = true;
+        self
     }
 
     /// The `*.eml` files of the directory, sorted by name (single level —
@@ -183,7 +207,14 @@ impl StreamSource for EmlDirSource {
             for file in &files {
                 let outcome = match fs::read(file) {
                     Ok(bytes) => match parse_eml(&bytes) {
-                        Some(msg) => EntryOutcome::Message(msg),
+                        Some(mut msg) => {
+                            // A3b: the whole file *is* the message's raw
+                            // RFC 5322 bytes — carried, not copied.
+                            if self.retain_originals {
+                                msg.original_bytes = Some(bytes);
+                            }
+                            EntryOutcome::Message(msg)
+                        }
                         None => EntryOutcome::Failed {
                             external_ref: String::new(),
                             reason: "mail part failed to parse".to_string(),
@@ -253,9 +284,25 @@ pub(crate) fn descend_wrapped_eml_dir(mut dir: PathBuf) -> PathBuf {
 pub fn mail_source_for_pick(
     path: &Path,
 ) -> Result<(Box<dyn StreamSource + Send>, Option<tempfile::TempDir>)> {
+    mail_source_for_pick_with(path, false)
+}
+
+/// [`mail_source_for_pick`] with the A3b original-retention flag: the
+/// resolved source carries each message's raw RFC 5322 bytes when
+/// `retain_originals` is on (the caller must then also run the
+/// retention pass, [`crate::bounded::OriginalsPass`], or the carried
+/// bytes are dropped at commit).
+pub fn mail_source_for_pick_with(
+    path: &Path,
+    retain_originals: bool,
+) -> Result<(Box<dyn StreamSource + Send>, Option<tempfile::TempDir>)> {
     if path.is_dir() {
         let dir = descend_wrapped_eml_dir(path.to_path_buf());
-        return Ok((Box::new(EmlDirSource::new(dir)), None));
+        let mut source = EmlDirSource::new(dir);
+        if retain_originals {
+            source = source.retaining_originals();
+        }
+        return Ok((Box::new(source), None));
     }
     if path
         .extension()
@@ -264,9 +311,17 @@ pub fn mail_source_for_pick(
         let extracted = tempfile::tempdir().map_err(Error::from)?;
         expand_zip_bounded(path, extracted.path(), &ImportBounds::default())?;
         let root = descend_wrapped_eml_dir(extracted.path().to_path_buf());
-        Ok((Box::new(EmlDirSource::new(root)), Some(extracted)))
+        let mut source = EmlDirSource::new(root);
+        if retain_originals {
+            source = source.retaining_originals();
+        }
+        Ok((Box::new(source), Some(extracted)))
     } else {
-        Ok((Box::new(MboxSource::new(path)), None))
+        let mut source = MboxSource::new(path);
+        if retain_originals {
+            source = source.retaining_originals();
+        }
+        Ok((Box::new(source), None))
     }
 }
 
@@ -277,7 +332,9 @@ pub fn mail_source_for_pick(
 /// folder, a `.zip` a fenced temp tree — the returned guard stays alive
 /// for the whole run, so a zip is never un-squashed mid-import), then a
 /// [`BoundedRun`] with the mail media pass drives it against `sink`.
-/// The same shape as [`crate::chat_export::import_bounded`].
+/// The same shape as [`crate::chat_export::import_bounded`]. Original
+/// retention is **off** (A3b default); use
+/// [`import_pick_bounded_with_retention`] to opt in.
 pub fn import_pick_bounded(
     sink: &mut dyn crate::bounded::IngestSink,
     picked: &Path,
@@ -285,10 +342,33 @@ pub fn import_pick_bounded(
     is_cancelled: &dyn Fn() -> bool,
     progress: &mut dyn FnMut(u64, u64, &str),
 ) -> Result<crate::bounded::BoundedOutcome> {
-    let (source, _zip_guard) = mail_source_for_pick(picked)?;
+    import_pick_bounded_with_retention(sink, picked, data_dir, false, is_cancelled, progress)
+}
+
+/// [`import_pick_bounded`] with the A3b original-retention flag: when
+/// `retain_originals` is on, each parsed message's raw RFC 5322 bytes
+/// ride the batch and are stored through the object store
+/// (stage → promote, deduplicated by digest) before the normalized
+/// record commits; the outcome carries the originals counters
+/// ([`crate::bounded::BoundedOutcome::originals`], whose `new_bytes`
+/// is the storage estimate the A2b receipt will surface). When off,
+/// nothing is stored and the records read as
+/// [`crate::ORIGINAL_NOT_RETAINED`].
+pub fn import_pick_bounded_with_retention(
+    sink: &mut dyn crate::bounded::IngestSink,
+    picked: &Path,
+    data_dir: &Path,
+    retain_originals: bool,
+    is_cancelled: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(u64, u64, &str),
+) -> Result<crate::bounded::BoundedOutcome> {
+    let (source, _zip_guard) = mail_source_for_pick_with(picked, retain_originals)?;
     let mut run =
         crate::bounded::BoundedRun::new(crate::bounded::import_id_for("mbox-import", picked));
     run.media = Some(crate::bounded::MediaPass::mail(data_dir));
+    if retain_originals {
+        run.originals = Some(crate::bounded::OriginalsPass { data_dir });
+    }
     run.run(source.as_ref(), sink, is_cancelled, progress)
 }
 
@@ -321,13 +401,19 @@ pub fn import_pick_bounded_bound_to(
 pub fn parse_mbox(bytes: &[u8], chat_id: &str) -> Result<Collected> {
     let mut messages = Vec::new();
     let mut failed: u64 = 0;
-    stream_mbox(std::io::Cursor::new(bytes), chat_id, 0, &mut |item| {
-        match item {
-            StreamItem::Message(msg) => messages.push(msg),
-            StreamItem::Failed { .. } => failed += 1,
-        }
-        Ok(Flow::Continue)
-    })?;
+    stream_mbox_with(
+        std::io::Cursor::new(bytes),
+        chat_id,
+        0,
+        false,
+        &mut |item| {
+            match item {
+                StreamItem::Message(msg) => messages.push(msg),
+                StreamItem::Failed { .. } => failed += 1,
+            }
+            Ok(Flow::Continue)
+        },
+    )?;
     Ok(Collected { messages, failed })
 }
 
@@ -344,6 +430,21 @@ pub fn stream_mbox<R: BufRead>(
     reader: R,
     chat_id: &str,
     skip: u64,
+    emit: &mut dyn FnMut(StreamItem) -> Result<Flow>,
+) -> Result<()> {
+    stream_mbox_with(reader, chat_id, skip, false, emit)
+}
+
+/// [`stream_mbox`] with the A3b original-retention flag: when on, every
+/// emitted message carries its raw RFC 5322 bytes on
+/// [`crate::message::NewMessage::original_bytes`] (for an mbox part
+/// that is the message *without* its `From ` separator line — the
+/// separator is an mbox container artifact, not part of the message).
+pub fn stream_mbox_with<R: BufRead>(
+    reader: R,
+    chat_id: &str,
+    skip: u64,
+    retain_originals: bool,
     emit: &mut dyn FnMut(StreamItem) -> Result<Flow>,
 ) -> Result<()> {
     let mut skip = skip;
@@ -375,6 +476,7 @@ pub fn stream_mbox<R: BufRead>(
             &whole,
             chat_id,
             &mut skip,
+            retain_originals,
             emit,
             &mut failure,
             &mut stopped,
@@ -400,6 +502,7 @@ pub fn stream_mbox<R: BufRead>(
                     &part,
                     chat_id,
                     &mut skip,
+                    retain_originals,
                     emit,
                     &mut failure,
                     &mut stopped,
@@ -423,6 +526,7 @@ pub fn stream_mbox<R: BufRead>(
             &part,
             chat_id,
             &mut skip,
+            retain_originals,
             emit,
             &mut failure,
             &mut stopped,
@@ -437,10 +541,12 @@ pub fn stream_mbox<R: BufRead>(
 
 /// Parse one buffered part and offer it to the consumer; `false` = stop
 /// reading (the stop/failure slots record why).
+#[allow(clippy::too_many_arguments)]
 fn offer_part(
     part: &[u8],
     chat_id: &str,
     skip: &mut u64,
+    retain_originals: bool,
     emit: &mut dyn FnMut(StreamItem) -> Result<Flow>,
     failure: &mut Option<crate::Error>,
     stopped: &mut bool,
@@ -460,7 +566,14 @@ fn offer_part(
         return true;
     }
     let outcome = match parse_raw_mail(raw, MBOX_SOURCE, chat_id) {
-        Some(msg) => EntryOutcome::Message(msg),
+        Some(mut msg) => {
+            // A3b: hand the retention pass the exact bytes that were
+            // parsed — never a reconstruction from parsed fields.
+            if retain_originals {
+                msg.original_bytes = Some(raw.to_vec());
+            }
+            EntryOutcome::Message(msg)
+        }
         None => EntryOutcome::Failed {
             external_ref: String::new(),
             reason: "mail part failed to parse".to_string(),

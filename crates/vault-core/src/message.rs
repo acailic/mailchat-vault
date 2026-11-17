@@ -68,6 +68,23 @@ pub struct NewMessage {
     /// everywhere else — the namespace itself is the label.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source_label: String,
+    /// A3b original retention: the raw RFC 5322 bytes of this message,
+    /// set by the mbox/`.eml` splitter when the import opted in. The
+    /// retention pass ([`crate::bounded`]) consumes them before the
+    /// batch commits — never serialized, never persisted directly (the
+    /// persisted shape is the `original_references` row), and `None`
+    /// for every source except a retaining mail import.
+    #[serde(skip)]
+    pub original_bytes: Option<Vec<u8>>,
+    /// A3b original retention: the object-store outcome the retention
+    /// pass recorded for this message's original bytes (stage → promote
+    /// completed; `sha256`/`size` describe the stored object). The
+    /// ingest commit reads it to write the `original_objects` /
+    /// `original_references` rows; a message without it has no retained
+    /// original and its fidelity label is
+    /// [`crate::ORIGINAL_NOT_RETAINED`]. Never serialized.
+    #[serde(skip)]
+    pub original_ref: Option<crate::object_store::ObjectRef>,
 }
 
 impl NewMessage {
@@ -96,6 +113,8 @@ impl NewMessage {
             time_confidence: String::new(),
             attachments: Vec::new(),
             source_label: String::new(),
+            original_bytes: None,
+            original_ref: None,
         }
     }
 }
