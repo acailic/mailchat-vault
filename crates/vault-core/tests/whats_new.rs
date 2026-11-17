@@ -32,6 +32,8 @@ fn put(s: &Storage, source: &str, id: &str) {
         time_confidence: String::new(),
         attachments: Vec::new(),
         source_label: String::new(),
+        original_bytes: None,
+        original_ref: None,
     })
     .unwrap();
 }

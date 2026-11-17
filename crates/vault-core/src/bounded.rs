@@ -321,6 +321,40 @@ impl<'a> MediaPass<'a> {
     }
 }
 
+/// The A3b original-retention pass configuration of one bounded run:
+/// where the vault's object store lives. When set, every message that
+/// arrives carrying its raw bytes ([`NewMessage::original_bytes`], set
+/// by the mail splitter of a retention-opted import) has them staged
+/// and promoted through the object store **before** the batch commits —
+/// the `original_references` rows then land in the same transaction as
+/// the messages, after promote (the media-reference order). Identical
+/// bytes dedup by digest: only the first message that carries them
+/// stores an object.
+///
+/// An import without the flag sets no pass, carries no bytes, and
+/// writes no rows — its records read as
+/// [`crate::ORIGINAL_NOT_RETAINED`].
+#[derive(Debug, Clone, Copy)]
+pub struct OriginalsPass<'a> {
+    /// The vault's app-data dir (the object store lives under
+    /// `<data_dir>/media/`).
+    pub data_dir: &'a Path,
+}
+
+/// A3b original-retention counters for one bounded run (carried by
+/// [`BoundedOutcome::originals`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OriginalSummary {
+    /// Messages whose raw bytes were written as new original objects.
+    pub stored: u64,
+    /// Messages whose bytes matched an already-stored object (digest
+    /// dedup — a re-import adds zero new originals).
+    pub deduped: u64,
+    /// Bytes of the new objects this run added to the store: the
+    /// storage estimate the A2b receipt surface will show.
+    pub new_bytes: u64,
+}
+
 /// Storage access for [`BoundedRun`]: load a checkpoint, commit a batch.
 ///
 /// Implemented directly by [`crate::storage::Storage`] (tests, the
@@ -383,6 +417,8 @@ pub struct BoundedOutcome {
     /// storage. `None` when the run did not complete — a cancelled run
     /// claims no receipt, exactly as it claims no completion.
     pub receipt: Option<crate::storage::SourceReceipt>,
+    /// A3b original-retention counters, present when the pass ran.
+    pub originals: Option<OriginalSummary>,
 }
 
 /// One bounded import: identity, limits, and the optional media pass.
@@ -397,6 +433,9 @@ pub struct BoundedRun<'a> {
     /// commit (file copies happen on the driver thread, outside every
     /// storage lock).
     pub media: Option<MediaPass<'a>>,
+    /// Run the A3b original-retention pass for this import before each
+    /// commit (opt-in, default off — see [`OriginalsPass`]).
+    pub originals: Option<OriginalsPass<'a>>,
 }
 
 impl<'a> BoundedRun<'a> {
@@ -406,6 +445,7 @@ impl<'a> BoundedRun<'a> {
             import_id: import_id.into(),
             limits: StreamLimits::default(),
             media: None,
+            originals: None,
         }
     }
 
@@ -430,6 +470,7 @@ impl<'a> BoundedRun<'a> {
             import_id: &self.import_id,
             source_name: &source_name,
             media: self.media,
+            originals: self.originals,
             media_budget: Capacity::default(),
             summary: IngestSummary {
                 source: source_name.clone(),
@@ -439,6 +480,7 @@ impl<'a> BoundedRun<'a> {
                 failed: 0,
             },
             media_summary: self.media.map(|_| MediaSummary::default()),
+            originals_summary: self.originals.map(|_| OriginalSummary::default()),
             batch: Vec::new(),
             issues: Vec::new(),
             batch_text_bytes: 0,
@@ -531,12 +573,15 @@ struct RunState<'a, 'b> {
     import_id: &'a str,
     source_name: &'a str,
     media: Option<MediaPass<'a>>,
+    /// The A3b original-retention pass, when this run opted in.
+    originals: Option<OriginalsPass<'a>>,
     /// The M4.1 media capacity budget for this run — shared across every
     /// batch's media pass, so one import cannot store past its bounds;
     /// dedup hits refund their charge (see [`crate::object_store`]).
     media_budget: Capacity,
     summary: IngestSummary,
     media_summary: Option<MediaSummary>,
+    originals_summary: Option<OriginalSummary>,
     batch: Vec<NewMessage>,
     issues: Vec<PendingIssue>,
     batch_text_bytes: usize,
@@ -671,6 +716,45 @@ impl RunState<'_, '_> {
                 }
             }
         }
+        // The A3b original-retention pass: stage → promote each
+        // message's raw bytes (on this thread, outside every storage
+        // transaction — the same lifecycle the media pass uses), and
+        // leave the digest on the message so the ingest commit writes
+        // the reference rows in the batch transaction, after promote.
+        // Bytes that could not be staged (budget, disk error) are
+        // simply not retained: the record stays honestly labeled
+        // "original not retained", never a fabricated original.
+        if let Some(pass) = self.originals {
+            if !self.batch.is_empty() {
+                let object_store = crate::object_store::ObjectStore::new(pass.data_dir);
+                for msg in self.batch.iter_mut() {
+                    let Some(bytes) = msg.original_bytes.take() else {
+                        continue; // nothing carried (source did not opt in)
+                    };
+                    let mut reader = std::io::Cursor::new(bytes);
+                    let staged =
+                        match object_store.stage_reader(&mut reader, "eml", &mut self.media_budget)
+                        {
+                            Ok(staged) => staged,
+                            Err(_) => continue, // not retained; label covers it
+                        };
+                    match object_store.promote(staged, &mut self.media_budget) {
+                        Ok(object) => {
+                            if let Some(summary) = self.originals_summary.as_mut() {
+                                if object.written {
+                                    summary.stored += 1;
+                                    summary.new_bytes += object.size;
+                                } else {
+                                    summary.deduped += 1;
+                                }
+                            }
+                            msg.original_ref = Some(object);
+                        }
+                        Err(_) => continue, // not retained; label covers it
+                    }
+                }
+            }
+        }
         let records: Vec<ImportIssueRecord<'_>> = self
             .issues
             .iter()
@@ -722,6 +806,7 @@ impl RunState<'_, '_> {
             resumed_from,
             committed_items: self.committed_items,
             receipt: self.receipt,
+            originals: self.originals_summary,
         }
     }
 }
