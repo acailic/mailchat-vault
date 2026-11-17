@@ -13,8 +13,9 @@ use vault_core::backup::{BackupCounts, LastBackupRecord, LAST_BACKUP_KEY};
 use vault_core::bounded::BoundedOutcome;
 use vault_core::health::{
     archive_health, import_source_records, media_verification, record_import_attempt,
-    record_media_verification, ArchiveHealth, ImportAttempt, ImportCounts, MediaVerificationSummary,
-    SourceHealth, SourceImportRecord, IMPORTS_KEY, MEDIA_VERIFICATION_KEY,
+    record_media_verification, ArchiveHealth, ImportAttempt, ImportCounts,
+    MediaVerificationSummary, SourceHealth, SourceImportRecord, IMPORTS_KEY,
+    MEDIA_VERIFICATION_KEY,
 };
 use vault_core::ingest::IngestSummary;
 use vault_core::object_store::ReconcileReport;
@@ -454,11 +455,8 @@ fn sync_import_and_backup_stay_three_separate_facts() {
         },
         schema_version: 24,
     };
-    s.set_archive_meta(
-        LAST_BACKUP_KEY,
-        &serde_json::to_string(&backup).unwrap(),
-    )
-    .unwrap();
+    s.set_archive_meta(LAST_BACKUP_KEY, &serde_json::to_string(&backup).unwrap())
+        .unwrap();
 
     let health = archive_health(&s).unwrap();
     let source = &health.sources[0];
@@ -468,7 +466,10 @@ fn sync_import_and_backup_stay_three_separate_facts() {
     assert_eq!(import.observed_max.as_deref(), Some("2026-10-31T23:59:59Z"));
     // The sync fact kept its own receipt — the import replaced
     // nothing.
-    assert_eq!(source.last_sync.as_ref().unwrap().kind, SourceReceiptKind::Sync);
+    assert_eq!(
+        source.last_sync.as_ref().unwrap().kind,
+        SourceReceiptKind::Sync
+    );
     assert_eq!(
         health.last_verified_backup.as_ref().unwrap().created_at,
         "2026-11-10T10:00:00Z"
@@ -478,7 +479,12 @@ fn sync_import_and_backup_stay_three_separate_facts() {
     // "backup" and "sync" in one shared status claim — the three facts
     // live in separate keys and no shared status field exists.
     let model = serde_json::to_value(&health).unwrap();
-    let mut model_keys: Vec<&str> = model.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+    let mut model_keys: Vec<&str> = model
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
     model_keys.sort_unstable();
     assert_eq!(
         model_keys,
@@ -510,10 +516,17 @@ fn failing_import_leaves_failure_counts_visible_after_reopen() {
     let db = tmp.path().join("vault.db");
     {
         let s = Storage::open(&db).unwrap();
-        s.record_job_ledger(&ledger_entry("import_mbox", "failed", "2026-11-16T09:00:00Z"))
-            .unwrap();
+        s.record_job_ledger(&ledger_entry(
+            "import_mbox",
+            "failed",
+            "2026-11-16T09:00:00Z",
+        ))
+        .unwrap();
         assert_eq!(
-            archive_health(&s).unwrap().unresolved_job_failures.get("import_mbox"),
+            archive_health(&s)
+                .unwrap()
+                .unresolved_job_failures
+                .get("import_mbox"),
             Some(&1)
         );
     }
@@ -522,20 +535,31 @@ fn failing_import_leaves_failure_counts_visible_after_reopen() {
     // the failure count survives.
     let s = Storage::open(&db).unwrap();
     assert_eq!(
-        archive_health(&s).unwrap().unresolved_job_failures.get("import_mbox"),
+        archive_health(&s)
+            .unwrap()
+            .unresolved_job_failures
+            .get("import_mbox"),
         Some(&1),
         "the failed import stays visible after reopen"
     );
 
     // A later succeeded run of the same kind resolves its failures…
-    s.record_job_ledger(&ledger_entry("import_mbox", "succeeded", "2026-11-16T10:00:00Z"))
-        .unwrap();
+    s.record_job_ledger(&ledger_entry(
+        "import_mbox",
+        "succeeded",
+        "2026-11-16T10:00:00Z",
+    ))
+    .unwrap();
     // …while another kind's failure stands on its own, and a later
     // cancelled run (the user's own action) neither fails nor resolves.
     s.record_job_ledger(&ledger_entry("imap_sync", "failed", "2026-11-16T10:30:00Z"))
         .unwrap();
-    s.record_job_ledger(&ledger_entry("imap_sync", "cancelled", "2026-11-16T11:00:00Z"))
-        .unwrap();
+    s.record_job_ledger(&ledger_entry(
+        "imap_sync",
+        "cancelled",
+        "2026-11-16T11:00:00Z",
+    ))
+    .unwrap();
     let mut expected = BTreeMap::new();
     expected.insert("imap_sync".to_string(), 1);
     assert_eq!(
@@ -567,11 +591,8 @@ fn verified_backup_fact_reads_the_persisted_record_tolerantly() {
         },
         schema_version: 24,
     };
-    s.set_archive_meta(
-        LAST_BACKUP_KEY,
-        &serde_json::to_string(&backup).unwrap(),
-    )
-    .unwrap();
+    s.set_archive_meta(LAST_BACKUP_KEY, &serde_json::to_string(&backup).unwrap())
+        .unwrap();
     assert_eq!(
         archive_health(&s).unwrap().last_verified_backup,
         Some(backup)
