@@ -1053,6 +1053,23 @@ const MIGRATIONS: &[(i64, &str)] = &[
         );
         "#,
     ),
+    (
+        26,
+        r#"
+        CREATE TABLE original_objects (
+            digest       TEXT PRIMARY KEY,
+            size         INTEGER NOT NULL,
+            retained_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+            kind         TEXT    NOT NULL DEFAULT 'rfc5322'
+        );
+
+        CREATE TABLE original_references (
+            message_id INTEGER PRIMARY KEY,
+            digest     TEXT NOT NULL
+        );
+        CREATE INDEX idx_original_references_digest ON original_references (digest);
+        "#,
+    ),
 ];
 
 /// Rust halves of migrations, for backfill logic that SQL alone cannot

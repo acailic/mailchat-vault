@@ -306,6 +306,8 @@ fn version17_db(db: &std::path::Path) -> i64 {
     conn.execute_batch(
         "DROP TABLE IF EXISTS source_receipts;
          DROP TABLE IF EXISTS reminder_preferences;
+         DROP TABLE IF EXISTS original_references;
+         DROP TABLE IF EXISTS original_objects;
          DROP TABLE IF EXISTS person_link_history;
          DROP TABLE IF EXISTS attachment_refs;
          DROP TABLE IF EXISTS person_identity_links;
