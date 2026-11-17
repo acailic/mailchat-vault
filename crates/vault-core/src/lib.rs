@@ -96,6 +96,7 @@ pub mod demo;
 pub mod discord;
 pub mod export;
 pub mod extract;
+pub mod files;
 pub mod health;
 pub mod imap;
 pub mod imap_coordinator;
