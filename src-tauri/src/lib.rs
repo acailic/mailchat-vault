@@ -193,6 +193,8 @@ mod media_proto;
 mod registry;
 mod secrets;
 mod tray;
+#[cfg(feature = "encryption")]
+mod vault_key;
 
 use registry::{LlmRegistry, LlmTestPayload, SaveSettingsPayload, Selection, SettingsView};
 
@@ -1040,7 +1042,10 @@ async fn restore_commit(
             .with_read(|s| s.vault_fingerprint())
             .map_err(|e| e.to_string())?;
         // Refusals surface before anything stops: the app stays usable.
-        backup::verify_committable(&data_dir, &preview_id, &fingerprint, &|_| {})
+        // The staged vault's key is threaded by the encrypted-restore
+        // follow-up; plaintext restores (today's only kind a default
+        // build creates) verify exactly as before.
+        backup::verify_committable(&data_dir, &preview_id, &fingerprint, &|_| {}, None)
             .map_err(|e| e.to_string())?;
         // Stop scheduled rounds and watched-folder imports before the
         // switch (their writes would fail on the drained pool anyway,
@@ -3160,7 +3165,14 @@ fn run_backup_create(
             .write({
                 let data_dir = data_dir.to_path_buf();
                 let snapshot_tmp = snapshot_tmp.clone();
-                move |s| backup::snapshot_for_backup(&data_dir, s.connection(), &snapshot_tmp)
+                move |s| {
+                    backup::snapshot_for_backup(
+                        &data_dir,
+                        s.connection(),
+                        &snapshot_tmp,
+                        s.vault_key(),
+                    )
+                }
             })
             .map_err(backup_job_error)?;
         backup::write_backup_container(
@@ -4149,14 +4161,23 @@ pub fn run() {
             // M2.1: one pool over the vault file — writer worker + two
             // read connections. Job events stream to the UI; the same
             // events are recoverable by polling `job_events_since`.
+            // With the `encryption` feature the pool opens through the
+            // OS-keyring-held vault key (see `vault_key`); without it
+            // this is exactly the previous plaintext open.
+            #[cfg(feature = "encryption")]
+            let vault_key = vault_key::load_or_create()
+                .map_err(|e| format!("cannot prepare the vault's encryption key: {e}"))?;
+            #[cfg(feature = "encryption")]
+            let pool_config = PoolConfig {
+                vault_key: Some(vault_key),
+                ..Default::default()
+            };
+            #[cfg(not(feature = "encryption"))]
+            let pool_config = PoolConfig::default();
             let emit_handle = app.handle().clone();
-            let pool = DbPool::spawn(
-                session.db_path().to_owned(),
-                PoolConfig::default(),
-                move |event| {
-                    let _ = emit_handle.emit("job-event", event);
-                },
-            )
+            let pool = DbPool::spawn(session.db_path().to_owned(), pool_config, move |event| {
+                let _ = emit_handle.emit("job-event", event);
+            })
             .map_err(|e| e.to_string())?;
             // Settings come from the file first; the environment keeps
             // working as a read-only fallback provider exactly as before

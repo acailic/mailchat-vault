@@ -110,6 +110,7 @@ pub mod bounded;
 pub mod chat_export;
 pub mod demo;
 pub mod discord;
+pub mod encryption;
 pub mod export;
 pub mod export_html;
 pub mod extract;
@@ -236,4 +237,14 @@ pub enum Error {
     IdentityLinkNotFound(String),
     #[error("person organization changed: the commit carried organization revision {expected} but the vault is at {current}; re-preview and confirm against the current revision")]
     PersonLinksStaleRevision { expected: u64, current: u64 },
+    #[error("encryption error: {0}")]
+    Encryption(String),
+    #[error("the vault at {path} is encrypted and no key was supplied; supply its key — there is deliberately no read-only fallback")]
+    EncryptedVaultLocked { path: String },
+    #[error("the supplied vault key does not open the encrypted vault at {path}")]
+    WrongVaultKey { path: String },
+    #[error("the vault at {path} appears encrypted, but this build was compiled without the `encryption` feature — rebuild with it to open the vault")]
+    EncryptionUnsupported { path: String },
+    #[error("a vault key was supplied for {path}, but this build was compiled without the `encryption` feature — rebuild with it to create an encrypted vault")]
+    KeyWithoutEncryption { path: String },
 }

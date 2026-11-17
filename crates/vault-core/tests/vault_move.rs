@@ -199,6 +199,7 @@ impl Sandbox {
                     &dest,
                     s.connection(),
                     &proc_mounts,
+                    s.vault_key(),
                 ))
             })
             .unwrap();
@@ -250,7 +251,8 @@ fn inspect_reports_write_access_free_space_and_empty_content() {
     let home = tempfile::tempdir().unwrap();
     let candidate = home.path().join("archive");
     fs::create_dir(&candidate).unwrap();
-    let inspection = vault_location_inspect(&candidate, None, &mounts_of(local_mounts())).unwrap();
+    let inspection =
+        vault_location_inspect(&candidate, None, &mounts_of(local_mounts()), None).unwrap();
     assert!(inspection.writable);
     assert!(inspection.free_bytes > 0);
     assert_eq!(
@@ -267,7 +269,7 @@ fn inspect_reports_write_access_free_space_and_empty_content() {
 #[test]
 fn inspect_on_the_real_mount_table_reports_a_local_filesystem() {
     let candidate = tempfile::tempdir().unwrap();
-    let inspection = vault_location_inspect(candidate.path(), None, &proc_mounts).unwrap();
+    let inspection = vault_location_inspect(candidate.path(), None, &proc_mounts, None).unwrap();
     assert!(matches!(inspection.filesystem, FilesystemKind::Local(_)));
 }
 
@@ -280,7 +282,7 @@ fn inspect_refuses_a_network_filesystem_via_the_mount_table() {
     fs::create_dir(&on_nas).unwrap();
     let canonical = on_nas.canonicalize().unwrap();
     let mounts = mounts_fencing(&canonical);
-    match vault_location_inspect(&on_nas, None, &mounts_of(mounts)) {
+    match vault_location_inspect(&on_nas, None, &mounts_of(mounts), None) {
         Err(MoveError::NetworkFilesystem { fstype, path }) => {
             assert_eq!(fstype, "nfs4");
             assert_eq!(path, canonical);
@@ -298,14 +300,14 @@ fn inspect_refuses_missing_unrelated_and_not_a_directory() {
     let mounts = &mounts_of(local_mounts());
 
     let missing = home.path().join("nope");
-    match vault_location_inspect(&missing, None, mounts) {
+    match vault_location_inspect(&missing, None, mounts, None) {
         Err(MoveError::DirectoryMissing(_)) => {}
         other => panic!("expected a missing-directory refusal, got {other:?}"),
     }
 
     let a_file = home.path().join("file.txt");
     fs::write(&a_file, b"not a directory").unwrap();
-    match vault_location_inspect(&a_file, None, mounts) {
+    match vault_location_inspect(&a_file, None, mounts, None) {
         Err(MoveError::NotADirectory(_)) => {}
         other => panic!("expected a not-a-directory refusal, got {other:?}"),
     }
@@ -313,7 +315,7 @@ fn inspect_refuses_missing_unrelated_and_not_a_directory() {
     let unrelated = home.path().join("unrelated");
     fs::create_dir(&unrelated).unwrap();
     fs::write(unrelated.join("notes.txt"), b"someone's notes").unwrap();
-    match vault_location_inspect(&unrelated, None, mounts) {
+    match vault_location_inspect(&unrelated, None, mounts, None) {
         Err(MoveError::UnrelatedDirectory(path)) => assert_eq!(path, unrelated),
         other => panic!("expected the unrelated-directory refusal, got {other:?}"),
     }
@@ -323,7 +325,7 @@ fn inspect_refuses_missing_unrelated_and_not_a_directory() {
     fs::create_dir(unrelated.parent().unwrap().join("with-staging")).unwrap();
     let with_staging = unrelated.parent().unwrap().join("with-staging");
     fs::create_dir(with_staging.join(vault_move::DESTINATION_STAGING_DIR)).unwrap();
-    assert!(vault_location_inspect(&with_staging, None, mounts).is_ok());
+    assert!(vault_location_inspect(&with_staging, None, mounts, None).is_ok());
 }
 
 /// An unwritable candidate is refused (skipped when the test runner
@@ -348,7 +350,7 @@ fn inspect_refuses_an_unwritable_directory() {
     let locked_down = home.path().join("readonly");
     fs::create_dir(&locked_down).unwrap();
     fs::set_permissions(&locked_down, fs::Permissions::from_mode(0o555)).unwrap();
-    let result = vault_location_inspect(&locked_down, None, &mounts_of(local_mounts()));
+    let result = vault_location_inspect(&locked_down, None, &mounts_of(local_mounts()), None);
     fs::set_permissions(&locked_down, fs::Permissions::from_mode(0o755)).unwrap();
     match result {
         Err(MoveError::NotWritable(_)) => {}
@@ -371,6 +373,7 @@ fn inspect_refuses_foreign_and_invalid_identities() {
         &destination,
         Some("22222222-2222-4222-8222-222222222222"),
         mounts,
+        None,
     ) {
         Err(MoveError::DestinationVaultMismatch {
             destination_id,
@@ -389,6 +392,7 @@ fn inspect_refuses_foreign_and_invalid_identities() {
         &destination,
         Some("11111111-1111-4111-8111-111111111111"),
         mounts,
+        None,
     )
     .unwrap();
     assert_eq!(
@@ -397,6 +401,7 @@ fn inspect_refuses_foreign_and_invalid_identities() {
             vault_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
             schema_version: None,
             directory_name: Some("dest".to_string()),
+            encrypted: false,
         }
     );
 
@@ -408,7 +413,7 @@ fn inspect_refuses_foreign_and_invalid_identities() {
         "{\"format\":\"mailchat-vault\",\"format_version\":1,\"vault_id\":\"not-a-uuid\"}",
     )
     .unwrap();
-    match vault_location_inspect(&malformed, None, mounts) {
+    match vault_location_inspect(&malformed, None, mounts, None) {
         Err(MoveError::InvalidIdentity { .. }) => {}
         other => panic!("expected the invalid-identity refusal, got {other:?}"),
     }
@@ -425,7 +430,7 @@ fn inspect_checks_schema_compatibility_of_an_existing_database() {
     let future = home.path().join("future");
     fs::create_dir(&future).unwrap();
     destination_db_at_version(&future, SUPPORTED_SCHEMA_VERSION + 1);
-    match vault_location_inspect(&future, None, mounts) {
+    match vault_location_inspect(&future, None, mounts, None) {
         Err(MoveError::SchemaTooNew { db, supported }) => {
             assert_eq!(db, SUPPORTED_SCHEMA_VERSION + 1);
             assert_eq!(supported, SUPPORTED_SCHEMA_VERSION);
@@ -436,13 +441,14 @@ fn inspect_checks_schema_compatibility_of_an_existing_database() {
     let legacy = home.path().join("legacy");
     fs::create_dir(&legacy).unwrap();
     destination_db_at_version(&legacy, SUPPORTED_SCHEMA_VERSION);
-    let inspection = vault_location_inspect(&legacy, None, mounts).unwrap();
+    let inspection = vault_location_inspect(&legacy, None, mounts, None).unwrap();
     assert_eq!(
         inspection.existing,
         ExistingContent::Vault {
             vault_id: None,
             schema_version: Some(SUPPORTED_SCHEMA_VERSION),
             directory_name: None,
+            encrypted: false,
         }
     );
 }

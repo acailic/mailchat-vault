@@ -83,6 +83,7 @@ use sha2::{Digest, Sha256};
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
+use crate::encryption::VaultKey;
 use crate::object_store::ObjectStore;
 use crate::storage::{
     media_digests_on, read_schema_version, vault_fingerprint_on, SourceInstance, VaultFingerprint,
@@ -305,6 +306,11 @@ pub struct BackupOptions {
     /// bytes (test hook for provoking [`Error::InsufficientSpace`] on
     /// any real disk).
     pub min_free_bytes: Option<u64>,
+    /// The vault's key when it is encrypted (SQLCipher): the backup
+    /// snapshot is then written encrypted too — locking the front door
+    /// must not leave the back door open. A plaintext vault ignores it
+    /// (its backups stay plaintext until it is converted).
+    pub vault_key: Option<VaultKey>,
 }
 
 /// Where a restore can inject a failure (test hook). Each boundary
@@ -338,6 +344,13 @@ pub struct RestoreOptions {
     /// Force the capacity preflight to demand at least this many free
     /// bytes (test hook).
     pub min_free_bytes: Option<u64>,
+    /// The key for an **encrypted** backup being restored: the staged
+    /// database and the commit-time verifications open through the
+    /// keyed path. `None` (the default) restores plaintext backups as
+    /// before; an encrypted staged database without its key refuses
+    /// with a clear error. Full encrypted-restore handling — including
+    /// which key opens *which* backup — is the follow-up task.
+    pub vault_key: Option<VaultKey>,
 }
 
 // ---------------------------------------------------------------------------
@@ -431,18 +444,38 @@ pub struct BackupPlan {
 /// `snapshot` is the temp file to write (next to the eventual
 /// destination, so the container write stays on one filesystem); the
 /// caller hands both to [`write_backup_container`].
+///
+/// `key` is the vault's key when the vault is encrypted (SQLCipher):
+/// the snapshot is written through the keyed open, so an encrypted
+/// vault's backup is encrypted too. A plaintext vault ignores the key
+/// and keeps plaintext backups; an encrypted vault without its key is
+/// refused — no unencrypted fallback exists.
 pub fn snapshot_for_backup(
     data_dir: &Path,
     conn: &Connection,
     snapshot: &Path,
+    key: Option<&VaultKey>,
 ) -> Result<BackupPlan> {
     let db_path = data_dir.join(DB_ENTRY);
     if !db_path.is_file() {
         return Err(bad(format!("no vault database at {}", db_path.display())));
     }
-    snapshot_database(conn, snapshot)?;
-    let snapshot_conn =
-        Connection::open_with_flags(snapshot, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // The snapshot inherits the *vault's* at-rest state, never the mere
+    // presence of a key: backing up a plaintext vault with a key in
+    // hand stays plaintext (it has not been converted), and an
+    // encrypted vault cannot be backed up without its key.
+    let key = match (crate::encryption::vault_file_is_encrypted(&db_path)?, key) {
+        (true, Some(key)) => Some(key),
+        (true, None) => {
+            return Err(bad(
+                "the vault is encrypted; backing it up requires its key — \
+                 no unencrypted snapshot is ever written by design",
+            ))
+        }
+        (false, _) => None,
+    };
+    snapshot_database(conn, snapshot, key)?;
+    let snapshot_conn = open_keyed(snapshot, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY, key)?;
     let schema_version = read_schema_version(&snapshot_conn)?;
     let counts = BackupCounts::of(&snapshot_conn)?;
     let digests = media_digests_on(&snapshot_conn)?;
@@ -702,7 +735,7 @@ pub fn create_backup(
         done: 0,
         total: 0,
     });
-    let plan = snapshot_for_backup(data_dir, conn, &snapshot_tmp)?;
+    let plan = snapshot_for_backup(data_dir, conn, &snapshot_tmp, opts.vault_key.as_ref())?;
     let summary = write_backup_container(data_dir, &plan, dest, progress, cancel, opts)?;
     // The snapshot's job is done once the container is verified.
     discard_snapshot(&snapshot_tmp);
@@ -711,8 +744,12 @@ pub fn create_backup(
 
 /// Snapshot a live database into `dest` using SQLite's backup API.
 /// The destination must not exist (a fresh, empty target is required).
-fn snapshot_database(conn: &Connection, dest: &Path) -> Result<()> {
-    let mut target = Connection::open(dest)?;
+/// With a key supplied, `dest` does not exist yet, so the keyed open
+/// creates it encrypted: the snapshot pages leave the vault encrypted
+/// and land encrypted (SQLCipher re-encrypts through the backup API,
+/// never decrypting to disk).
+fn snapshot_database(conn: &Connection, dest: &Path, key: Option<&VaultKey>) -> Result<()> {
+    let mut target = open_keyed(dest, rusqlite::OpenFlags::default(), key)?;
     {
         let backup = rusqlite::backup::Backup::new(conn, &mut target)
             .map_err(|e| bad(format!("cannot start the database snapshot: {e}")))?;
@@ -1125,8 +1162,8 @@ pub fn stage_restore(
     // Validate the staged database: openable read-only, whole-file
     // integrity, no foreign-key violations, supported schema, and
     // every referenced digest present in the manifest.
-    validate_staged_database(&staging.join(DB_ENTRY), &manifest)?;
-    let staged_conn = open_read_only(&staging.join(DB_ENTRY))?;
+    validate_staged_database(&staging.join(DB_ENTRY), &manifest, opts.vault_key.as_ref())?;
+    let staged_conn = open_read_only(&staging.join(DB_ENTRY), opts.vault_key.as_ref())?;
     let staged_fingerprint = vault_fingerprint_on(&staged_conn)?;
     drop(staged_conn);
     if staged_fingerprint.messages != manifest.counts.messages
@@ -1175,8 +1212,12 @@ pub fn stage_restore(
 /// validations: whole-file integrity, foreign-key check, schema
 /// ceiling, manifest/schema agreement, and object presence (every
 /// referenced digest carried by the manifest).
-fn validate_staged_database(db: &Path, manifest: &BackupManifest) -> Result<()> {
-    let conn = open_read_only(db)?;
+fn validate_staged_database(
+    db: &Path,
+    manifest: &BackupManifest,
+    key: Option<&VaultKey>,
+) -> Result<()> {
+    let conn = open_read_only(db, key)?;
     let verdict: String = conn
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .map_err(|e| {
@@ -1230,9 +1271,16 @@ fn validate_staged_database(db: &Path, manifest: &BackupManifest) -> Result<()> 
     Ok(())
 }
 
-fn open_read_only(db: &Path) -> Result<Connection> {
-    Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|e| bad(format!("cannot open the staged database: {e}")))
+fn open_read_only(db: &Path, key: Option<&VaultKey>) -> Result<Connection> {
+    open_keyed(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY, key)
+}
+
+/// Open a database file through the keyed path ([`crate::encryption`]):
+/// header classification first, `PRAGMA key` applied when the file is
+/// encrypted, plaintext files opened normally, and a clear refusal —
+/// never a fallback — for an encrypted file without its key.
+fn open_keyed(db: &Path, flags: rusqlite::OpenFlags, key: Option<&VaultKey>) -> Result<Connection> {
+    Ok(crate::encryption::open_connection(db, flags, key)?.conn)
 }
 
 // ---------------------------------------------------------------------------
@@ -1283,6 +1331,7 @@ pub fn commit_restore(
         preview_id,
         current_fingerprint,
         progress,
+        opts.vault_key.as_ref(),
     )?;
 
     let previous_slot = new_previous_slot(data_dir)?;
@@ -1319,6 +1368,7 @@ pub fn verify_committable(
     preview_id: &str,
     current_fingerprint: &VaultFingerprint,
     progress: &dyn Fn(ProgressNote),
+    key: Option<&VaultKey>,
 ) -> Result<()> {
     let staging = staging_dir(data_dir);
     precheck_commit(
@@ -1327,6 +1377,7 @@ pub fn verify_committable(
         preview_id,
         current_fingerprint,
         progress,
+        key,
     )
     .map(|_| ())
 }
@@ -1342,6 +1393,7 @@ fn precheck_commit(
     preview_id: &str,
     current_fingerprint: &VaultFingerprint,
     progress: &dyn Fn(ProgressNote),
+    key: Option<&VaultKey>,
 ) -> Result<(PreviewRecord, BackupManifest)> {
     let record: PreviewRecord = read_json(&staging.join(PREVIEW_FILE)).map_err(|e| {
         bad(format!(
@@ -1375,7 +1427,7 @@ fn precheck_commit(
             "the vault changed since the restore was validated — restage the restore and try again",
         ));
     }
-    let staged_conn = open_read_only(&staging.join(DB_ENTRY))?;
+    let staged_conn = open_read_only(&staging.join(DB_ENTRY), key)?;
     let staged_fingerprint = vault_fingerprint_on(&staged_conn)?;
     drop(staged_conn);
     if staged_fingerprint != record.staged_fingerprint {
@@ -1526,7 +1578,7 @@ fn restored_sources_needing_reauth(
     data_dir: &Path,
     needs_reauth: &dyn Fn(&SourceInstance) -> bool,
 ) -> Option<u64> {
-    let conn = open_read_only(&data_dir.join(DB_ENTRY)).ok()?;
+    let conn = open_read_only(&data_dir.join(DB_ENTRY), None).ok()?;
     let mut stmt = conn
         .prepare(
             "SELECT id, kind, label, connector_key, config_json, state, excluded, \
@@ -1708,7 +1760,7 @@ fn validate_previous_slot(data_dir: &Path, slot_id: &str) -> Result<(PathBuf, i6
             "previous vault {slot_id} holds no database — it cannot be switched back in"
         )));
     }
-    let conn = open_read_only(&slot.join(DB_ENTRY))?;
+    let conn = open_read_only(&slot.join(DB_ENTRY), None)?;
     let verdict: String = conn
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .map_err(|e| {
@@ -1855,7 +1907,7 @@ fn verify_active_vault(data_dir: &Path) -> Result<()> {
             db.display()
         )));
     }
-    let conn = open_read_only(&db)?;
+    let conn = open_read_only(&db, None)?;
     let verdict: String = conn
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .map_err(|e| bad(format!("recovered database fails its integrity check: {e}")))?;

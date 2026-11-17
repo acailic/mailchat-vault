@@ -6,6 +6,14 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Opt-in at-rest archive encryption (SQLCipher): key generation and the
+# keyed-open machinery that applies `PRAGMA key` engage only with this
+# feature AND a supplied key. Default builds behave exactly as before
+# (plaintext vaults; classification and honest `encrypted` status still
+# work — they only read the file header).
+encryption = []
+
 [dependencies]
 base64 = "0.22"
 chrono = { workspace = true }
