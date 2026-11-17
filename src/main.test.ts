@@ -506,6 +506,20 @@ describe("search box", () => {
     const buttons = pageButtons();
     expect(buttons.map((b) => b.disabled)).toEqual([true, true]);
     expect(win.document.querySelectorAll("#results .group, #results .hit-item").length).toBe(0);
+    // The illustrated group replaces the bare empty list: art, headline,
+    // copy, one CTA — while the status line keeps the count above.
+    const group = $("#results .empty-state");
+    expect(group.querySelector(".empty-state-art use")?.getAttribute("href")).toBe(
+      "#i-empty-search",
+    );
+    expect(group.querySelector(".empty-state-headline")!.textContent).toBe("No messages match");
+    expect(group.querySelector(".empty-state-copy")!.textContent).toContain("whole archive");
+    // One CTA: clearing runs a fresh, unfiltered browse (the group goes
+    // away with the query).
+    (group.querySelector(".empty-state-cta button") as HTMLElement).click();
+    await vi.waitFor(() => expect(input("#search").value).toBe(""));
+    await vi.waitFor(() => expect($("#status").textContent).toBe("0 results"));
+    expect(win.document.querySelector("#results .empty-state")).toBeNull();
   });
 });
 
@@ -5931,6 +5945,21 @@ describe("sources view sub-sections", () => {
     await vi.waitFor(() =>
       expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("email"),
     );
+  });
+
+  it("the import section's idle state is the illustrated group with one CTA", async () => {
+    await boot();
+    const group = $("#import-empty .empty-state");
+    expect(group.querySelector(".empty-state-art use")?.getAttribute("href")).toBe(
+      "#i-empty-import",
+    );
+    expect(group.querySelector(".empty-state-headline")!.textContent).toBe("Import an archive");
+    expect(group.querySelector(".empty-state-copy")!.textContent).toContain("preview");
+    // One CTA, wired to the same file picker the section's own button
+    // uses (a cancelled picker is a no-op).
+    dialog.open.mockReturnValue(Promise.resolve(null));
+    (group.querySelector(".empty-state-cta button") as HTMLElement).click();
+    await vi.waitFor(() => expect(dialog.open).toHaveBeenCalled());
   });
 });
 
