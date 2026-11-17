@@ -117,6 +117,8 @@ import {
   type ProviderMenuItem,
   type SaveSettingsPayload,
   type SettingsView,
+  type StoredTheme,
+  type Theme,
 } from "./settings";
 import {
   SequenceGuard,
@@ -977,9 +979,35 @@ function providerRow(
   return row;
 }
 
+/** The vesper theme choice persists across launches (machine-local). The
+ * backend theme enum does not know "vesper", so settings.json keeps
+ * saving "dark" while this flag records the actual choice; renderSettings
+ * applies it over the saved theme. Guarded: storage is absent in some
+ * test/restricted-webview environments (same stance as mcv.navCollapsed). */
+const THEME_VESPER_KEY = "mcv.themeVesper";
+
+function readThemeVesper(): boolean {
+  try {
+    return window.localStorage.getItem(THEME_VESPER_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistThemeVesper(vesper: boolean): void {
+  try {
+    window.localStorage.setItem(THEME_VESPER_KEY, vesper ? "1" : "0");
+  } catch {
+    // best effort only
+  }
+}
+
 /** Render the whole Settings form from a view (after boot and after every
  * successful save or key clear). */
 function renderSettings(view: SettingsView): void {
+  // The vesper override wins over the saved theme (which reads "dark"
+  // while vesper is active — the backend enum has no vesper variant).
+  const theme: Theme = readThemeVesper() ? "vesper" : view.theme;
   settingsRendered = true;
   providerRows.replaceChildren(
     ...view.providers.map((p) =>
@@ -992,7 +1020,7 @@ function renderSettings(view: SettingsView): void {
   if (autoRadio)
     autoRadio.checked =
       view.default_provider === null || view.default_provider === ENV_ID;
-  themeSelect.value = view.theme;
+  themeSelect.value = theme;
   summarizeTopInput.value = String(view.summarize_top);
   notifyToggle.checked = view.notifications;
   notifyEnabled = view.notifications;
@@ -1022,7 +1050,14 @@ function renderSettings(view: SettingsView): void {
 
   settingsNote.classList.remove("error");
   settingsNote.textContent = keyStoreNote(view.key_store);
-  applyTheme(view.theme);
+  applyTheme(theme);
+}
+
+/** The backend theme enum accepts system/light/dark only; the
+ * frontend-only "vesper" palette saves as "dark" while the localStorage
+ * flag records the real choice (see renderSettings). */
+function storedTheme(value: string): StoredTheme {
+  return value === "vesper" ? "dark" : (value as StoredTheme);
 }
 
 /** The parsed summarize_top for the backend validator: an unparseable
@@ -1063,7 +1098,7 @@ function collectSettings(): SaveSettingsPayload {
   return {
     providers,
     default_provider: checked && checked.value ? checked.value : null,
-    theme: themeSelect.value as SettingsView["theme"],
+    theme: storedTheme(themeSelect.value),
     summarize_top: parsedSummarizeTop(summarizeTopInput.value),
     notifications: notifyToggle.checked,
     keep_running_in_background: keepaliveToggle.checked,
@@ -1084,6 +1119,9 @@ notifyToggle.addEventListener("change", () => {
 async function saveSettings(): Promise<void> {
   if (!settingsRendered) return;
   const payload = collectSettings();
+  // Record the vesper choice beside the "dark" placeholder save; saving
+  // any other theme clears the override so the saved theme rules again.
+  persistThemeVesper(themeSelect.value === "vesper");
   const previousDefault = llmStatus?.default_provider ?? null;
   settingsSaveGeneralButton.disabled = true;
   settingsSaveAiButton.disabled = true;
@@ -3498,7 +3536,7 @@ workspace.store.subscribe(({ view }) => {
     renderActivityBadge();
   }
 });
-themeSelect.addEventListener("change", () => applyTheme(themeSelect.value as SettingsView["theme"]));
+themeSelect.addEventListener("change", () => applyTheme(themeSelect.value as Theme));
 providerRows.addEventListener("click", (event) => {
   const target = event.target as HTMLElement;
   const row = target.closest<HTMLElement>(".provider-row");

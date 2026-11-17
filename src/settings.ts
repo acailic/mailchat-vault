@@ -6,8 +6,14 @@
 /** Mirrors `vault_core::settings::ProviderKind` (snake_case serde). */
 export type ProviderKind = "zai" | "anthropic" | "custom";
 
-/** Mirrors `vault_core::settings::Theme` (snake_case serde). */
-export type Theme = "system" | "light" | "dark";
+/** UI theme choices: the backend set plus "vesper", a frontend-only
+ * warm-paper palette (the backend enum does not know it — it is saved as
+ * "dark" plus a machine-local localStorage flag; see main.ts). */
+export type Theme = "system" | "light" | "dark" | "vesper";
+
+/** Themes the backend `vault_core::settings::Theme` enum accepts
+ * (snake_case serde) — the settings_get/settings_save contract. */
+export type StoredTheme = Exclude<Theme, "vesper">;
 
 /** Mirrors `vault_core::settings::ProviderProfile` (serde field names). */
 export interface ProviderProfile {
@@ -44,7 +50,7 @@ export interface EnvOverridesView {
 export interface SettingsView {
   providers: ProviderView[];
   default_provider: string | null;
-  theme: Theme;
+  theme: StoredTheme;
   summarize_top: number;
   /** Desktop notifications for new mail after sync/watch cycles. */
   notifications: boolean;
@@ -64,7 +70,7 @@ export interface SettingsView {
 export interface SaveSettingsPayload {
   providers: ProviderProfile[];
   default_provider: string | null;
-  theme: Theme;
+  theme: StoredTheme;
   summarize_top: number;
   /** Desktop notifications for new mail after sync/watch cycles. */
   notifications: boolean;
@@ -228,10 +234,14 @@ export function keyStoreNote(store: SettingsView["key_store"]): string {
 
 /** Apply a theme choice to the document (idempotent). "system" clears
  * the explicit theme so the prefers-color-scheme media query in the
- * design tokens decides; explicit light/dark pin the token palette. */
+ * design tokens decides; explicit light/dark pin the token palette.
+ * "vesper" pins the warm-paper palette the same way, but maps the
+ * color-scheme property to "dark" ("vesper" is not a keyword the
+ * engine would recognize). */
 export function applyTheme(theme: Theme): void {
   const root = document.documentElement;
-  root.style.colorScheme = theme === "system" ? "" : theme;
+  root.style.colorScheme =
+    theme === "system" ? "" : theme === "vesper" ? "dark" : theme;
   if (theme === "system") {
     delete root.dataset.theme;
   } else {
