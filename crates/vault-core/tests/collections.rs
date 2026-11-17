@@ -302,6 +302,7 @@ fn version17_db(db: &std::path::Path) -> i64 {
          DROP TABLE person_identity_links;
          DROP TABLE people;
          DROP TABLE saved_searches;
+         DROP TABLE IF EXISTS attachment_refs;
          DROP INDEX IF EXISTS idx_archive_messages_created_source;
          DELETE FROM schema_migrations WHERE version >= 18;",
     )

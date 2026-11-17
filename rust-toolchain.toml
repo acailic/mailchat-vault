@@ -1,8 +1,8 @@
-# The vault crates compile on this pinned toolchain. The newest stable
-# rustc (1.100 at the time of pinning) rejects unchanged main with 28
-# "not general enough" trait-solver errors; until those are fixed, this
-# file keeps every runner and CI on a known-good compiler. Keep the
-# version in sync with the runner image toolchain.
+# Pin the compiler every runner and CI uses, so a fresh clone never
+# breaks on a compiler it did not test. Bump deliberately: install the
+# new stable beside this one, run the full vault-core suite on it, then
+# move this pin (and the runner image toolchain) in the same change.
+# 1.100.0 validated: full vault-core suite green (2026-11-17).
 [toolchain]
-channel = "1.98.1"
+channel = "1.100.0"
 profile = "minimal"
