@@ -514,7 +514,8 @@ mod tests {
         // Stable across calls, `sha256:<hex>:<size>` shaped.
         assert_eq!(input_fingerprint(&file).unwrap(), a);
         assert!(a.starts_with("sha256:"), "{a}");
-        assert!(a.ends_with(&format!(":{}", fs::metadata(&file).unwrap().len())), "{a}");
+        let size = fs::metadata(&file).unwrap().len();
+        assert!(a.ends_with(&format!(":{size}")), "{a}");
         // Edited bytes (even same-size) change the token.
         fs::write(&file, b"[1.11.2026., 09:00:05] Ana: yo\n").unwrap();
         assert_ne!(input_fingerprint(&file).unwrap(), a);

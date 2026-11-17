@@ -929,7 +929,11 @@ mod tests {
             preview.fingerprint,
             crate::import_bounds::input_fingerprint(&path).unwrap()
         );
-        assert!(preview.fingerprint.starts_with("sha256:"), "{}", preview.fingerprint);
+        assert!(
+            preview.fingerprint.starts_with("sha256:"),
+            "{}",
+            preview.fingerprint
+        );
         // Additive serde: a serialized preview from before the field
         // existed still deserializes (empty token, no refusal wording).
         let older = serde_json::json!({
