@@ -9,7 +9,6 @@ name: Perf
 #   gate; JSON results are uploaded as artifacts for baseline tracking.
 
 on:
-  pull_request:
   push:
     branches: [main]
   workflow_dispatch:

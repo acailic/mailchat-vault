@@ -9,7 +9,6 @@ name: Retrieval
 # in CI. Full JSON results are uploaded as artifacts for trend tracking.
 
 on:
-  pull_request:
   push:
     branches: [main]
   workflow_dispatch:
