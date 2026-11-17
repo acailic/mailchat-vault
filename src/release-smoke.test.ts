@@ -19,7 +19,7 @@
 //
 // These checks never substitute for a native run
 // (docs/native-verification.md).
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
@@ -141,7 +141,7 @@ describe("G1 evidence contract in the smoke scripts", () => {
 describe("smoke-macos.sh evidence machinery (stubbed macOS tooling)", () => {
   it.skipIf(!hasBash || process.platform !== "linux")(
     "emits valid PASS/FAIL JSON bound to artifact SHA-256 and tester",
-    () => {
+    async () => {
       const work = `${tmpdir()}/mc-smoke-selfcheck-${process.pid}`;
       rmSync(work, { recursive: true, force: true });
       const bin = `${work}/bin`;
@@ -159,9 +159,23 @@ describe("smoke-macos.sh evidence machinery (stubbed macOS tooling)", () => {
           "<key>CFBundleShortVersionString</key><string>0.1.0</string>" +
           "<key>CFBundleExecutable</key><string>mailchat-vault</string></dict></plist>",
       );
-      writeFileSync(`${art}/unpack/${appName}/Contents/MacOS/mailchat-vault`, "#!/bin/sh\nsleep 60\n", {
-        mode: 0o755,
-      });
+      // The fake app only needs to outlive the smoke script's alive
+      // check — that is observable state, not a duration: it parks
+      // indefinitely (an empty interval keeps the event loop alive),
+      // exits cleanly on the SIGTERM the script's alive loop sends, and
+      // writes a ready file (its stdout is redirected to /dev/null by
+      // the script, so a file is the observable signal) so the test can
+      // assert the app process really started. The ready-file path is
+      // baked in before launch for the same reason.
+      const appStarted = `${work}/app-started`;
+      writeFileSync(
+        `${art}/unpack/${appName}/Contents/MacOS/mailchat-vault`,
+        "#!/usr/bin/env node\n" +
+          `require("node:fs").writeFileSync(${JSON.stringify(appStarted)}, "ready");\n` +
+          'process.on("SIGTERM", () => process.exit(0));\n' +
+          "setInterval(() => {}, 1 << 30);\n",
+        { mode: 0o755 },
+      );
       const dmg = `${art}/mailchat-vault_0.1.0_universal.dmg`;
       writeFileSync(dmg, "fake dmg bytes");
       execFileSync("tar", [
@@ -213,12 +227,23 @@ describe("smoke-macos.sh evidence machinery (stubbed macOS tooling)", () => {
           { encoding: "utf8", env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } },
         );
 
+      // Bounded condition polls for everything that appears on disk
+      // (50 ms interval; the timeout is only a safety bound, never a
+      // wait target). No fake timers: real child processes below.
+      const waitForOpts = { timeout: 10_000, interval: 50 };
+
       // PASS run: every check green, valid JSON bound to real digests.
       const passLogs = `${work}/logs-pass`;
       const pass = runSmoke(passLogs);
       expect(pass.status).toBe(0);
-      const passJsonFiles = readdirSync(passLogs).filter((f) => f.endsWith(".json"));
-      expect(passJsonFiles).toHaveLength(1);
+      // Observable state, not elapsed time: the stub app process really
+      // started, and exactly one evidence JSON landed.
+      await vi.waitFor(() => expect(existsSync(appStarted)).toBe(true), waitForOpts);
+      let passJsonFiles: string[] = [];
+      await vi.waitFor(() => {
+        passJsonFiles = readdirSync(passLogs).filter((f) => f.endsWith(".json"));
+        expect(passJsonFiles).toHaveLength(1);
+      }, waitForOpts);
       const evidence = JSON.parse(readFileSync(`${passLogs}/${passJsonFiles[0]}`, "utf8"));
       expect(evidence.schema).toBe("mailchat-vault/smoke-macos/1");
       expect(evidence.result).toBe("PASS");
@@ -241,8 +266,11 @@ describe("smoke-macos.sh evidence machinery (stubbed macOS tooling)", () => {
       const failLogs = `${work}/logs-fail`;
       const fail = runSmoke(failLogs);
       expect(fail.status).toBe(1);
-      const failJsonFiles = readdirSync(failLogs).filter((f) => f.endsWith(".json"));
-      expect(failJsonFiles).toHaveLength(1);
+      let failJsonFiles: string[] = [];
+      await vi.waitFor(() => {
+        failJsonFiles = readdirSync(failLogs).filter((f) => f.endsWith(".json"));
+        expect(failJsonFiles).toHaveLength(1);
+      }, waitForOpts);
       const failEvidence = JSON.parse(readFileSync(`${failLogs}/${failJsonFiles[0]}`, "utf8"));
       expect(failEvidence.result).toBe("FAIL");
       expect(failEvidence.failed).toBeGreaterThan(0);

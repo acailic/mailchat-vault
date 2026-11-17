@@ -1,9 +1,11 @@
 /// DOM rendering for the v2 search UI (M3.2): flat results rows, era
-/// chips, applied filter chips, and the v2 reading pane (detail +
-/// chronological context).
-/// Pure builders like render.ts — every dynamic string goes through
-/// textContent, tested via happy-dom in render2.test.ts.
+/// chips, applied filter chips, the v2 reading pane (detail +
+/// chronological context), pagination, source chips, and the statistics
+/// dashboard.
+/// Pure builders — every dynamic string goes through textContent, tested
+/// via happy-dom in render2.test.ts.
 
+import type { SourceChipRow } from "./accountsview";
 import {
   authorDisplayName,
   conversationConfidenceLabel,
@@ -16,9 +18,6 @@ import {
 } from "./format";
 import { type IconName, icon, iconEl } from "./icons";
 import {
-  appendSegments,
-} from "./render";
-import {
   type ContextEntry,
   type EraBucket,
   type FilterChip,
@@ -26,7 +25,15 @@ import {
   messageLink,
   similarCopiesLabel,
 } from "./searchstate";
+import type { ArchiveStats } from "./types";
 import {
+  type DayBar,
+  type PageModel,
+  type Segment,
+  barHeightPct,
+  dashboardSummary,
+  dayBars,
+  formatCount,
   highlightSegments,
   htmlOf,
   parseSnippet,
@@ -39,6 +46,24 @@ import type {
   ImportScope,
   MessageSummary,
 } from "./v2types";
+
+// ---------------------------------------------------------------------------
+// Highlight segments
+// ---------------------------------------------------------------------------
+
+/** Append segments as text nodes plus `<mark class="hit">` runs. */
+export function appendSegments(el: HTMLElement, segments: Segment[]): void {
+  for (const seg of segments) {
+    if (seg.hit) {
+      const mark = document.createElement("mark");
+      mark.className = "hit";
+      mark.textContent = seg.text;
+      el.append(mark);
+    } else {
+      el.append(document.createTextNode(seg.text));
+    }
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Flat results
@@ -890,4 +915,283 @@ export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
 
   card.append(...sections);
   el.replaceChildren(card);
+}
+
+// ---------------------------------------------------------------------------
+// Pagination
+// ---------------------------------------------------------------------------
+
+export interface PaginationHandlers {
+  onPrev: () => void;
+  onNext: () => void;
+}
+
+/** Render the "1–50 of 1,234" line plus prev/next controls. */
+export function renderPagination(
+  el: HTMLElement,
+  model: PageModel,
+  handlers: PaginationHandlers,
+): void {
+  const info = document.createElement("span");
+  info.className = "page-info";
+  info.textContent =
+    model.total === 0
+      ? "0 results"
+      : `${model.from}–${model.to} of ${model.total} · page ${model.page}/${model.pageCount}`;
+  const prev = document.createElement("button");
+  prev.type = "button";
+  prev.className = "page-btn";
+  prev.textContent = "‹ Prev";
+  prev.disabled = !model.hasPrev;
+  const next = document.createElement("button");
+  next.type = "button";
+  next.className = "page-btn";
+  next.textContent = "Next ›";
+  next.disabled = !model.hasNext;
+  prev.addEventListener("click", handlers.onPrev);
+  next.addEventListener("click", handlers.onNext);
+  el.replaceChildren(prev, info, next);
+}
+
+// ---------------------------------------------------------------------------
+// Source chips
+// ---------------------------------------------------------------------------
+
+export interface SourceChipsOptions {
+  rows: SourceChipRow[];
+  selected: string[];
+  onToggle: (id: string) => void;
+}
+
+/** Toggle chips for the source filter (none selected = all sources).
+ * Selection keys are stable source-instance ids. Each chip leads with
+ * its source's taxonomy icon (mail/chat/file — decorative, aria-hidden;
+ * the label stays the accessible text) and, when the row carries one,
+ * appends the source's short status span after the label — the label
+ * and count text themselves stay intact (the e2e specs assert them by
+ * substring), the status adds to the chip's accessible name. */
+export function renderSourceChips(el: HTMLElement, opts: SourceChipsOptions): void {
+  const chips = opts.rows.map((row) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "chip" + (opts.selected.includes(row.id) ? " on" : "");
+    chip.dataset.source = row.id;
+    chip.setAttribute("aria-pressed", opts.selected.includes(row.id) ? "true" : "false");
+    const label = document.createElement("span");
+    label.textContent =
+      row.count === null ? row.label : `${row.label} (${row.count.toLocaleString()})`;
+    chip.append(iconEl(row.icon), label);
+    if (row.status) {
+      const status = document.createElement("span");
+      status.className = "chip-status";
+      status.textContent = row.status;
+      chip.append(status);
+    }
+    chip.addEventListener("click", () => opts.onToggle(row.id));
+    return chip;
+  });
+  el.replaceChildren(...chips);
+}
+
+// ---------------------------------------------------------------------------
+// Statistics dashboard
+// ---------------------------------------------------------------------------
+
+/** One row of a count table: a label, its count, and an inline bar. */
+interface CountRow {
+  label: string;
+  /** The untruncated value when `label` is a shortened form (full author
+   *  strings); the tooltip defaults to the label. */
+  title?: string;
+  count: number;
+}
+
+/** One bar's label, for the tooltip, the screen reader, and the single
+ * bucket's plain-text line alike: "2026-11-01: 6 messages". */
+function dayBarLabel(bar: DayBar): string {
+  return `${bar.label}: ${formatCount(bar.count)} ${bar.count === 1 ? "message" : "messages"}`;
+}
+
+/** Bars wide enough to carry a visible count label; beyond this the
+ * labels would collide, and each bar keeps its title/aria-label. */
+const DAY_BAR_LABEL_MAX = 12;
+
+function dayChart(days: ArchiveStats["by_day"]): HTMLElement {
+  const block = document.createElement("div");
+  block.className = "day-chart-block";
+  const chart = document.createElement("div");
+  chart.className = "day-chart";
+  chart.setAttribute("role", "group");
+  const bars = dayBars(days, 180);
+  if (bars.length === 1) {
+    // A single bucket has no distribution to show — one full-width bar
+    // would just dress the total up as a chart. Say the count plainly.
+    chart.classList.add("single");
+    const text = dayBarLabel(bars[0]);
+    chart.setAttribute("aria-label", `Messages per day — ${text}`);
+    const note = document.createElement("span");
+    note.className = "day-single";
+    note.textContent = text;
+    chart.append(note);
+    return chart;
+  }
+  chart.setAttribute("aria-label", "Messages per day");
+  const max = Math.max(0, ...bars.map((b) => b.count));
+  const withCounts = bars.length <= DAY_BAR_LABEL_MAX;
+  for (const bar of bars) {
+    const col = document.createElement("div");
+    col.className = "day-bar";
+    col.style.height = `${barHeightPct(bar.count, max)}%`;
+    // Heat share of the tallest day (0..100) drives the color ramp;
+    // engines without color-mix keep the solid accent fallback.
+    col.style.setProperty("--bar-heat", String(barHeightPct(bar.count, max)));
+    const text = dayBarLabel(bar);
+    col.title = text;
+    col.setAttribute("role", "img");
+    col.setAttribute("aria-label", text);
+    if (withCounts) {
+      const count = document.createElement("span");
+      count.className = "day-bar-count";
+      count.textContent = formatCount(bar.count);
+      col.append(count);
+    }
+    chart.append(col);
+  }
+  block.append(chart);
+  if (bars.length > 0) block.append(dayChartAxis(bars));
+  return block;
+}
+
+/** Time axis under the histogram: the first, middle, and last bucket
+ * labels (a day, month, or year, per the bucketing in dayBars). */
+function dayChartAxis(bars: DayBar[]): HTMLElement {
+  const axis = document.createElement("div");
+  axis.className = "day-chart-axis";
+  const ticks = [
+    bars[0].label,
+    bars[Math.floor((bars.length - 1) / 2)].label,
+    bars[bars.length - 1].label,
+  ];
+  axis.append(
+    ...[...new Set(ticks)].map((label) => {
+      const tick = document.createElement("span");
+      tick.textContent = label;
+      return tick;
+    }),
+  );
+  return axis;
+}
+
+function countTable(caption: string, rows: CountRow[]): HTMLElement {
+  const card = document.createElement("div");
+  card.className = "stat-table";
+  const heading = document.createElement("h3");
+  heading.textContent = caption;
+  const table = document.createElement("table");
+  const max = Math.max(0, ...rows.map((r) => r.count));
+  const body = document.createElement("tbody");
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    const label = document.createElement("td");
+    label.className = "label";
+    label.textContent = row.label;
+    label.title = row.title ?? row.label;
+    const num = document.createElement("td");
+    num.className = "num";
+    num.textContent = formatCount(row.count);
+    const bar = document.createElement("td");
+    bar.className = "bar";
+    const fill = document.createElement("div");
+    fill.style.width = `${barHeightPct(row.count, max)}%`;
+    bar.append(fill);
+    tr.append(label, num, bar);
+    body.append(tr);
+  }
+  table.append(body);
+  card.append(heading, table);
+  return card;
+}
+
+/** Top-author table rows with display-identical authors merged: header
+ *  spellings of one identity ('"Ana" <a@b.c>' and 'Ana <a@b.c>') become
+ *  one row with the summed count, re-sorted descending. The merged
+ *  row's title joins the distinct full identities ("; ") so the
+ *  addresses stay one hover away. Merging happens after the backend's
+ *  LIMIT, so a variant below the top-N cutoff can be under-counted —
+ *  a deliberate display-side trade, not a stats change. */
+function topAuthorRows(authors: ArchiveStats["top_authors"]): CountRow[] {
+  const byLabel = new Map<string, { count: number; identities: string[] }>();
+  for (const a of authors) {
+    const label = authorDisplayName(a.author) || "(unknown)";
+    const identity = a.author || "(unknown)";
+    const merged = byLabel.get(label) ?? { count: 0, identities: [] };
+    merged.count += a.count;
+    if (!merged.identities.includes(identity)) merged.identities.push(identity);
+    byLabel.set(label, merged);
+  }
+  return [...byLabel]
+    .map(([label, m]) => ({ label, title: m.identities.join("; "), count: m.count }))
+    .sort((a, b) => b.count - a.count);
+}
+
+/** True when a Top chats source is mail: an mbox import or a live IMAP
+ *  account (labels "mbox" and "imap:host:port:user"). Mail folder names
+ *  come from the provider (Gmail's "All mail Including Spam and Trash"),
+ *  not from the user, so the dashboard normalizes their casing; chat
+ *  names are user-chosen proper nouns and stay verbatim. */
+function isMailSource(source: string): boolean {
+  return source === "mbox" || source.startsWith("imap:");
+}
+
+/** Sentence-case a mail folder label: first word capitalized, the rest
+ *  lowercased ("All mail Including Spam and Trash" → "All mail
+ *  including spam and trash"). The raw value stays in the tooltip. */
+function sentenceCaseFolder(name: string): string {
+  const lowered = name.toLowerCase();
+  return lowered.charAt(0).toUpperCase() + lowered.slice(1);
+}
+
+export interface DashboardOptions {
+  stats: ArchiveStats;
+}
+
+/**
+ * Render the statistics dashboard: a summary line, the per-day histogram
+ * (CSS bars, no chart library), and count tables for sources, busiest
+ * folders, and top authors. An empty archive renders the summary only.
+ */
+export function renderDashboard(el: HTMLElement, opts: DashboardOptions): void {
+  const { stats } = opts;
+  const summary = document.createElement("p");
+  summary.className = "meta";
+  summary.textContent = dashboardSummary(stats);
+  if (stats.total === 0) {
+    el.replaceChildren(summary);
+    return;
+  }
+  const grid = document.createElement("div");
+  grid.className = "stat-grid";
+  grid.append(
+    countTable(
+      "By source",
+      stats.by_source.map((s) => ({
+        label: friendlySourceLabel(s.source),
+        title: s.source,
+        count: s.count,
+      })),
+    ),
+    countTable(
+      "Busiest folders",
+      stats.top_chats.map((c) => ({
+        // Mail folder names arrive in the provider's casing; chat names
+        // are user-chosen and render verbatim. The source reads in plain
+        // words (friendlySourceLabel); the raw label stays in the tooltip.
+        label: `${friendlySourceLabel(c.source)} · ${isMailSource(c.source) ? sentenceCaseFolder(c.chat_id) : c.chat_id}`,
+        title: `${c.source} · ${c.chat_id}`,
+        count: c.count,
+      })),
+    ),
+    countTable("Top authors", topAuthorRows(stats.top_authors)),
+  );
+  el.replaceChildren(summary, dayChart(stats.by_day), grid);
 }
