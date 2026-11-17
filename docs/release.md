@@ -39,7 +39,13 @@ workspace `Cargo.toml`, commit, tag `v<version>`, push the tag.
 > `SHA256SUMS`; it stays a draft until the macOS (universal) and Windows
 > x64 columns run on native hosts (`scripts/release/matrix-macos.sh`,
 > `pwsh scripts/release/matrix-windows.ps1`, #81) and the combined
-> `SHA256SUMS` is regenerated. Hosted runners remain blocked on account
+> A clean-worktree re-run of the same tag commit (2026-11-17, evidence
+> for the reproducibility question) rebuilt both artifacts and re-smoked
+> them (4/4 PASS); the draft carries the re-run's assets and sums. The
+> two builds of the same commit produce different digests (AppImage/deb
+> embed timestamps), so builds are NOT byte-reproducible yet - the
+> supply-chain ticket (#108) owns deterministic assembly
+> (SOURCE_DATE_EPOCH et al.). > `SHA256SUMS` is regenerated. Hosted runners remain blocked on account
 > billing (owner action: fix Actions billing to restore the hosted default
 > route). Fixes that rode into the release tag: restored the
 > original-retention migration (renumbered to 26) lost in #230's conflict
