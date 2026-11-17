@@ -27,6 +27,25 @@ are also attached as workflow-run artifacts (`linux-bundles`,
 Version bump flow: raise `version` in `src-tauri/tauri.conf.json` and the
 workspace `Cargo.toml`, commit, tag `v<version>`, push the tag.
 
+> **Honest status (2026-11-17, v0.2.0 execution):** the release executed
+> on the authorized local route. Gate evidence at tag `e9f227f`:
+> `cargo test -p vault-core` 59/59 binaries green, `npm test` 702 passed /
+> 3 skipped, `npm run check` clean, executed and recorded in ticket #90.
+> Linux x86_64 built via `scripts/release/build-linux.sh` (pinned-toolchain
+> container — the image now preinstalls the repo-pinned 1.100.0 + rustfmt
+> so non-root builds resolve the toolchain without writing RUSTUP_HOME)
+> and smoke-gated on clean 22.04 and 24.04 containers (deb+AppImage, 4/4
+> PASS). A **draft** GitHub Release exists with the Linux assets and
+> `SHA256SUMS`; it stays a draft until the macOS (universal) and Windows
+> x64 columns run on native hosts (`scripts/release/matrix-macos.sh`,
+> `pwsh scripts/release/matrix-windows.ps1`, #81) and the combined
+> `SHA256SUMS` is regenerated. Hosted runners remain blocked on account
+> billing (owner action: fix Actions billing to restore the hosted default
+> route). Fixes that rode into the release tag: restored the
+> original-retention migration (renumbered to 26) lost in #230's conflict
+> resolution, `originals` field initialization across test and app
+> fixtures, and the version17 fixture rollback-list completions.
+
 > **Honest status (2026-11-15, per D11 — tags and workflow YAML are not
 > evidence):** route (c) was decided on 2026-11-14 (PR #85): CI and Release
 > workflows are **enabled** again, and the `v0.2.0` tag (commit `71ac2d4`,
