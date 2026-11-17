@@ -470,6 +470,7 @@ input[type="text"].short { flex: 0 1 14em; }
  * relative luminance, the tokens.css convention):
  *   light  #5d6a60 on --panel #ffffff = 5.68:1, on --panel-2 #f2efe8 = 4.95:1
  *   dark   #9faaa1 on --panel #222825 = 6.25:1, on --panel-2 #2a312d = 5.55:1
+ *   vesper #a39b8c on --panel #2a2825 = 5.34:1, on --panel-2 #323029 = 4.79:1
  * opacity 1 keeps the measured pair exact (UA placeholder opacity would
  * dim it below the ratio). */
 ::placeholder { color: var(--muted); opacity: 1; }
