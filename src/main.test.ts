@@ -4472,6 +4472,323 @@ describe("settings screen", () => {
     fireChange(input("#theme"));
     expect(document.documentElement.style.colorScheme).toBe("dark");
   });
+
+  // --- AI assistance rework: sections, per-kind fields, defaults,
+  // inline validation, test connection (NEWWO-65 part 2).
+
+  /** Fire a bubbling input event (programmatic value sets do not). */
+  const fireInput = (el: DispatchTarget): void => {
+    el.dispatchEvent(new win.Event("input", { bubbles: true }));
+  };
+
+  const fieldError = (id: string, field: string): HTMLElement =>
+    rowEl(id).querySelector<HTMLElement>(`.field-error[data-field="${field}"]`)!;
+
+  const fieldHidden = (id: string, cls: string): boolean =>
+    (rowInput(id, cls) as HTMLElement).closest<HTMLElement>(".prov-field")!.hidden;
+
+  it("first visit: adding a provider needs only an API key (defaults prefill)", async () => {
+    tauri.handlers.set(
+      "settings_get",
+      () => viewWith((v) => {
+        v.providers = [];
+        v.default_provider = null;
+      }),
+    );
+    tauri.handlers.set("settings_save", (args: unknown) => {
+      const payload = (args as { payload: { providers: Array<Record<string, unknown>> } })
+        .payload;
+      return viewWith((v) => {
+        v.providers = [{ ...zaiProvider(), ...payload.providers[0], has_key: true }];
+        v.default_provider = "zai";
+      });
+    });
+    await boot();
+    // Out of the box nothing is configured; the summary says local-only.
+    expect($("#active-provider-summary").textContent).toContain("none");
+
+    input("#add-kind").value = "zai";
+    $("#add-provider-btn").click();
+    await vi.waitFor(() => expect(rowIds()).toEqual(["zai"]));
+    // Kind defaults auto-fill; the only missing piece is flagged: the key.
+    expect(rowInput("zai", "prov-url").value).toBe("https://api.z.ai/api/anthropic");
+    expect(rowInput("zai", "prov-model").value).toBe("glm-5");
+    expect(
+      (rowEl("zai").querySelector<HTMLElement>(".prov-key-note") as HTMLElement).hidden,
+    ).toBe(false);
+    // No validation errors: the prefilled row saves as-is once keyed.
+    expect(fieldError("zai", "base_url").hidden).toBe(true);
+
+    rowInput("zai", "prov-key").value = "secret";
+    $("#settings-save-ai").click();
+    await vi.waitFor(() => expect($("#settings-note").textContent).toContain("Saved."));
+    const save = tauri.calls.find((c) => c.cmd === "settings_save");
+    expect((save!.args as { payload: { providers: unknown[]; api_keys: unknown[] } }).payload)
+      .toMatchObject({
+        providers: [
+          {
+            id: "zai",
+            kind: "zai",
+            base_url: "https://api.z.ai/api/anthropic",
+            model: "glm-5",
+          },
+        ],
+        api_keys: [{ id: "zai", key: "secret" }],
+      });
+    // The saved view re-renders with the active summary naming it.
+    expect($("#active-provider-summary").textContent).toContain(
+      "z.ai GLM — glm-5 via api.z.ai",
+    );
+  });
+
+  it("renders and saves an azure profile with its per-kind fields", async () => {
+    tauri.handlers.set("settings_get", () =>
+      viewWith((v) => {
+        v.providers = [
+          {
+            id: "az",
+            name: "Work Azure",
+            kind: "azure_openai",
+            base_url: "https://res.openai.azure.com",
+            model: "",
+            deployment_name: "glm-deploy",
+            api_version: "2024-10-21",
+            temperature: 0.5,
+            max_tokens: 2048,
+            timeout_secs: 60,
+            has_key: true,
+          },
+        ];
+        v.default_provider = "az";
+      }),
+    );
+    let saved: { providers: Array<Record<string, unknown>> } | undefined;
+    tauri.handlers.set("settings_save", (args: unknown) => {
+      saved = (args as { payload: { providers: Array<Record<string, unknown>> } }).payload;
+      return viewWith();
+    });
+    await boot();
+    await vi.waitFor(() => expect(rowIds()).toEqual(["az"]));
+    // Azure sections: the deployment name is the model (the plain model
+    // input hides); base URL and api-version show; the sampling
+    // overrides render their stored values.
+    expect(fieldHidden("az", "prov-model")).toBe(true);
+    expect(fieldHidden("az", "prov-deployment")).toBe(false);
+    expect(fieldHidden("az", "prov-url")).toBe(false);
+    expect(fieldHidden("az", "prov-api-version")).toBe(false);
+    expect(rowInput("az", "prov-deployment").value).toBe("glm-deploy");
+    expect(rowInput("az", "prov-url").value).toBe("https://res.openai.azure.com");
+    expect(rowInput("az", "prov-api-version").value).toBe("2024-10-21");
+    expect(rowInput("az", "prov-temperature").value).toBe("0.5");
+    expect(rowInput("az", "prov-max-tokens").value).toBe("2048");
+    expect(rowInput("az", "prov-timeout").value).toBe("60");
+    expect($("#active-provider-summary").textContent).toContain("Work Azure — glm-deploy");
+
+    $("#settings-save-ai").click();
+    await vi.waitFor(() => expect(saved).toBeTruthy());
+    expect(saved!.providers).toEqual([
+      {
+        id: "az",
+        name: "Work Azure",
+        kind: "azure_openai",
+        base_url: "https://res.openai.azure.com",
+        model: "",
+        deployment_name: "glm-deploy",
+        api_version: "2024-10-21",
+        temperature: 0.5,
+        max_tokens: 2048,
+        timeout_secs: 60,
+      },
+    ]);
+  });
+
+  it("kinds with a fixed endpoint hide the base URL field; overrides round-trip", async () => {
+    tauri.handlers.set("settings_get", () =>
+      viewWith((v) => {
+        v.providers = [
+          { ...zaiProvider(), base_url: "https://api.z.ai/api/paas4", model: "glm-5" },
+        ];
+      }),
+    );
+    let saved: { providers: Array<Record<string, unknown>> } | undefined;
+    tauri.handlers.set("settings_save", (args: unknown) => {
+      saved = (args as { payload: { providers: Array<Record<string, unknown>> } }).payload;
+      return viewWith();
+    });
+    await boot();
+    await vi.waitFor(() => expect(rowIds()).toEqual(["zai"]));
+    // The field hides behind a hint naming the fixed default endpoint…
+    expect(fieldHidden("zai", "prov-url")).toBe(true);
+    expect(rowEl("zai").querySelector<HTMLElement>(".prov-url-hint")!.textContent)
+      .toContain("https://api.z.ai/api/anthropic");
+    // …the model dropdown offers the kind default…
+    expect(
+      [...rowEl("zai").querySelectorAll<HTMLOptionElement>("datalist.prov-model-options option")].map(
+        (o) => o.value,
+      ),
+    ).toEqual(["glm-5"]);
+    // …and the stored explicit override still saves unchanged.
+    $("#settings-save-ai").click();
+    await vi.waitFor(() => expect(saved).toBeTruthy());
+    expect(saved!.providers[0]).toMatchObject({
+      kind: "zai",
+      base_url: "https://api.z.ai/api/paas4",
+      model: "glm-5",
+    });
+  });
+
+  it("inline validation blocks the save and clears as the input is fixed", async () => {
+    tauri.handlers.set("settings_get", () =>
+      viewWith((v) => {
+        v.providers = [
+          { id: "mine", name: "Mine", kind: "custom", base_url: "", model: "", has_key: false },
+        ];
+        v.default_provider = null;
+      }),
+    );
+    await boot();
+    await vi.waitFor(() => expect(rowIds()).toEqual(["mine"]));
+    // A custom provider needs both fields — flagged inline as rendered.
+    expect(fieldError("mine", "base_url").hidden).toBe(false);
+    expect(fieldError("mine", "base_url").textContent).toContain("base URL is required");
+    expect(fieldError("mine", "model").hidden).toBe(false);
+    // The save never leaves the page while the row is invalid.
+    $("#settings-save-ai").click();
+    await flush();
+    expect(tauri.calls.some((c) => c.cmd === "settings_save")).toBe(false);
+    expect($("#settings-note").textContent).toContain("Not saved");
+    expect($("#settings-note").classList.contains("error")).toBe(true);
+    // Fixing the fields clears the errors; the save goes through.
+    tauri.handlers.set("settings_save", () => viewWith());
+    rowInput("mine", "prov-url").value = "https://api.example.com/v1";
+    fireInput(rowInput("mine", "prov-url"));
+    rowInput("mine", "prov-model").value = "m";
+    fireInput(rowInput("mine", "prov-model"));
+    expect(fieldError("mine", "base_url").hidden).toBe(true);
+    expect(fieldError("mine", "model").hidden).toBe(true);
+    $("#settings-save-ai").click();
+    await vi.waitFor(() => expect($("#settings-note").textContent).toContain("Saved."));
+  });
+
+  it("numeric bounds flag inline (out-of-range temperature never reaches the backend)", async () => {
+    tauri.handlers.set("settings_get", () => viewWith());
+    await boot();
+    await vi.waitFor(() => expect(rowIds()).toEqual(["zai"]));
+    rowInput("zai", "prov-temperature").value = "9";
+    fireInput(rowInput("zai", "prov-temperature"));
+    expect(fieldError("zai", "temperature").hidden).toBe(false);
+    $("#settings-save-ai").click();
+    await flush();
+    expect(tauri.calls.some((c) => c.cmd === "settings_save")).toBe(false);
+    rowInput("zai", "prov-temperature").value = "0.7";
+    fireInput(rowInput("zai", "prov-temperature"));
+    expect(fieldError("zai", "temperature").hidden).toBe(true);
+  });
+
+  it("Test connection renders clear success and failure feedback", async () => {
+    tauri.handlers.set("settings_get", () => viewWith());
+    tauri.handlers.set("llm_test", (args: unknown) => {
+      const payload = (args as { payload: { model: string } }).payload;
+      return payload.model === "bad"
+        ? { ok: false, latency_ms: 0, detail: "401 unauthorized" }
+        : { ok: true, latency_ms: 123, detail: "1 token" };
+    });
+    await boot();
+    await vi.waitFor(() => expect(rowIds()).toEqual(["zai"]));
+    const status = () => $<HTMLElement>('.provider-row[data-id="zai"] .prov-test-status');
+    ($('.provider-row[data-id="zai"] .test-btn') as HTMLElement).click();
+    await vi.waitFor(() => expect(status().textContent).toContain("OK — 123 ms"));
+    expect(status().classList.contains("error")).toBe(false);
+    // The test runs the typed values (a failing model reports clearly).
+    rowInput("zai", "prov-model").value = "bad";
+    ($('.provider-row[data-id="zai"] .test-btn') as HTMLElement).click();
+    await vi.waitFor(() => expect(status().textContent).toContain("Failed: 401 unauthorized"));
+    expect(status().classList.contains("error")).toBe(true);
+  });
+
+  it("switching kinds auto-fills the kind defaults and keeps per-kind edits", async () => {
+    tauri.handlers.set(
+      "settings_get",
+      () => viewWith((v) => (v.providers = [])),
+    );
+    await boot();
+    input("#add-kind").value = "zai";
+    $("#add-provider-btn").click();
+    await vi.waitFor(() => expect(rowIds()).toEqual(["zai"]));
+    expect(rowInput("zai", "prov-model").value).toBe("glm-5");
+    rowInput("zai", "prov-model").value = "glm-4.6";
+
+    const kind = $<HTMLSelectElement>('.provider-row[data-id="zai"] .prov-kind');
+    kind.value = "openai";
+    fireChange(kind);
+    // Auto-fill: openai defaults replace the z.ai values…
+    expect(rowInput("zai", "prov-model").value).toBe("gpt-4o-mini");
+    expect(rowInput("zai", "prov-url").value).toBe("https://api.openai.com/v1");
+    expect(
+      [...rowEl("zai").querySelectorAll<HTMLOptionElement>("datalist option")].map((o) => o.value),
+    ).toEqual(["gpt-4o-mini"]);
+    // …and a switch back restores the z.ai edit (per-kind memory).
+    kind.value = "zai";
+    fireChange(kind);
+    expect(rowInput("zai", "prov-model").value).toBe("glm-4.6");
+    expect(rowInput("zai", "prov-url").value).toBe("https://api.z.ai/api/anthropic");
+  });
+
+  it("Reset to defaults restores the kind defaults (name and key stay)", async () => {
+    tauri.handlers.set("settings_get", () => viewWith((v) => (v.providers = [])));
+    await boot();
+    input("#add-kind").value = "openai";
+    $("#add-provider-btn").click();
+    await vi.waitFor(() => expect(rowIds()).toEqual(["openai"]));
+    rowInput("openai", "prov-name").value = "Work";
+    rowInput("openai", "prov-model").value = "gpt-4.1";
+    rowInput("openai", "prov-temperature").value = "0.9";
+    ($('.provider-row[data-id="openai"] .reset-btn') as HTMLElement).click();
+    expect(rowInput("openai", "prov-model").value).toBe("gpt-4o-mini");
+    expect(rowInput("openai", "prov-url").value).toBe("https://api.openai.com/v1");
+    expect(rowInput("openai", "prov-temperature").value).toBe("");
+    expect(rowInput("openai", "prov-temperature").placeholder).toBe("0.2 (default)");
+    expect(rowInput("openai", "prov-name").value).toBe("Work");
+  });
+
+  it("a bedrock profile renders and saves unchanged (its UI is part 3)", async () => {
+    tauri.handlers.set("settings_get", () =>
+      viewWith((v) => {
+        v.providers = [
+          {
+            id: "bedrock",
+            name: "",
+            kind: "bedrock",
+            base_url: "",
+            model: "",
+            region: "us-east-1",
+            has_key: false,
+          },
+        ];
+        v.default_provider = "bedrock";
+      }),
+    );
+    let saved: { providers: Array<Record<string, unknown>> } | undefined;
+    tauri.handlers.set("settings_save", (args: unknown) => {
+      saved = (args as { payload: { providers: Array<Record<string, unknown>> } }).payload;
+      return viewWith();
+    });
+    await boot();
+    await vi.waitFor(() => expect(rowIds()).toEqual(["bedrock"]));
+    // Render-safe: the row shows its kind (listed, disabled — not offered
+    // for new selection) and never blocks a save.
+    const kind = $<HTMLSelectElement>('.provider-row[data-id="bedrock"] .prov-kind');
+    expect(kind.value).toBe("bedrock");
+    expect(Array.from(kind.options).find((o) => o.value === "bedrock")!.disabled).toBe(true);
+    expect(Array.from($<HTMLSelectElement>("#add-kind").options).map((o) => o.value)).not.toContain("bedrock");
+    $("#settings-save-ai").click();
+    await vi.waitFor(() => expect(saved).toBeTruthy());
+    expect(saved!.providers[0]).toMatchObject({
+      id: "bedrock",
+      kind: "bedrock",
+      region: "us-east-1",
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
