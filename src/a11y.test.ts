@@ -15,6 +15,17 @@ import { describe, expect, it } from "vitest";
 const here = dirname(fileURLToPath(import.meta.url));
 const tokensCss = readFileSync(join(here, "styles", "tokens.css"), "utf8");
 const appCss = readFileSync(join(here, "styles", "app.css"), "utf8");
+const mainTs = readFileSync(join(here, "main.ts"), "utf8");
+const indexHtml = readFileSync(join(here, "..", "index.html"), "utf8");
+
+/** Parse `selector { body }` pairs (comments stripped, brace-safe). */
+function cssRules(css: string): { selector: string; body: string }[] {
+  const noComments = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  return [...noComments.matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({
+    selector: m[1].trim(),
+    body: m[2],
+  }));
+}
 
 // ---------------------------------------------------------------------------
 // WCAG contrast math over the committed token values
@@ -142,5 +153,158 @@ describe("topbar Menu tab order (index.html)", () => {
     for (const el of doc.querySelectorAll("[tabindex]")) {
       expect(Number(el.getAttribute("tabindex"))).toBeLessThanOrEqual(0);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Global focus ring (identity pass): one accent rule, no overrides
+// ---------------------------------------------------------------------------
+
+describe("global focus ring (app.css, tokens.css)", () => {
+  const rules = cssRules(appCss);
+
+  it("sets exactly one outline on a focus state — the global accent rule", () => {
+    const outlineOnFocus = rules.filter(
+      (r) => r.selector.includes(":focus") && r.body.includes("outline:"),
+    );
+    expect(outlineOnFocus).toHaveLength(1);
+    expect(outlineOnFocus[0].selector).toBe(":focus-visible");
+    expect(outlineOnFocus[0].body).toMatch(/outline:\s*2px solid var\(--accent\)/);
+    expect(outlineOnFocus[0].body).toMatch(/outline-offset:\s*([1-9]\d*)px/);
+  });
+
+  it("retires the separate --focus-ring token from every theme block", () => {
+    expect(tokensCss).not.toContain("--focus-ring");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Accent-usage invariants (the rule documented beside the palette)
+// ---------------------------------------------------------------------------
+
+describe("accent-usage invariants (app.css)", () => {
+  const rules = cssRules(appCss);
+
+  it("colors text with the accent only on interactive affordances", () => {
+    // Allowlist per the tokens.css rule: link/btn/chip/summary/tab/nav
+    // families, hit rows, thread rows, ask-source rows, icon buttons.
+    // The property match is exact (word-boundary, var(--accent) value):
+    // border-color, accent-color, and var(--accent-fg) are not text.
+    const allow = ["btn", "button", "link", "chip", "summary", "hit", "tab", "nav-view", "thread-row", "ask-source"];
+    const textAccent = (body: string) => /(?<![-\w])color:\s*var\(--accent\)\s*;/.test(body);
+    const violators = rules.filter(
+      (r) => textAccent(r.body) && !allow.some((t) => r.selector.includes(t)),
+    );
+    expect(violators.map((r) => r.selector)).toEqual([]);
+    // The invariant must bite: at least the link, citation, and
+    // ask-source affordances exercise it.
+    expect(rules.filter((r) => textAccent(r.body)).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("fills the accent background only on primary, badge, and data rules", () => {
+    // Allowlist per the tokens.css rule: primary buttons, small badges,
+    // chart ramps and data fills (day histogram, usage/progress bars).
+    const allow = ["primary", "badge", "day-bar", "usage-bar", "progress"];
+    const fillAccent = (body: string) => /(?<![-\w])background:\s*var\(--accent\)\s*;/.test(body);
+    const violators = rules.filter(
+      (r) => fillAccent(r.body) && !allow.some((t) => r.selector.includes(t)),
+    );
+    expect(violators.map((r) => r.selector)).toEqual([]);
+    expect(rules.filter((r) => fillAccent(r.body)).length).toBeGreaterThanOrEqual(4);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Branded first paint: splash markup, theme script, hide seam
+// ---------------------------------------------------------------------------
+
+describe("branded first paint (index.html, main.ts)", () => {
+  it("ships #boot-splash as an aria-hidden direct body child outside #app/#content", () => {
+    const doc = loadIndexBody();
+    const splash = doc.querySelector("#boot-splash");
+    expect(splash).toBeTruthy();
+    expect(splash!.getAttribute("aria-hidden")).toBe("true");
+    expect(splash!.parentElement).toBe(doc.body);
+    expect(doc.querySelector("#app")!.contains(splash!)).toBe(false);
+    expect(doc.querySelector("#content")!.contains(splash!)).toBe(false);
+    // #topbar stays the first child of #content (splash adds no chrome).
+    expect(doc.querySelector("#content")!.firstElementChild!.id).toBe("topbar");
+  });
+
+  it("carries the inline pre-paint theme script with splash backstops in the head", () => {
+    const head = indexHtml.slice(0, indexHtml.indexOf("<body>"));
+    // The theme mirror of resolveTheme: localStorage mcv.themeVesper
+    // resolved into the root data-theme before any module loads.
+    expect(head).toMatch(/<script>[\s\S]*mcv\.themeVesper[\s\S]*dataset\.theme[\s\S]*<\/script>/);
+    // Backstops so a failed module load can never strand the splash:
+    // a load listener plus a hard 2-second timeout in the same script.
+    expect(head).toMatch(/<script>[\s\S]*getElementById\("boot-splash"\)[\s\S]*<\/script>/);
+    expect(head).toMatch(/setTimeout\(\s*\w+,\s*2000\s*\)/);
+    expect(head).toMatch(/addEventListener\(\s*"load"/);
+    // Reduced motion swaps instantly: the fade transition is disabled.
+    expect(head).toMatch(/prefers-reduced-motion:\s*reduce[\s\S]*#boot-splash\.hide\s*\{\s*transition:\s*none/);
+  });
+
+  it("hides the splash from main.ts at the first-render seam", () => {
+    expect(mainTs).toContain('getElementById("boot-splash")');
+    expect(mainTs).toMatch(/renderAll\(\);\s*hideBootSplash\(\);/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Uniform hover, press, disabled states across every clickable family
+// ---------------------------------------------------------------------------
+
+describe("uniform hover, press, disabled states (app.css)", () => {
+  const families = [
+    "button",
+    ".chip",
+    ".nav-view-btn",
+    ".settings-nav-btn",
+    ".workspace-tab-btn",
+    "summary",
+    ".hit-item",
+    ".thread-row.link",
+    ".ask-source",
+  ];
+  const rules = cssRules(appCss);
+  const reduced = appCss.slice(appCss.indexOf("@media (prefers-reduced-motion: reduce)"));
+  const reducedRules = cssRules(reduced);
+
+  it("gives every clickable family a visible hover change", () => {
+    for (const family of families) {
+      expect(
+        rules.some((r) => r.selector.includes(`${family}:hover`)),
+        `${family} has a :hover rule`,
+      ).toBe(true);
+    }
+  });
+
+  it("presses every clickable family through the .mv-press scale", () => {
+    for (const family of families) {
+      const press = rules.find((r) => r.selector.includes(`${family}:active`));
+      expect(press, `${family} has an :active press rule`).toBeTruthy();
+      expect(press!.body).toMatch(/transform:\s*scale\(0\.96\)/);
+    }
+  });
+
+  it("keeps color feedback but removes the press movement under reduced motion", () => {
+    for (const family of families) {
+      const override = reducedRules.find((r) => r.selector.includes(`${family}:active`));
+      expect(override, `${family} reduced-motion :active override`).toBeTruthy();
+      expect(override!.body).toMatch(/transform:\s*none/);
+      const transition = reducedRules.find((r) => r.selector.includes(family) && r.body.includes("transition:"));
+      expect(transition, `${family} keeps a color transition under reduce`).toBeTruthy();
+      expect(transition!.body).not.toContain("transform var(");
+    }
+  });
+
+  it("keeps disabled controls muted and not-allowed", () => {
+    // Every disable-able family is <button>-based (chips, nav/settings/
+    // workspace tabs, ask-source rows), so one rule covers them all.
+    const disabled = rules.find((r) => r.selector === "button:disabled");
+    expect(disabled).toBeTruthy();
+    expect(disabled!.body).toMatch(/color:\s*var\(--muted\)/);
+    expect(disabled!.body).toMatch(/cursor:\s*not-allowed/);
   });
 });
