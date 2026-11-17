@@ -15,6 +15,7 @@ export type ProviderKind =
   | "groq"
   | "openrouter"
   | "ollama"
+  | "lmstudio"
   | "custom";
 
 /** UI theme choices: the backend set plus "vesper", a frontend-only
@@ -160,6 +161,7 @@ const KIND_LABELS: Record<ProviderKind, string> = {
   groq: "Groq",
   openrouter: "OpenRouter",
   ollama: "Ollama",
+  lmstudio: "LM Studio",
   custom: "Custom",
 };
 
@@ -175,8 +177,13 @@ export const ALL_KINDS: readonly ProviderKind[] = [
   "groq",
   "openrouter",
   "ollama",
+  "lmstudio",
   "custom",
 ];
+
+/** The keyless local kinds (backend `AuthStyle::None`): usable without
+ * any stored API key — the local server needs no auth. */
+export const KEYLESS_KINDS: readonly ProviderKind[] = ["ollama", "lmstudio"];
 
 /** Kinds the Settings UI offers. `bedrock` exists in the backend catalog
  * (part 1) but its configuration UI is part 3 — it renders and saves
@@ -192,7 +199,7 @@ export const DEFAULT_AZURE_API_VERSION = "2024-10-21";
  * `vault_core::settings::ProviderKind::defaults` (pinned by unit tests so
  * drift is caught at the value level). Empty model/base URL = the field is
  * user-supplied by definition (azure, custom; bedrock's URL derives from
- * its region). */
+ * its region; lmstudio's model is user-loaded in the app it serves). */
 export interface ProviderDefaults {
   model: string;
   base_url: string;
@@ -272,6 +279,13 @@ export const KIND_DEFAULTS: Record<ProviderKind, ProviderDefaults> = {
     max_tokens: 1024,
     timeout_secs: 120,
   },
+  lmstudio: {
+    model: "", // the served model is user-loaded in LM Studio
+    base_url: "http://127.0.0.1:1234/v1",
+    temperature: 0.2,
+    max_tokens: 1024,
+    timeout_secs: 120,
+  },
   custom: {
     model: "",
     base_url: "",
@@ -283,10 +297,10 @@ export const KIND_DEFAULTS: Record<ProviderKind, ProviderDefaults> = {
 
 /** Which per-kind fields the Settings form shows (the others stay hidden
  * but keep their stored value so a save round-trips unchanged).
- * `base_url` is user-supplied only for azure_openai, ollama, and custom —
- * the fixed-default kinds show a default hint instead of an input. On
- * azure_openai the deployment name is the model id, so the plain model
- * input is hidden there. */
+ * `base_url` is user-supplied only for azure_openai, the local kinds
+ * (ollama, lmstudio), and custom — the fixed-default kinds show a
+ * default hint instead of an input. On azure_openai the deployment name
+ * is the model id, so the plain model input is hidden there. */
 export interface KindFieldVisibility {
   base_url: boolean;
   model: boolean;
@@ -296,7 +310,8 @@ export interface KindFieldVisibility {
 
 export function kindFieldVisibility(kind: ProviderKind): KindFieldVisibility {
   return {
-    base_url: kind === "azure_openai" || kind === "ollama" || kind === "custom",
+    base_url:
+      kind === "azure_openai" || kind === "ollama" || kind === "lmstudio" || kind === "custom",
     model: kind !== "azure_openai",
     deployment_name: kind === "azure_openai",
     api_version: kind === "azure_openai",

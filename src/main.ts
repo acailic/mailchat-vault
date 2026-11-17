@@ -1229,7 +1229,9 @@ function refreshKindChrome(row: HTMLElement): void {
       ? "Your Azure resource endpoint, e.g. https://<resource>.openai.azure.com"
       : kind === "ollama"
         ? `The local Ollama server (${defaults.base_url} by default)`
-        : "Any OpenAI-compatible /chat/completions endpoint (base URL without the path)"
+        : kind === "lmstudio"
+          ? `The local LM Studio server (${defaults.base_url} by default)`
+          : "Any OpenAI-compatible /chat/completions endpoint (base URL without the path)"
     : `Endpoint fixed by the kind: ${defaults.base_url || "derived from the region"}`;
 
   inputs.model.placeholder = placeholderForKind(kind, "model");
@@ -1251,9 +1253,9 @@ function refreshKindChrome(row: HTMLElement): void {
   );
 
   const keyNote = row.querySelector<HTMLElement>(".prov-key-note")!;
-  if (kind === "ollama") {
+  if (kind === "ollama" || kind === "lmstudio") {
     keyNote.hidden = false;
-    keyNote.textContent = "Ollama runs locally — no API key needed";
+    keyNote.textContent = `${kindLabel(kind)} runs locally — no API key needed`;
   } else {
     // refreshed by refreshRowValidation (a key is required to *use* the
     // provider, but a keyless row may still be saved)
@@ -1287,7 +1289,7 @@ function refreshRowValidation(row: HTMLElement): void {
     error.hidden = !message;
   }
   const keyNote = row.querySelector<HTMLElement>(".prov-key-note")!;
-  if (kind !== "ollama") {
+  if (kind !== "ollama" && kind !== "lmstudio") {
     keyNote.hidden = !(
       rowInputs(row).key.value.trim() === "" && row.dataset.hasKey !== "true"
     );
