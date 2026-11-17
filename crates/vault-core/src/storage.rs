@@ -103,7 +103,11 @@ const MAX_SCHEMA_VERSION: i64 = SUPPORTED_SCHEMA_VERSION;
 /// copies the legacy rows into it; version 11 seeds the periodic sync
 /// schedule. Never edit an applied migration — append
 /// a new version instead.
-const MIGRATIONS: &[(i64, &str)] = &[
+///
+/// `pub(crate)` so the doc-hidden test-support deriver
+/// (`crate::migration_rollback`) can invert migrations for rollback
+/// fixtures; not part of the crate's public surface.
+pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (
         1,
         r#"
