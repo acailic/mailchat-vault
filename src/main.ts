@@ -4056,11 +4056,32 @@ envClearKeysButton.addEventListener("click", async () => {
   }
 });
 
+/** Hide the inline first-paint splash (index.html #boot-splash) once
+ * the shell has rendered its first frame — the identity-pass swap.
+ * Opacity-only fade (the .hide class in the inline head style) unless
+ * the user asked for reduced movement, which removes it instantly;
+ * then the element leaves the DOM so nothing strands in the a11y
+ * tree. The inline head script carries its own window-load listener
+ * and 2s timeout for the failed-module-load path. */
+function hideBootSplash(): void {
+  const splash = document.getElementById("boot-splash");
+  if (!splash) return;
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    splash.remove();
+    return;
+  }
+  splash.classList.add("hide");
+  splash.addEventListener("transitionend", () => splash.remove(), { once: true });
+  // Hard fallback if the transition never fires (e.g. hidden window).
+  window.setTimeout(() => splash.remove(), 300);
+}
+
 // Boot. The status line and the first-run/browse choice follow the
 // first stats + demo-status responses; until then a neutral loading
 // line (the e2e waitForApp settles on the stats label, not this).
 setStatus("Loading…");
 renderAll();
+hideBootSplash();
 updateVaultChrome();
 // The demo lives in the app process: a webview reload while the sample
 // archive is open restores the banner instead of silently browsing the
