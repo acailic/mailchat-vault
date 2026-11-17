@@ -150,6 +150,18 @@ describe("privacyNoteFor", () => {
     expect(note).toContain("top 5 result messages");
   });
 
+  it("states the no-key truth for keyless local providers (ollama, lmstudio)", () => {
+    const ollama = privacyNoteFor(
+      { ...zaiItem, kind: "ollama", model: "llama3.2", host: "127.0.0.1" },
+      8,
+    );
+    expect(ollama).toContain("LLM assist is on (llama3.2 via 127.0.0.1)");
+    expect(ollama).toContain("the local server needs no API key");
+    const studio = privacyNoteFor({ ...zaiItem, kind: "lmstudio", model: "m", host: "127.0.0.1" }, 8);
+    expect(studio).toContain("the local server needs no API key");
+    expect(studio).not.toContain("stored outside the app");
+  });
+
   it("states the local fallback for local mode and keyless providers", () => {
     const localNote = privacyNoteFor(localItem, 8);
     expect(localNote).toContain("LLM assist is off");
