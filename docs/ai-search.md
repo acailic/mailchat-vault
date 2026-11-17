@@ -34,6 +34,12 @@ Privacy: when extraction is active, the summary prompt additionally contains
 the collected link list (`URL · sender · date`, capped at 50 lines). The
 consent prompt says exactly this before anything is sent.
 
+## Optional semantic draft (HyDE)
+
+Ask queries are questions; archived messages are statements. Embedding the raw question therefore hands the local vector leg a weak query vector. The opt-in setting **Improve semantic search with a generated draft** (default off) closes that register gap with one extra provider call per ask: the provider writes 2–3 hypothetical sentences answering the question, and that text — not the question — is embedded as the dense query vector (HyDE; Gao, Ma, Lin & Callan, *"Precise Zero-Shot Dense Retrieval without Relevance Labels"*, ACL 2023). The FTS leg, the plan, fusion, and all existing fallback behavior stay unchanged; drafts are cached in memory per question (bounded, 64 entries), so repeated searches cost no extra provider calls.
+
+Privacy and consent: the draft call sends exactly the question — the same data the translate step already sends — and nothing else (no archive rows; those ride only the summary step, as before). It runs only behind the same AI-consent gate as every network path, never in local-only asks, and is skipped entirely when no local embeddings exist (there is no vector leg to improve). If the provider errors or times out, the ask falls back honestly to embedding the plain question and the provenance footer notes “semantic draft unavailable”.
+
 ## Configuration (Settings UI, or environment variables)
 
 Providers are configured on the **Settings screen**; the key is stored in the OS keyring when one is available (session memory otherwise) — never in the database or the repo, and never in the settings file. The environment variables below keep working as a fallback for headless use — and are themselves editable in Settings (see *Environment fallback overrides* below):
@@ -53,7 +59,7 @@ A mismatched key/endpoint pairing (for example `ANTHROPIC_API_KEY` without `ANTH
 
 ## Privacy
 
-Nothing leaves the machine without the explicit AI consent above; LLM mode is opt-in and strictly scoped: only your question (for translation) and the top-8 matching messages, truncated (for the summary), are sent to the configured provider. No other rows, no database dumps, no embeddings, no key at rest. The summary step is skipped entirely when there are no results.
+Nothing leaves the machine without the explicit AI consent above; LLM mode is opt-in and strictly scoped: only your question (for translation — and, with the optional draft setting on, for the [HyDE draft](#optional-semantic-draft-hyde); the same question, nothing more) and the top-8 matching messages, truncated (for the summary), are sent to the configured provider. No other rows, no database dumps, no embeddings, no key at rest. The summary step is skipped entirely when there are no results.
 
 ## Fallback
 
