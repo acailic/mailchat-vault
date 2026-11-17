@@ -1,6 +1,6 @@
 # Product review evidence — 2026-11-06
 
-Application source: `cb8b67d86fda8929130b452dcddc1c5a97850dff`, version 0.2.0. Environment: Pop!_OS 24.04, native Tauri/WebKitGTK desktop application. The local development binary embedded the built frontend; this was not a published-installer usability test. Product conclusions are in the [review](../../product-review.md).
+Application source: `cb8b67d86fda8929130b452dcddc1c5a97850dff`, version 0.2.0. Environment: Pop!_OS 24.04, native Tauri/WebKitGTK desktop application. The local development binary embedded the built frontend; this was not a published-installer usability test. Product conclusions are in the [review](../../internal/product-review.md).
 
 ## Files
 

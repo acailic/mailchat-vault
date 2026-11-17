@@ -68,7 +68,7 @@ Ask participants to think aloud. Let them choose the route. A hint, pointed gest
 
 On the current baseline, tasks blocked by a missing workflow are expected failures to record. Do not hide them behind an engineering demonstration. Re-run after the corresponding work package, with a fresh participant where prior teaching would bias the result.
 
-Use synthetic messages with known answers for comparable tasks; use user-owned copies locally for a separate relevance check. Cover email plus the selected chat source, a known verified conversation, ambiguous/unknown time, duplicate-looking but distinct messages, missing media, and a supported preserved attachment. Existing [E2E fixtures and media suites](../tests/e2e/README.md) are starting material; the six-message demo alone is insufficient to represent years of personal history.
+Use synthetic messages with known answers for comparable tasks; use user-owned copies locally for a separate relevance check. Cover email plus the selected chat source, a known verified conversation, ambiguous/unknown time, duplicate-looking but distinct messages, missing media, and a supported preserved attachment. Existing [E2E fixtures and media suites](../../tests/e2e/README.md) are starting material; the six-message demo alone is insufficient to represent years of personal history.
 
 ## Compare value fairly
 
@@ -91,7 +91,7 @@ Report top-1 accuracy, recall@5 for questions with an available labeled answer, 
 
 Enroll after the recovery and platform gates in the success plan. Participants keep original exports/source copies and use an explicitly labeled build. Schedule an onboarding check and follow-ups around days 7 and 30; arrange support without collecting their archive contents.
 
-The runnable form of this section — [U10 pilot kit](evidence/u10-pilot-kit-2026-11-15.md) (2026-11-15): recruitment screener, day-0/7/30 schedule with the support arrangement, participant tracking log, and the gate-readout template with its decision rubric. Its [gate record](evidence/u10-pilot-gate-2026-11-15.md) states the GP03/GP04 preconditions and the rule that no broader promotion happens before the readout.
+The runnable form of this section — [U10 pilot kit](../evidence/u10-pilot-kit-2026-11-15.md) (2026-11-15): recruitment screener, day-0/7/30 schedule with the support arrangement, participant tracking log, and the gate-readout template with its decision rubric. Its [gate record](../evidence/u10-pilot-gate-2026-11-15.md) states the GP03/GP04 preconditions and the rule that no broader promotion happens before the readout.
 
 For each genuine retrieval opportunity, participants may voluntarily record: a random task label, chosen tool, source category, success/failure, approximate time, assistance needed and why they chose that route. Do not request query text, message bodies, contact names, screenshots of private conversations or credentials.
 
