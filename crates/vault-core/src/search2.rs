@@ -1190,7 +1190,7 @@ fn truncate_chars(s: &str, max: usize) -> String {
 /// The browse-mode snippet: an HTML-extracted, whitespace-collapsed body
 /// prefix, bounded so summaries stay summaries even without match
 /// positions.
-fn browse_snippet(body: &str) -> String {
+pub(crate) fn browse_snippet(body: &str) -> String {
     truncate_chars(&html_to_snippet_text(body), BROWSE_SNIPPET_CHARS)
 }
 
@@ -2417,7 +2417,7 @@ pub fn export_selection<W: Write>(
 
 /// Read the archive revision inside an open transaction (one snapshot
 /// with the page's rows).
-fn read_archive_revision(tx: &Connection) -> Result<u64> {
+pub(crate) fn read_archive_revision(tx: &Connection) -> Result<u64> {
     let value: Option<String> = tx
         .query_row(
             "SELECT value FROM archive_meta WHERE key = 'archive_revision'",
