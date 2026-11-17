@@ -78,9 +78,18 @@
   --radius-m: 6px;
   --radius-pill: 999px;
 
-  /* Motion: 120–180ms state transitions only, none for layout. */
+  /* Motion vocabulary (ux-specification.md "Visual direction"): shared
+   * durations and easing for every state transition — no raw values in
+   * component rules. fast = press/enter feedback, standard = ordinary
+   * UI movement (hard cap 200ms), slow = dialogs and large surfaces
+   * only. Ease-out everywhere; nothing eases in. Reduced-motion
+   * handling lives in app.css and removes movement while keeping
+   * color/opacity feedback — these durations are never zeroed. */
   --motion-fast: 120ms;
-  --motion-slow: 180ms;
+  --motion-standard: 180ms;
+  --motion-slow: 240ms;
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-press: cubic-bezier(0.33, 1, 0.68, 1);
 
   /* Workspace geometry (ux-specification.md "Workspace and navigation"). */
   --nav-width: 208px;
@@ -209,13 +218,5 @@
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.35);
 
     color-scheme: dark;
-  }
-}
-
-/* Reduced motion: transitions off entirely. */
-@media (prefers-reduced-motion: reduce) {
-  :root {
-    --motion-fast: 0ms;
-    --motion-slow: 0ms;
   }
 }

@@ -49,11 +49,8 @@
     transform: rotate(360deg);
   }
 }
-@media (prefers-reduced-motion: reduce) {
-  .icon-spin {
-    animation: none;
-  }
-}
+/* Reduced-motion disable for icon-spin lives in the one consolidated
+ * prefers-reduced-motion block at the end of this file. */
 
 /* --- Small layout utilities (replace one-off inline styles) ------------- */
 
@@ -763,12 +760,13 @@ button.link-btn:hover:not(:disabled) { background: none; color: var(--accent-hov
   min-width: 2px;
   background: var(--accent);
   border-radius: var(--radius-pill);
-  transition: width var(--motion-slow) ease-out;
+  transition: width var(--motion-slow) var(--ease-out);
 }
 
 /* Indeterminate (total not yet known): one accent segment traverses the
  * track. Under reduced motion it rests as a static partial fill — the
- * state stays legible without the movement. */
+ * state stays legible without the movement (see the consolidated
+ * prefers-reduced-motion block at the end of this file). */
 .progress-track.indeterminate::after {
   content: "";
   position: absolute;
@@ -777,20 +775,11 @@ button.link-btn:hover:not(:disabled) { background: none; color: var(--accent-hov
   left: 0;
   width: 30%;
   background: var(--accent);
-}
-@media (prefers-reduced-motion: no-preference) {
-  .progress-track.indeterminate::after {
-    animation: progress-traverse 1.4s ease-in-out infinite;
-  }
+  animation: progress-traverse 1.4s ease-in-out infinite;
 }
 @keyframes progress-traverse {
   from { transform: translateX(-100%); }
   to { transform: translateX(calc(100% / 0.3)); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .progress-track.indeterminate::after {
-    left: 35%;
-  }
 }
 
 /* Results list */
@@ -1407,14 +1396,14 @@ label.field-check input { margin: 0; }
      * report them hidden); opening flips it back immediately. */
     visibility: hidden;
     transition:
-      transform var(--motion-fast) ease-out,
+      transform var(--motion-fast) var(--ease-out),
       visibility 0s linear var(--motion-fast);
     box-shadow: var(--shadow);
   }
   #app[data-nav="open"] #nav {
     transform: none;
     visibility: visible;
-    transition: transform var(--motion-fast) ease-out;
+    transition: transform var(--motion-fast) var(--ease-out);
   }
 
   #nav-scrim {
@@ -1436,19 +1425,99 @@ label.field-check input { margin: 0; }
 
 #nav-scrim { display: none; }
 
-/* Motion: only opacity/transform state transitions, never layout. */
-@media (prefers-reduced-motion: no-preference) {
-  .hit-item, .chip, button, .nav-view-btn { transition: background-color var(--motion-fast) ease-out; }
-  #nav { transition: transform var(--motion-fast) ease-out; }
+/* --- Motion vocabulary (tokens.css --motion-* / --ease-*) ------------------
+ * Every transition consumes the shared tokens: no raw durations, no
+ * raw easing curves. Movement means transform only; opacity and color
+ * are feedback, not movement, and stay animated for everyone. */
+
+/* Color feedback runs unconditionally at the fast token — including
+ * for reduced-motion users (only movement is ever removed). */
+.hit-item,
+.chip,
+button,
+.nav-view-btn {
+  transition: background-color var(--motion-fast) var(--ease-out);
 }
 
-button:active:not(:disabled),
-.chip:active:not(:disabled) {
-  transform: translateY(0.5px);
+/* The compact nav drawer's transition lives with the drawer rules in
+ * the compact media block above; the consolidated reduced-motion block
+ * below makes it instant. */
+
+/* Enter: fade plus a 4px rise. Opacity leads at the fast token, the
+ * transform settles at standard, both ease-out. Consumers toggle the
+ * element from its pre-state (opacity 0, translateY(4px)). */
+.mv-enter {
+  transition:
+    opacity var(--motion-fast) var(--ease-out),
+    transform var(--motion-standard) var(--ease-out);
 }
+
+/* Press feedback: quick scale to 0.96 on the active state (never
+ * below 0.95) with the dedicated press curve. */
+.mv-press {
+  transition: transform var(--motion-fast) var(--ease-press);
+}
+.mv-press:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+/* Dialog / large-surface entry: fade plus a gentle 0.98 settle (from
+ * the pre-state opacity 0, scale(0.98)) over the slow token — the only
+ * sanctioned --motion-slow movement use. */
+.mv-dialog-in {
+  transition:
+    opacity var(--motion-standard) var(--ease-out),
+    transform var(--motion-slow) var(--ease-out);
+}
+
+/* The reduced-motion fallback shape: opacity and color transitions
+ * only, no transform property at all. Every movement class above
+ * collapses to this shape under the block below. */
+.mv-fade-only {
+  transition:
+    opacity var(--motion-fast) var(--ease-out),
+    background-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+/* Reduced motion: the one consolidated block. All movement (transform
+ * transitions, ambient keyframe animation) is removed; the opacity and
+ * color transitions above keep their token durations. The tokens
+ * themselves stay non-zero — zeroing them would kill color and opacity
+ * feedback too. */
 @media (prefers-reduced-motion: reduce) {
-  button:active:not(:disabled),
-  .chip:active:not(:disabled) {
+  /* Movement classes collapse to their fade-only shape: transform
+   * transition gone, opacity feedback kept. */
+  .mv-enter {
+    transition: opacity var(--motion-fast) var(--ease-out);
+  }
+  .mv-dialog-in {
+    transition: opacity var(--motion-standard) var(--ease-out);
+  }
+  .mv-press {
+    transition: none;
+  }
+  .mv-press:active:not(:disabled) {
     transform: none;
+  }
+
+  /* Drawer becomes instant: no transform transition, and visibility
+   * flips with no delay so the closed drawer leaves the tab order
+   * immediately. */
+  #nav {
+    transition: none;
+  }
+  #app[data-nav="open"] #nav {
+    transition: none;
+  }
+
+  /* Ambient progress animation off; the indeterminate bar rests as a
+   * static partial fill so the state stays legible. */
+  .icon-spin {
+    animation: none;
+  }
+  .progress-track.indeterminate::after {
+    animation: none;
+    left: 35%;
   }
 }
