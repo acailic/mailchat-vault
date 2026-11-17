@@ -401,13 +401,19 @@ pub fn import_pick_bounded_bound_to(
 pub fn parse_mbox(bytes: &[u8], chat_id: &str) -> Result<Collected> {
     let mut messages = Vec::new();
     let mut failed: u64 = 0;
-    stream_mbox_with(std::io::Cursor::new(bytes), chat_id, 0, false, &mut |item| {
-        match item {
-            StreamItem::Message(msg) => messages.push(msg),
-            StreamItem::Failed { .. } => failed += 1,
-        }
-        Ok(Flow::Continue)
-    })?;
+    stream_mbox_with(
+        std::io::Cursor::new(bytes),
+        chat_id,
+        0,
+        false,
+        &mut |item| {
+            match item {
+                StreamItem::Message(msg) => messages.push(msg),
+                StreamItem::Failed { .. } => failed += 1,
+            }
+            Ok(Flow::Continue)
+        },
+    )?;
     Ok(Collected { messages, failed })
 }
 

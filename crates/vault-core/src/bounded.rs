@@ -732,12 +732,12 @@ impl RunState<'_, '_> {
                         continue; // nothing carried (source did not opt in)
                     };
                     let mut reader = std::io::Cursor::new(bytes);
-                    let staged = match object_store
-                        .stage_reader(&mut reader, "eml", &mut self.media_budget)
-                    {
-                        Ok(staged) => staged,
-                        Err(_) => continue, // not retained; label covers it
-                    };
+                    let staged =
+                        match object_store.stage_reader(&mut reader, "eml", &mut self.media_budget)
+                        {
+                            Ok(staged) => staged,
+                            Err(_) => continue, // not retained; label covers it
+                        };
                     match object_store.promote(staged, &mut self.media_budget) {
                         Ok(object) => {
                             if let Some(summary) = self.originals_summary.as_mut() {

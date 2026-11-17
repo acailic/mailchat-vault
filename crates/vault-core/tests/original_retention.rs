@@ -123,9 +123,14 @@ fn retention_off_by_default_writes_no_rows_and_labels_records() {
 
     // The existing entry point — the one the app's command and job call
     // — keeps its signature and retains nothing.
-    let outcome =
-        mbox::import_pick_bounded(&mut storage, &pick, &env.data_dir(), &no_cancel, &mut no_progress)
-            .unwrap();
+    let outcome = mbox::import_pick_bounded(
+        &mut storage,
+        &pick,
+        &env.data_dir(),
+        &no_cancel,
+        &mut no_progress,
+    )
+    .unwrap();
     assert!(!outcome.cancelled);
     assert_eq!(outcome.summary.inserted, 2);
     assert!(
@@ -175,10 +180,7 @@ fn retained_import_stores_exact_raw_bytes_that_survive_source_deletion() {
     // object store, byte-exact, under the digest of their contents.
     fs::remove_dir_all(&pick).unwrap();
     assert!(!pick.exists());
-    for (external_id, bytes) in [
-        ("ret-a@example.com", raw[0]),
-        ("ret-b@example.com", raw[1]),
-    ] {
+    for (external_id, bytes) in [("ret-a@example.com", raw[0]), ("ret-b@example.com", raw[1])] {
         let id = message_id(&storage, external_id);
         let original = storage.original_for_message(id).unwrap().unwrap();
         assert_eq!(original.digest, sha256_hex(bytes));
@@ -247,8 +249,14 @@ fn retention_on_a_reimport_links_originals_to_existing_rows() {
     let (pick, raw) = eml_pick(&env);
     let mut storage = env.storage();
 
-    mbox::import_pick_bounded(&mut storage, &pick, &env.data_dir(), &no_cancel, &mut no_progress)
-        .unwrap();
+    mbox::import_pick_bounded(
+        &mut storage,
+        &pick,
+        &env.data_dir(),
+        &no_cancel,
+        &mut no_progress,
+    )
+    .unwrap();
     assert_eq!(original_rows(&storage, "original_objects"), 0);
     let id_before = message_id(&storage, "ret-a@example.com");
     assert_eq!(fidelity_label(&storage, id_before), "original not retained");
@@ -265,7 +273,10 @@ fn retention_on_a_reimport_links_originals_to_existing_rows() {
     assert_eq!(second.summary.skipped, 2);
     let originals = second.originals.expect("the retention pass ran");
     assert_eq!(originals.stored, 2);
-    assert_eq!(originals.new_bytes, raw.iter().map(|b| b.len() as u64).sum::<u64>());
+    assert_eq!(
+        originals.new_bytes,
+        raw.iter().map(|b| b.len() as u64).sum::<u64>()
+    );
 
     let id_after = message_id(&storage, "ret-a@example.com");
     assert_eq!(id_before, id_after, "the same archived row");

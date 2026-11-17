@@ -700,12 +700,7 @@ fn retained_originals_round_trip_and_verify_by_digest() {
     // original, and the stored bytes re-hash to that digest and match
     // the original message content byte for byte.
     let store = sc.fresh.store();
-    for (digest, part) in sc
-        .seed
-        .original_digests
-        .iter()
-        .zip(RETAINED_PARTS.iter())
-    {
+    for (digest, part) in sc.seed.original_digests.iter().zip(RETAINED_PARTS.iter()) {
         let name = store
             .object_name(digest)
             .expect("the restored store holds the original object");

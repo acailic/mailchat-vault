@@ -372,8 +372,8 @@ fn json_lines_round_trip_is_bit_identical_into_a_fresh_archive() {
             timezone: String::new(),
             time_confidence: String::new(),
             source_label: String::new(),
-        original_bytes: None,
-        original_ref: None,
+            original_bytes: None,
+            original_ref: None,
         };
         target.insert_message(&new).unwrap();
     }
@@ -1810,8 +1810,8 @@ fn json_lines_signal_rows_reimport_row_for_row() {
                 timezone: String::new(),
                 time_confidence: String::new(),
                 source_label: String::new(),
-        original_bytes: None,
-        original_ref: None,
+                original_bytes: None,
+                original_ref: None,
             })
             .unwrap();
     }
