@@ -20,13 +20,13 @@ import {
 } from "./settings";
 
 describe("prefillForKind", () => {
-  it("z.ai starts empty (defaults apply server-side)", () => {
+  it("z.ai auto-fills its kind defaults (model and endpoint)", () => {
     expect(prefillForKind("zai")).toEqual({
       id: "",
       name: "",
       kind: "zai",
-      base_url: "",
-      model: "",
+      base_url: "https://api.z.ai/api/anthropic",
+      model: "glm-5",
     });
   });
 
@@ -35,6 +35,16 @@ describe("prefillForKind", () => {
     expect(p.base_url).toBe("https://api.anthropic.com");
     expect(p.model).not.toBe("");
     expect(p.kind).toBe("anthropic");
+  });
+
+  it("azure starts empty: resource URL and deployment name are user-supplied", () => {
+    expect(prefillForKind("azure_openai")).toEqual({
+      id: "",
+      name: "",
+      kind: "azure_openai",
+      base_url: "",
+      model: "",
+    });
   });
 
   it("custom starts empty but is required to be filled", () => {

@@ -4187,9 +4187,9 @@ describe("settings screen", () => {
     );
     await boot();
     await vi.waitFor(() => expect(rowIds()).toEqual(["zai", "mine"]));
-    // Row contents: kind label, values, key placeholder for a stored key.
-    expect($<HTMLElement>('.provider-row[data-id="zai"] .kind-label').textContent)
-      .toBe("z.ai GLM");
+    // Row contents: kind select, values, key placeholder for a stored key.
+    expect($<HTMLSelectElement>('.provider-row[data-id="zai"] .prov-kind').value)
+      .toBe("zai");
     expect(rowInput("zai", "prov-name").value).toBe("");
     expect(rowInput("zai", "prov-url").value).toBe("");
     expect(rowInput("zai", "prov-url").placeholder).toContain("api.z.ai");
