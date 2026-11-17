@@ -210,4 +210,6 @@ pub enum Error {
     },
     #[error("identity link not found: {0}")]
     IdentityLinkNotFound(String),
+    #[error("person organization changed: the commit carried organization revision {expected} but the vault is at {current}; re-preview and confirm against the current revision")]
+    PersonLinksStaleRevision { expected: u64, current: u64 },
 }

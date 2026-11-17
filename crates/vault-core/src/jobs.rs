@@ -227,7 +227,8 @@ impl From<Error> for JobError {
             Error::PersonNotFound(_)
             | Error::InvalidPersonInput(_)
             | Error::IdentityLinkConflict { .. }
-            | Error::IdentityLinkNotFound(_) => JobError::Invalid {
+            | Error::IdentityLinkNotFound(_)
+            | Error::PersonLinksStaleRevision { .. } => JobError::Invalid {
                 message: e.to_string(),
             },
             Error::OAuth(_) => JobError::Network {

@@ -938,6 +938,38 @@ const MIGRATIONS: &[(i64, &str)] = &[
         CREATE INDEX idx_attachment_refs_message ON attachment_refs (message_id);
         "#,
     ),
+    (
+        23,
+        // The person link history ledger (A5a): one row per link or
+        // unlink a `person_links_commit` actually applied, tagged with
+        // the organization revision the commit produced. Minimal
+        // undo/audit record of confirmed association changes — no
+        // message payload is ever rewritten. `person_id` deliberately
+        // carries no foreign key: deleting a person removes
+        // organization only, and the audit ledger must neither block
+        // that deletion nor vanish with it.
+        r#"
+        CREATE TABLE person_link_history (
+            id                 INTEGER PRIMARY KEY,
+            person_id          TEXT NOT NULL,
+            source_instance_id TEXT NOT NULL,
+            -- 'stable_key' / 'author_name', exactly the anchor kinds of
+            -- person_identity_links.
+            anchor_kind        TEXT NOT NULL
+                CHECK (anchor_kind IN ('stable_key', 'author_name')),
+            anchor_value       TEXT NOT NULL,
+            -- 'link' or 'unlink' — what the commit applied.
+            operation          TEXT NOT NULL CHECK (operation IN ('link', 'unlink')),
+            -- Organization revision the commit recorded the change at
+            -- (the counter lives in archive_meta, key
+            -- 'organization_revision').
+            organization_revision INTEGER NOT NULL,
+            recorded_at        TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE INDEX idx_person_link_history_person
+            ON person_link_history (person_id);
+        "#,
+    ),
 ];
 
 /// Rust halves of migrations, for backfill logic that SQL alone cannot
@@ -3619,62 +3651,8 @@ impl Storage {
         person_id: &str,
         link: &NewPersonIdentityLink<'_>,
     ) -> Result<()> {
-        let anchor_value = normalize_anchor_value(link.anchor_kind, link.anchor_value)?;
         let tx = self.conn.unchecked_transaction()?;
-        let person: Option<String> = tx
-            .query_row(
-                "SELECT id FROM people WHERE id = ?1",
-                params![person_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if person.is_none() {
-            return Err(Error::PersonNotFound(person_id.to_string()));
-        }
-        let owner: Option<(String, String)> = tx
-            .query_row(
-                "SELECT p.id, p.name
-                 FROM person_identity_links AS l JOIN people AS p ON p.id = l.person_id
-                 WHERE l.source_instance_id = ?1
-                   AND l.anchor_kind = ?2
-                   AND l.anchor_value = ?3",
-                params![
-                    link.source_instance_id,
-                    link.anchor_kind.as_str(),
-                    anchor_value
-                ],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        match owner {
-            Some((owner_id, owner_name)) if owner_id != person_id => {
-                return Err(Error::IdentityLinkConflict {
-                    source_instance_id: link.source_instance_id.to_string(),
-                    anchor_kind: link.anchor_kind.as_str().to_string(),
-                    anchor_value,
-                    owner_id,
-                    owner_name,
-                });
-            }
-            // Already linked to this person: idempotent no-op.
-            Some(_) => {}
-            None => {
-                tx.execute(
-                    "INSERT INTO person_identity_links
-                         (id, person_id, source_instance_id, anchor_kind,
-                          anchor_value, display_label)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        new_uuid(),
-                        person_id,
-                        link.source_instance_id,
-                        link.anchor_kind.as_str(),
-                        anchor_value,
-                        link.display_label
-                    ],
-                )?;
-            }
-        }
+        apply_person_link(&tx, person_id, link)?;
         tx.commit()?;
         Ok(())
     }
@@ -3686,28 +3664,9 @@ impl Storage {
     /// belonging to a different person — are refused with
     /// [`Error::IdentityLinkNotFound`] / [`Error::PersonNotFound`].
     pub fn unlink_person_identity(&self, person_id: &str, link_id: &str) -> Result<()> {
-        let removed = self.conn.execute(
-            "DELETE FROM person_identity_links WHERE id = ?1 AND person_id = ?2",
-            params![link_id, person_id],
-        )?;
-        if removed == 0 {
-            // Distinguish "no such link" from "someone else's link" so
-            // the caller gets an explanation, not a bare failure.
-            let owner: Option<String> = self
-                .conn
-                .query_row(
-                    "SELECT person_id FROM person_identity_links WHERE id = ?1",
-                    params![link_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            return match owner {
-                Some(other) if other != person_id => Err(Error::IdentityLinkNotFound(format!(
-                    "link {link_id} belongs to person {other}, not {person_id}"
-                ))),
-                _ => Err(Error::IdentityLinkNotFound(link_id.to_string())),
-            };
-        }
+        let tx = self.conn.unchecked_transaction()?;
+        apply_person_unlink(&tx, person_id, link_id)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -3752,6 +3711,284 @@ impl Storage {
             )
             .optional()?;
         Ok(person)
+    }
+
+    /// The organization revision the person view currently sits at
+    /// (A5a): every [`Storage::person_links_commit`] that changes
+    /// anything bumps it inside the same transaction, so a preview or
+    /// a paginated person view can detect that the organization moved
+    /// underneath it instead of silently showing a changed person.
+    /// Starts at 0; lives in `archive_meta` next to the content
+    /// revision, so no migration is needed for the counter itself.
+    pub fn organization_revision(&self) -> Result<u64> {
+        organization_revision_on(&self.conn)
+    }
+
+    /// Preview a set of link/unlink operations (A5a): per-identity
+    /// evidence — the anchor exactly as it would be stored, how many
+    /// archived messages it matches in its source instance, up to
+    /// three representative messages, and for link ops the person
+    /// already holding a conflicting anchor. Nothing is written.
+    ///
+    /// The result carries the organization revision it was read at;
+    /// passing that revision to [`Storage::person_links_commit`] makes
+    /// the confirm/re-preview cycle explicit. Same-label identities
+    /// stay distinct entries: one per operation, each scoped to its
+    /// own source instance — nothing is merged or auto-linked.
+    ///
+    /// Validation mirrors the commit: unknown persons, empty anchors,
+    /// and unknown or foreign link ids are refused here, so a clean
+    /// preview means a confirmable set (bar a concurrent change, which
+    /// the commit's revision check catches).
+    pub fn person_link_preview(&self, ops: &[PersonLinkOp<'_>]) -> Result<PersonLinkPreview> {
+        const REPRESENTATIVES: usize = 3;
+        let mut entries = Vec::with_capacity(ops.len());
+        for op in ops {
+            // Resolve the op to (person, anchor descriptor, owner forecast).
+            let (person_id, source_instance_id, anchor_kind, anchor_value, display_label, owner) =
+                match op {
+                    PersonLinkOp::Link { person_id, link } => {
+                        let anchor_value =
+                            normalize_anchor_value(link.anchor_kind, link.anchor_value)?;
+                        let exists: Option<String> = self
+                            .conn
+                            .query_row(
+                                "SELECT id FROM people WHERE id = ?1",
+                                params![person_id],
+                                |row| row.get(0),
+                            )
+                            .optional()?;
+                        if exists.is_none() {
+                            return Err(Error::PersonNotFound(person_id.to_string()));
+                        }
+                        let owner: Option<Person> = self
+                            .conn
+                            .query_row(
+                                "SELECT p.id, p.name, p.created_at, p.updated_at
+                                 FROM person_identity_links AS l
+                                 JOIN people AS p ON p.id = l.person_id
+                                 WHERE l.source_instance_id = ?1
+                                   AND l.anchor_kind = ?2
+                                   AND l.anchor_value = ?3",
+                                params![
+                                    link.source_instance_id,
+                                    link.anchor_kind.as_str(),
+                                    anchor_value
+                                ],
+                                person_from_row,
+                            )
+                            .optional()?;
+                        (
+                            person_id.to_string(),
+                            link.source_instance_id.to_string(),
+                            link.anchor_kind,
+                            anchor_value,
+                            link.display_label.to_string(),
+                            owner.filter(|p| p.id != *person_id),
+                        )
+                    }
+                    PersonLinkOp::Unlink { person_id, link_id } => {
+                        // Same refusal semantics as the unlink itself:
+                        // the row must exist and belong to this person.
+                        let anchor: Option<(String, String, String, String, String)> = self
+                            .conn
+                            .query_row(
+                                "SELECT person_id, source_instance_id, anchor_kind,
+                                        anchor_value, display_label
+                                 FROM person_identity_links WHERE id = ?1",
+                                params![link_id],
+                                |row| {
+                                    Ok((
+                                        row.get(0)?,
+                                        row.get(1)?,
+                                        row.get(2)?,
+                                        row.get(3)?,
+                                        row.get(4)?,
+                                    ))
+                                },
+                            )
+                            .optional()?;
+                        let (owner_id, source_instance_id, kind_raw, anchor_value, display_label) =
+                            match anchor {
+                                Some(columns) => columns,
+                                None => {
+                                    return Err(Error::IdentityLinkNotFound(
+                                        link_id.to_string(),
+                                    ))
+                                }
+                            };
+                        if owner_id != *person_id {
+                            return Err(Error::IdentityLinkNotFound(format!(
+                                "link {link_id} belongs to person {owner_id}, not {person_id}"
+                            )));
+                        }
+                        let anchor_kind = PersonAnchorKind::from_str_opt(&kind_raw)
+                            .ok_or_else(|| {
+                                Error::Sqlite(rusqlite::Error::FromSqlConversionFailure(
+                                    2,
+                                    rusqlite::types::Type::Text,
+                                    format!("invalid anchor_kind: {kind_raw}").into(),
+                                ))
+                            })?;
+                        (
+                            person_id.to_string(),
+                            source_instance_id,
+                            anchor_kind,
+                            anchor_value,
+                            display_label,
+                            None,
+                        )
+                    }
+                };
+            let (matched_messages, representative_messages) = anchor_message_evidence(
+                &self.conn,
+                &source_instance_id,
+                anchor_kind,
+                &anchor_value,
+                REPRESENTATIVES,
+            )?;
+            entries.push(PersonLinkPreviewEntry {
+                person_id,
+                source_instance_id,
+                anchor_kind,
+                anchor_value,
+                display_label,
+                matched_messages,
+                representative_messages,
+                current_owner: owner,
+            });
+        }
+        Ok(PersonLinkPreview {
+            organization_revision: self.organization_revision()?,
+            entries,
+        })
+    }
+
+    /// Apply a set of link/unlink operations in **one transaction**
+    /// (A5a), guarded by the organization revision the caller
+    /// previewed at:
+    ///
+    /// - a commit whose `expected_organization_revision` is not the
+    ///   current one is refused with [`Error::PersonLinksStaleRevision`]
+    ///   carrying the current revision — the caller re-previews and
+    ///   confirms against the fresh evidence, never commits onto a
+    ///   silently changed organization;
+    /// - each op follows exactly the single-link semantics
+    ///   ([`Storage::link_person_identity`] /
+    ///   [`Storage::unlink_person_identity`]): idempotent re-links are
+    ///   no-ops, conflicting anchors are refused with
+    ///   [`Error::IdentityLinkConflict`], and a refusal rolls the
+    ///   whole set back;
+    /// - every op that actually changes the organization writes a
+    ///   `person_link_history` row (migration 23) and bumps the
+    ///   organization revision by exactly one for the whole set —
+    ///   the revision the result (and the history rows) carry.
+    ///
+    /// Archived rows are never touched: only association rows, the
+    /// history ledger, and the counter change.
+    pub fn person_links_commit(
+        &self,
+        expected_organization_revision: u64,
+        ops: &[PersonLinkOp<'_>],
+    ) -> Result<PersonLinksCommit> {
+        let tx = self.conn.unchecked_transaction()?;
+        let current = organization_revision_on(&tx)?;
+        if current != expected_organization_revision {
+            return Err(Error::PersonLinksStaleRevision {
+                expected: expected_organization_revision,
+                current,
+            });
+        }
+        let mut changed = false;
+        for op in ops {
+            match op {
+                PersonLinkOp::Link { person_id, link } => {
+                    if apply_person_link(&tx, person_id, link)? {
+                        changed = true;
+                        record_person_link_history(
+                            &tx,
+                            person_id,
+                            link.source_instance_id,
+                            link.anchor_kind.as_str(),
+                            &normalize_anchor_value(link.anchor_kind, link.anchor_value)?,
+                            PersonLinkOperation::Link,
+                            current + 1,
+                        )?;
+                    }
+                }
+                PersonLinkOp::Unlink { person_id, link_id } => {
+                    let anchor = apply_person_unlink(&tx, person_id, link_id)?;
+                    changed = true;
+                    record_person_link_history(
+                        &tx,
+                        person_id,
+                        &anchor.source_instance_id,
+                        &anchor.anchor_kind,
+                        &anchor.anchor_value,
+                        PersonLinkOperation::Unlink,
+                        current + 1,
+                    )?;
+                }
+            }
+        }
+        let organization_revision = if changed {
+            bump_organization_revision(&tx)?;
+            current + 1
+        } else {
+            current
+        };
+        tx.commit()?;
+        Ok(PersonLinksCommit {
+            organization_revision,
+        })
+    }
+
+    /// One person's applied association changes from the history
+    /// ledger (migration 23), oldest first — the undo/audit record
+    /// behind every preview/commit cycle. Survives person deletion:
+    /// deleting a person removes organization only, and the ledger is
+    /// the record of what was organized, not a live association.
+    pub fn person_link_history(&self, person_id: &str) -> Result<Vec<PersonLinkHistoryRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, person_id, source_instance_id, anchor_kind, anchor_value,
+                    operation, organization_revision, recorded_at
+             FROM person_link_history
+             WHERE person_id = ?1
+             ORDER BY recorded_at, id",
+        )?;
+        let rows = stmt.query_map(params![person_id], |row| {
+            let kind_raw: String = row.get(3)?;
+            let anchor_kind = PersonAnchorKind::from_str_opt(&kind_raw).ok_or_else(|| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    3,
+                    rusqlite::types::Type::Text,
+                    format!("invalid anchor_kind: {kind_raw}").into(),
+                )
+            })?;
+            let op_raw: String = row.get(5)?;
+            let operation = match op_raw.as_str() {
+                "link" => PersonLinkOperation::Link,
+                "unlink" => PersonLinkOperation::Unlink,
+                _ => {
+                    return Err(rusqlite::Error::FromSqlConversionFailure(
+                        5,
+                        rusqlite::types::Type::Text,
+                        format!("invalid operation: {op_raw}").into(),
+                    ))
+                }
+            };
+            Ok(PersonLinkHistoryRecord {
+                id: row.get(0)?,
+                person_id: row.get(1)?,
+                source_instance_id: row.get(2)?,
+                anchor_kind,
+                anchor_value: row.get(4)?,
+                operation,
+                organization_revision: row.get::<_, i64>(6)?.max(0) as u64,
+                recorded_at: row.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     // ------------------------------------------------------------------
@@ -4197,6 +4434,23 @@ fn bump_archive_revision(tx: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// The person-organization counterpart of [`bump_archive_revision`]
+/// (A5a): bumped inside every `person_links_commit` that changes
+/// anything, so person views and pending confirmations can detect a
+/// changed organization instead of silently acting on a stale one.
+/// Same key/value shape in `archive_meta`; separate counter, because
+/// content and organization change independently.
+fn bump_organization_revision(tx: &Connection) -> Result<()> {
+    tx.execute(
+        "INSERT INTO archive_meta (key, value) VALUES ('organization_revision', '1')
+         ON CONFLICT(key) DO UPDATE SET
+            value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+         WHERE key = 'organization_revision'",
+        [],
+    )?;
+    Ok(())
+}
+
 /// The non-empty `media` array of a message's `raw_json`, if any — the
 /// media-extraction pass writes it there ([`crate::media`]), and the
 /// ingest paths link/backfill from it.
@@ -4219,6 +4473,20 @@ fn archive_revision_on(conn: &Connection) -> Result<u64> {
     let value: Option<String> = conn
         .query_row(
             "SELECT value FROM archive_meta WHERE key = 'archive_revision'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(value.and_then(|v| v.parse().ok()).unwrap_or(0))
+}
+
+/// The current `organization_revision` counter on an arbitrary
+/// connection (0 before the first person-links commit — see
+/// [`Storage::organization_revision`]).
+fn organization_revision_on(conn: &Connection) -> Result<u64> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM archive_meta WHERE key = 'organization_revision'",
             [],
             |row| row.get(0),
         )
@@ -4868,6 +5136,357 @@ fn person_link_from_row(row: &Row<'_>) -> rusqlite::Result<PersonIdentityLink> {
         display_label: row.get(5)?,
         linked_at: row.get(6)?,
     })
+}
+
+/// One operation inside a preview/commit set (A5a). Every op names the
+/// person it acts on; a `Link` carries the full anchor descriptor,
+/// an `Unlink` names the stored link row to remove.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PersonLinkOp<'a> {
+    Link {
+        person_id: &'a str,
+        link: NewPersonIdentityLink<'a>,
+    },
+    Unlink {
+        person_id: &'a str,
+        link_id: &'a str,
+    },
+}
+
+/// What a history row (and an op) did to an anchor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonLinkOperation {
+    Link,
+    Unlink,
+}
+
+impl PersonLinkOperation {
+    /// The stored `operation` token.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PersonLinkOperation::Link => "link",
+            PersonLinkOperation::Unlink => "unlink",
+        }
+    }
+}
+
+/// A representative message of one identity, for the preview's "these
+/// are the messages you would organize" evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonLinkPreviewMessage {
+    pub id: i64,
+    pub author: String,
+    pub sent_at: String,
+    /// Short body excerpt (bounded, display only).
+    pub snippet: String,
+}
+
+/// Per-identity preview evidence (A5a): the anchor exactly as it would
+/// be stored, how many archived messages it matches in its source
+/// instance, and up to three representative messages. Same-label
+/// identities stay distinct entries — one entry per operation, each
+/// anchored to its own source instance, never merged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonLinkPreviewEntry {
+    pub person_id: String,
+    pub source_instance_id: String,
+    pub anchor_kind: PersonAnchorKind,
+    pub anchor_value: String,
+    pub display_label: String,
+    /// Archived messages in this source instance the anchor matches.
+    pub matched_messages: u64,
+    /// Up to three representative matches, oldest first.
+    pub representative_messages: Vec<PersonLinkPreviewMessage>,
+    /// For a `Link` op: the person already holding the anchor, when it
+    /// is someone else — the commit would refuse with
+    /// [`Error::IdentityLinkConflict`]; `None` when the anchor is free
+    /// (or already this person's). Unlink ops carry `None`.
+    pub current_owner: Option<Person>,
+}
+
+/// The [`Storage::person_link_preview`] result: the organization
+/// revision the evidence was read at (the value a subsequent
+/// [`Storage::person_links_commit`] must carry), one entry per
+/// operation, in operation order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonLinkPreview {
+    pub organization_revision: u64,
+    pub entries: Vec<PersonLinkPreviewEntry>,
+}
+
+/// The [`Storage::person_links_commit`] result: the organization
+/// revision the vault now sits at (the caller's new preview base).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonLinksCommit {
+    pub organization_revision: u64,
+}
+
+/// One applied association change from the audit ledger (migration
+/// 23). Pure record: nothing about archived messages is derivable or
+/// mutated from it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonLinkHistoryRecord {
+    pub id: i64,
+    pub person_id: String,
+    pub source_instance_id: String,
+    pub anchor_kind: PersonAnchorKind,
+    pub anchor_value: String,
+    pub operation: PersonLinkOperation,
+    /// Organization revision the commit that applied this change
+    /// produced.
+    pub organization_revision: u64,
+    pub recorded_at: String,
+}
+
+/// Extract the case-folded address a stable-key anchor matches from a
+/// verbatim author string: the `<...>` segment of a `Name <address>`
+/// author, or the whole trimmed string when the author is a bare
+/// address (contains `@`). Authors that carry neither form — chat
+/// display names — have *no* stable key; they surface as ambiguous,
+/// source-scoped author-name identities and never match a stable-key
+/// anchor.
+fn author_stable_key(author: &str) -> Option<String> {
+    let trimmed = author.trim();
+    if let (Some(open), Some(close)) = (trimmed.rfind('<'), trimmed.rfind('>')) {
+        if open < close {
+            let inner = trimmed[open + 1..close].trim();
+            if !inner.is_empty() {
+                return Some(inner.to_lowercase());
+            }
+        }
+    }
+    if trimmed.contains('@') {
+        return Some(trimmed.to_lowercase());
+    }
+    None
+}
+
+/// A short, char-boundary-safe body excerpt for preview evidence.
+fn preview_snippet(body: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    if body.chars().count() <= MAX_CHARS {
+        return body.to_string();
+    }
+    body.chars().take(MAX_CHARS).collect()
+}
+
+/// The anchor columns of one `person_identity_links` row, as the
+/// unlink path needs them (explanation errors and history records).
+struct LinkAnchor {
+    source_instance_id: String,
+    anchor_kind: String,
+    anchor_value: String,
+}
+
+/// The shared body of [`Storage::link_person_identity`] and the commit
+/// path: validate, conflict-check, and insert one link row on `conn`
+/// (inside the caller's transaction). Returns whether a row was
+/// inserted — re-linking an anchor this person already holds is an
+/// idempotent no-op, not a change.
+fn apply_person_link(
+    conn: &Connection,
+    person_id: &str,
+    link: &NewPersonIdentityLink<'_>,
+) -> Result<bool> {
+    let anchor_value = normalize_anchor_value(link.anchor_kind, link.anchor_value)?;
+    let person: Option<String> = conn
+        .query_row(
+            "SELECT id FROM people WHERE id = ?1",
+            params![person_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if person.is_none() {
+        return Err(Error::PersonNotFound(person_id.to_string()));
+    }
+    let owner: Option<(String, String)> = conn
+        .query_row(
+            "SELECT p.id, p.name
+             FROM person_identity_links AS l JOIN people AS p ON p.id = l.person_id
+             WHERE l.source_instance_id = ?1
+               AND l.anchor_kind = ?2
+               AND l.anchor_value = ?3",
+            params![
+                link.source_instance_id,
+                link.anchor_kind.as_str(),
+                anchor_value
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    match owner {
+        Some((owner_id, owner_name)) if owner_id != person_id => {
+            return Err(Error::IdentityLinkConflict {
+                source_instance_id: link.source_instance_id.to_string(),
+                anchor_kind: link.anchor_kind.as_str().to_string(),
+                anchor_value,
+                owner_id,
+                owner_name,
+            });
+        }
+        // Already linked to this person: idempotent no-op.
+        Some(_) => Ok(false),
+        None => {
+            conn.execute(
+                "INSERT INTO person_identity_links
+                     (id, person_id, source_instance_id, anchor_kind,
+                      anchor_value, display_label)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    new_uuid(),
+                    person_id,
+                    link.source_instance_id,
+                    link.anchor_kind.as_str(),
+                    anchor_value,
+                    link.display_label
+                ],
+            )?;
+            Ok(true)
+        }
+    }
+}
+
+/// The shared body of [`Storage::unlink_person_identity`] and the
+/// commit path: locate one link row, refuse with the same
+/// explanations when it is missing or someone else's, and delete it
+/// inside the caller's transaction. Returns the removed row's anchor
+/// columns for the history record.
+fn apply_person_unlink(conn: &Connection, person_id: &str, link_id: &str) -> Result<LinkAnchor> {
+    let anchor: Option<(String, String, String, String)> = conn
+        .query_row(
+            "SELECT person_id, source_instance_id, anchor_kind, anchor_value
+             FROM person_identity_links WHERE id = ?1",
+            params![link_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let (owner, source_instance_id, anchor_kind, anchor_value) = match anchor {
+        Some(columns) => columns,
+        None => return Err(Error::IdentityLinkNotFound(link_id.to_string())),
+    };
+    if owner != person_id {
+        return Err(Error::IdentityLinkNotFound(format!(
+            "link {link_id} belongs to person {owner}, not {person_id}"
+        )));
+    }
+    conn.execute(
+        "DELETE FROM person_identity_links WHERE id = ?1 AND person_id = ?2",
+        params![link_id, person_id],
+    )?;
+    Ok(LinkAnchor {
+        source_instance_id,
+        anchor_kind,
+        anchor_value,
+    })
+}
+
+/// Record one applied association change in the history ledger
+/// (migration 23) at the revision the committing transaction produced.
+fn record_person_link_history(
+    conn: &Connection,
+    person_id: &str,
+    source_instance_id: &str,
+    anchor_kind: &str,
+    anchor_value: &str,
+    operation: PersonLinkOperation,
+    organization_revision: u64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO person_link_history
+             (person_id, source_instance_id, anchor_kind, anchor_value,
+              operation, organization_revision)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            person_id,
+            source_instance_id,
+            anchor_kind,
+            anchor_value,
+            operation.as_str(),
+            organization_revision as i64
+        ],
+    )?;
+    Ok(())
+}
+
+/// Message evidence of one anchor inside its source instance: how many
+/// archived rows match, plus up to `limit` representative rows, oldest
+/// first. Author-name anchors match the verbatim author string;
+/// stable-key anchors match the case-folded address extracted from the
+/// author string (`Name <address>` and bare-address forms).
+fn anchor_message_evidence(
+    conn: &Connection,
+    source_instance_id: &str,
+    anchor_kind: PersonAnchorKind,
+    anchor_value: &str,
+    limit: usize,
+) -> Result<(u64, Vec<PersonLinkPreviewMessage>)> {
+    const REPRESENTATIVE_SQL: &str = "SELECT id, author, COALESCE(sent_instant, ''), body
+             FROM archive_messages
+             WHERE source_instance_id = ?1";
+    match anchor_kind {
+        PersonAnchorKind::AuthorName => {
+            let matched: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM archive_messages
+                 WHERE source_instance_id = ?1 AND author = ?2",
+                params![source_instance_id, anchor_value],
+                |row| row.get(0),
+            )?;
+            let mut stmt = conn.prepare(&format!(
+                "{REPRESENTATIVE_SQL} AND author = ?2
+                 ORDER BY COALESCE(sent_instant, ''), id LIMIT {limit}"
+            ))?;
+            let rows = stmt.query_map(
+                params![source_instance_id, anchor_value],
+                |row| {
+                    Ok(PersonLinkPreviewMessage {
+                        id: row.get(0)?,
+                        author: row.get(1)?,
+                        sent_at: row.get(2)?,
+                        snippet: preview_snippet(&row.get::<_, String>(3)?),
+                    })
+                },
+            )?;
+            let representative = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok((matched.max(0) as u64, representative))
+        }
+        PersonAnchorKind::StableKey => {
+            // The `instr` prefilter (case-folded both sides — stable
+            // keys are always stored lowercased) keeps the scan bounded
+            // to authors that even mention the address; the exact check
+            // extracts and case-folds each author's address in Rust.
+            let mut stmt = conn.prepare(&format!(
+                "{REPRESENTATIVE_SQL} AND instr(lower(author), ?2) > 0
+                 ORDER BY COALESCE(sent_instant, ''), id"
+            ))?;
+            let rows = stmt.query_map(params![source_instance_id, anchor_value], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            let mut matched = 0u64;
+            let mut representative = Vec::new();
+            for row in rows {
+                let (id, author, sent_at, body) = row?;
+                if author_stable_key(&author).as_deref() != Some(anchor_value) {
+                    continue;
+                }
+                matched += 1;
+                if representative.len() < limit {
+                    representative.push(PersonLinkPreviewMessage {
+                        id,
+                        author,
+                        sent_at,
+                        snippet: preview_snippet(&body),
+                    });
+                }
+            }
+            Ok((matched, representative))
+        }
+    }
 }
 
 /// A durable source instance as stored (see
