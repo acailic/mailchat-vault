@@ -4,9 +4,9 @@
 //!
 //! This slice is the protocol engine only — the desktop folder picker
 //! and the Tauri wiring are a thin follow-up, and the executing copy
-//! ([`vault_move_commit`], plan section 8 steps 2–5) is the next
-//! ticket. Nothing here switches the active vault or removes the old
-//! copy.
+//! (a future `vault_move_commit`, plan section 8 steps 2–5) is the
+//! next ticket. Nothing here switches the active vault or removes the
+//! old copy.
 //!
 //! # Inspection
 //!
