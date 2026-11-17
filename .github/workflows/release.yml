@@ -165,6 +165,14 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
+      # The rust-toolchain.toml pin selects the active toolchain; add both
+      # targets to THAT toolchain explicitly - rust-cache can otherwise
+      # restore a state where x86_64-apple-darwin is missing and the
+      # universal build dies with "Target x86_64-apple-darwin is not
+      # installed".
+      - name: Ensure both Apple targets on the pinned toolchain
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Install frontend dependencies
