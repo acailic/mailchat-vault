@@ -919,6 +919,20 @@ fn vector_leg_meets_baseline_floors() {
 #[test]
 fn fused_leg_meets_baseline_floors() {
     let ev = evaluate();
+    // The exact macro-averaged measurements (visible with --nocapture;
+    // failure messages always carry them): the AFTER side of the
+    // BEFORE/AFTER comparison against the recorded baseline above.
+    println!(
+        "recall@10 / nDCG@10 — fts {:.3}/{:.3}, vector {:.3}/{:.3}, \
+         fused {:.3}/{:.3} (fused-reversed nDCG@10 {:.3})",
+        ev.fts.recall,
+        ev.fts.ndcg,
+        ev.vector.recall,
+        ev.vector.ndcg,
+        ev.fused.recall,
+        ev.fused.ndcg,
+        ev.fused_reversed_ndcg
+    );
     assert!(
         ev.fused.recall >= FUSED_RECALL_FLOOR,
         "fused recall@10 = {:.3} below floor {:.3}",

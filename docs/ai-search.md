@@ -85,7 +85,7 @@ Embeddings live in a `message_embeddings` table (schema migration 3) as **one 51
 
 ### Hybrid ranking
 
-FTS5 relevance and cosine similarity have incomparable scales, so the two ranked lists are fused with **Reciprocal Rank Fusion**: score(d) = Σ 1/(60 + rank). A row found by both legs outranks a row found by one. The plan's date bounds apply to the vector leg exactly as to the FTS leg. The Ask status line always shows the mode used: `ranked: hybrid FTS + local vectors`, `ranked: FTS only`, or `ranked: local vectors only`.
+FTS5 relevance and cosine similarity have incomparable scales, so the two ranked lists are fused with **Reciprocal Rank Fusion**: score(d) = Σ 1/(60 + rank). The constant k = 60 follows Cormack, Buettner & Clarke, *"Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning Methods"* (SIGIR 2009, doi:10.1145/1571941.1572114), where rank-based fusion with this k beat the best individual system and learned fusion — with zero training data. A row found by both legs outranks a row found by one. The plan's date bounds apply to the vector leg exactly as to the FTS leg. The Ask status line always shows the mode used: `ranked: hybrid FTS + local vectors`, `ranked: FTS only`, or `ranked: local vectors only`.
 
 ### Incremental job
 

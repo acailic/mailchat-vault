@@ -141,6 +141,7 @@ pub mod pdf_text;
 pub mod person_timeline;
 pub mod preview;
 pub mod query;
+pub mod rank_fusion;
 pub mod reminders;
 pub mod safe_migration;
 pub mod scheduler;
