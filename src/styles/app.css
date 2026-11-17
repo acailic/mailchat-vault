@@ -92,9 +92,13 @@ body {
   color: var(--text);
 }
 
-/* Focus visibility for keyboard users everywhere. */
+/* Focus visibility for keyboard users everywhere: one global rule on
+ * the accent (the identity contract — selected/interactive color), the
+ * same ring in every theme and on every control. No per-control
+ * outline overrides; the two .ask-source:focus-visible rules set
+ * background only. */
 :focus-visible {
-  outline: 2px solid var(--focus-ring);
+  outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 
@@ -559,9 +563,12 @@ kbd {
   color: inherit;
   width: fit-content;
 }
-#filters > summary:hover,
-#export-menu > summary:hover,
-#ask-fold > summary:hover { background: var(--panel-2); }
+/* Every disclosure summary is a clickable control: the shared cursor
+ * and the same quiet hover as the other clickable families (fills the
+ * gap the three grouped ids used to leave — bare summaries like the
+ * Technical-details fold and the ask-collected URLs now match). */
+summary { cursor: pointer; }
+summary:hover { background: var(--panel-2); }
 #filters > summary.on,
 #ask-fold > summary.on {
   background: var(--selection);
@@ -951,8 +958,10 @@ mark.hit {
   border-radius: var(--radius-m);
   background: var(--panel);
 }
-/* M5: clickable citations inside the answer jump to the source message. */
-#answer .citation {
+/* M5: clickable citations inside the answer jump to the source message.
+ * Selected as button.citation so the accent color sits on an explicitly
+ * interactive selector (the accent-usage rule in tokens.css). */
+#answer button.citation {
   font: inherit;
   color: var(--accent);
   background: none;
@@ -1556,6 +1565,40 @@ button,
   transform: scale(0.96);
 }
 
+/* The .mv-press contract applied by selector to every clickable
+ * family, so markup stays unchanged: buttons (incl. .chip,
+ * .nav-view-btn, .settings-nav-btn, .workspace-tab-btn, .ask-source —
+ * all <button>-based), native summary disclosures, result rows
+ * (.hit-item), thread rows (.thread-row.link) and ask-source rows.
+ * The transition carries the color feedback too, so this one rule —
+ * not a per-family override — owns hover/press feedback for the set.
+ * Disabled controls are muted and not-allowed via button:disabled and
+ * never press (:not(:disabled) below). */
+button,
+.chip,
+.nav-view-btn,
+.settings-nav-btn,
+.workspace-tab-btn,
+summary,
+.hit-item,
+.thread-row.link,
+.ask-source {
+  transition:
+    background-color var(--motion-fast) var(--ease-out),
+    transform var(--motion-fast) var(--ease-press);
+}
+button:active:not(:disabled),
+.chip:active:not(:disabled),
+.nav-view-btn:active:not(:disabled),
+.settings-nav-btn:active:not(:disabled),
+.workspace-tab-btn:active:not(:disabled),
+summary:active:not(:disabled),
+.hit-item:active:not(:disabled),
+.thread-row.link:active:not(:disabled),
+.ask-source:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
 /* Dialog / large-surface entry: fade plus a gentle 0.98 settle (from
  * the pre-state opacity 0, scale(0.98)) over the slow token — the only
  * sanctioned --motion-slow movement use. */
@@ -1612,6 +1655,32 @@ button,
     transition: none;
   }
   .mv-press:active:not(:disabled) {
+    transform: none;
+  }
+
+  /* The clickable-family press list above keeps only its color
+   * feedback here — the transform transition and the active scale
+   * are removed, so press feedback is instant, never movement. */
+  button,
+  .chip,
+  .nav-view-btn,
+  .settings-nav-btn,
+  .workspace-tab-btn,
+  summary,
+  .hit-item,
+  .thread-row.link,
+  .ask-source {
+    transition: background-color var(--motion-fast) var(--ease-out);
+  }
+  button:active:not(:disabled),
+  .chip:active:not(:disabled),
+  .nav-view-btn:active:not(:disabled),
+  .settings-nav-btn:active:not(:disabled),
+  .workspace-tab-btn:active:not(:disabled),
+  summary:active:not(:disabled),
+  .hit-item:active:not(:disabled),
+  .thread-row.link:active:not(:disabled),
+  .ask-source:active:not(:disabled) {
     transform: none;
   }
 

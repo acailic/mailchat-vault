@@ -128,6 +128,13 @@
   --muted: #5d6a60;
   --border: #d8d3c8;
   --border-strong: #b9b2a4;
+  /* Accent-usage rule (the identity-pass contract, enforced by the
+   * invariant tests in a11y.test.ts): --accent and --accent-hover mark
+   * INTERACTIVE or SELECTED states only — borders, small badges,
+   * primary buttons, the focus ring — never body text outside an
+   * interactive affordance and never large decorative fills. Chart
+   * ramps and data fills (day histogram, usage/progress bars) are
+   * exempt: they are data, not decoration. */
   --accent: #2d6a4f;
   --accent-hover: #1f5440;
   --accent-fg: #ffffff;
@@ -145,7 +152,6 @@
   --success: #256b3c;
   --warning: #8a5a00;
   --danger: #b3261e;
-  --focus-ring: #1f5440;
   --shadow: 0 1px 2px rgba(31, 42, 36, 0.08), 0 4px 12px rgba(31, 42, 36, 0.06);
 
   color-scheme: light;
@@ -174,7 +180,6 @@
   --success: #7fc492;
   --warning: #d9a84e;
   --danger: #f08a80;
-  --focus-ring: #9ccdb2;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.35);
 
   color-scheme: dark;
@@ -206,7 +211,6 @@
   --success: #8fc79a;
   --warning: #d9a84e;
   --danger: #f08a80;
-  --focus-ring: #eb9d58;
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.35);
 
   color-scheme: dark;
@@ -238,7 +242,6 @@
     --success: #7fc492;
     --warning: #d9a84e;
     --danger: #f08a80;
-    --focus-ring: #9ccdb2;
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.35);
 
     color-scheme: dark;

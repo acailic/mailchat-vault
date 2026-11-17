@@ -8,9 +8,110 @@
     <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />
     <!-- Styles and the bundled Source Sans 3 font are imported from
          src/main.ts so Vite bundles (and hashes) them into the app. -->
+    <!-- First paint (identity pass): the theme must resolve BEFORE the
+         module bundle — and tokens.css with it — loads, so the very
+         first frame is branded instead of the webview default. The
+         inline script mirrors resolveTheme in src/main.ts: localStorage
+         mcv.themeVesper "1" → vesper, "0" → follow prefers-color-scheme,
+         absent → vesper (the product default); it sets data-theme so
+         splash and shell paint themed, and applyTheme corrects any
+         drift once backend settings arrive. The token hex values are
+         mirrored below (they ship too late for this paint) — keep in
+         sync with the theme blocks in src/styles/tokens.css. The
+         module hides the splash at first render (hideBootSplash in
+         src/main.ts); the load listener and 2s timeout in the script
+         are backstops so a failed module load can never strand it. -->
+    <style>
+      #boot-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 90;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #1f1d1b; /* vesper --canvas (the default) */
+      }
+      :root[data-theme="dark"] #boot-splash { background: #191d1b; }
+      :root[data-theme="light"] #boot-splash { background: #faf8f4; }
+      #boot-splash svg {
+        width: 64px;
+        height: 64px;
+        color: #d9d2c7; /* vesper --text */
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.5;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      :root[data-theme="dark"] #boot-splash svg { color: #e7ece8; }
+      :root[data-theme="light"] #boot-splash svg { color: #1f2a24; }
+      #boot-splash .logo-bubble {
+        fill: #e08e45; /* vesper --accent */
+        stroke: none;
+      }
+      #boot-splash .logo-dots {
+        fill: none;
+        stroke: #241505; /* vesper --accent-fg */
+        stroke-width: 2;
+        stroke-linecap: round;
+      }
+      :root[data-theme="dark"] #boot-splash .logo-bubble { fill: #7fb99a; }
+      :root[data-theme="dark"] #boot-splash .logo-dots { stroke: #10241a; }
+      :root[data-theme="light"] #boot-splash .logo-bubble { fill: #2d6a4f; }
+      :root[data-theme="light"] #boot-splash .logo-dots { stroke: #ffffff; }
+      /* The swap to the app shell: an opacity-only fade — never
+         movement, no progress theater — and only when the user has
+         not asked for reduced movement (mirrored --motion-standard /
+         --ease-out). Removal is instant under reduce. */
+      #boot-splash.hide {
+        opacity: 0;
+        transition: opacity 180ms cubic-bezier(0.23, 1, 0.32, 1);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #boot-splash.hide { transition: none; }
+      }
+    </style>
+    <script>
+      (function () {
+        var root = document.documentElement;
+        try {
+          var vesper = localStorage.getItem("mcv.themeVesper");
+          root.dataset.theme =
+            vesper === "0"
+              ? window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light"
+              : "vesper";
+        } catch (e) {
+          root.dataset.theme = "vesper";
+        }
+        // Backstops: the module's first-render hide is the normal
+        // path; window load and a hard 2s timeout guarantee the
+        // splash can never strand on a failed module load.
+        function drop() {
+          var el = document.getElementById("boot-splash");
+          if (el) el.remove();
+        }
+        window.addEventListener("load", drop);
+        window.setTimeout(drop, 2000);
+      })();
+    </script>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
+
+    <!-- First-paint splash (see the head comment): the logo mark — the
+         same envelope + bubble as #app-title — centered on the theme
+         canvas. Direct body child, outside #app, aria-hidden: it never
+         joins the tab order and leaves no accessibility residue. -->
+    <div id="boot-splash" aria-hidden="true">
+      <svg viewBox="0 0 24 24" focusable="false">
+        <rect x="3" y="4.5" width="13" height="9.5" rx="1.5"/>
+        <path d="M3.8 5.9 9.5 10l5.7-4.1"/>
+        <path class="logo-bubble" d="M14.6 12h4.1a2 2 0 0 1 2 2v3.2a2 2 0 0 1-2 2h-2.3l-2.1 1.8v-1.8h-.6a2 2 0 0 1-2-2V14a2 2 0 0 1 2-2Z"/>
+        <path class="logo-dots" d="M16.3 15.3h.01M18.6 15.3h.01M17.45 17.2h.01"/>
+      </svg>
+    </div>
 
     <div id="app" data-view="workspace" data-layout="wide" data-nav="closed" data-reading="closed">
       <nav id="nav" aria-label="Workspace">
