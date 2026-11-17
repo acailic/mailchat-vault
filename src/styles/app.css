@@ -1339,19 +1339,37 @@ label.field-check input { margin: 0; }
   padding-top: var(--sp-3);
   border-top: 1px solid var(--border);
 }
+/* Provider rows: one sectioned card per provider (Provider / Model /
+ * Credentials / Advanced), reusing the settings-form field pattern. */
 .provider-row {
   display: grid;
-  grid-template-columns: auto auto 1.1fr 1.4fr 1fr 1fr auto;
-  gap: 6px;
-  align-items: center;
+  gap: var(--sp-2);
   margin-top: var(--sp-2);
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
 }
-.provider-row .kind-label { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.prov-section { display: flex; gap: var(--sp-2) var(--sp-3); flex-wrap: wrap; align-items: center; }
+.prov-section-title {
+  font-size: var(--text-meta);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  width: 100%;
+}
+.provider-row .prov-field { font-weight: 600; font-size: var(--text-meta); color: var(--muted); }
+.provider-row .prov-field input, .provider-row .prov-field select {
+  font-weight: 400;
+  color: var(--text);
+}
 .provider-row input[type="text"] { min-width: 6em; }
 .provider-row input[type="password"] { min-width: 8em; }
 .provider-row .small-btn, .row .small-btn { padding: 4px 8px; font-size: 12px; }
-/* Per-row Test-connection outcome: a full-width line below the inputs. */
-.prov-test-status { grid-column: 1 / -1; min-height: 1em; }
+/* Inline validation and the missing-key note sit under their field. */
+.field-error { font-weight: 400; color: var(--danger); }
+.prov-key-note { color: var(--warning); }
+/* Per-row Test-connection outcome: a full-width line in Credentials. */
+.prov-test-status { flex: 1; min-height: 1em; }
 
 /* --- Medium layout (800–1099px): nav + one content column ---------------- */
 
@@ -1412,7 +1430,7 @@ label.field-check input { margin: 0; }
 
   /* Keep every control reachable without horizontal scrolling. */
   #results-col, #view-sources, #view-activity, #view-settings { padding: var(--sp-3); }
-  .provider-row { grid-template-columns: 1fr 1fr; }
+  .provider-row { padding: var(--sp-2); }
   .day-chart { height: 48px; }
 }
 
