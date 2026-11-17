@@ -119,7 +119,7 @@ Use a quiet reference-library aesthetic with dense but comfortable message rows.
 
 Define semantic tokens for canvas, panel, text, muted text, border, accent, selection, match, success, warning, and danger. Start with warm neutral light surfaces and a forest-green accent; provide a dark equivalent and System/Light/Dark settings. Final token values must pass measured contrast. Use an amber search-match highlight distinct from selection. Keep message lines near 70–85 characters where space permits.
 
-Motion is limited to 120–180ms opacity/transform state transitions and disabled for reduced-motion preferences. Do not animate message reorderings, use autoplay media, fetch fonts remotely, or decorate the workspace with metrics unrelated to retrieval.
+Motion uses the shared token vocabulary (`--motion-fast` 120ms, `--motion-standard` 180ms, `--motion-slow` 240ms for dialogs/large surfaces only, with `--ease-out`/`--ease-press`) for opacity/transform state transitions; the `prefers-reduced-motion` block removes all movement and ambient animation while keeping opacity/color feedback. Do not animate message reorderings, use autoplay media, fetch fonts remotely, or decorate the workspace with metrics unrelated to retrieval.
 
 ## State and recovery matrix
 
