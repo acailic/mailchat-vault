@@ -2561,6 +2561,33 @@ mod tests {
     }
 
     #[test]
+    fn pre_fold_payloads_still_deserialize() {
+        // The cluster fields are additive: a summary serialized before
+        // the fold (no cluster_count / cluster_member_ids) still
+        // deserializes, so old cached payloads are not a breaking
+        // change.
+        let pre_fold = serde_json::json!({
+            "id": 7,
+            "source_id": "src-1",
+            "source_label": "mbox",
+            "conversation_id": null,
+            "conversation_label": null,
+            "author": "ana",
+            "subject": null,
+            "sent_at": "2026-11-01T09:00:00Z",
+            "time_confidence": "explicit_offset",
+            "snippet": "…",
+            "attachment_count": 0,
+            "available_attachment_count": 0,
+            "has_conflicting_revision": false
+        });
+        let summary: MessageSummary = serde_json::from_value(pre_fold).unwrap();
+        assert_eq!(summary.id, 7);
+        assert_eq!(summary.cluster_count, 0);
+        assert!(summary.cluster_member_ids.is_empty());
+    }
+
+    #[test]
     fn normalize_clamps_and_validates() {
         let req = SearchArchiveRequest {
             limit: Some(0),
@@ -3288,17 +3315,40 @@ mod tests {
             text: "needle".into(),
             ..SearchArchiveRequest::default()
         };
+        // Byte-identical bodies are SimHash-identical, so the P2.14
+        // fold collapses each two-row page into its higher-ranked
+        // (lower-id) representative; the cursor still names the
+        // pre-fold tail, so the walk neither skips nor repeats a row.
         let (pages, cursors) = cursor_walk(&s, &base, 2);
         assert_eq!(
             pages,
-            vec![
-                tied_ids[0..2].to_vec(),
-                tied_ids[2..4].to_vec(),
-                vec![tied_ids[4]],
-            ],
-            "tied ranks page by the id tiebreak"
+            vec![vec![tied_ids[0]], vec![tied_ids[2]], vec![tied_ids[4]],],
+            "tied ranks fold page by page onto the id-tiebreak winner"
         );
         assert!(cursors.last().unwrap().is_none());
+        // Every tied id appears exactly once — as a representative or
+        // as a folded member of the previous page's representative.
+        let first = s.search_archive(&SearchArchiveRequest {
+            limit: Some(2),
+            ..base.clone()
+        });
+        let second = s.search_archive(&SearchArchiveRequest {
+            limit: Some(2),
+            cursor: first.as_ref().unwrap().next_cursor.clone(),
+            ..base.clone()
+        });
+        let mut seen: Vec<i64> = Vec::new();
+        for page in [&first.unwrap(), &second.unwrap()] {
+            for hit in &page.hits {
+                seen.push(hit.id);
+                seen.extend(&hit.cluster_member_ids);
+                assert_eq!(hit.cluster_count, hit.cluster_member_ids.len() as u32 + 1);
+            }
+        }
+        seen.push(tied_ids[4]);
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen, tied_ids, "no row skipped or repeated by the fold");
     }
 
     #[test]

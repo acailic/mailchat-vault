@@ -168,7 +168,11 @@ fn all_v2_filters_and_timezone_bounds_survive_export_while_pagination_is_ignored
             "another",
         ),
     ] {
-        let mut m = message("mbox", id, date, "contract accepted");
+        // Distinct bodies per row: this test drives filters, and the
+        // P2.14 near-duplicate fold would otherwise collapse the
+        // byte-identical rows into one representative, hiding the
+        // author lookup below.
+        let mut m = message("mbox", id, date, &format!("contract accepted {id}"));
         m.author = author.into();
         m.conversation_key = format!("email:thread:{conversation}");
         if attached {
