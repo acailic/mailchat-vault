@@ -1,4 +1,7 @@
-/** Icon names — one entry per `<symbol id="i-…">` in the index.html sprite. */
+/** Icon names — one entry per `<symbol id="i-…">` in the index.html sprite.
+ * The `empty-*` names are the empty-state illustrations: larger 48-grid
+ * line-art scenes (not UI glyphs) under the same decorative, aria-hidden
+ * contract — the headline and copy beside them carry the meaning. */
 export type IconName =
   | "archive"
   | "sources"
@@ -18,7 +21,11 @@ export type IconName =
   | "mail"
   | "chat"
   | "file"
-  | "server";
+  | "server"
+  | "empty-search"
+  | "empty-sources"
+  | "empty-import"
+  | "empty-backup";
 
 /** Inline icon markup referencing the static sprite in index.html.
  * Decorative by contract: aria-hidden, always accompanied by a text label. */

@@ -17,7 +17,6 @@ import {
   sourceChipRows,
   sourceChipStatus,
   sourceIcon,
-  sourcesEmptyLine,
   syncFailureText,
   syncNowRequest,
 } from "./accountsview";
@@ -258,10 +257,6 @@ describe("labels and status lines", () => {
       "1,234 messages · 3 failing",
     );
   });
-
-  it("words the empty state", () => {
-    expect(sourcesEmptyLine()).toContain("No sources yet");
-  });
 });
 
 describe("sourceChipStatus (the chip's short per-source status)", () => {
@@ -369,6 +364,7 @@ describe("renderSourcesList", () => {
       onUpdateCredentials: vi.fn(),
       onForget: vi.fn(),
       onDisconnect: vi.fn(),
+      onAddSource: vi.fn(),
     };
     renderSourcesList(el, accounts, opts);
     return { el, opts };
@@ -441,11 +437,21 @@ describe("renderSourcesList", () => {
     expect(again.textContent).toBe("Disconnect…");
   });
 
-  it("renders the empty state as a single row", () => {
-    const { el } = render([]);
+  it("renders the empty state as one illustrated row with one CTA", () => {
+    const { el, opts } = render([]);
     expect(el.children.length).toBe(1);
-    expect(el.querySelector(".account-row.empty")!.textContent).toContain("No sources yet");
-    expect(el.querySelectorAll("button").length).toBe(0);
+    const row = el.querySelector(".account-row.empty")!;
+    // The named-state shape: line-art illustration, headline, copy, CTA.
+    expect(row.querySelector(".empty-state-art")!.getAttribute("aria-hidden")).toBe("true");
+    expect(row.querySelector(".empty-state-art use")?.getAttribute("href")).toBe(
+      "#i-empty-sources",
+    );
+    expect(row.querySelector(".empty-state-headline")!.textContent).toBe("No sources yet");
+    expect(row.querySelector(".empty-state-copy")!.textContent).toContain("archive");
+    const cta = row.querySelector(".empty-state-cta button") as HTMLButtonElement;
+    expect(cta.textContent).toBe("Add source…");
+    cta.click();
+    expect(opts.onAddSource).toHaveBeenCalledTimes(1);
   });
 
   it("escapes nothing by construction: labels land via textContent", () => {
