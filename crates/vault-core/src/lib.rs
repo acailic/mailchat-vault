@@ -92,6 +92,11 @@
 //!   vault identity, the exclusive advisory session lock, and the
 //!   derived vault paths, so every consumer resolves the vault through
 //!   a single session before custom locations exist.
+//! - [`vault_move`]: the A7 vault-location engine — candidate-location
+//!   inspection (write access, filesystem type, free space, existing
+//!   identity, schema compatibility), the phased move preview with a
+//!   byte estimate, and the device-local move journal whose every
+//!   phase has one defined recovery action at startup.
 
 pub mod backup;
 pub mod bounded;
@@ -130,6 +135,7 @@ pub mod stats;
 pub mod storage;
 pub mod telegram;
 pub mod util;
+pub mod vault_move;
 pub mod vault_session;
 pub mod vector;
 pub mod watch;

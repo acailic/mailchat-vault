@@ -41,15 +41,17 @@ use uuid::Uuid;
 use crate::settings::SETTINGS_FILE;
 
 /// The vault identity file: a stable UUID plus format metadata, written
-/// on the first successful open of a legacy vault.
-const IDENTITY_FILE: &str = "vault.json";
+/// on the first successful open of a legacy vault. Public so the A7
+/// move engine (and its tests) resolve the same file name.
+pub const IDENTITY_FILE: &str = "vault.json";
+
+/// The canonical archive database inside the vault directory. Public
+/// for the same reason as [`IDENTITY_FILE`].
+pub const DB_FILE: &str = "vault.db";
 
 /// The exclusive advisory session lock file. Its bytes are never
 /// meaningful — the lock lives in the open file handle.
 const LOCK_FILE: &str = "vault.lock";
-
-/// The canonical archive database inside the vault directory.
-const DB_FILE: &str = "vault.db";
 
 /// The immutable media object store directory inside the vault
 /// directory (see [`crate::object_store`]).
@@ -103,18 +105,18 @@ pub enum SessionError {
 /// only, so an identity survives parent renames and a future move
 /// protocol can rewrite it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct VaultIdentity {
+pub(crate) struct VaultIdentity {
     /// The format marker; must be [`IDENTITY_FORMAT`].
-    format: String,
+    pub(crate) format: String,
     /// The identity format version; must be exactly the version this
     /// build writes (newer refuses).
-    format_version: u32,
+    pub(crate) format_version: u32,
     /// The stable vault UUID (v4 when minted here), as a string.
-    vault_id: String,
+    pub(crate) vault_id: String,
     /// The directory name at the time this identity was last written
     /// (`None` only for a path with no file name, e.g. a filesystem
     /// root — never the case for a real vault).
-    directory_name: Option<String>,
+    pub(crate) directory_name: Option<String>,
 }
 
 impl VaultIdentity {
@@ -128,9 +130,11 @@ impl VaultIdentity {
         }
     }
 
-    /// Validate an identity read from disk against the directory being
-    /// opened; returns the parsed vault UUID.
-    fn validate(&self, dir: &Path) -> Result<Uuid, SessionError> {
+    /// Validate the identity's format fields only — marker, version,
+    /// and a parseable UUID — without the directory-name binding. The
+    /// A7 move engine uses this when inspecting a candidate directory
+    /// it does not open (a move later rewrites the recorded name).
+    pub(crate) fn validate_format(&self) -> std::result::Result<Uuid, SessionError> {
         if self.format != IDENTITY_FORMAT {
             return Err(SessionError::InvalidIdentity(format!(
                 "unknown format marker {:?} (expected {:?})",
@@ -143,8 +147,14 @@ impl VaultIdentity {
                 self.format_version, IDENTITY_FORMAT_VERSION
             )));
         }
-        let vault_id = Uuid::parse_str(&self.vault_id)
-            .map_err(|e| SessionError::InvalidIdentity(format!("vault UUID does not parse: {e}")))?;
+        Uuid::parse_str(&self.vault_id)
+            .map_err(|e| SessionError::InvalidIdentity(format!("vault UUID does not parse: {e}")))
+    }
+
+    /// Validate an identity read from disk against the directory being
+    /// opened; returns the parsed vault UUID.
+    fn validate(&self, dir: &Path) -> Result<Uuid, SessionError> {
+        let vault_id = self.validate_format()?;
         // The name check binds the identity to this directory *name*,
         // never an absolute path: the same vault directory name under a
         // different parent still opens (a move rewrites the name only
@@ -161,10 +171,20 @@ impl VaultIdentity {
     }
 }
 
+/// Parse identity-file bytes (`vault.json` contents) into a
+/// [`VaultIdentity`], shared with the A7 move engine. Structurally the
+/// same parse [`VaultSession::open`] performs; validation of the
+/// format fields is the caller's (see [`VaultIdentity::validate_format`]).
+pub(crate) fn parse_identity(text: &str) -> std::result::Result<VaultIdentity, SessionError> {
+    serde_json::from_str(text)
+        .map_err(|e| SessionError::InvalidIdentity(format!("not valid JSON: {e}")))
+}
+
 /// The directory's own name (`"Vault"` in `/a/b/Vault`), lossily; `None`
 /// for a path with no file name (a filesystem root).
 fn directory_name_of(dir: &Path) -> Option<String> {
-    dir.file_name().map(|name| name.to_string_lossy().into_owned())
+    dir.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
 }
 
 /// One open vault: the single owner of the vault identity, the
@@ -195,8 +215,7 @@ impl VaultSession {
         let identity_path = dir.join(IDENTITY_FILE);
         let vault_id = match fs::read_to_string(&identity_path) {
             Ok(text) => {
-                let identity: VaultIdentity = serde_json::from_str(&text)
-                    .map_err(|e| SessionError::InvalidIdentity(format!("not valid JSON: {e}")))?;
+                let identity = parse_identity(&text)?;
                 identity.validate(&dir)?
             }
             // Absent identity: a legacy vault — open in place and gain
