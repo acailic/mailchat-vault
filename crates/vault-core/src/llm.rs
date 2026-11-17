@@ -41,10 +41,11 @@ use url::Url;
 
 use crate::extract::CollectedLink;
 use crate::message::Message;
+use crate::rank_fusion::rrf_fuse;
 use crate::search::build_match_query;
 use crate::search2::AskScope;
 use crate::storage::Storage;
-use crate::vector::{rrf_fuse, Embedder};
+use crate::vector::Embedder;
 use crate::{Error, Result};
 
 /// How many of the top search results feed the summary, by default.

@@ -27,9 +27,9 @@
 //!
 //! **Hybrid ranking.** FTS5 relevance and cosine similarity have
 //! incomparable score scales, so the two ranked lists are fused with
-//! Reciprocal Rank Fusion ([`rrf_fuse`]): score(d) = Σ 1/(k + rank),
-//! k = 60 (the TREC default). Rank-based fusion needs no calibration and
-//! is order-deterministic (ties break by message id).
+//! Reciprocal Rank Fusion ([`crate::rank_fusion`]): score(d) = Σ 1/(k +
+//! rank), k = 60 (the TREC default). Rank-based fusion needs no calibration
+//! and is order-deterministic (ties break by message id).
 //!
 //! **Incrementality.** The embedding job ([`run_embedding_job`]) embeds
 //! only messages lacking a row for the *current* model id — new imports
@@ -38,7 +38,6 @@
 //!
 //! [`sqlite-vec`]: https://github.com/asg017/sqlite-vec
 
-use std::collections::HashMap;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -324,31 +323,11 @@ pub fn run_embedding_job(
 // Reciprocal Rank Fusion
 // ---------------------------------------------------------------------------
 
-/// The standard RRF smoothing constant (TREC default).
-pub const RRF_K: u32 = 60;
-
-/// Fuse two ranked id lists (best first) with Reciprocal Rank Fusion:
-/// score(d) = Σ_lists 1/(RRF_K + rank), rank starting at 1. Deterministic:
-/// equal scores order by ascending id. Returns at most `limit` ids, best
-/// first. Rank-based fusion sidesteps the incomparable score scales of
-/// FTS5 relevance and cosine similarity.
-pub fn rrf_fuse(fts: &[i64], vector: &[i64], limit: usize) -> Vec<i64> {
-    let mut scores: HashMap<i64, f32> = HashMap::new();
-    for (rank, id) in fts.iter().enumerate() {
-        *scores.entry(*id).or_insert(0.0) += 1.0 / (RRF_K + rank as u32 + 1) as f32;
-    }
-    for (rank, id) in vector.iter().enumerate() {
-        *scores.entry(*id).or_insert(0.0) += 1.0 / (RRF_K + rank as u32 + 1) as f32;
-    }
-    let mut ranked: Vec<(i64, f32)> = scores.into_iter().collect();
-    ranked.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.0.cmp(&b.0))
-    });
-    ranked.truncate(limit);
-    ranked.into_iter().map(|(id, _)| id).collect()
-}
+/// Reciprocal Rank Fusion lives in [`crate::rank_fusion`] (a pure module);
+/// re-exported here because the vector leg and the FTS leg meet in this
+/// module's callers — the hybrid Ask pipeline fuses the two ranked lists
+/// with it.
+pub use crate::rank_fusion::{rrf_fuse, RRF_K};
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -426,19 +405,12 @@ mod tests {
     }
 
     #[test]
-    fn rrf_prefers_ids_ranked_well_in_both_lists() {
-        let fused = rrf_fuse(&[10, 20, 30], &[20, 40, 10], 10);
-        // 20 and 10 appear in both lists → top; 20 ranks higher overall.
-        assert_eq!(&fused[..2], &[20, 10]);
-        assert!(fused.contains(&30) && fused.contains(&40));
-        assert_eq!(fused.len(), 4);
-    }
-
-    #[test]
-    fn rrf_is_deterministic_on_ties_and_respects_limit() {
-        // Same ranks in both lists: ties break by ascending id.
-        assert_eq!(rrf_fuse(&[7, 3], &[7, 3], 10), vec![7, 3]);
+    fn rrf_reexport_matches_the_pure_module() {
+        // The re-export is the same function the dedicated module ships:
+        // ids ranked well in both lists fuse to the top, ties break by
+        // ascending id, and the limit truncates. Deep coverage lives in
+        // tests/rank_fusion.rs.
+        assert_eq!(rrf_fuse(&[10, 20, 30], &[20, 40, 10], 10)[..2], [20, 10]);
         assert_eq!(rrf_fuse(&[1, 2, 3], &[], 2), vec![1, 2]);
-        assert!(rrf_fuse(&[], &[], 5).is_empty());
     }
 }
