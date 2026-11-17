@@ -62,7 +62,7 @@ These are Google-console/account actions with external lead time; none can be do
 | Restricted-scope verification includes CASA assessment, annual recertification | [Verification requirements](https://support.google.com/cloud/answer/13464321) · [Security assessment](https://support.google.com/cloud/answer/13465431) · [Annual recertification](https://support.google.com/cloud/answer/13463816) |
 | Vault issues only `EXAMINE`, `UID SEARCH`, `UID FETCH` | [imap.rs](../../crates/vault-core/src/imap.rs) sync path; hermetic IMAP suites |
 | Scope constant pinned; BYO rationale in code | [oauth.rs](../../crates/vault-core/src/oauth.rs) `GMAIL_SCOPE` + tests |
-| No one-click/public Gmail claim in UI or docs | README, `index.html`, `src/main.ts` sign-in hints, `docs/imap-sync.md`, [product-review F04](../product-review.md) |
+| No one-click/public Gmail claim in UI or docs | README, `index.html`, `src/main.ts` sign-in hints, `docs/imap-sync.md`, [product-review F04](../internal/product-review.md) |
 
 ## Local verification (interim per-PR protocol, [testing](../testing.md#interim-per-pr-verification-while-ci-is-down))
 
