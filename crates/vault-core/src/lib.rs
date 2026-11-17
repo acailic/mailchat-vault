@@ -88,6 +88,10 @@
 //! - [`health`]: persisted archive-health evidence — the media
 //!   verification summary and per-import-source last-import records the
 //!   health overview reads (absent records read as not checked).
+//! - [`vault_session`]: the vault session seam (A4) — one owner of
+//!   vault identity, the exclusive advisory session lock, and the
+//!   derived vault paths, so every consumer resolves the vault through
+//!   a single session before custom locations exist.
 
 pub mod backup;
 pub mod bounded;
@@ -126,6 +130,7 @@ pub mod stats;
 pub mod storage;
 pub mod telegram;
 pub mod util;
+pub mod vault_session;
 pub mod vector;
 pub mod watch;
 pub mod whats_new;
