@@ -349,6 +349,13 @@ impl vault_core::bounded::StreamSource for IngestSource {
                 original_timestamp: String::new(),
                 timezone: String::new(),
                 time_confidence: String::new(),
+                // Post-M2.4 NewMessage fields; the bench fixture keeps
+                // every one at its empty/None default so the generated
+                // bytes (and thus every recorded baseline) are unchanged.
+                attachments: Vec::new(),
+                source_label: String::new(),
+                original_bytes: None,
+                original_ref: None,
             };
             if emit(vault_core::bounded::StreamItem::Message(msg))?
                 == vault_core::bounded::Flow::Stop
@@ -417,6 +424,13 @@ pub fn generate(
                 original_timestamp: String::new(),
                 timezone: String::new(),
                 time_confidence: String::new(),
+                // Post-M2.4 NewMessage fields; the bench fixture keeps
+                // every one at its empty/None default so the generated
+                // bytes (and thus every recorded baseline) are unchanged.
+                attachments: Vec::new(),
+                source_label: String::new(),
+                original_bytes: None,
+                original_ref: None,
             }
         } else {
             // Chat (WhatsApp/Telegram): short body, session grouping.
@@ -450,6 +464,13 @@ pub fn generate(
                 original_timestamp: String::new(),
                 timezone: String::new(),
                 time_confidence: String::new(),
+                // Post-M2.4 NewMessage fields; the bench fixture keeps
+                // every one at its empty/None default so the generated
+                // bytes (and thus every recorded baseline) are unchanged.
+                attachments: Vec::new(),
+                source_label: String::new(),
+                original_bytes: None,
+                original_ref: None,
             }
         };
         if matches!(storage.insert_message(&msg)?, InsertOutcome::Inserted(_)) {

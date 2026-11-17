@@ -1,0 +1,25 @@
+{
+  "methodology": {
+    "schema": 1,
+    "harness": "vault-perf 0.1.0",
+    "fixture_count": 100000,
+    "seed": 42,
+    "iterations": 60,
+    "warmup": 5,
+    "machine_class": "8-core/16-thread desktop class, 32 GiB RAM, Linux x86_64 (see docs/benchmark.md)",
+    "calibration": "per-query p95 budgets ~10x the measured local p95 (12x for deep-page labels); see docs/benchmark.md"
+  },
+  "methodology_sha256": "de46b73f21ed9fd25ed41e55cb2dfce592bd5411625b84db7ddb1724a2ab5aca",
+  "budgets_ms": {
+    "ubiquitous-term": 1500.0,
+    "frequent-term": 300.0,
+    "rare-term": 40.0,
+    "two-term-and": 75.0,
+    "author-term": 80.0,
+    "frequent+date-filter": 300.0,
+    "frequent-paged-200": 375.0,
+    "frequent-deep-page": 3000.0,
+    "browse-newest": 60.0,
+    "browse-deep-page": 1800.0
+  }
+}
