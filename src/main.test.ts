@@ -5638,7 +5638,7 @@ describe("workspace shell", () => {
     win.document.dispatchEvent(
       new win.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true }),
     );
-    const input = win.document.querySelector<HTMLInputElement>("#command-palette-input")!;
+    const input = win.document.querySelector("#command-palette-input") as unknown as HTMLInputElement;
     expect(input).toBeTruthy();
     expect(input.getAttribute("role")).toBe("combobox");
     expect(win.document.activeElement).toBe(input);
@@ -5647,7 +5647,7 @@ describe("workspace shell", () => {
     win.document.dispatchEvent(
       new win.KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true, cancelable: true }),
     );
-    expect(win.document.querySelector<HTMLElement>(".command-palette-overlay")!.hidden).toBe(true);
+    expect((win.document.querySelector(".command-palette-overlay") as unknown as HTMLElement).hidden).toBe(true);
     expect(win.document.activeElement?.tagName).toBe("H1");
   });
 
@@ -5732,25 +5732,27 @@ describe("command palette (Cmd/Ctrl+K)", () => {
     win.document.dispatchEvent(
       new win.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true }),
     );
-    const input = win.document.querySelector<HTMLInputElement>("#command-palette-input");
+    const input = win.document.querySelector("#command-palette-input") as unknown as HTMLInputElement | null;
     if (!input) throw new Error("palette did not open");
     return input;
   }
 
   function typeIn(input: HTMLInputElement, text: string): void {
     input.value = text;
-    input.dispatchEvent(new win.Event("input", { bubbles: true }));
+    (input as unknown as { dispatchEvent(event: object): boolean }).dispatchEvent(
+      new win.Event("input", { bubbles: true }),
+    );
   }
 
   it("seeds the view commands; Enter navigates end-to-end", async () => {
     await boot();
     const input = openPalette();
     typeIn(input, "jobs");
-    const active = win.document.querySelector('[role="option"][aria-selected="true"]') as HTMLElement;
+    const active = win.document.querySelector('[role="option"][aria-selected="true"]') as unknown as HTMLElement;
     expect(active.id).toBe("palette-cmd-view.jobs");
     pressKey(input, "Enter");
     expect($("#app").dataset.view).toBe("activity");
-    expect(win.document.querySelector<HTMLElement>(".command-palette-overlay")!.hidden).toBe(true);
+    expect($(".command-palette-overlay").hidden).toBe(true);
   });
 
   it("theme commands ride the existing theme select", async () => {
@@ -5789,7 +5791,7 @@ describe("command palette (Cmd/Ctrl+K)", () => {
     const input = openPalette();
     expect(win.document.activeElement).toBe(input);
     pressKey(input, "Escape");
-    expect(win.document.querySelector<HTMLElement>(".command-palette-overlay")!.hidden).toBe(true);
+    expect($(".command-palette-overlay").hidden).toBe(true);
     expect(win.document.activeElement?.tagName).toBe("H1");
   });
 });

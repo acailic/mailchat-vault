@@ -1,18 +1,13 @@
 // Command palette (Cmd/Ctrl+K): the keyboard-first surface for every
-// power-user action. Three pieces, deliberately dependency-free so any
-// feature can register commands without touching this file:
-//
-//  1. A registry — registerCommand({id, title, section, shortcut, run}).
-//  2. A subsequence fuzzy matcher that reports the matched-letter
-//     indices (the highlight source) and a score (the ranking source).
-//  3. A lazily-mounted combobox overlay (role=combobox/listbox/option,
-//     aria-activedescendant tracking, focus trap, focus restore).
-//
-// Recent searches persist under mcv.paletteRecents (same guarded-storage
-// convention as mcv.navCollapsed). Keyboard opens render instantly — a
+// power-user action — a registry (registerCommand), a subsequence fuzzy
+// matcher reporting matched-letter indices (highlight) and a score
+// (ranking), and a lazily-mounted combobox overlay (combobox/listbox/
+// option roles, aria-activedescendant tracking, focus trap, focus
+// restore). Recents persist under mcv.paletteRecents (the guarded-storage
+// convention of mcv.navCollapsed). Keyboard opens render instantly — a
 // high-frequency action never animates (Rauno frequency rule); only the
-// pointer path fades in, opacity-only, and prefers-reduced-motion keeps
-// that path opacity-only too (see the palette rules in app.css).
+// pointer path fades in, opacity-only, and prefers-reduced-motion removes
+// even that (see the palette rules in app.css).
 
 /** Section of the palette a registered command lists under. */
 export type PaletteSection = "actions" | "views";
@@ -28,11 +23,8 @@ export interface PaletteCommand {
   run(): void;
 }
 
-// ---------------------------------------------------------------------------
-// Registry
-// ---------------------------------------------------------------------------
+// --- Registry: registration order = display order within a section ------
 
-/** Registration order = display order within a section (stable ranking). */
 const commands: PaletteCommand[] = [];
 
 /** Register (or replace, by id) one command. */
@@ -55,10 +47,8 @@ export function resetCommandRegistry(): void {
   commands.length = 0;
 }
 
-// ---------------------------------------------------------------------------
-// Fuzzy matching: case-insensitive subsequence with a small deterministic
-// score (consecutive and word-start runs beat scattered letters).
-// ---------------------------------------------------------------------------
+// --- Fuzzy matching: case-insensitive subsequence; consecutive and
+// --- word-start runs beat scattered letters ------------------------------
 
 export interface FuzzyMatch {
   score: number;
@@ -85,17 +75,14 @@ export function fuzzyMatch(query: string, text: string): FuzzyMatch | null {
   return { score, indices };
 }
 
-// ---------------------------------------------------------------------------
-// Recent searches (guarded localStorage, mcv.* convention)
-// ---------------------------------------------------------------------------
+// --- Recent searches (guarded localStorage, mcv.* convention) -----------
 
 const RECENTS_KEY = "mcv.paletteRecents";
 const RECENTS_CAP = 8;
 
 function readRecents(): string[] {
   try {
-    const raw = window.localStorage.getItem(RECENTS_KEY);
-    const parsed = raw ? (JSON.parse(raw) as unknown) : [];
+    const parsed = JSON.parse(window.localStorage.getItem(RECENTS_KEY) ?? "[]") as unknown;
     return Array.isArray(parsed) ? parsed.filter((q): q is string => typeof q === "string") : [];
   } catch {
     return [];
@@ -114,22 +101,13 @@ function recordRecent(query: string): void {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Platform-aware shortcut labels
-// ---------------------------------------------------------------------------
-
-/** Apple platforms render ⌘; everything else spells Ctrl. */
-export function isApplePlatform(platform: string): boolean {
-  return /mac|iphone|ipad|ipod/i.test(platform);
-}
+// --- Platform-aware shortcut labels (⌘ on Apple, Ctrl elsewhere) --------
 
 export function paletteOpenShortcut(platform: string): string {
-  return isApplePlatform(platform) ? "⌘K" : "Ctrl+K";
+  return /mac|iphone|ipad|ipod/i.test(platform) ? "⌘K" : "Ctrl+K";
 }
 
-// ---------------------------------------------------------------------------
-// Palette overlay
-// ---------------------------------------------------------------------------
+// --- Palette overlay -----------------------------------------------------
 
 export interface CommandPalette {
   open(options?: { pointer?: boolean }): void;
@@ -170,36 +148,40 @@ export function initCommandPalette(options: {
   let trigger: HTMLElement | null = null;
   let openState = false;
 
+  /** Minimal element helper: class + attributes + text in one call. */
+  function el<K extends keyof HTMLElementTagNameMap>(
+    tag: K,
+    cls = "",
+    attrs: Record<string, string> = {},
+    text?: string,
+  ): HTMLElementTagNameMap[K] {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, value);
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
   function ensureMounted(): void {
     if (overlay) return;
-    overlay = document.createElement("div");
-    overlay.className = "command-palette-overlay";
-    overlay.hidden = true;
-    const dialog = document.createElement("div");
-    dialog.className = "command-palette";
-    dialog.setAttribute("role", "dialog");
-    dialog.setAttribute("aria-modal", "true");
-    dialog.setAttribute("aria-label", "Command palette");
-    const inputRow = document.createElement("div");
-    inputRow.className = "command-palette-inputrow";
-    input = document.createElement("input");
-    input.id = "command-palette-input";
-    input.type = "text";
-    input.placeholder = "Type a command or search…";
-    input.setAttribute("role", "combobox");
-    input.setAttribute("aria-expanded", "true");
-    input.setAttribute("aria-controls", "command-palette-list");
-    input.setAttribute("aria-autocomplete", "list");
-    input.setAttribute("aria-label", "Search commands");
+    input = el("input", "", {
+      id: "command-palette-input", type: "text", placeholder: "Type a command or search…",
+      role: "combobox", "aria-expanded": "true", "aria-controls": "command-palette-list",
+      "aria-autocomplete": "list", "aria-label": "Search commands",
+    });
     const openHint = document.createElement("kbd");
     openHint.textContent = paletteOpenShortcut(platform);
+    const inputRow = el("div", "command-palette-inputrow");
     inputRow.append(input, openHint);
-    list = document.createElement("div");
-    list.id = "command-palette-list";
-    list.className = "command-palette-list";
-    list.setAttribute("role", "listbox");
-    list.setAttribute("aria-label", "Commands");
+    list = el("div", "command-palette-list", {
+      id: "command-palette-list", role: "listbox", "aria-label": "Commands",
+    });
+    const dialog = el("div", "command-palette", {
+      role: "dialog", "aria-modal": "true", "aria-label": "Command palette",
+    });
     dialog.append(inputRow, list);
+    overlay = el("div", "command-palette-overlay");
+    overlay.hidden = true;
     overlay.append(dialog);
     overlay.addEventListener("mousedown", (event) => {
       if (event.target === overlay) close();
@@ -227,6 +209,25 @@ export function initCommandPalette(options: {
     return frag;
   }
 
+  /** A row that runs a search (recent or the typed-query fallback):
+   * every execution records the raw query in Recent searches (`title`
+   * may differ — the fallback labels itself "Search for …"). */
+  function searchRow(
+    kind: "recent" | "search",
+    id: string,
+    query: string,
+    match: FuzzyMatch,
+    title = query,
+  ): Row {
+    return {
+      kind, section: "recents", id, title, match,
+      run: () => {
+        recordRecent(query);
+        options.onSearch(query);
+      },
+    };
+  }
+
   /** Commands ranked by score inside each section; recents keep their
    * recency order; a typed query always offers the fallback search row. */
   function visibleRows(query: string): Row[] {
@@ -235,52 +236,26 @@ export function initCommandPalette(options: {
       const match = fuzzyMatch(query, command.title);
       if (match)
         matched.push({
-          kind: "command",
-          section: command.section,
-          id: `palette-cmd-${command.id}`,
-          title: command.title,
-          shortcut: command.shortcut,
-          match,
-          run: () => command.run(),
+          kind: "command", section: command.section, id: `palette-cmd-${command.id}`,
+          title: command.title, shortcut: command.shortcut, match, run: () => command.run(),
         });
     }
     matched.sort((a, b) => b.match.score - a.match.score);
     const grouped: Row[] = [];
     for (const section of SECTION_ORDER) {
       if (section.key === "recents") {
+        let n = 0;
         for (const recent of readRecents()) {
           const match = fuzzyMatch(query, recent);
-          if (match)
-            grouped.push({
-              kind: "recent",
-              section: "recents",
-              id: `palette-recent-${grouped.filter((r) => r.kind === "recent").length}`,
-              title: recent,
-              match,
-              run: () => {
-                recordRecent(recent);
-                options.onSearch(recent);
-              },
-            });
+          if (match) grouped.push(searchRow("recent", `palette-recent-${n++}`, recent, match));
         }
       } else {
         grouped.push(...matched.filter((row) => row.section === section.key));
       }
     }
-    if (query.trim()) {
-      const trimmed = query.trim();
-      grouped.push({
-        kind: "search",
-        section: "actions",
-        id: "palette-search",
-        title: `Search for “${trimmed}”`,
-        match: { score: 0, indices: [] },
-        run: () => {
-          recordRecent(trimmed);
-          options.onSearch(trimmed);
-        },
-      });
-    }
+    const trimmed = query.trim();
+    if (trimmed)
+      grouped.push(searchRow("search", "palette-search", trimmed, { score: 0, indices: [] }, `Search for “${trimmed}”`));
     return grouped;
   }
 
@@ -292,17 +267,12 @@ export function initCommandPalette(options: {
     rows.forEach((row, i) => {
       if (row.kind !== "search" && row.section !== lastSection) {
         lastSection = row.section;
-        const head = document.createElement("div");
-        head.className = "command-palette-section";
-        head.setAttribute("role", "presentation");
-        head.textContent = SECTION_ORDER.find((s) => s.key === row.section)!.label;
-        list!.append(head);
+        list!.append(el("div", "command-palette-section", { role: "presentation" },
+          SECTION_ORDER.find((s) => s.key === row.section)!.label));
       }
-      const option = document.createElement("div");
-      option.id = row.id;
-      option.className = "command-palette-option";
-      option.setAttribute("role", "option");
-      option.setAttribute("aria-selected", i === active ? "true" : "false");
+      const option = el("div", "command-palette-option", {
+        id: row.id, role: "option", "aria-selected": i === active ? "true" : "false",
+      });
       option.append(titled(row.title, row.match));
       if (row.shortcut) {
         const kbd = document.createElement("kbd");
@@ -315,10 +285,7 @@ export function initCommandPalette(options: {
       });
       list!.append(option);
     });
-    input!.setAttribute(
-      "aria-activedescendant",
-      rows.length > 0 ? rows[active].id : "",
-    );
+    setActive(active);
   }
 
   function runRow(i: number): void {
@@ -328,20 +295,22 @@ export function initCommandPalette(options: {
     row.run();
   }
 
+  /** Sync aria-selected + aria-activedescendant with `active`. */
   function setActive(i: number): void {
     active = i;
-    const options = list!.querySelectorAll("[role='option']");
-    options.forEach((el, at) => el.setAttribute("aria-selected", at === active ? "true" : "false"));
+    const optionEls = list!.querySelectorAll("[role='option']");
+    optionEls.forEach((node, at) =>
+      node.setAttribute("aria-selected", at === active ? "true" : "false"),
+    );
     input!.setAttribute("aria-activedescendant", rows.length > 0 ? rows[active].id : "");
-    options[active]?.scrollIntoView?.({ block: "nearest" });
+    optionEls[active]?.scrollIntoView?.({ block: "nearest" });
   }
 
   function onKeyDown(event: KeyboardEvent): void {
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
-      if (rows.length === 0) return;
-      const delta = event.key === "ArrowDown" ? 1 : -1;
-      setActive((active + delta + rows.length) % rows.length);
+      if (rows.length > 0)
+        setActive((active + (event.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length);
     } else if (event.key === "Home" || event.key === "End") {
       event.preventDefault();
       setActive(rows.length === 0 ? 0 : event.key === "Home" ? 0 : rows.length - 1);
@@ -358,13 +327,13 @@ export function initCommandPalette(options: {
     }
   }
 
-  function open(optionsIn?: { pointer?: boolean }): void {
+  function open(openOptions?: { pointer?: boolean }): void {
     ensureMounted();
     if (openState) return;
     trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     openState = true;
     overlay!.hidden = false;
-    if (optionsIn?.pointer) {
+    if (openOptions?.pointer) {
       // Pointer path only: opacity-only enter (keyboard opens stay instant).
       overlay!.classList.add("palette-enter");
       overlay!.style.opacity = "0";

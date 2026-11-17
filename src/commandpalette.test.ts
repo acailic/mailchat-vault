@@ -42,7 +42,16 @@ async function fresh(platform = "Linux x86_64"): Promise<void> {
   });
 }
 
-function pressKey(target: EventTarget, key: string, init: KeyboardEventInit = {}): void {
+/** Anything we can dispatch a happy-dom event on (element or document). */
+interface DispatchTarget {
+  dispatchEvent(event: object): boolean;
+}
+
+function pressKey(
+  target: DispatchTarget,
+  key: string,
+  init: { ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean } = {},
+): void {
   target.dispatchEvent(
     new win.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...init }),
   );
@@ -52,14 +61,20 @@ function openViaKeyboard(ctrl = true): void {
   pressKey(win.document, "k", ctrl ? { ctrlKey: true } : { metaKey: true });
 }
 
+function $<T extends HTMLElement = HTMLElement>(sel: string): T {
+  const el = win.document.querySelector(sel) as unknown as T | null;
+  if (!el) throw new Error(`missing element ${sel}`);
+  return el;
+}
+
 function type(text: string): void {
-  const input = win.document.querySelector<HTMLInputElement>("#command-palette-input")!;
+  const input = $<HTMLInputElement>("#command-palette-input");
   input.value = text;
-  input.dispatchEvent(new win.Event("input", { bubbles: true }));
+  (input as unknown as DispatchTarget).dispatchEvent(new win.Event("input", { bubbles: true }));
 }
 
 function options(): HTMLElement[] {
-  return [...win.document.querySelectorAll("#command-palette-list [role='option']")] as HTMLElement[];
+  return [...win.document.querySelectorAll("#command-palette-list [role='option']")] as unknown as HTMLElement[];
 }
 
 beforeEach(() => fresh());
@@ -166,14 +181,14 @@ describe("palette open/close", () => {
     pressKey(win.document.querySelector("#command-palette-input")!, "Escape");
     openViaKeyboard(false); // Cmd
     expect(palette.isOpen()).toBe(true);
-    const overlay = win.document.querySelector<HTMLElement>(".command-palette-overlay")!;
+    const overlay = $<HTMLElement>(".command-palette-overlay");
     expect(overlay.classList.contains("palette-enter")).toBe(false);
   });
 
   it("exposes the combobox pattern with aria-activedescendant on the first option", async () => {
     await fresh();
     openViaKeyboard();
-    const input = win.document.querySelector<HTMLInputElement>("#command-palette-input")!;
+    const input = $<HTMLInputElement>("#command-palette-input");
     expect(input.getAttribute("role")).toBe("combobox");
     expect(input.getAttribute("aria-expanded")).toBe("true");
     expect(input.getAttribute("aria-controls")).toBe("command-palette-list");
@@ -205,11 +220,11 @@ describe("palette open/close", () => {
     win.document.body.append(trigger);
     trigger.focus();
     openViaKeyboard();
-    const input = win.document.querySelector<HTMLInputElement>("#command-palette-input")!;
+    const input = $<HTMLInputElement>("#command-palette-input");
     expect(win.document.activeElement).toBe(input);
     pressKey(input, "Escape");
     expect(palette.isOpen()).toBe(false);
-    expect(win.document.querySelector<HTMLElement>(".command-palette-overlay")!.hidden).toBe(true);
+    expect($<HTMLElement>(".command-palette-overlay").hidden).toBe(true);
     expect(win.document.activeElement).toBe(trigger);
   });
 
@@ -223,7 +238,7 @@ describe("palette open/close", () => {
   it("pointer open applies the opacity-only enter class", async () => {
     await fresh();
     palette.open({ pointer: true });
-    const overlay = win.document.querySelector<HTMLElement>(".command-palette-overlay")!;
+    const overlay = $<HTMLElement>(".command-palette-overlay");
     expect(overlay.classList.contains("palette-enter")).toBe(true);
     expect(overlay.style.opacity).toBe("1");
   });
@@ -257,7 +272,7 @@ describe("keyboard model", () => {
   it("ArrowDown/ArrowUp move aria-activedescendant and aria-selected, wrapping", async () => {
     await fresh();
     openViaKeyboard();
-    const input = win.document.querySelector<HTMLInputElement>("#command-palette-input")!;
+    const input = $<HTMLInputElement>("#command-palette-input");
     pressKey(input, "ArrowDown");
     expect(input.getAttribute("aria-activedescendant")).toBe("palette-cmd-search");
     expect(options()[1].getAttribute("aria-selected")).toBe("true");
@@ -270,7 +285,7 @@ describe("keyboard model", () => {
   it("Home and End jump to the first and last option", async () => {
     await fresh();
     openViaKeyboard();
-    const input = win.document.querySelector<HTMLInputElement>("#command-palette-input")!;
+    const input = $<HTMLInputElement>("#command-palette-input");
     pressKey(input, "End");
     expect(input.getAttribute("aria-activedescendant")).toBe("palette-cmd-search");
     pressKey(input, "Home");
@@ -283,7 +298,7 @@ describe("keyboard model", () => {
     win.document.body.append(trigger);
     trigger.focus();
     openViaKeyboard();
-    const input = win.document.querySelector<HTMLInputElement>("#command-palette-input")!;
+    const input = $<HTMLInputElement>("#command-palette-input");
     type("go");
     pressKey(input, "Enter");
     expect(ran).toEqual(["search"]);
@@ -294,7 +309,7 @@ describe("keyboard model", () => {
   it("Enter on the fallback row runs the search callback", async () => {
     await fresh();
     openViaKeyboard();
-    const input = win.document.querySelector<HTMLInputElement>("#command-palette-input")!;
+    const input = $<HTMLInputElement>("#command-palette-input");
     type("quarterly");
     pressKey(input, "Enter");
     expect(ran).toEqual([]);
@@ -304,7 +319,7 @@ describe("keyboard model", () => {
   it("Tab is trapped: focus stays in the palette input", async () => {
     await fresh();
     openViaKeyboard();
-    const input = win.document.querySelector<HTMLInputElement>("#command-palette-input")!;
+    const input = $<HTMLInputElement>("#command-palette-input");
     pressKey(input, "Tab", { shiftKey: true });
     pressKey(input, "Tab");
     expect(win.document.activeElement).toBe(input);
@@ -314,7 +329,9 @@ describe("keyboard model", () => {
     await fresh();
     openViaKeyboard();
     const option = options()[1];
-    option.dispatchEvent(new win.MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    (option as unknown as DispatchTarget).dispatchEvent(
+      new win.MouseEvent("mousedown", { bubbles: true, cancelable: true }),
+    );
     expect(ran).toEqual(["search"]);
     expect(palette.isOpen()).toBe(false);
   });
