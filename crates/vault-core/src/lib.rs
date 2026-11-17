@@ -112,6 +112,7 @@ pub mod demo;
 pub mod discord;
 pub mod export;
 pub mod export_html;
+pub mod export_manifest;
 pub mod extract;
 pub mod files;
 pub mod health;
