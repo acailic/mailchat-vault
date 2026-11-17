@@ -363,6 +363,12 @@ impl LlmRegistry {
                 kind: profile.kind,
                 base_url: config.base_url.clone(),
                 model: config.model.clone(),
+                temperature: None,
+                max_tokens: None,
+                timeout_secs: None,
+                deployment_name: None,
+                api_version: None,
+                region: None,
             };
             (config, Some(composed))
         };
@@ -622,7 +628,7 @@ mod tests {
             base_url: match kind {
                 ProviderKind::Anthropic => "https://api.anthropic.com",
                 ProviderKind::Custom => "http://127.0.0.1:9/api",
-                ProviderKind::Zai => "",
+                _ => "",
             }
             .into(),
             model: match kind {
@@ -630,6 +636,12 @@ mod tests {
                 _ => "m",
             }
             .into(),
+            temperature: None,
+            max_tokens: None,
+            timeout_secs: None,
+            deployment_name: None,
+            api_version: None,
+            region: None,
         };
         p.base_url = p.base_url.trim().into();
         p
