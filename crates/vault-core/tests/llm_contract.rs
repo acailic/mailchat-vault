@@ -23,8 +23,8 @@ use std::net::TcpListener;
 
 use chrono::NaiveDate;
 use vault_core::llm::{
-    ask, summarize_results, translate, validate, AnthropicLlm, LlmConfig, MockLlm, PlanSource,
-    QueryPlan, DEFAULT_SUMMARIZE_TOP,
+    ask, summarize_results, translate, validate, AnthropicLlm, Llm, LlmConfig, MockLlm, OpenAiLlm,
+    PlanSource, QueryPlan, DEFAULT_SUMMARIZE_TOP,
 };
 use vault_core::message::NewMessage;
 use vault_core::search::build_match_query;
@@ -747,4 +747,103 @@ fn leap_day_dates_are_validated_not_trusted() {
     let planned = validate(&s, "vault", translate(&bad, "vault", today()));
     assert_eq!(planned.source, PlanSource::LlmFallback);
     assert_eq!(planned.plan, QueryPlan::plain("vault"));
+}
+
+// ---------------------------------------------------------------------------
+// OpenAI-compatible client wire contract (openai / groq / openrouter /
+// ollama / custom provider kinds share one client path)
+// ---------------------------------------------------------------------------
+
+/// Serve one request on an ephemeral local port, answering with an
+/// OpenAI-style chat-completions body carrying `reply`, and return the
+/// base URL (with a `/v1/` path and trailing slash, so the endpoint join
+/// must trim it) plus a join handle yielding the recorded request.
+fn spawn_openai_recorder(reply: &str) -> (String, std::thread::JoinHandle<Recorded>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local recorder");
+    let addr = listener.local_addr().unwrap();
+    let payload = serde_json::json!({
+        "id": "chatcmpl-test",
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": reply },
+            "finish_reason": "stop",
+        }],
+        "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 },
+    })
+    .to_string();
+    let handle = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let recorded = read_request(&mut stream);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        stream.write_all(response.as_bytes()).expect("write reply");
+        recorded
+    });
+    (format!("http://{addr}/v1/"), handle)
+}
+
+#[test]
+fn openai_compatible_wire_shape_and_parsed_completion() {
+    const KEY: &str = "sk-openai-wire-DO-NOT-LEAK-77bd";
+    // openai kind: the key rides only in the Authorization bearer header
+    // and the request targets /chat/completions with the model in the body.
+    let (base_url, server) = spawn_openai_recorder("served completion [1].");
+    let config = LlmConfig {
+        base_url,
+        api_key: KEY.into(),
+        model: "gpt-4o-mini".into(),
+    };
+    let backend = OpenAiLlm::new(config);
+    let answer = backend.complete("answer tersely", "summarize this").unwrap();
+    assert_eq!(answer, "served completion [1].", "the served completion parses");
+
+    let req = server.join().expect("recorder thread");
+    assert_eq!(req.request_line, "POST /v1/chat/completions HTTP/1.1");
+    assert!(
+        req.headers
+            .to_ascii_lowercase()
+            .contains(&format!("authorization: bearer {KEY}").to_ascii_lowercase()),
+        "the key must ride in the Authorization bearer header: {}",
+        req.headers
+    );
+    assert!(
+        !req.headers.to_ascii_lowercase().contains("x-api-key:"),
+        "no anthropic-style header on the OpenAI-compatible path"
+    );
+    assert!(!req.body.contains(KEY), "the key must never be in the payload");
+    let body: serde_json::Value = serde_json::from_str(&req.body).unwrap();
+    assert_eq!(body["model"], "gpt-4o-mini");
+    assert_eq!(body["max_tokens"], vault_core::llm::DEFAULT_MAX_TOKENS);
+    assert_eq!(body["messages"][0]["role"], "system");
+    assert_eq!(body["messages"][0]["content"], "answer tersely");
+    assert_eq!(body["messages"][1]["role"], "user");
+    assert_eq!(body["messages"][1]["content"], "summarize this");
+}
+
+#[test]
+fn openai_compatible_ollama_base_url_override_without_key() {
+    // ollama kind: a base URL override decides the endpoint (here the
+    // recorder's /v1 stands in for any local path; the join appends
+    // /chat/completions) and no auth header is sent without a key.
+    let (base_url, server) = spawn_openai_recorder("local completion.");
+    let config = LlmConfig {
+        base_url,
+        api_key: "  ".into(), // blank: local Ollama runs without a key
+        model: "llama3.2".into(),
+    };
+    let backend = OpenAiLlm::new(config);
+    let answer = backend.complete("s", "u").unwrap();
+    assert_eq!(answer, "local completion.");
+
+    let req = server.join().expect("recorder thread");
+    assert_eq!(req.request_line, "POST /v1/chat/completions HTTP/1.1");
+    assert!(
+        !req.headers.to_ascii_lowercase().contains("authorization:"),
+        "no auth header without a key: {}",
+        req.headers
+    );
+    assert!(req.body.contains("llama3.2"));
 }

@@ -8,16 +8,24 @@
 //!
 //! The LLM provider model generalizes the environment-variable policy of
 //! [`crate::llm::LlmConfig`] into named provider profiles whose *kind*
-//! fixes the key/endpoint pairing rules:
+//! fixes the key/endpoint pairing rules. Kinds are data — id, display
+//! name, wire protocol, auth style, and per-provider defaults (see
+//! [`ProviderKind::defaults`]) — not separate modules:
 //!
 //! - `zai` — the z.ai GLM endpoint (the default provider). An explicit
 //!   base URL must point at the z.ai host (any spelling); the model
-//!   defaults to `glm-5`.
+//!   defaults to `glm-5`. Native `/v1/messages` wire.
 //! - `anthropic` — Anthropic keys are only ever sent to an explicitly
 //!   configured endpoint, never the z.ai host; both base URL and model are
-//!   explicit.
-//! - `custom` — any Anthropic-compatible `/v1/messages` endpoint, with an
-//!   explicit base URL and model.
+//!   explicit. Native `/v1/messages` wire.
+//! - `openai`, `gemini`, `azure_openai`, `bedrock`, `mistral`, `groq`,
+//!   `openrouter`, `ollama` — the catalog kinds, each with versioned
+//!   defaults (model, base URL, temperature, max tokens, timeout) in this
+//!   module. All except `anthropic`/`zai` speak an OpenAI-compatible
+//!   chat-completions wire ([`crate::llm::OpenAiLlm`]). `azure_openai`
+//!   adds a deployment name + api-version; `bedrock` adds a region.
+//! - `custom` — any OpenAI-compatible `/chat/completions` endpoint, with
+//!   an explicit base URL and model.
 //!
 //! Environment variables keep working as a read-only fallback provider:
 //! when the settings file defines no default, the env-configured endpoint
@@ -51,17 +59,262 @@ pub enum ProviderKind {
     Zai,
     /// Anthropic — explicit endpoint only, never the z.ai host.
     Anthropic,
-    /// Any Anthropic-compatible endpoint, fully explicit.
+    /// OpenAI (chat completions).
+    Openai,
+    /// Google Gemini (its OpenAI-compatible endpoint).
+    Gemini,
+    /// Azure OpenAI — deployment name + api-version, resource-specific
+    /// base URL.
+    AzureOpenai,
+    /// AWS Bedrock — region-scoped.
+    Bedrock,
+    /// Mistral (chat completions).
+    Mistral,
+    /// Groq (chat completions).
+    Groq,
+    /// OpenRouter (chat completions).
+    Openrouter,
+    /// A local Ollama server (chat completions, no key required).
+    Ollama,
+    /// Any OpenAI-compatible endpoint, fully explicit.
     Custom,
 }
 
+/// Every provider kind, in menu order (see [`ProviderKind::defaults`]
+/// for the per-kind data).
+pub const ALL_KINDS: [ProviderKind; 11] = [
+    ProviderKind::Zai,
+    ProviderKind::Anthropic,
+    ProviderKind::Openai,
+    ProviderKind::Gemini,
+    ProviderKind::AzureOpenai,
+    ProviderKind::Bedrock,
+    ProviderKind::Mistral,
+    ProviderKind::Groq,
+    ProviderKind::Openrouter,
+    ProviderKind::Ollama,
+    ProviderKind::Custom,
+];
+
+/// Default [`ProviderProfile::api_version`] for `azure_openai` (pinned
+/// Azure OpenAI api-version; a versionable constant).
+pub const DEFAULT_AZURE_API_VERSION: &str = "2024-10-21";
+
+/// Default [`ProviderProfile::region`] for `bedrock`.
+pub const DEFAULT_BEDROCK_REGION: &str = "us-east-1";
+
+/// Base URL of the Bedrock runtime in `region`
+/// (`https://bedrock-runtime.<region>.amazonaws.com`).
+pub fn bedrock_base_url(region: &str) -> String {
+    format!("https://bedrock-runtime.{region}.amazonaws.com")
+}
+
+/// How a kind authenticates (data for the client path; the API key
+/// itself lives in the OS keyring, never in settings).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthStyle {
+    /// `Authorization: Bearer <key>` (OpenAI-compatible providers).
+    Bearer,
+    /// `x-api-key` + `anthropic-version` headers (native Anthropic wire).
+    XApiKey,
+    /// No key (local Ollama; a key may still be configured).
+    None,
+    /// AWS SigV4 (Bedrock; region + keyring credentials).
+    AwsSigV4,
+}
+
+/// The request wire a kind speaks (which client path serves it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Wire {
+    /// Native Anthropic-compatible `/v1/messages`
+    /// ([`crate::llm::AnthropicLlm`]; z.ai and Anthropic).
+    AnthropicMessages,
+    /// OpenAI-compatible `/chat/completions`
+    /// ([`crate::llm::OpenAiLlm`]).
+    OpenAiChat,
+    /// Bedrock's own invoke/converse wire (data only in this slice; the
+    /// client path is a follow-up).
+    AwsBedrock,
+}
+
+/// The versioned per-kind defaults (constants in vault-core, not UI
+/// strings): what a profile of the kind uses when a field is left empty.
+/// `azure_openai` and `custom` carry no default model/base URL — a
+/// deployment/resource URL (azure) or an explicit endpoint (custom) is
+/// definitionally user-supplied.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProviderDefaults {
+    /// Default model id (empty = user-supplied; azure/custom).
+    pub model: &'static str,
+    /// Default endpoint base URL (empty = user-supplied; azure/custom).
+    pub base_url: &'static str,
+    /// Default sampling temperature.
+    pub temperature: f64,
+    /// Default `max_tokens` per request.
+    pub max_tokens: u32,
+    /// Default per-request timeout.
+    pub timeout_secs: u64,
+}
+
 impl ProviderKind {
+    /// Stable kind id string (also the menu/UI kind tag).
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Zai => "zai",
+            Self::Anthropic => "anthropic",
+            Self::Openai => "openai",
+            Self::Gemini => "gemini",
+            Self::AzureOpenai => "azure_openai",
+            Self::Bedrock => "bedrock",
+            Self::Mistral => "mistral",
+            Self::Groq => "groq",
+            Self::Openrouter => "openrouter",
+            Self::Ollama => "ollama",
+            Self::Custom => "custom",
+        }
+    }
+
     /// Human-facing label (also the default provider name).
     pub fn label(self) -> &'static str {
         match self {
             Self::Zai => "z.ai GLM",
             Self::Anthropic => "Anthropic",
+            Self::Openai => "OpenAI",
+            Self::Gemini => "Google Gemini",
+            Self::AzureOpenai => "Azure OpenAI",
+            Self::Bedrock => "AWS Bedrock",
+            Self::Mistral => "Mistral",
+            Self::Groq => "Groq",
+            Self::Openrouter => "OpenRouter",
+            Self::Ollama => "Ollama",
             Self::Custom => "Custom",
+        }
+    }
+
+    /// How this kind authenticates (see [`AuthStyle`]).
+    pub fn auth(self) -> AuthStyle {
+        match self {
+            Self::Zai | Self::Anthropic => AuthStyle::XApiKey,
+            Self::Ollama => AuthStyle::None,
+            Self::Bedrock => AuthStyle::AwsSigV4,
+            Self::Openai
+            | Self::Gemini
+            | Self::AzureOpenai
+            | Self::Mistral
+            | Self::Groq
+            | Self::Openrouter
+            | Self::Custom => AuthStyle::Bearer,
+        }
+    }
+
+    /// Which request wire this kind speaks (see [`Wire`]).
+    pub fn wire(self) -> Wire {
+        match self {
+            Self::Zai | Self::Anthropic => Wire::AnthropicMessages,
+            Self::Bedrock => Wire::AwsBedrock,
+            Self::Openai
+            | Self::Gemini
+            | Self::AzureOpenai
+            | Self::Mistral
+            | Self::Groq
+            | Self::Openrouter
+            | Self::Ollama
+            | Self::Custom => Wire::OpenAiChat,
+        }
+    }
+
+    /// The versioned defaults for profiles of this kind.
+    pub fn defaults(self) -> ProviderDefaults {
+        // Shared sampling defaults: low temperature for deterministic
+        // RAG answers, the pipeline's max-tokens cap, the standard
+        // request timeout (local Ollama inference gets a longer leash).
+        const T: f64 = crate::llm::DEFAULT_SAMPLING_TEMPERATURE;
+        const MAX_TOKENS: u32 = crate::llm::DEFAULT_MAX_TOKENS;
+        const TIMEOUT: u64 = 30;
+        match self {
+            Self::Zai => ProviderDefaults {
+                model: LlmConfig::DEFAULT_MODEL,
+                base_url: LlmConfig::DEFAULT_BASE_URL,
+                temperature: T,
+                max_tokens: MAX_TOKENS,
+                timeout_secs: TIMEOUT,
+            },
+            Self::Anthropic => ProviderDefaults {
+                model: "claude-sonnet-4-5",
+                base_url: "https://api.anthropic.com",
+                temperature: T,
+                max_tokens: MAX_TOKENS,
+                timeout_secs: TIMEOUT,
+            },
+            Self::Openai => ProviderDefaults {
+                model: "gpt-4o-mini",
+                base_url: "https://api.openai.com/v1",
+                temperature: T,
+                max_tokens: MAX_TOKENS,
+                timeout_secs: TIMEOUT,
+            },
+            Self::Gemini => ProviderDefaults {
+                model: "gemini-2.0-flash",
+                base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+                temperature: T,
+                max_tokens: MAX_TOKENS,
+                timeout_secs: TIMEOUT,
+            },
+            Self::AzureOpenai => ProviderDefaults {
+                // Deployment name and resource URL are user-supplied.
+                model: "",
+                base_url: "",
+                temperature: T,
+                max_tokens: MAX_TOKENS,
+                timeout_secs: TIMEOUT,
+            },
+            Self::Bedrock => ProviderDefaults {
+                model: "anthropic.claude-sonnet-4-5",
+                // Effective default derived from the region
+                // ([`bedrock_base_url`]); the constant itself is empty.
+                base_url: "",
+                temperature: T,
+                max_tokens: MAX_TOKENS,
+                timeout_secs: TIMEOUT,
+            },
+            Self::Mistral => ProviderDefaults {
+                model: "mistral-large-latest",
+                base_url: "https://api.mistral.ai/v1",
+                temperature: T,
+                max_tokens: MAX_TOKENS,
+                timeout_secs: TIMEOUT,
+            },
+            Self::Groq => ProviderDefaults {
+                model: "llama-3.3-70b-versatile",
+                base_url: "https://api.groq.com/openai/v1",
+                temperature: T,
+                max_tokens: MAX_TOKENS,
+                timeout_secs: TIMEOUT,
+            },
+            Self::Openrouter => ProviderDefaults {
+                model: "openrouter/auto",
+                base_url: "https://openrouter.ai/api/v1",
+                temperature: T,
+                max_tokens: MAX_TOKENS,
+                timeout_secs: TIMEOUT,
+            },
+            Self::Ollama => ProviderDefaults {
+                model: "llama3.2",
+                base_url: "http://127.0.0.1:11434/v1",
+                temperature: T,
+                max_tokens: MAX_TOKENS,
+                timeout_secs: 120,
+            },
+            Self::Custom => ProviderDefaults {
+                // A custom endpoint is fully explicit by definition.
+                model: "",
+                base_url: "",
+                temperature: T,
+                max_tokens: MAX_TOKENS,
+                timeout_secs: TIMEOUT,
+            },
         }
     }
 }
@@ -142,7 +395,12 @@ pub struct EnvOverrides {
 
 /// One configured LLM provider profile. Carries no key material: the API
 /// key lives in the OS keyring under the profile `id`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The sampling and provider-extra fields are additive and optional
+/// (`#[serde(default)]`, skipped when `None`): settings files written by
+/// older builds load unchanged, and files written with them stay
+/// loadable by older builds (serde ignores unknown fields).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderProfile {
     /// Stable opaque id (also the keyring entry name). Assigned once when
     /// the provider is added and never regenerated.
@@ -151,11 +409,31 @@ pub struct ProviderProfile {
     pub name: String,
     /// Which pairing rules apply.
     pub kind: ProviderKind,
-    /// Endpoint base URL (without `/v1/messages`). Empty = the kind's
-    /// default (only `zai` has one).
+    /// Endpoint base URL (without `/v1/messages` or `/chat/completions`).
+    /// Empty = the kind's default.
     pub base_url: String,
-    /// Model name. Empty = the kind's default (only `zai` has one).
+    /// Model name. Empty = the kind's default.
     pub model: String,
+    /// Sampling temperature override; `None` = the kind default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    /// `max_tokens` override; `None` = the kind default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    /// Per-request timeout override (seconds); `None` = the kind default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
+    /// `azure_openai` only: the deployment name (the deployed model).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_name: Option<String>,
+    /// `azure_openai` only: the api-version query parameter.
+    /// `None` = [`DEFAULT_AZURE_API_VERSION`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_version: Option<String>,
+    /// `bedrock` only: the AWS region. `None` =
+    /// [`DEFAULT_BEDROCK_REGION`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 impl ProviderProfile {
@@ -170,30 +448,72 @@ impl ProviderProfile {
 
     /// Effective base URL after kind defaults are applied.
     pub fn effective_base_url(&self) -> String {
+        if !self.base_url.trim().is_empty() {
+            return self.base_url.trim().to_string();
+        }
         match self.kind {
-            ProviderKind::Zai => {
-                if self.base_url.trim().is_empty() {
-                    LlmConfig::DEFAULT_BASE_URL.to_string()
-                } else {
-                    self.base_url.trim().to_string()
-                }
-            }
-            _ => self.base_url.trim().to_string(),
+            // Bedrock's endpoint is derived from the region.
+            ProviderKind::Bedrock => bedrock_base_url(&self.effective_region()),
+            _ => self.kind.defaults().base_url.to_string(),
         }
     }
 
     /// Effective model name after kind defaults are applied.
     pub fn effective_model(&self) -> String {
-        match self.kind {
-            ProviderKind::Zai => {
-                if self.model.trim().is_empty() {
-                    LlmConfig::DEFAULT_MODEL.to_string()
-                } else {
-                    self.model.trim().to_string()
-                }
+        if !self.model.trim().is_empty() {
+            self.model.trim().to_string()
+        } else {
+            match self.kind {
+                // On Azure the deployment name is the model id.
+                ProviderKind::AzureOpenai => self
+                    .deployment_name
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string(),
+                _ => self.kind.defaults().model.to_string(),
             }
-            _ => self.model.trim().to_string(),
         }
+    }
+
+    /// Effective sampling temperature (override or kind default).
+    pub fn effective_temperature(&self) -> f64 {
+        self.temperature
+            .unwrap_or_else(|| self.kind.defaults().temperature)
+    }
+
+    /// Effective `max_tokens` (override or kind default).
+    pub fn effective_max_tokens(&self) -> u32 {
+        self.max_tokens
+            .unwrap_or_else(|| self.kind.defaults().max_tokens)
+    }
+
+    /// Effective per-request timeout (override or kind default).
+    pub fn effective_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.timeout_secs
+                .unwrap_or_else(|| self.kind.defaults().timeout_secs),
+        )
+    }
+
+    /// Effective Azure api-version (override or the pinned default).
+    pub fn effective_api_version(&self) -> String {
+        self.api_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(DEFAULT_AZURE_API_VERSION)
+            .to_string()
+    }
+
+    /// Effective Bedrock region (override or the default).
+    pub fn effective_region(&self) -> String {
+        self.region
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(DEFAULT_BEDROCK_REGION)
+            .to_string()
     }
 
     /// Endpoint host for display (e.g. `api.z.ai`).
@@ -203,7 +523,7 @@ impl ProviderProfile {
 }
 
 /// The whole settings file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     /// Format version (see [`SETTINGS_VERSION`]).
     pub version: u32,
@@ -340,6 +660,65 @@ pub fn check_profile_pairing(profile: &ProviderProfile) -> crate::Result<()> {
                 )));
             }
         }
+        // The hosted OpenAI-compatible catalog kinds: base URL and model
+        // are optional (kind defaults apply); an explicit base URL must
+        // be a well-formed encrypted (or loopback) http(s) URL.
+        ProviderKind::Openai
+        | ProviderKind::Gemini
+        | ProviderKind::Mistral
+        | ProviderKind::Groq
+        | ProviderKind::Openrouter
+        | ProviderKind::Ollama => {
+            if !profile.base_url.is_empty() {
+                if !is_http_url(&profile.base_url) {
+                    return Err(settings_error(format!(
+                        "provider “{name}”: base URL must be an absolute http(s) URL"
+                    )));
+                }
+                check_no_plaintext_http(&format!("provider “{name}”"), &profile.base_url)?;
+            }
+        }
+        ProviderKind::AzureOpenai => {
+            if profile.base_url.is_empty() {
+                return Err(settings_error(format!(
+                    "provider “{name}”: an Azure OpenAI provider needs the resource base URL \
+                     (e.g. https://<resource>.openai.azure.com)"
+                )));
+            }
+            if !is_http_url(&profile.base_url) {
+                return Err(settings_error(format!(
+                    "provider “{name}”: base URL must be an absolute http(s) URL"
+                )));
+            }
+            check_no_plaintext_http(&format!("provider “{name}”"), &profile.base_url)?;
+            if profile.deployment_name.as_deref().map_or(true, str::is_empty) {
+                return Err(settings_error(format!(
+                    "provider “{name}”: an Azure OpenAI provider needs a deployment name"
+                )));
+            }
+        }
+        ProviderKind::Bedrock => {
+            if let Some(region) = profile.region.as_deref() {
+                let region = region.trim();
+                if !region.is_empty()
+                    && !region
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                {
+                    return Err(settings_error(format!(
+                        "provider “{name}”: AWS region “{region}” is not a valid region slug"
+                    )));
+                }
+            }
+            if !profile.base_url.is_empty() {
+                if !is_http_url(&profile.base_url) {
+                    return Err(settings_error(format!(
+                        "provider “{name}”: base URL must be an absolute http(s) URL"
+                    )));
+                }
+                check_no_plaintext_http(&format!("provider “{name}”"), &profile.base_url)?;
+            }
+        }
         ProviderKind::Custom => {
             if profile.base_url.is_empty() {
                 return Err(settings_error(format!(
@@ -405,6 +784,9 @@ impl Settings {
             p.name = p.name.trim().to_string();
             p.base_url = p.base_url.trim().trim_end_matches('/').to_string();
             p.model = p.model.trim().to_string();
+            p.deployment_name = p.deployment_name.take().map(|v| v.trim().to_string());
+            p.api_version = p.api_version.take().map(|v| v.trim().to_string());
+            p.region = p.region.take().map(|v| v.trim().to_string());
         }
         if let Some(default) = &mut self.default_provider {
             let d = default.trim().to_string();
@@ -536,7 +918,8 @@ pub struct ProviderMenuItem {
     pub id: String,
     /// Display name (e.g. `Work GLM`).
     pub name: String,
-    /// `local`, `env`, `zai`, `anthropic`, or `custom` (kind string).
+    /// `local`, `env`, or a provider kind id (`zai`, `anthropic`,
+    /// `openai`, …; see [`ProviderKind::id`]).
     pub kind: String,
     /// Effective model (empty for `local`).
     pub model: String,
@@ -567,12 +950,7 @@ pub fn build_menu(
         items.push(ProviderMenuItem {
             id: p.id.clone(),
             name: p.display_name().to_string(),
-            kind: match p.kind {
-                ProviderKind::Zai => "zai",
-                ProviderKind::Anthropic => "anthropic",
-                ProviderKind::Custom => "custom",
-            }
-            .to_string(),
+            kind: p.kind.id().to_string(),
             model: p.effective_model(),
             host: p.host(),
             available: has_key(&p.id),
@@ -606,6 +984,12 @@ mod tests {
             kind,
             base_url: base_url.into(),
             model: model.into(),
+            temperature: None,
+            max_tokens: None,
+            timeout_secs: None,
+            deployment_name: None,
+            api_version: None,
+            region: None,
         }
     }
 
@@ -941,6 +1325,12 @@ mod tests {
                 kind: ProviderKind::Zai,
                 base_url: " https://api.z.ai/api/anthropic/ ".into(),
                 model: " glm-5 ".into(),
+                temperature: None,
+                max_tokens: None,
+                timeout_secs: None,
+                deployment_name: None,
+                api_version: None,
+                region: None,
             }],
             default_provider: Some(" ".into()),
             options: Options::default(),
@@ -1051,5 +1441,343 @@ mod tests {
         // Empty override: nothing to check.
         s.env_overrides.anthropic_base_url = String::new();
         s.validate().unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // Provider catalog: kinds, defaults, sampling fields (AI providers
+    // backend substrate)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn registry_defaults_table_is_total() {
+        // Every kind appears exactly once in the catalog, exposes its
+        // data (id, label, auth style, wire), and has defaults with a
+        // model, base URL, and timeout — except azure_openai and custom,
+        // whose endpoint and model are definitionally user-supplied (a
+        // resource/deployment URL and an explicit endpoint), and bedrock,
+        // whose base URL is derived from the region.
+        assert_eq!(ALL_KINDS.len(), 11);
+        let mut seen = std::collections::HashSet::new();
+        for kind in ALL_KINDS {
+            assert!(seen.insert(kind.id()), "duplicate kind id {}", kind.id());
+            assert!(!kind.label().is_empty(), "{} needs a label", kind.id());
+            let defaults = kind.defaults();
+            assert!(
+                defaults.max_tokens > 0,
+                "{} needs a max-tokens default",
+                kind.id()
+            );
+            assert!(
+                defaults.timeout_secs > 0,
+                "{} needs a timeout default",
+                kind.id()
+            );
+            assert!(
+                (0.0..=2.0).contains(&defaults.temperature),
+                "{} has an out-of-range default temperature",
+                kind.id()
+            );
+            match kind {
+                ProviderKind::AzureOpenai | ProviderKind::Custom => {
+                    assert_eq!(defaults.model, "", "{} model is user-supplied", kind.id());
+                    assert_eq!(
+                        defaults.base_url, "",
+                        "{} base URL is user-supplied", kind.id()
+                    );
+                }
+                ProviderKind::Bedrock => {
+                    assert!(!defaults.model.is_empty(), "bedrock needs a model default");
+                    // The effective default base URL derives from the
+                    // region template.
+                    let empty = profile("b", ProviderKind::Bedrock, "", "");
+                    assert_eq!(
+                        empty.effective_base_url(),
+                        bedrock_base_url(DEFAULT_BEDROCK_REGION)
+                    );
+                }
+                _ => {
+                    assert!(
+                        !defaults.model.is_empty(),
+                        "{} needs a model default",
+                        kind.id()
+                    );
+                    assert!(
+                        Url::parse(defaults.base_url).is_ok(),
+                        "{} needs a parseable default base URL, got {:?}",
+                        kind.id(),
+                        defaults.base_url
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn registry_kind_data_maps_wires_and_auth() {
+        // Native Anthropic wire: z.ai + anthropic. OpenAI-compatible:
+        // the catalog kinds + custom. Bedrock: its own (follow-up) wire.
+        for kind in [ProviderKind::Zai, ProviderKind::Anthropic] {
+            assert_eq!(kind.wire(), Wire::AnthropicMessages, "{kind:?}");
+            assert_eq!(kind.auth(), AuthStyle::XApiKey, "{kind:?}");
+        }
+        for kind in [
+            ProviderKind::Openai,
+            ProviderKind::Gemini,
+            ProviderKind::AzureOpenai,
+            ProviderKind::Mistral,
+            ProviderKind::Groq,
+            ProviderKind::Openrouter,
+            ProviderKind::Ollama,
+            ProviderKind::Custom,
+        ] {
+            assert_eq!(kind.wire(), Wire::OpenAiChat, "{kind:?}");
+        }
+        assert_eq!(ProviderKind::Bedrock.wire(), Wire::AwsBedrock);
+        assert_eq!(ProviderKind::Openai.auth(), AuthStyle::Bearer);
+        assert_eq!(ProviderKind::Ollama.auth(), AuthStyle::None);
+        assert_eq!(ProviderKind::Bedrock.auth(), AuthStyle::AwsSigV4);
+        // Kind ids round-trip through serde (the settings file stores
+        // them as the snake_case tag).
+        for kind in ALL_KINDS {
+            let text = serde_json::to_string(&kind).unwrap();
+            let back: ProviderKind = serde_json::from_str(&text).unwrap();
+            assert_eq!(back, kind);
+        }
+    }
+
+    #[test]
+    fn sampling_fields_round_trip_two_providers_without_crosstalk() {
+        let dir = std::env::temp_dir().join(format!("mcv-settings-smp-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        // Two providers of different kinds with distinct sampling
+        // overrides and distinct base URLs: nothing of one may leak
+        // into the other through a save + reopen.
+        let mut s = Settings::default();
+        s.providers = vec![
+            ProviderProfile {
+                id: "openai-main".into(),
+                name: "OpenAI".into(),
+                kind: ProviderKind::Openai,
+                base_url: String::new(),
+                model: String::new(),
+                temperature: Some(0.7),
+                max_tokens: Some(512),
+                timeout_secs: Some(45),
+                deployment_name: None,
+                api_version: None,
+                region: None,
+            },
+            ProviderProfile {
+                id: "ollama-local".into(),
+                name: "Local Ollama".into(),
+                kind: ProviderKind::Ollama,
+                base_url: "http://127.0.0.1:11434/v1".into(),
+                model: "llama3.2".into(),
+                temperature: Some(0.0),
+                max_tokens: Some(2048),
+                timeout_secs: Some(300),
+                deployment_name: None,
+                api_version: None,
+                region: None,
+            },
+        ];
+        s.default_provider = Some("ollama-local".into());
+        s.normalize();
+        s.validate().unwrap();
+        s.save(&path).unwrap();
+        let loaded = Settings::load(&path).unwrap().expect("file exists");
+        assert_eq!(loaded, s, "the whole file round-trips");
+        // Provider choice survives.
+        assert_eq!(loaded.default_provider.as_deref(), Some("ollama-local"));
+        // Credential references (keyring ids) survive.
+        assert_eq!(
+            loaded.providers.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["openai-main", "ollama-local"]
+        );
+        // The three sampling fields survive per provider, without
+        // crosstalk.
+        let (openai, ollama) = (&loaded.providers[0], &loaded.providers[1]);
+        assert_eq!(
+            (openai.temperature, openai.max_tokens, openai.timeout_secs),
+            (Some(0.7), Some(512), Some(45))
+        );
+        assert_eq!(
+            (ollama.temperature, ollama.max_tokens, ollama.timeout_secs),
+            (Some(0.0), Some(2048), Some(300))
+        );
+        // Effective values follow each profile's own overrides/kind.
+        assert_eq!(openai.effective_temperature(), 0.7);
+        assert_eq!(openai.effective_max_tokens(), 512);
+        assert_eq!(openai.effective_timeout(), std::time::Duration::from_secs(45));
+        assert_eq!(ollama.effective_temperature(), 0.0);
+        assert_eq!(ollama.effective_max_tokens(), 2048);
+        assert_eq!(ollama.effective_timeout(), std::time::Duration::from_secs(300));
+        // An untouched profile uses the kind defaults (no crosstalk from
+        // the sibling's overrides either).
+        let plain = profile("g", ProviderKind::Groq, "", "");
+        assert_eq!(plain.effective_temperature(), ProviderKind::Groq.defaults().temperature);
+        assert_eq!(plain.effective_max_tokens(), ProviderKind::Groq.defaults().max_tokens);
+        assert_eq!(
+            plain.effective_timeout(),
+            std::time::Duration::from_secs(ProviderKind::Groq.defaults().timeout_secs)
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn provider_settings_shape_stays_additive_for_older_readers() {
+        let dir = std::env::temp_dir().join(format!("mcv-settings-add-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        // A file written before the sampling/extra fields existed (the
+        // exact pre-change shape) loads unchanged, with the new fields
+        // backfilled to None.
+        let older = serde_json::json!({
+            "version": SETTINGS_VERSION,
+            "providers": [{
+                "id": "mine", "name": "Mine", "kind": "custom",
+                "base_url": "http://127.0.0.1:9/api", "model": "m"
+            }],
+            "default_provider": "mine",
+            "options": {"theme": "system", "summarize_top": 8}
+        });
+        fs::write(&path, serde_json::to_vec(&older).unwrap()).unwrap();
+        let loaded = Settings::load(&path).unwrap().expect("older file loads");
+        let p = &loaded.providers[0];
+        assert_eq!(p.kind, ProviderKind::Custom);
+        assert_eq!(p.temperature, None);
+        assert_eq!(p.max_tokens, None);
+        assert_eq!(p.timeout_secs, None);
+        assert_eq!(p.deployment_name, None);
+        assert_eq!(p.api_version, None);
+        assert_eq!(p.region, None);
+        // Saving with the new fields set keeps the shape additive: the
+        // optional fields are absent when None, so an older build (which
+        // ignores unknown JSON fields) still reads the file.
+        let mut s = loaded;
+        s.providers[0].temperature = Some(0.4);
+        s.providers[0].max_tokens = Some(256);
+        s.providers[0].timeout_secs = Some(90);
+        s.save(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"temperature\": 0.4"));
+        let reloaded = Settings::load(&path).unwrap().unwrap();
+        assert_eq!(reloaded.providers[0].temperature, Some(0.4));
+        assert_eq!(reloaded.providers[0].max_tokens, Some(256));
+        assert_eq!(reloaded.providers[0].timeout_secs, Some(90));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn catalog_kinds_apply_defaults_and_validate_overrides() {
+        // Bare catalog profiles validate with pure defaults…
+        for kind in [
+            ProviderKind::Openai,
+            ProviderKind::Gemini,
+            ProviderKind::Mistral,
+            ProviderKind::Groq,
+            ProviderKind::Openrouter,
+            ProviderKind::Ollama,
+        ] {
+            let s = settings_with(vec![profile("x", kind, "", "")]);
+            s.validate()
+                .unwrap_or_else(|e| panic!("{} with defaults should pass: {e}", kind.id()));
+            let p = &s.providers[0];
+            assert!(!p.effective_base_url().is_empty(), "{}", kind.id());
+            assert!(!p.effective_model().is_empty(), "{}", kind.id());
+        }
+        // …an explicit base URL override wins and must be a URL…
+        let s = settings_with(vec![profile(
+            "oai",
+            ProviderKind::Openai,
+            "https://proxy.example.com/v1",
+            "gpt-4o",
+        )]);
+        s.validate().unwrap();
+        assert_eq!(s.providers[0].effective_base_url(), "https://proxy.example.com/v1");
+        // …a malformed URL is refused, and plaintext http off loopback
+        // is refused for hosted kinds too.
+        let s = settings_with(vec![profile("oai", ProviderKind::Openai, "not a url", "")]);
+        assert!(s.validate().unwrap_err().to_string().contains("http(s) URL"));
+        let s = settings_with(vec![profile(
+            "groq",
+            ProviderKind::Groq,
+            "http://api.groq.com/openai/v1",
+            "",
+        )]);
+        assert!(s.validate().unwrap_err().to_string().contains("plaintext http"));
+        // Ollama's default is loopback http: allowed as-is.
+        let s = settings_with(vec![profile("loc", ProviderKind::Ollama, "", "")]);
+        s.validate().unwrap();
+        assert_eq!(
+            s.providers[0].effective_base_url(),
+            ProviderKind::Ollama.defaults().base_url
+        );
+    }
+
+    #[test]
+    fn azure_requires_resource_url_and_deployment() {
+        let s = settings_with(vec![profile("az", ProviderKind::AzureOpenai, "", "")]);
+        let err = s.validate().unwrap_err().to_string();
+        assert!(err.contains("resource base URL"), "got: {err}");
+        let s = settings_with(vec![profile(
+            "az",
+            ProviderKind::AzureOpenai,
+            "https://res.openai.azure.com",
+            "",
+        )]);
+        let err = s.validate().unwrap_err().to_string();
+        assert!(err.contains("deployment name"), "got: {err}");
+        // Complete: deployment name + optional api-version (pinned
+        // default applies); the deployment is the effective model.
+        let mut s = settings_with(vec![profile(
+            "az",
+            ProviderKind::AzureOpenai,
+            "https://res.openai.azure.com",
+            "",
+        )]);
+        s.providers[0].deployment_name = Some(" my-gpt ".into());
+        s.providers[0].api_version = Some(" 2025-01-01 ".into());
+        s.normalize();
+        s.validate().unwrap();
+        let p = &s.providers[0];
+        assert_eq!(p.deployment_name.as_deref(), Some("my-gpt"));
+        assert_eq!(p.effective_model(), "my-gpt");
+        assert_eq!(p.effective_api_version(), "2025-01-01");
+        // Default api-version when unset.
+        s.providers[0].api_version = None;
+        assert_eq!(
+            s.providers[0].effective_api_version(),
+            DEFAULT_AZURE_API_VERSION
+        );
+    }
+
+    #[test]
+    fn bedrock_derives_base_url_from_region() {
+        // Bare profile: default region template.
+        let s = settings_with(vec![profile("b", ProviderKind::Bedrock, "", "")]);
+        s.validate().unwrap();
+        let p = &s.providers[0];
+        assert_eq!(p.effective_region(), DEFAULT_BEDROCK_REGION);
+        assert_eq!(
+            p.effective_base_url(),
+            "https://bedrock-runtime.us-east-1.amazonaws.com"
+        );
+        // An explicit region redirects the derived endpoint.
+        let mut s = settings_with(vec![profile("b", ProviderKind::Bedrock, "", "")]);
+        s.providers[0].region = Some(" eu-central-1 ".into());
+        s.normalize();
+        s.validate().unwrap();
+        assert_eq!(s.providers[0].effective_region(), "eu-central-1");
+        assert_eq!(
+            s.providers[0].effective_base_url(),
+            "https://bedrock-runtime.eu-central-1.amazonaws.com"
+        );
+        // Region slugs are validated.
+        let mut s = settings_with(vec![profile("b", ProviderKind::Bedrock, "", "")]);
+        s.providers[0].region = Some("Not A Region".into());
+        let err = s.validate().unwrap_err().to_string();
+        assert!(err.contains("not a valid region slug"), "got: {err}");
     }
 }
