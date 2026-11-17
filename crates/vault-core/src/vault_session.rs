@@ -102,8 +102,12 @@ pub enum SessionError {
 /// is parsed on read; the recorded location is the directory *name*
 /// only, so an identity survives parent renames and a future move
 /// protocol can rewrite it.
+///
+/// Public so [`crate::vault_move`] can read and validate an identity
+/// without opening a session (inspection takes no lock and never
+/// mutates the directory).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct VaultIdentity {
+pub struct VaultIdentity {
     /// The format marker; must be [`IDENTITY_FORMAT`].
     format: String,
     /// The identity format version; must be exactly the version this
@@ -118,6 +122,25 @@ struct VaultIdentity {
 }
 
 impl VaultIdentity {
+    /// Read the identity file of the vault at `dir` **without** taking
+    /// the session lock and without validating anything: `Ok(None)`
+    /// when the directory carries no identity (a legacy or a candidate
+    /// directory); a parse failure is
+    /// [`SessionError::InvalidIdentity`]. Callers that need the full
+    /// checks use [`VaultIdentity::validate`] against the directory
+    /// being considered. Written state is never touched.
+    pub fn read(dir: &Path) -> Result<Option<Self>, SessionError> {
+        match fs::read_to_string(dir.join(IDENTITY_FILE)) {
+            Ok(text) => {
+                let identity: VaultIdentity = serde_json::from_str(&text)
+                    .map_err(|e| SessionError::InvalidIdentity(format!("not valid JSON: {e}")))?;
+                Ok(Some(identity))
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(SessionError::Io(e)),
+        }
+    }
+
     /// A fresh identity for a legacy vault opened in place.
     fn minted(dir: &Path) -> Self {
         Self {
@@ -129,8 +152,10 @@ impl VaultIdentity {
     }
 
     /// Validate an identity read from disk against the directory being
-    /// opened; returns the parsed vault UUID.
-    fn validate(&self, dir: &Path) -> Result<Uuid, SessionError> {
+    /// opened; returns the parsed vault UUID. Public so
+    /// [`crate::vault_move`] can validate a candidate directory's
+    /// identity without opening a session.
+    pub fn validate(&self, dir: &Path) -> Result<Uuid, SessionError> {
         if self.format != IDENTITY_FORMAT {
             return Err(SessionError::InvalidIdentity(format!(
                 "unknown format marker {:?} (expected {:?})",
