@@ -51,8 +51,12 @@ use crate::{Error, Result};
 pub const DEFAULT_SUMMARIZE_TOP: usize = 8;
 /// Per-request timeout for LLM calls.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// `max_tokens` sent with each request.
-const MAX_TOKENS: u32 = 1024;
+/// `max_tokens` sent with each request (the registry's per-kind default
+/// tables and both clients share this constant).
+pub const DEFAULT_MAX_TOKENS: u32 = 1024;
+/// Default sampling temperature (low and deterministic — these are RAG
+/// answers over a personal archive, not creative writing).
+pub const DEFAULT_SAMPLING_TEMPERATURE: f64 = 0.2;
 /// Hard cap on the length of an LLM-produced MATCH expression.
 const MAX_MATCH_LEN: usize = 512;
 /// Hard cap on the length of an LLM-produced `from` filter.
@@ -229,8 +233,10 @@ fn classify_status(code: u16, body: &str, host: &str) -> String {
 
 /// A chat-completion backend: one system + user exchange.
 ///
-/// Implemented by [`AnthropicLlm`] (real endpoint) and [`MockLlm`] (tests);
-/// the pipeline functions below accept any `&dyn Llm`.
+/// Implemented by [`AnthropicLlm`] (native `/v1/messages`) and
+/// [`OpenAiLlm`] (OpenAI-compatible `/chat/completions`) over real
+/// endpoints, and by [`MockLlm`] (tests); the pipeline functions below
+/// accept any `&dyn Llm`.
 pub trait Llm: Send + Sync {
     /// Complete one exchange, returning the assistant's text.
     fn complete(&self, system: &str, user: &str) -> Result<String>;
@@ -257,7 +263,7 @@ impl Llm for AnthropicLlm {
         let url = format!("{}/v1/messages", self.config.base_url.trim_end_matches('/'));
         let body = serde_json::json!({
             "model": self.config.model,
-            "max_tokens": MAX_TOKENS,
+            "max_tokens": DEFAULT_MAX_TOKENS,
             "system": system,
             "messages": [{ "role": "user", "content": user }],
         });
@@ -287,6 +293,150 @@ impl Llm for AnthropicLlm {
         }
         Ok(text.to_string())
     }
+}
+
+/// The exact outbound request of one [`OpenAiLlm`] exchange — URL,
+/// auth, and body as they go on the wire — built by
+/// [`OpenAiLlm::build_request`] so tests can assert the request shape
+/// without any network.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenAiRequest {
+    /// Full chat-completions URL.
+    pub url: String,
+    /// `Authorization: Bearer <key>` value; `None` sends no auth header
+    /// (a local endpoint without a key, e.g. Ollama).
+    pub bearer: Option<String>,
+    /// The chat-completions JSON body.
+    pub body: serde_json::Value,
+}
+
+/// [`Llm`] over an OpenAI-compatible `/chat/completions` endpoint — one
+/// client path shared by the `openai`, `groq`, `openrouter`, `ollama`,
+/// and `custom` provider kinds (see [`crate::settings::ProviderKind`]).
+/// The Anthropic-compatible endpoint keeps its native
+/// [`AnthropicLlm`].
+#[derive(Debug, Clone)]
+pub struct OpenAiLlm {
+    config: LlmConfig,
+    temperature: f64,
+    max_tokens: u32,
+    timeout: Duration,
+}
+
+impl OpenAiLlm {
+    /// Client with the pipeline's default sampling
+    /// ([`DEFAULT_SAMPLING_TEMPERATURE`], [`DEFAULT_MAX_TOKENS`],
+    /// 30 s timeout).
+    pub fn new(config: LlmConfig) -> Self {
+        Self {
+            config,
+            temperature: DEFAULT_SAMPLING_TEMPERATURE,
+            max_tokens: DEFAULT_MAX_TOKENS,
+            timeout: REQUEST_TIMEOUT,
+        }
+    }
+
+    /// Override the sampling values (a provider profile's effective
+    /// temperature / max tokens / timeout).
+    pub fn with_sampling(mut self, temperature: f64, max_tokens: u32, timeout: Duration) -> Self {
+        self.temperature = temperature;
+        self.max_tokens = max_tokens;
+        self.timeout = timeout;
+        self
+    }
+
+    /// The chat-completions URL for `base_url` (trailing slashes on the
+    /// base are trimmed, `/chat/completions` appended).
+    pub fn chat_url(base_url: &str) -> String {
+        format!("{}/chat/completions", base_url.trim_end_matches('/'))
+    }
+
+    /// Build the exact outbound request for one exchange (no network).
+    pub fn build_request(&self, system: &str, user: &str) -> OpenAiRequest {
+        OpenAiRequest {
+            url: Self::chat_url(&self.config.base_url),
+            bearer: (!self.config.api_key.trim().is_empty())
+                .then(|| format!("Bearer {}", self.config.api_key)),
+            body: serde_json::json!({
+                "model": self.config.model,
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+                "messages": [
+                    { "role": "system", "content": system },
+                    { "role": "user", "content": user },
+                ],
+            }),
+        }
+    }
+
+    /// One exchange through an injected `transport`: the transport
+    /// receives the built request (URL, auth, body — nothing else) and
+    /// returns the parsed response body. [`Llm::complete`] uses the
+    /// real HTTP transport; tests mock it.
+    pub fn complete_via(
+        &self,
+        system: &str,
+        user: &str,
+        transport: &dyn Fn(&OpenAiRequest) -> Result<serde_json::Value>,
+    ) -> Result<String> {
+        let request = self.build_request(system, user);
+        let parsed = transport(&request)?;
+        parse_openai_completion(&parsed)
+    }
+
+    /// The real HTTP transport (ureq): POST the request, classify
+    /// failures like [`LlmConfig::test_connection`].
+    fn send(&self, request: &OpenAiRequest) -> Result<serde_json::Value> {
+        let mut call = ureq::post(&request.url).timeout(self.timeout);
+        if let Some(bearer) = &request.bearer {
+            call = call.set("Authorization", bearer);
+        }
+        match call.send_json(request.body.clone()) {
+            Ok(response) => response
+                .into_json()
+                .map_err(|e| Error::Llm(format!("unreadable response body: {e}"))),
+            Err(ureq::Error::Status(code, response)) => {
+                let body = response.into_string().unwrap_or_default();
+                Err(Error::Llm(classify_status(code, &body, &self.config.host())))
+            }
+            Err(e) => Err(Error::Llm(format!(
+                "request to {} failed: {e}",
+                self.config.host()
+            ))),
+        }
+    }
+}
+
+impl Llm for OpenAiLlm {
+    fn complete(&self, system: &str, user: &str) -> Result<String> {
+        self.complete_via(system, user, &|request| self.send(request))
+    }
+}
+
+/// Extract the assistant's text from a chat-completions response body:
+/// `choices[0].message.content`, either as a string or as an array of
+/// parts whose `text` fields are concatenated. Empty text is an error.
+pub fn parse_openai_completion(body: &serde_json::Value) -> Result<String> {
+    let content = body["choices"][0]["message"]["content"].clone();
+    let mut text = String::new();
+    match content {
+        serde_json::Value::String(s) => text.push_str(&s),
+        serde_json::Value::Array(parts) => {
+            for part in parts {
+                if part.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                        text.push_str(t);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(Error::Llm("model returned no text".into()));
+    }
+    Ok(text.to_string())
 }
 
 /// Deterministic [`Llm`] for tests: replies in order, records every prompt.
@@ -2017,6 +2167,138 @@ mod tests {
         assert!(!plaintext_http_off_loopback("http://localhost:9"));
         assert!(!plaintext_http_off_loopback("http://[::1]:9"));
         assert!(!plaintext_http_off_loopback("not a url"));
+    }
+
+    // ------------------------------------------------------------------
+    // OpenAI-compatible client (shared by openai/groq/openrouter/
+    // ollama/custom provider kinds)
+    // ------------------------------------------------------------------
+
+    fn openai_config(base_url: &str, api_key: &str, model: &str) -> LlmConfig {
+        LlmConfig {
+            base_url: base_url.into(),
+            api_key: api_key.into(),
+            model: model.into(),
+        }
+    }
+
+    #[test]
+    fn openai_client_builds_the_expected_request_shape() {
+        // openai kind: default base URL, bearer auth.
+        let llm = OpenAiLlm::new(openai_config(
+            crate::settings::ProviderKind::Openai.defaults().base_url,
+            "sk-test",
+            "gpt-4o-mini",
+        ));
+        let request = llm.build_request("be terse", "summarize this");
+        assert_eq!(request.url, "https://api.openai.com/v1/chat/completions");
+        assert_eq!(request.bearer.as_deref(), Some("Bearer sk-test"));
+        assert_eq!(request.body["model"], "gpt-4o-mini");
+        assert_eq!(request.body["temperature"], DEFAULT_SAMPLING_TEMPERATURE);
+        assert_eq!(request.body["max_tokens"], DEFAULT_MAX_TOKENS);
+        assert_eq!(request.body["messages"][0]["role"], "system");
+        assert_eq!(request.body["messages"][0]["content"], "be terse");
+        assert_eq!(request.body["messages"][1]["role"], "user");
+        assert_eq!(request.body["messages"][1]["content"], "summarize this");
+
+        // Sampling overrides from a provider profile reach the body.
+        let tuned = OpenAiLlm::new(openai_config("https://api.openai.com/v1", "k", "m"))
+            .with_sampling(0.9, 77, Duration::from_secs(120));
+        let request = tuned.build_request("s", "u");
+        assert_eq!(request.body["temperature"], 0.9);
+        assert_eq!(request.body["max_tokens"], 77);
+    }
+
+    #[test]
+    fn openai_client_honors_base_url_override_and_omits_auth_without_key() {
+        // ollama kind: a local base URL override (trailing slash trimmed,
+        // /chat/completions appended) and no bearer without a key.
+        let llm = OpenAiLlm::new(openai_config(
+            "http://127.0.0.1:11434/v1/",
+            "  ",
+            "llama3.2",
+        ));
+        let request = llm.build_request("s", "u");
+        assert_eq!(request.url, "http://127.0.0.1:11434/v1/chat/completions");
+        assert_eq!(request.bearer, None, "no auth header without a key");
+        assert_eq!(request.body["model"], "llama3.2");
+
+        // With a key (a proxied Ollama), the bearer header is back.
+        let llm = OpenAiLlm::new(openai_config(
+            "http://localhost:11434/v1",
+            "proxy-key",
+            "llama3.2",
+        ));
+        assert_eq!(
+            llm.build_request("s", "u").bearer.as_deref(),
+            Some("Bearer proxy-key")
+        );
+    }
+
+    #[test]
+    fn openai_client_returns_a_parsed_completion_via_mocked_transport() {
+        let llm = OpenAiLlm::new(openai_config("https://api.openai.com/v1", "k", "m"));
+        // The mocked transport sees exactly the built request and serves
+        // a chat-completions body; the client parses the completion.
+        let seen: std::sync::Mutex<Vec<OpenAiRequest>> = std::sync::Mutex::new(Vec::new());
+        let reply = llm
+            .complete_via("sys", "usr", &|request| {
+                seen.lock().unwrap().push(request.clone());
+                Ok(serde_json::json!({
+                    "id": "chatcmpl-1",
+                    "choices": [{
+                        "index": 0,
+                        "message": { "role": "assistant", "content": "  parsed completion [1]. " }
+                    }]
+                }))
+            })
+            .unwrap();
+        assert_eq!(reply, "parsed completion [1].");
+        let seen = seen.into_inner().unwrap();
+        assert_eq!(seen.len(), 1, "exactly one round trip");
+        assert_eq!(
+            seen[0].url,
+            "https://api.openai.com/v1/chat/completions",
+            "the transport saw the built request"
+        );
+        // A transport failure surfaces; a body without text is an error.
+        let err = llm
+            .complete_via("s", "u", &|_| Err(Error::Llm("transport down".into())))
+            .unwrap_err();
+        assert!(err.to_string().contains("transport down"));
+        let err = llm
+            .complete_via("s", "u", &|_| {
+                Ok(serde_json::json!({ "choices": [{ "message": { "content": "  " } }] }))
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("model returned no text"));
+    }
+
+    #[test]
+    fn openai_completion_parser_accepts_string_and_part_array_content() {
+        let string = serde_json::json!({
+            "choices": [{ "message": { "content": "plain text" } }]
+        });
+        assert_eq!(parse_openai_completion(&string).unwrap(), "plain text");
+        // Some providers answer with an array of typed parts.
+        let parts = serde_json::json!({
+            "choices": [{
+                "message": { "content": [
+                    { "type": "text", "text": "alpha " },
+                    { "type": "refusal", "refusal": null },
+                    { "type": "text", "text": "beta" },
+                ] }
+            }]
+        });
+        assert_eq!(parse_openai_completion(&parts).unwrap(), "alpha beta");
+        // No choices / wrong shape / empty: errors, never panics.
+        for bad in [
+            serde_json::json!({}),
+            serde_json::json!({ "choices": [] }),
+            serde_json::json!({ "choices": [{ "message": {} }] }),
+        ] {
+            assert!(parse_openai_completion(&bad).is_err(), "{bad}");
+        }
     }
 
     // ------------------------------------------------------------------

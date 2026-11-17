@@ -187,6 +187,12 @@ impl Sandbox {
                 kind: vault_core::settings::ProviderKind::Custom,
                 base_url: "https://example.invalid/api".to_string(),
                 model: "test-model".to_string(),
+                temperature: None,
+                max_tokens: None,
+                timeout_secs: None,
+                deployment_name: None,
+                api_version: None,
+                region: None,
             });
         settings.save(&self.data_dir().join(SETTINGS_FILE)).unwrap();
 
