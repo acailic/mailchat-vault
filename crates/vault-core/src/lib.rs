@@ -134,6 +134,7 @@ pub mod messenger;
 pub mod oauth;
 pub mod object_store;
 pub mod pdf_text;
+pub mod person_timeline;
 pub mod preview;
 pub mod query;
 pub mod reminders;

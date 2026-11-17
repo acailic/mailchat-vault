@@ -4990,7 +4990,7 @@ fn archive_revision_on(conn: &Connection) -> Result<u64> {
 /// The current `organization_revision` counter on an arbitrary
 /// connection (0 before the first person-links commit — see
 /// [`Storage::organization_revision`]).
-fn organization_revision_on(conn: &Connection) -> Result<u64> {
+pub(crate) fn organization_revision_on(conn: &Connection) -> Result<u64> {
     let value: Option<String> = conn
         .query_row(
             "SELECT value FROM archive_meta WHERE key = 'organization_revision'",
@@ -5789,7 +5789,7 @@ pub struct PersonLinkHistoryRecord {
 /// display names — have *no* stable key; they surface as ambiguous,
 /// source-scoped author-name identities and never match a stable-key
 /// anchor.
-fn author_stable_key(author: &str) -> Option<String> {
+pub(crate) fn author_stable_key(author: &str) -> Option<String> {
     let trimmed = author.trim();
     if let (Some(open), Some(close)) = (trimmed.rfind('<'), trimmed.rfind('>')) {
         if open < close {
