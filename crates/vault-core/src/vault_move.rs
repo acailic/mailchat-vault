@@ -269,7 +269,9 @@ pub fn detect_filesystem(path: &Path, mount_table: &str) -> FilesystemInfo {
     }
     match best {
         Some((_, fs_type)) => {
-            let network = NETWORK_FILESYSTEMS.iter().any(|n| n.eq_ignore_ascii_case(&fs_type));
+            let network = NETWORK_FILESYSTEMS
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(&fs_type));
             FilesystemInfo { fs_type, network }
         }
         None => FilesystemInfo {
@@ -405,7 +407,10 @@ pub fn inspect_location(
     probe_writable(path)?;
 
     let free_bytes = fs4::available_space(path).map_err(|e| {
-        MoveError::Vault(format!("cannot measure free space at {}: {e}", path.display()))
+        MoveError::Vault(format!(
+            "cannot measure free space at {}: {e}",
+            path.display()
+        ))
     })?;
 
     let disposition = classify_contents(path, active_vault_id)?;
@@ -510,12 +515,11 @@ fn schema_version_of(db: &Path, dir_for_error: &Path) -> Result<i64, MoveError> 
             path: dir_for_error.to_path_buf(),
             reason: format!("cannot open read-only: {e}"),
         })?;
-    let version = crate::storage::read_schema_version(&conn).map_err(|e| {
-        MoveError::InvalidVaultDb {
+    let version =
+        crate::storage::read_schema_version(&conn).map_err(|e| MoveError::InvalidVaultDb {
             path: dir_for_error.to_path_buf(),
             reason: e.to_string(),
-        }
-    })?;
+        })?;
     if version > SUPPORTED_SCHEMA_VERSION {
         return Err(MoveError::SchemaTooNew {
             path: dir_for_error.to_path_buf(),
@@ -742,11 +746,9 @@ pub fn preview_move(
     let mut estimate = result?;
     estimate.total_bytes = estimate.total();
 
-    let needed = opts
-        .min_free_bytes
-        .map_or(estimate.total_bytes, |floor| {
-            estimate.total_bytes.max(floor)
-        });
+    let needed = opts.min_free_bytes.map_or(estimate.total_bytes, |floor| {
+        estimate.total_bytes.max(floor)
+    });
     if inspection.free_bytes < needed {
         return Err(MoveError::InsufficientSpace {
             needed,
@@ -820,8 +822,7 @@ impl MoveJournal {
         Self {
             version: MOVE_JOURNAL_VERSION,
             phase: MovePhase::Quiescing,
-            created_at: chrono::Utc::now()
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             intent: MoveIntent::Move,
             origin,
             destination,
@@ -934,10 +935,14 @@ pub fn resolve_interrupted_move(data_dir: &Path) -> Result<MoveRecovery, MoveErr
         return Ok(MoveRecovery::None);
     };
     let MoveJournal {
-        origin, destination, ..
+        origin,
+        destination,
+        ..
     } = journal;
     Ok(match journal.phase {
-        MovePhase::Quiescing | MovePhase::SnapshotReady | MovePhase::Copying
+        MovePhase::Quiescing
+        | MovePhase::SnapshotReady
+        | MovePhase::Copying
         | MovePhase::CopiedVerified => MoveRecovery::KeepOrigin {
             origin,
             destination,
@@ -990,11 +995,7 @@ mod tests {
             .unwrap()
             .display()
             .to_string();
-        let nested = format!(
-            "{}dev/sdb /{} cifs rw 0 0\n",
-            local_mounts(),
-            nested_path
-        );
+        let nested = format!("{}dev/sdb /{} cifs rw 0 0\n", local_mounts(), nested_path);
         let nested_info = detect_filesystem(dir.path(), &nested);
         assert_eq!(nested_info.fs_type, "cifs");
         assert!(nested_info.network);

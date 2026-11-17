@@ -86,7 +86,11 @@ impl Sandbox {
         let storage = Storage::open(data_dir.join("vault.db")).unwrap();
         let mut budget = Capacity::default();
         for i in 0..2 {
-            let (name, kind) = if i == 0 { ("photo.jpg", "image") } else { ("beep.wav", "audio") };
+            let (name, kind) = if i == 0 {
+                ("photo.jpg", "image")
+            } else {
+                ("beep.wav", "audio")
+            };
             let (entry, _) = media::store(&data_dir, &fixture(name), name, kind, &mut budget)
                 .expect("fixture object stored");
             let mut msg = vault_core::message::NewMessage::new(
@@ -318,7 +322,9 @@ fn inspection_reports_an_existing_compatible_vault() {
     let origin_id = origin_session.vault_id();
     drop(origin_session);
     match inspect_location(&candidate, Some(origin_id), &local_mounts()) {
-        Err(MoveError::IdentityMismatch { existing, active, .. }) => {
+        Err(MoveError::IdentityMismatch {
+            existing, active, ..
+        }) => {
             assert_eq!(existing, id.to_string());
             assert_eq!(active, origin_id.to_string());
         }
@@ -368,7 +374,9 @@ fn inspection_refuses_a_newer_schema_vault() {
 fn preview_estimates_database_objects_and_settings() {
     let sb = Sandbox::new("preview");
     let object_bytes = sb.seed_vault();
-    let settings_bytes = fs::metadata(sb.data_dir().join(SETTINGS_FILE)).unwrap().len();
+    let settings_bytes = fs::metadata(sb.data_dir().join(SETTINGS_FILE))
+        .unwrap()
+        .len();
     let destination = sb.dir("destination");
 
     let preview = sb
@@ -398,8 +406,12 @@ fn preview_estimates_database_objects_and_settings() {
     assert!(preview.destination_free_bytes > 0);
     // The plan: all five phases in order, a copy that verifies.
     assert_eq!(preview.phases, MovePhase::PLAN.to_vec());
-    assert!(preview.phases[2].summary().contains("checksum verification"));
-    assert!(preview.phases[2].summary().contains("never an assumed rename"));
+    assert!(preview.phases[2]
+        .summary()
+        .contains("checksum verification"));
+    assert!(preview.phases[2]
+        .summary()
+        .contains("never an assumed rename"));
     // Same-device destination detected; the plan still copies.
     assert!(!preview.cross_volume);
     assert!(preview.phases.contains(&MovePhase::Copying));
@@ -486,7 +498,10 @@ fn endpoints() -> (VaultEndpoint, VaultEndpoint) {
 fn move_journal_round_trips_in_its_own_recovery_file() {
     let sb = Sandbox::new("journal");
     let data_dir = sb.data_dir();
-    assert_eq!(resolve_interrupted_move(&data_dir).unwrap(), MoveRecovery::None);
+    assert_eq!(
+        resolve_interrupted_move(&data_dir).unwrap(),
+        MoveRecovery::None
+    );
 
     let (origin, destination) = endpoints();
     let mut journal = MoveJournal::new_move(origin.clone(), destination.clone());
@@ -500,7 +515,10 @@ fn move_journal_round_trips_in_its_own_recovery_file() {
         path.file_name().unwrap().to_string_lossy(),
         "switch-journal.json"
     );
-    assert_eq!(vault_move::read_move_journal(&data_dir).unwrap(), Some(journal));
+    assert_eq!(
+        vault_move::read_move_journal(&data_dir).unwrap(),
+        Some(journal)
+    );
     // The record carries both vault identities and paths plus intent.
     let raw = fs::read_to_string(&path).unwrap();
     assert!(raw.contains("\"intent\": \"move\""));
@@ -544,7 +562,9 @@ fn every_phase_resolves_to_one_action_with_one_writable_vault() {
         // Exactly one writable vault, and it is the origin — never the
         // destination, never both.
         assert_eq!(
-            resolve_interrupted_move(&data_dir).unwrap().writable_vault(),
+            resolve_interrupted_move(&data_dir)
+                .unwrap()
+                .writable_vault(),
             Some(origin.path.as_path()),
             "{phase:?}: the origin is the only writable vault"
         );
@@ -554,7 +574,10 @@ fn every_phase_resolves_to_one_action_with_one_writable_vault() {
     journal.phase = MovePhase::SwitchingPointer;
     write_move_journal(&data_dir, &journal).unwrap();
     match resolve_interrupted_move(&data_dir).unwrap() {
-        MoveRecovery::AdoptDestination { origin: o, destination: d } => {
+        MoveRecovery::AdoptDestination {
+            origin: o,
+            destination: d,
+        } => {
             assert_eq!(o, origin);
             assert_eq!(d, destination);
         }
@@ -565,7 +588,10 @@ fn every_phase_resolves_to_one_action_with_one_writable_vault() {
     journal.phase = MovePhase::Completed;
     write_move_journal(&data_dir, &journal).unwrap();
     match resolve_interrupted_move(&data_dir).unwrap() {
-        MoveRecovery::Completed { origin: o, destination: d } => {
+        MoveRecovery::Completed {
+            origin: o,
+            destination: d,
+        } => {
             assert_eq!(o, origin);
             assert_eq!(d, destination);
         }
@@ -574,7 +600,9 @@ fn every_phase_resolves_to_one_action_with_one_writable_vault() {
     // After the pointer moved, the *destination* is the one writable
     // vault — the origin copy is retained, never a second writable.
     assert_eq!(
-        resolve_interrupted_move(&data_dir).unwrap().writable_vault(),
+        resolve_interrupted_move(&data_dir)
+            .unwrap()
+            .writable_vault(),
         Some(destination.path.as_path())
     );
 }
