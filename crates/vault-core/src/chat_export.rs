@@ -17,7 +17,7 @@ use crate::bounded::{
 use crate::discord::{
     is_discord_export, is_discord_export_dir, is_discord_export_reader, DiscordSource,
 };
-use crate::import_bounds::{expand_zip_bounded, ImportBounds};
+use crate::import_bounds::{expand_zip_bounded, verify_input_fingerprint, ImportBounds};
 use crate::ingest::IngestSummary;
 use crate::jsonl::{is_jsonl_export, is_jsonl_export_reader, JsonlSource};
 use crate::media::MediaSummary;
@@ -445,6 +445,39 @@ pub fn import_bounded_with(
         }
     }
     run.run(source.as_ref(), sink, is_cancelled, progress)
+}
+
+/// A2a: [`import_bounded_with`] bound to the preview's input
+/// fingerprint — the confirmation token
+/// ([`crate::preview::ImportPreview::fingerprint`]). The picked input
+/// is re-fingerprinted first and the run is refused with "input
+/// changed after preview — inspect again" **before** any message or
+/// media byte is stored, so a stale preview can no longer authorize
+/// changed bytes. Unchanged input imports exactly as
+/// [`import_bounded_with`] does.
+#[allow(clippy::too_many_arguments)]
+pub fn import_bounded_bound_to(
+    sink: &mut dyn IngestSink,
+    picked: &Path,
+    expected_fingerprint: &str,
+    extract_media: bool,
+    data_dir: Option<&Path>,
+    confirmed_zone: Option<&str>,
+    destination_source: Option<&str>,
+    is_cancelled: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(u64, u64, &str),
+) -> Result<BoundedOutcome> {
+    verify_input_fingerprint(picked, expected_fingerprint)?;
+    import_bounded_with(
+        sink,
+        picked,
+        extract_media,
+        data_dir,
+        confirmed_zone,
+        destination_source,
+        is_cancelled,
+        progress,
+    )
 }
 
 #[cfg(test)]

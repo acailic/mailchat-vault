@@ -292,6 +292,26 @@ pub fn import_pick_bounded(
     run.run(source.as_ref(), sink, is_cancelled, progress)
 }
 
+/// A2a: [`import_pick_bounded`] bound to the preview's input
+/// fingerprint — the confirmation token
+/// ([`crate::preview::ImportPreview::fingerprint`]), which also feeds
+/// the mail pick route. The picked input is re-fingerprinted first and
+/// the run is refused with "input changed after preview — inspect
+/// again" **before** any message or media byte is stored, so a stale
+/// preview can no longer authorize changed bytes. Unchanged input
+/// imports exactly as [`import_pick_bounded`] does.
+pub fn import_pick_bounded_bound_to(
+    sink: &mut dyn crate::bounded::IngestSink,
+    picked: &Path,
+    expected_fingerprint: &str,
+    data_dir: &Path,
+    is_cancelled: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(u64, u64, &str),
+) -> Result<crate::bounded::BoundedOutcome> {
+    crate::import_bounds::verify_input_fingerprint(picked, expected_fingerprint)?;
+    import_pick_bounded(sink, picked, data_dir, is_cancelled, progress)
+}
+
 /// Parse raw `.mbox` file contents into messages.
 ///
 /// `chat_id` groups the messages (typically the file name stem). Message
