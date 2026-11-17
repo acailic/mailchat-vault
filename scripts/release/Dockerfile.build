@@ -35,9 +35,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # uid (the host user) — /root is not traversable for other users.
 ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
 ENV PATH=/usr/local/cargo/bin:$PATH
+# The pinned toolchain (rust-toolchain.toml) must be preinstalled exactly:
+# the build runs as the host uid, which cannot write into RUSTUP_HOME to
+# install or sync a toolchain. The pin also requires the rustfmt
+# component, so it is preinstalled too.
 RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
-      | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
+      | sh -s -- -y --default-toolchain 1.100.0 --profile minimal --no-modify-path \
+    && rustup component add rustfmt --toolchain 1.100.0 \
     && chmod -R a+rX /usr/local/rustup /usr/local/cargo \
+    && mkdir -p /usr/local/rustup/tmp && chmod 1777 /usr/local/rustup/tmp \
     && rustc --version
 
 # Writable-by-anyone mount point for the host cargo cache volume
