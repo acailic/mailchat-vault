@@ -16,11 +16,10 @@
 //! Everything exercises the product's own `vault-core` API — no SQL of
 //! the app is duplicated for timing.
 //!
-//! Run `vault-perf bench --help` for usage. See tests/perf/BASELINE.md for
-//! recorded baselines and the CI gate policy.
-
-mod fixture;
-mod measure;
+//! Run `vault-perf bench --help` for usage. See tests/perf/BASELINE.md
+//! for recorded baselines, docs/benchmark.md for the published
+//! methodology and results, and tests/perf/baseline.json for the gate
+//! budgets the `--gate` flag enforces.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,12 +31,11 @@ use vault_core::jobs::{DbPool, JobError, PoolConfig, PoolSink};
 use vault_core::query::SearchQuery;
 use vault_core::search::build_match_query;
 use vault_core::storage::Storage;
+use vault_perf::protocol::{self, Baseline, GateCheck};
+use vault_perf::suite::QuerySpec;
 
-use fixture::{
-    word_at, IngestSource, AUTHOR_HANDLE_RANK, BENCH_INGEST_SOURCE, DATE_FILTER_FROM,
-    DATE_FILTER_TO, FREQUENT_RANK, RARE_RANK, UBIQUITOUS_RANK, UNCOMMON_RANK,
-};
-use measure::{
+use vault_perf::fixture::{self, word_at, IngestSource, BENCH_INGEST_SOURCE, RARE_RANK};
+use vault_perf::measure::{
     BenchConfig, ConcurrentIngestRow, EnvInfo, FixtureInfo, GateResult, IngestSearchRow, IpcRow,
     LatencyStats, Report, SearchRow, StartupRow,
 };
@@ -54,8 +52,11 @@ Usage: vault-perf bench [OPTIONS]
   --startup-runs N   storage startup measurements (default 10)
   --ingest-count N   messages committed by the concurrent-ingest phase
                      (default 50000; 0 skips the phase)
-  --gate             fail (exit 1) when any query's p95 >= its budget
-                     (per-query budgets calibrated for CI; see BASELINE.md)
+  --gate             fail (exit 1) when any query's p95 >= its budget from
+                     the committed baseline file (default baseline.json;
+                     see docs/benchmark.md)
+  --baseline PATH    baseline file for --gate (default: baseline.json in
+                     the working directory)
   --gate-p95-ms X    like --gate but one uniform budget (ms) for all queries
   --json PATH        write the full results as JSON to PATH
   --gen-only         generate the fixture and exit (skip benchmarks)
@@ -71,6 +72,7 @@ struct Args {
     startup_runs: u32,
     ingest_count: u64,
     gate: bool,
+    baseline: Option<PathBuf>,
     gate_p95_ms: Option<f64>,
     json: Option<PathBuf>,
     gen_only: bool,
@@ -87,6 +89,7 @@ fn parse_args() -> Result<Args, String> {
         startup_runs: 10,
         ingest_count: 50_000,
         gate: false,
+        baseline: None,
         gate_p95_ms: None,
         json: None,
         gen_only: false,
@@ -132,6 +135,9 @@ fn parse_args() -> Result<Args, String> {
                     .map_err(|e| format!("--ingest-count: {e}"))?
             }
             "--gate" => args.gate = true,
+            "--baseline" => {
+                args.baseline = Some(PathBuf::from(value("--baseline")?));
+            }
             "--gate-p95-ms" => {
                 args.gate_p95_ms = Some(
                     value("--gate-p95-ms")?
@@ -205,12 +211,75 @@ fn run() -> Result<i32, String> {
         .map_err(|e| format!("spawn pool over fixture: {e}"))?;
     let specs = query_suite();
     let gating = args.gate || args.gate_p95_ms.is_some();
+    // With --gate, budgets come from the committed baseline file: load and
+    // fully validate it (hash + label coverage) BEFORE the long measurement
+    // so a stale or incomplete file fails fast and loudly.
+    let baseline = if args.gate {
+        let path = args
+            .baseline
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("baseline.json"));
+        let b = Baseline::load(&path).map_err(|e| format!("--gate: {e}"))?;
+        let labels: Vec<&str> = specs.iter().map(|s| s.label).collect();
+        if let Err(errors) = b.validate_labels(labels) {
+            let detail = errors
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(format!(
+                "--gate: baseline {} does not match the query suite: {}",
+                path.display(),
+                detail
+            ));
+        }
+        // The budgets are only meaningful under the methodology they were
+        // calibrated with; refuse to gate a differently-shaped run.
+        let m = &b.methodology;
+        let mismatches: Vec<String> = [
+            (
+                m.fixture_count != args.count,
+                format!("count {} vs {}", m.fixture_count, args.count),
+            ),
+            (
+                m.seed != args.seed,
+                format!("seed {} vs {}", m.seed, args.seed),
+            ),
+            (
+                m.iterations != args.iterations,
+                format!("iterations {} vs {}", m.iterations, args.iterations),
+            ),
+            (
+                m.warmup != args.warmup,
+                format!("warmup {} vs {}", m.warmup, args.warmup),
+            ),
+        ]
+        .into_iter()
+        .filter(|(mismatched, _)| *mismatched)
+        .map(|(_, what)| what)
+        .collect();
+        if !mismatches.is_empty() {
+            return Err(format!(
+                "--gate: run shape differs from the baseline methodology ({}): {}. \
+                 Recalibrate the baseline (docs/benchmark.md) or match the recorded shape.",
+                path.display(),
+                mismatches.join(", ")
+            ));
+        }
+        eprintln!("gate budgets loaded from {}", path.display());
+        Some(b)
+    } else {
+        None
+    };
     let mut search_rows = Vec::with_capacity(specs.len());
     for spec in &specs {
         let budget = match args.gate_p95_ms {
             Some(uniform) => Some(uniform),
-            None if args.gate => Some(spec.p95_budget_ms),
-            None => None,
+            None => baseline
+                .as_ref()
+                .map(|b| b.budget_for(spec.label))
+                .transpose()
+                .map_err(|e| e.to_string())?,
         };
         let mut samples = Vec::with_capacity(args.iterations as usize);
         let mut hits = 0u64;
@@ -328,26 +397,28 @@ fn run() -> Result<i32, String> {
 
     // --- gate + report -----------------------------------------------------
     let gate = if gating {
-        let worst = search_rows
+        let checks: Vec<GateCheck> = search_rows
             .iter()
-            .filter(|r| r.p95_budget_ms.is_some())
-            .max_by(|a, b| {
-                let ra = a.stats.p95_ms / a.p95_budget_ms.unwrap_or(f64::MAX);
-                let rb = b.stats.p95_ms / b.p95_budget_ms.unwrap_or(f64::MAX);
-                ra.total_cmp(&rb)
+            .filter_map(|r| {
+                r.p95_budget_ms.map(|budget_ms| GateCheck {
+                    label: r.label.to_string(),
+                    p95_ms: r.stats.p95_ms,
+                    budget_ms,
+                })
             })
-            .expect("gating requires budgeted rows");
+            .collect();
+        let outcome = protocol::evaluate_gate(checks);
         Some(GateResult {
             budgets: if args.gate_p95_ms.is_some() {
                 "uniform"
             } else {
-                "per-query"
+                "per-query (baseline.json)"
             },
             uniform_budget_ms: args.gate_p95_ms,
-            worst_label: worst.label.to_string(),
-            worst_p95_ms: worst.stats.p95_ms,
-            worst_ratio: worst.stats.p95_ms / worst.p95_budget_ms.unwrap_or(f64::MAX),
-            passed: search_rows.iter().all(|r| r.within_budget.unwrap_or(true)),
+            worst_label: outcome.worst.label.clone(),
+            worst_p95_ms: outcome.worst.p95_ms,
+            worst_ratio: outcome.worst.ratio(),
+            passed: outcome.passed,
         })
     } else {
         None
@@ -507,136 +578,10 @@ fn measure_startup(db_path: &Path, runs: u32) -> StartupRow {
 
 // --- search --------------------------------------------------------------------
 
-/// One benchmark query: the free text exactly as typed into the app (empty
-/// text = newest-first browse), optional inclusive date range, page size,
-/// page offset, and its CI p95 budget.
-///
-/// Budgets are calibrated ≈10× the measured local p95 (with floors for
-/// sub-millisecond queries) so shared-CI-runner variance cannot flake the
-/// gate while order-of-magnitude regressions still trip it. Local p95s and
-/// the calibration rationale live in tests/perf/BASELINE.md.
-struct QuerySpec {
-    label: &'static str,
-    text: String,
-    date_from: Option<&'static str>,
-    date_to: Option<&'static str>,
-    limit: u32,
-    offset: u32,
-    p95_budget_ms: f64,
-}
-
+/// The benchmark suite (see [`vault_perf::suite`]); budgets are attached
+/// by the gate from the committed baseline file, never hardcoded here.
 fn query_suite() -> Vec<QuerySpec> {
-    vec![
-        QuerySpec {
-            label: "ubiquitous-term",
-            text: word_at(UBIQUITOUS_RANK),
-            date_from: None,
-            date_to: None,
-            limit: 50,
-            offset: 0,
-            p95_budget_ms: 1500.0,
-        },
-        QuerySpec {
-            label: "frequent-term",
-            text: word_at(FREQUENT_RANK),
-            date_from: None,
-            date_to: None,
-            limit: 50,
-            offset: 0,
-            p95_budget_ms: 300.0,
-        },
-        QuerySpec {
-            label: "rare-term",
-            text: word_at(RARE_RANK),
-            date_from: None,
-            date_to: None,
-            limit: 50,
-            offset: 0,
-            p95_budget_ms: 40.0,
-        },
-        QuerySpec {
-            label: "two-term-and",
-            text: format!("{} {}", word_at(FREQUENT_RANK), word_at(UNCOMMON_RANK)),
-            date_from: None,
-            date_to: None,
-            limit: 50,
-            offset: 0,
-            p95_budget_ms: 75.0,
-        },
-        QuerySpec {
-            label: "author-term",
-            text: word_at(AUTHOR_HANDLE_RANK),
-            date_from: None,
-            date_to: None,
-            limit: 50,
-            offset: 0,
-            p95_budget_ms: 80.0,
-        },
-        QuerySpec {
-            label: "frequent+date-filter",
-            text: word_at(FREQUENT_RANK),
-            date_from: Some(DATE_FILTER_FROM),
-            date_to: Some(DATE_FILTER_TO),
-            limit: 50,
-            offset: 0,
-            p95_budget_ms: 300.0,
-        },
-        QuerySpec {
-            label: "frequent-paged-200",
-            text: word_at(FREQUENT_RANK),
-            date_from: None,
-            date_to: None,
-            limit: 200,
-            offset: 0,
-            p95_budget_ms: 375.0,
-        },
-        QuerySpec {
-            label: "frequent-deep-page",
-            text: word_at(FREQUENT_RANK),
-            date_from: None,
-            date_to: None,
-            limit: 50,
-            offset: 5_000,
-            // New in M2.4 and not yet measured on shared CI runners —
-            // 12× headroom instead of the usual 10× until the first
-            // perf-results artifacts land (then tighten with data).
-            p95_budget_ms: 3000.0,
-        },
-        QuerySpec {
-            label: "browse-newest",
-            text: String::new(),
-            date_from: None,
-            date_to: None,
-            limit: 50,
-            offset: 0,
-            p95_budget_ms: 60.0,
-        },
-        QuerySpec {
-            label: "browse-deep-page",
-            text: String::new(),
-            date_from: None,
-            date_to: None,
-            limit: 50,
-            offset: 100_000,
-            // Same CI-unknown caveat as frequent-deep-page.
-            p95_budget_ms: 1800.0,
-        },
-    ]
-}
-
-impl QuerySpec {
-    /// The exact `SearchQuery` the app's `search_messages` IPC builds.
-    fn query(&self) -> SearchQuery {
-        SearchQuery {
-            text: self.text.clone(),
-            sources: Vec::new(),
-            author: String::new(),
-            from_date: self.date_from.unwrap_or_default().to_string(),
-            to_date: self.date_to.unwrap_or_default().to_string(),
-            limit: self.limit,
-            offset: self.offset,
-        }
-    }
+    QuerySpec::suite()
 }
 
 /// Run one paginated search exactly as the app does (a read-connection

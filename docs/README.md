@@ -16,6 +16,7 @@ Hands-on guides sit alongside the specification set:
 | [AI-assisted search](ai-search.md) | LLM ask pipeline, AI consent, provider configuration, local embeddings and hybrid ranking |
 | [IMAP sync](imap-sync.md) | Gmail (Google sign-in / app password) and generic IMAP setup, credential storage |
 | [Testing](testing.md) | Test suites, performance budgets, fuzzing, CI, hermetic server setup |
+| [Benchmark](benchmark.md) | Published performance results: 1M-message index time, search p50/p95/p99, methodology, and the CI regression gate |
 | [Download & install](download.md) | Version × OS × architecture matrix, minimum requirements, checksum verification, limitations, manual upgrade path |
 | [Release](release.md) | Installers, local builds, smoke tests, checksums, publishing |
 | [Native verification runbook](native-verification.md) | The G1/A14 procedure for real macOS/Windows verification hosts: exact commands per OS, evidence binding (artifact SHA-256, tester, date), and the templates native runs fill |

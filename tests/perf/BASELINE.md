@@ -94,8 +94,17 @@ stays exactly `--count` messages.
 
 ## CI gate policy
 
-The PR job runs `bench --count 100000 --gate` on `ubuntu-latest`. Gates use
-**per-query p95 budgets** calibrated ≈10× above the measured local p95
+The PR job runs `bench --count 100000 --gate` on `ubuntu-latest`. Since
+the benchmark-page ticket the gate budgets live in the committed
+[`baseline.json`](baseline.json) (per-query p95 + the methodology they
+were calibrated under + its SHA-256); the harness fails loudly on a hash
+mismatch, a missing query entry, or a run whose shape differs from the
+file. The public page with methodology and results is
+[docs/benchmark.md](../../docs/benchmark.md); the historical rationale is
+kept below.
+
+Gates use **per-query p95 budgets** calibrated ≈10× above the measured
+local p95
 below (with floors for sub-millisecond queries). Rationale: a naive
 `p95 < 100 ms` overall gate is flaky on shared CI runners — the
 `ubiquitous-term` query alone sits far above 100 ms locally, and 2-vCPU
