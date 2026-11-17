@@ -55,17 +55,15 @@ import {
   type LlmStatus,
 } from "./llmview";
 import {
-  renderDashboard,
-  renderPagination,
-  renderSourceChips,
-} from "./render";
-import {
   fillImportScopes,
+  renderDashboard,
   renderDetail2,
   renderEraChips,
   renderFilterChips,
   renderFlatResults,
+  renderPagination,
   renderRefreshNotice,
+  renderSourceChips,
 } from "./render2";
 import {
   activeEraIndex,

@@ -1,21 +1,26 @@
 // @vitest-environment happy-dom
 // DOM tests for the v2 rendering (M3.2): flat results rows with badges
 // and selection checkboxes, era chips, applied filter chips, import-scope
-// picker, refresh notice, and the reading pane (detail + context +
-// actions).
+// picker, refresh notice, the reading pane (detail + context + actions),
+// pagination, source chips, and the statistics dashboard.
 
 import { describe, expect, it, vi } from "vitest";
+import type { SourceChipRow } from "./accountsview";
 import {
   fillImportScopes,
+  renderDashboard,
   renderDetail2,
   renderEraChips,
   renderFilterChips,
   renderFlatResults,
+  renderPagination,
   renderRefreshNotice,
+  renderSourceChips,
   timeLabel,
 } from "./render2";
 import { contextEntries } from "./searchstate";
-import { HIGHLIGHT_MAX_MARKS } from "./viewmodel";
+import type { ArchiveStats } from "./types";
+import { HIGHLIGHT_MAX_MARKS, pageModel } from "./viewmodel";
 import type { ConversationContext, MessageSummary } from "./v2types";
 
 // Timestamps render timezone-independently (formatSentAt is covered by
@@ -122,6 +127,29 @@ describe("flat results", () => {
     });
     const mark = el.querySelector("mark.hit");
     expect(mark?.textContent).toBe("vault");
+  });
+
+  it("never interpolates message content as HTML", () => {
+    const el = document.createElement("div");
+    renderFlatResults(el, {
+      hits: [
+        hit({
+          author: '<b>"evil"</b>',
+          subject: '<img src=x onerror="alert(1)">',
+          snippet: "ok \x01body\x02",
+        }),
+      ],
+      activeIndex: -1,
+      selectedId: null,
+      selection: new Set(),
+      expandedFolds: new Set(),
+      terms: [],
+      onOpen: () => {},
+      onToggleSelect: () => {},
+      onToggleFold: () => {},
+    });
+    expect(el.querySelectorAll("script,img,b").length).toBe(0);
+    expect(el.innerHTML.includes("<img")).toBe(false);
   });
 
   it("a long snippet renders whole under the row's CSS two-line clamp", () => {
@@ -840,6 +868,23 @@ describe("reading pane", () => {
     expect(bodyEl.textContent).toBe(body);
   });
 
+  it("never executes message content on the raw body path", () => {
+    const evil: ConversationContext = {
+      ...ctx,
+      before: [],
+      after: [],
+      anchor: {
+        ...ctx.anchor,
+        author: '<b>"evil"</b>',
+        body: '<img src=x onerror="alert(1)">',
+        attachments: [],
+        raw_json: "{}",
+      },
+    };
+    const el = render({ ctx: evil, entries: contextEntries(evil), queryText: "" });
+    expect(el.querySelectorAll("img,b,script").length).toBe(0);
+  });
+
   it("actions are wired: copy, copy link, export, export chat, close, open neighbor", () => {
     const calls: string[] = [];
     const el = render({
@@ -978,5 +1023,376 @@ describe("reading pane", () => {
     expect(el.querySelector("button.mode-btn")).toBeNull();
     expect(el.querySelector("iframe.rendered-frame")).toBeNull();
     expect(el.querySelector(".detail-card .body")?.textContent).toContain("arrives");
+  });
+});
+
+describe("pagination", () => {
+  it("renders range info and enables the right buttons", () => {
+    const el = document.createElement("div");
+    renderPagination(el, pageModel(1234, 50, 50), { onPrev: () => {}, onNext: () => {} });
+    expect(el.innerHTML).toMatchSnapshot();
+    expect((el.querySelector(".page-btn") as HTMLButtonElement).disabled).toBe(false);
+    expect((el.querySelectorAll(".page-btn")[1] as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("empty results disable both buttons", () => {
+    const el = document.createElement("div");
+    renderPagination(el, pageModel(0, 0, 50), { onPrev: () => {}, onNext: () => {} });
+    expect(el.textContent).toContain("0 results");
+    expect(el.querySelectorAll(".page-btn:disabled").length).toBe(2);
+  });
+
+  it("last page keeps prev enabled and disables next (snapshot)", () => {
+    const el = document.createElement("div");
+    renderPagination(el, pageModel(120, 100, 50), { onPrev: () => {}, onNext: () => {} });
+    expect(el.innerHTML).toMatchSnapshot();
+    const [prev, next] = [...el.querySelectorAll(".page-btn")] as HTMLButtonElement[];
+    expect(prev.disabled).toBe(false);
+    expect(next.disabled).toBe(true);
+  });
+
+  it("fires prev/next handlers", () => {
+    const fired: string[] = [];
+    const el = document.createElement("div");
+    renderPagination(el, pageModel(200, 50, 50), {
+      onPrev: () => fired.push("prev"),
+      onNext: () => fired.push("next"),
+    });
+    (el.querySelectorAll(".page-btn")[0] as HTMLButtonElement).click();
+    (el.querySelectorAll(".page-btn")[1] as HTMLButtonElement).click();
+    expect(fired).toEqual(["prev", "next"]);
+  });
+});
+
+describe("source chips", () => {
+  it("renders toggles with counts and pressed state", () => {
+    const rows: SourceChipRow[] = [
+      { id: "inst-mbox", label: "mbox", count: 900, icon: "file", status: "" },
+      { id: "inst-whatsapp", label: "whatsapp", count: 80, icon: "chat", status: "" },
+    ];
+    const el = document.createElement("div");
+    renderSourceChips(el, { rows, selected: ["inst-whatsapp"], onToggle: () => {} });
+    expect(el.innerHTML).toMatchSnapshot();
+    expect(el.querySelector('[data-source="inst-whatsapp"]')?.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("leads each chip with its taxonomy icon without touching the text", () => {
+    // The mail-vs-chat axis is visible on the chip itself; the icon is
+    // decorative (aria-hidden svg), so the chip's accessible text — and
+    // every text-based assertion — is unchanged.
+    const el = document.createElement("div");
+    renderSourceChips(el, {
+      rows: [
+        { id: "inst-imap", label: "imap.gmail.com-ana", count: 12, icon: "mail", status: "" },
+        { id: "inst-whatsapp", label: "whatsapp", count: 80, icon: "chat", status: "" },
+      ],
+      selected: [],
+      onToggle: () => {},
+    });
+    const chips = [...el.querySelectorAll(".chip")];
+    expect(chips.map((c) => c.querySelector("use")?.getAttribute("href"))).toEqual([
+      "#i-mail",
+      "#i-chat",
+    ]);
+    expect(chips.map((c) => c.querySelector("svg")?.getAttribute("aria-hidden"))).toEqual([
+      "true",
+      "true",
+    ]);
+    expect(chips.map((c) => c.textContent)).toEqual([
+      "imap.gmail.com-ana (12)",
+      "whatsapp (80)",
+    ]);
+  });
+
+  it("toggling fires with the source instance id", () => {
+    let toggled = "";
+    const el = document.createElement("div");
+    renderSourceChips(el, {
+      rows: [{ id: "inst-mbox", label: "mbox", count: 1, icon: "file", status: "" }],
+      selected: [],
+      onToggle: (id) => (toggled = id),
+    });
+    (el.querySelector(".chip") as HTMLElement).click();
+    expect(toggled).toBe("inst-mbox");
+  });
+
+  it("renders all chips unselected by default (snapshot)", () => {
+    const el = document.createElement("div");
+    renderSourceChips(el, {
+      rows: [
+        { id: "inst-mbox", label: "mbox", count: 900, icon: "file", status: "" },
+        { id: "inst-telegram", label: "telegram", count: 80, icon: "chat", status: "" },
+      ],
+      selected: [],
+      onToggle: () => {},
+    });
+    expect(el.innerHTML).toMatchSnapshot();
+    expect(el.querySelectorAll(".chip.on").length).toBe(0);
+  });
+
+  it("appends the per-source status after the label, leaving the label-and-count text intact", () => {
+    // The e2e specs assert each chip's label and count by substring;
+    // the status adds to the chip's accessible name as its own span
+    // and never rewrites the label text it follows.
+    const el = document.createElement("div");
+    renderSourceChips(el, {
+      rows: [
+        { id: "inst-imap", label: "imap.gmail.com-ana", count: 12, icon: "mail", status: "Syncing…" },
+        { id: "inst-mbox", label: "mbox", count: 900, icon: "file", status: "" },
+      ],
+      selected: ["inst-imap"],
+      onToggle: () => {},
+    });
+    const chips = [...el.querySelectorAll(".chip")];
+    expect(chips[0].querySelector(".chip-status")?.textContent).toBe("Syncing…");
+    expect(chips[0].querySelector("span:not(.chip-status)")?.textContent).toBe(
+      "imap.gmail.com-ana (12)",
+    );
+    expect(chips[0].textContent).toBe("imap.gmail.com-ana (12)Syncing…");
+    // A row without a status renders no span — the chip is unchanged.
+    expect(chips[1].querySelector(".chip-status")).toBeNull();
+    expect(chips[1].textContent).toBe("mbox (900)");
+    // The pressed state and the decorative icon are untouched by status.
+    expect(chips[0].getAttribute("aria-pressed")).toBe("true");
+    expect(chips[0].querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Statistics dashboard
+// ---------------------------------------------------------------------------
+
+function archiveStats(over: Partial<ArchiveStats> = {}): ArchiveStats {
+  return {
+    total: 1234,
+    first_sent_at: "2026-01-01T08:00:00Z",
+    last_sent_at: "2026-03-31T22:00:00Z",
+    by_source: [
+      { source: "mbox", count: 900 },
+      { source: "whatsapp", count: 334 },
+    ],
+    by_day: [
+      { day: "2026-01-01", count: 10 },
+      { day: "2026-02-01", count: 20 },
+      { day: "2026-03-31", count: 5 },
+    ],
+    top_chats: [
+      { source: "whatsapp", chat_id: "family", count: 300 },
+      { source: "mbox", chat_id: "thread-a", count: 90 },
+    ],
+    top_authors: [
+      { author: "Ana <ana@example.com>", count: 500 },
+      { author: "", count: 12 },
+    ],
+    ...over,
+  };
+}
+
+describe("dashboard", () => {
+  it("renders summary, day bars, and count tables (snapshot)", () => {
+    const el = document.createElement("div");
+    renderDashboard(el, { stats: archiveStats() });
+    expect(el.innerHTML).toMatchSnapshot();
+    expect(el.querySelector("p.meta")?.textContent).toBe(
+      "1,234 messages · 2 sources · 2026-01-01 → 2026-03-31",
+    );
+    expect(el.querySelectorAll(".day-bar").length).toBe(3);
+    // Bar heights scale against the tallest day (20)…
+    expect((el.querySelectorAll(".day-bar")[0] as HTMLElement).style.height).toBe("50%");
+    expect((el.querySelectorAll(".day-bar")[1] as HTMLElement).style.height).toBe("100%");
+    expect((el.querySelectorAll(".day-bar")[2] as HTMLElement).style.height).toBe("25%");
+    // …and the same share feeds the color ramp via --bar-heat.
+    expect(
+      (el.querySelectorAll(".day-bar")[0] as HTMLElement).style.getPropertyValue("--bar-heat"),
+    ).toBe("50");
+    expect(
+      (el.querySelectorAll(".day-bar")[1] as HTMLElement).style.getPropertyValue("--bar-heat"),
+    ).toBe("100");
+    // Time axis under the histogram: first, middle, and last bucket.
+    expect(
+      [...el.querySelectorAll(".day-chart-axis span")].map((s) => s.textContent),
+    ).toEqual(["2026-01-01", "2026-02-01", "2026-03-31"]);
+    expect(el.querySelectorAll(".stat-table").length).toBe(3);
+    expect(el.querySelectorAll(".stat-table tbody tr").length).toBe(6);
+    // Plain language: the folder table reads "Busiest folders", and the
+    // raw `mbox` label reads "Mail import" (the stored label stays one
+    // hover away in the row's tooltip).
+    expect([...el.querySelectorAll(".stat-table h3")].map((h) => h.textContent)).toEqual([
+      "By source",
+      "Busiest folders",
+      "Top authors",
+    ]);
+    const sourceRows = [...el.querySelectorAll(".stat-table")[0].querySelectorAll("td.label")];
+    expect(sourceRows.map((td) => td.textContent)).toEqual(["Mail import", "whatsapp"]);
+    expect(sourceRows[0].getAttribute("title")).toBe("mbox");
+    const folderRows = [...el.querySelectorAll(".stat-table")[1].querySelectorAll("td.label")];
+    expect(folderRows.map((td) => td.textContent)).toEqual([
+      "whatsapp · family",
+      "Mail import · Thread-a",
+    ]);
+    // The author shows its display name; the full address stays in the
+    // tooltip; the unknown author gets a readable label.
+    const authorRows = [...el.querySelectorAll(".stat-table")[2].querySelectorAll("td.label")];
+    expect(authorRows.map((td) => td.textContent)).toEqual([
+      "Ana",
+      "(unknown)",
+    ]);
+    expect(authorRows[0].getAttribute("title")).toBe("Ana <ana@example.com>");
+  });
+
+  it("labels every day bar with its count for eyes and machines", () => {
+    const el = document.createElement("div");
+    renderDashboard(el, { stats: archiveStats() });
+    const bars = [...el.querySelectorAll(".day-bar")];
+    // Machine-readable label (aria-label) and tooltip per bar.
+    expect(bars.map((b) => b.getAttribute("aria-label"))).toEqual([
+      "2026-01-01: 10 messages",
+      "2026-02-01: 20 messages",
+      "2026-03-31: 5 messages",
+    ]);
+    expect(bars[0].getAttribute("title")).toBe("2026-01-01: 10 messages");
+    // Few enough bars: the count is visible text too.
+    expect(bars.map((b) => b.querySelector(".day-bar-count")?.textContent)).toEqual([
+      "10",
+      "20",
+      "5",
+    ]);
+  });
+
+  it("a single day renders its count as plain text, not one full-width bar", () => {
+    const el = document.createElement("div");
+    renderDashboard(el, {
+      stats: archiveStats({
+        by_day: [{ day: "2026-11-01", count: 6 }],
+      }),
+    });
+    expect(el.querySelectorAll(".day-bar").length).toBe(0);
+    const chart = el.querySelector(".day-chart") as HTMLElement;
+    expect(chart.classList.contains("single")).toBe(true);
+    const note = chart.querySelector(".day-single");
+    expect(note?.textContent).toBe("2026-11-01: 6 messages");
+    expect(chart.getAttribute("aria-label")).toBe(
+      "Messages per day — 2026-11-01: 6 messages",
+    );
+  });
+
+  it("an empty archive renders the summary only", () => {
+    const el = document.createElement("div");
+    renderDashboard(el, {
+      stats: archiveStats({
+        total: 0,
+        first_sent_at: null,
+        last_sent_at: null,
+        by_source: [],
+        by_day: [],
+        top_chats: [],
+        top_authors: [],
+      }),
+    });
+    expect(el.textContent).toBe("empty archive");
+    expect(el.querySelectorAll(".day-chart,.stat-table").length).toBe(0);
+  });
+
+  it("merges quoted and unquoted spellings of one author into one row", () => {
+    const el = document.createElement("div");
+    renderDashboard(el, {
+      stats: archiveStats({
+        top_authors: [
+          { author: '"Aleksandar Ilic" <a@b.c>', count: 759 },
+          { author: "Aleksandar Ilic <a@b.c>", count: 272 },
+          { author: "Ana <ana@example.com>", count: 500 },
+        ],
+      }),
+    });
+    const rows = [...el.querySelectorAll(".stat-table")[2].querySelectorAll("tbody tr")];
+    // One person, one row, summed count — re-sorted so the merged row leads.
+    expect(rows.map((tr) => tr.querySelector("td.label")?.textContent)).toEqual([
+      "Aleksandar Ilic",
+      "Ana",
+    ]);
+    expect(rows[0].querySelector("td.num")?.textContent).toBe("1,031");
+    // The tooltip keeps both full identities of record.
+    expect(rows[0].querySelector("td.label")?.getAttribute("title")).toBe(
+      '"Aleksandar Ilic" <a@b.c>; Aleksandar Ilic <a@b.c>',
+    );
+    expect(rows[1].querySelector("td.label")?.getAttribute("title")).toBe(
+      "Ana <ana@example.com>",
+    );
+  });
+
+  it("sentence-cases mail folder names in Top chats and leaves chat names verbatim", () => {
+    const el = document.createElement("div");
+    renderDashboard(el, {
+      stats: archiveStats({
+        top_chats: [
+          { source: "mbox", chat_id: "All mail Including Spam and Trash", count: 90 },
+          { source: "whatsapp", chat_id: "Family Group", count: 300 },
+        ],
+      }),
+    });
+    const labels = [...el.querySelectorAll(".stat-table")[1].querySelectorAll("td.label")];
+    // The mail folder label reads in sentence case; the user-chosen chat
+    // name keeps its own casing. (Rows keep the backend's count order.)
+    expect(labels.map((td) => td.textContent)).toEqual([
+      "Mail import · All mail including spam and trash",
+      "whatsapp · Family Group",
+    ]);
+    // The raw stored value stays in the tooltip.
+    expect(labels[0].getAttribute("title")).toBe(
+      "mbox · All mail Including Spam and Trash",
+    );
+    expect(labels[1].getAttribute("title")).toBe("whatsapp · Family Group");
+  });
+
+  it("never interpolates archive content as HTML", () => {
+    const el = document.createElement("div");
+    renderDashboard(el, {
+      stats: archiveStats({
+        by_source: [{ source: '<script>alert(1)</script>', count: 1 }],
+        top_chats: [
+          { source: "wa", chat_id: '<img src=x onerror="alert(1)">', count: 1 },
+        ],
+        top_authors: [{ author: "<b>bold</b>", count: 1 }],
+      }),
+    });
+    expect(el.querySelectorAll("script,img,b").length).toBe(0);
+    // The hostile strings survive only as escaped text/attribute content,
+    // never as elements (title attributes may legitimately contain the
+    // literal characters — they are not markup).
+    expect(el.querySelector("td.label")?.textContent).toBe("<script>alert(1)</script>");
+  });
+
+  it("downsamples long day series into month buckets", () => {
+    const by_day = Array.from({ length: 200 }, (_, i) => ({
+      day: `2026-${String((i % 12) + 1).padStart(2, "0")}-15`,
+      count: 1,
+    }));
+    const el = document.createElement("div");
+    renderDashboard(el, { stats: archiveStats({ by_day }) });
+    expect(el.querySelectorAll(".day-bar").length).toBe(12); // month buckets
+    // The axis follows the bucketing: month labels, no duplicates.
+    expect(
+      [...el.querySelectorAll(".day-chart-axis span")].map((s) => s.textContent),
+    ).toEqual(["2026-01", "2026-06", "2026-12"]);
+  });
+
+  it("dense charts keep every bar machine-readable but drop the visible counts", () => {
+    // Days spanning two years: 24 month buckets, too many for readable
+    // visible labels (every count is 6 to keep the check uniform).
+    const by_day = Array.from({ length: 700 }, (_, i) => ({
+      day: `${i % 24 < 12 ? 2025 : 2026}-${String((i % 12) + 1).padStart(2, "0")}-15`,
+      count: 6,
+    }));
+    const el = document.createElement("div");
+    renderDashboard(el, { stats: archiveStats({ by_day }) });
+    const bars = [...el.querySelectorAll(".day-bar")];
+    expect(bars.length).toBe(24);
+    expect(el.querySelectorAll(".day-bar-count").length).toBe(0);
+    // Every bar still names its bucket and its summed count for machines
+    // and tooltips ("2026-04: 30 messages").
+    expect(
+      bars.every((b) => /^\d{4}-\d{2}: [\d,]+ messages$/.test(b.getAttribute("aria-label") ?? "")),
+    ).toBe(true);
+    expect(bars.every((b) => b.getAttribute("title"))).toBe(true);
   });
 });

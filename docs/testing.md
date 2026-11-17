@@ -88,8 +88,8 @@ It writes to a throwaway temp directory, never your real vault.
 Testing strategy for the UI: driving the Tauri webview headlessly in CI is
 not practical (webkit2gtk driver + display), so the UI is covered by tests
 over the query layer (`crates/vault-core`), snapshot tests of the rendered
-UI state (`src/render.test.ts` via happy-dom: results list, pagination,
-source chips, detail panel), and wiring tests that boot the real
+UI state (`src/render2.test.ts` via happy-dom: flat results, pagination,
+source chips, reading pane, dashboard), and wiring tests that boot the real
 `index.html` markup against a mocked Tauri IPC bridge and drive it with DOM
 events (`src/main.test.ts`: search/empty-query guard, loading/empty/error
 states, filters, flat results, pagination, the stale-response guard, the
