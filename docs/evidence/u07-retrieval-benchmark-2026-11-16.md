@@ -1,6 +1,6 @@
 # U07 retrieval benchmark — verification and claim-calibration record (2026-11-16)
 
-Status: **complete for this slice** (benchmark instrument verified on current `main` and the claim surfaces wired to it; open track: [#189](https://github.com/acailic/mailchat-vault/issues/189)). Grounding: [user success plan](../user-success-plan.md) work package U07 ("retrieval benchmark results justify product claims"), the [U07 benchmark](../../tests/retrieval/BASELINE.md), and the [slice-1 results](retrieval-slice-1-results-2026-11-14.md) that pre-date it.
+Status: **complete for this slice** (benchmark instrument verified on current `main` and the claim surfaces wired to it; open track: [#189](https://github.com/acailic/mailchat-vault/issues/189)). Grounding: [user success plan](../internal/user-success-plan.md) work package U07 ("retrieval benchmark results justify product claims"), the [U07 benchmark](../../tests/retrieval/BASELINE.md), and the [slice-1 results](retrieval-slice-1-results-2026-11-14.md) that pre-date it.
 
 ## What this slice found and did
 

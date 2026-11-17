@@ -660,6 +660,7 @@
 
             <section id="settings-ai" class="settings-page" aria-label="AI assistance">
               <h3>AI assistance</h3>
+              <p id="active-provider-summary" class="meta" style="margin: 4px 0 0"></p>
               <div id="env-info" class="meta"></div>
               <!-- Environment fallback overrides: the env vars the backend reads,
                    editable here. Values set here override the process environment;
@@ -702,6 +703,13 @@
                   <select id="add-kind" aria-label="Provider kind">
                     <option value="zai">z.ai GLM (default)</option>
                     <option value="anthropic">Anthropic</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="gemini">Google Gemini</option>
+                    <option value="azure_openai">Azure OpenAI</option>
+                    <option value="mistral">Mistral</option>
+                    <option value="groq">Groq</option>
+                    <option value="openrouter">OpenRouter</option>
+                    <option value="ollama">Ollama (local)</option>
                     <option value="custom">Custom endpoint</option>
                   </select>
                 </label>

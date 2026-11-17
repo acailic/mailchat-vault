@@ -228,11 +228,7 @@ pub fn input_fingerprint(picked: &Path) -> Result<String> {
             }
             hasher.update(&buf[..n]);
         }
-        return Ok(format!(
-            "sha256:{:x}:{}",
-            hasher.finalize(),
-            metadata.len()
-        ));
+        return Ok(format!("sha256:{:x}:{}", hasher.finalize(), metadata.len()));
     }
     if metadata.is_dir() {
         // Sorted so the manifest does not depend on directory iteration
@@ -243,7 +239,7 @@ pub fn input_fingerprint(picked: &Path) -> Result<String> {
         let mut total: u64 = 0;
         for file in &files {
             hasher.update(file.rel.as_bytes());
-            hasher.update(&file.size.to_le_bytes());
+            hasher.update(file.size.to_le_bytes());
             total += file.size;
         }
         return Ok(format!("sha256:{:x}:{total}", hasher.finalize()));

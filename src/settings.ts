@@ -4,7 +4,18 @@
 // `has_key` flag does.
 
 /** Mirrors `vault_core::settings::ProviderKind` (snake_case serde). */
-export type ProviderKind = "zai" | "anthropic" | "custom";
+export type ProviderKind =
+  | "zai"
+  | "anthropic"
+  | "openai"
+  | "gemini"
+  | "azure_openai"
+  | "bedrock"
+  | "mistral"
+  | "groq"
+  | "openrouter"
+  | "ollama"
+  | "custom";
 
 /** UI theme choices: the backend set plus "vesper", a frontend-only
  * warm-paper palette (the backend enum does not know it — it is saved as
@@ -15,13 +26,21 @@ export type Theme = "system" | "light" | "dark" | "vesper";
  * (snake_case serde) — the settings_get/settings_save contract. */
 export type StoredTheme = Exclude<Theme, "vesper">;
 
-/** Mirrors `vault_core::settings::ProviderProfile` (serde field names). */
+/** Mirrors `vault_core::settings::ProviderProfile` (serde field names).
+ * The sampling and provider-extra fields are additive and optional:
+ * absent = the kind default (or not applicable to the kind). */
 export interface ProviderProfile {
   id: string;
   name: string;
   kind: ProviderKind;
   base_url: string;
   model: string;
+  temperature?: number;
+  max_tokens?: number;
+  timeout_secs?: number;
+  deployment_name?: string;
+  api_version?: string;
+  region?: string;
 }
 
 /** One provider row in the Settings UI (`settings_get` response item). */
@@ -133,39 +152,348 @@ export const MAX_SUMMARIZE_TOP = 50;
 const KIND_LABELS: Record<ProviderKind, string> = {
   zai: "z.ai GLM",
   anthropic: "Anthropic",
+  openai: "OpenAI",
+  gemini: "Google Gemini",
+  azure_openai: "Azure OpenAI",
+  bedrock: "AWS Bedrock",
+  mistral: "Mistral",
+  groq: "Groq",
+  openrouter: "OpenRouter",
+  ollama: "Ollama",
   custom: "Custom",
 };
+
+/** Every kind in catalog (menu) order — mirrors `vault_core::settings::ALL_KINDS`. */
+export const ALL_KINDS: readonly ProviderKind[] = [
+  "zai",
+  "anthropic",
+  "openai",
+  "gemini",
+  "azure_openai",
+  "bedrock",
+  "mistral",
+  "groq",
+  "openrouter",
+  "ollama",
+  "custom",
+];
+
+/** Kinds the Settings UI offers. `bedrock` exists in the backend catalog
+ * (part 1) but its configuration UI is part 3 — it renders and saves
+ * unchanged when present in a settings file, it just cannot be added. */
+export const SELECTABLE_KINDS: readonly ProviderKind[] = ALL_KINDS.filter(
+  (k) => k !== "bedrock",
+);
+
+/** Mirrors `vault_core::settings::DEFAULT_AZURE_API_VERSION`. */
+export const DEFAULT_AZURE_API_VERSION = "2024-10-21";
+
+/** The versioned per-kind defaults, mirrored from
+ * `vault_core::settings::ProviderKind::defaults` (pinned by unit tests so
+ * drift is caught at the value level). Empty model/base URL = the field is
+ * user-supplied by definition (azure, custom; bedrock's URL derives from
+ * its region). */
+export interface ProviderDefaults {
+  model: string;
+  base_url: string;
+  temperature: number;
+  max_tokens: number;
+  timeout_secs: number;
+}
+
+export const KIND_DEFAULTS: Record<ProviderKind, ProviderDefaults> = {
+  zai: {
+    model: "glm-5",
+    base_url: "https://api.z.ai/api/anthropic",
+    temperature: 0.2,
+    max_tokens: 1024,
+    timeout_secs: 30,
+  },
+  anthropic: {
+    model: "claude-sonnet-4-5",
+    base_url: "https://api.anthropic.com",
+    temperature: 0.2,
+    max_tokens: 1024,
+    timeout_secs: 30,
+  },
+  openai: {
+    model: "gpt-4o-mini",
+    base_url: "https://api.openai.com/v1",
+    temperature: 0.2,
+    max_tokens: 1024,
+    timeout_secs: 30,
+  },
+  gemini: {
+    model: "gemini-2.0-flash",
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+    temperature: 0.2,
+    max_tokens: 1024,
+    timeout_secs: 30,
+  },
+  azure_openai: {
+    model: "",
+    base_url: "",
+    temperature: 0.2,
+    max_tokens: 1024,
+    timeout_secs: 30,
+  },
+  bedrock: {
+    model: "anthropic.claude-sonnet-4-5",
+    base_url: "",
+    temperature: 0.2,
+    max_tokens: 1024,
+    timeout_secs: 30,
+  },
+  mistral: {
+    model: "mistral-large-latest",
+    base_url: "https://api.mistral.ai/v1",
+    temperature: 0.2,
+    max_tokens: 1024,
+    timeout_secs: 30,
+  },
+  groq: {
+    model: "llama-3.3-70b-versatile",
+    base_url: "https://api.groq.com/openai/v1",
+    temperature: 0.2,
+    max_tokens: 1024,
+    timeout_secs: 30,
+  },
+  openrouter: {
+    model: "openrouter/auto",
+    base_url: "https://openrouter.ai/api/v1",
+    temperature: 0.2,
+    max_tokens: 1024,
+    timeout_secs: 30,
+  },
+  ollama: {
+    model: "llama3.2",
+    base_url: "http://127.0.0.1:11434/v1",
+    temperature: 0.2,
+    max_tokens: 1024,
+    timeout_secs: 120,
+  },
+  custom: {
+    model: "",
+    base_url: "",
+    temperature: 0.2,
+    max_tokens: 1024,
+    timeout_secs: 30,
+  },
+};
+
+/** Which per-kind fields the Settings form shows (the others stay hidden
+ * but keep their stored value so a save round-trips unchanged).
+ * `base_url` is user-supplied only for azure_openai, ollama, and custom —
+ * the fixed-default kinds show a default hint instead of an input. On
+ * azure_openai the deployment name is the model id, so the plain model
+ * input is hidden there. */
+export interface KindFieldVisibility {
+  base_url: boolean;
+  model: boolean;
+  deployment_name: boolean;
+  api_version: boolean;
+}
+
+export function kindFieldVisibility(kind: ProviderKind): KindFieldVisibility {
+  return {
+    base_url: kind === "azure_openai" || kind === "ollama" || kind === "custom",
+    model: kind !== "azure_openai",
+    deployment_name: kind === "azure_openai",
+    api_version: kind === "azure_openai",
+  };
+}
+
+/** Model choices for the per-provider dropdown: the kind's default model
+ * when it has one (azure/custom have none — typed input there). */
+export function modelChoicesForKind(kind: ProviderKind): string[] {
+  const model = KIND_DEFAULTS[kind].model;
+  return model ? [model] : [];
+}
+
+/** Effective model for the at-a-glance summary (mirrors the backend
+ * `effective_model`: on Azure the deployment name is the model id). */
+export function effectiveModel(profile: Pick<
+  ProviderProfile,
+  "kind" | "model" | "deployment_name"
+>): string {
+  const typed = profile.model.trim();
+  if (typed) return typed;
+  if (profile.kind === "azure_openai") {
+    return (profile.deployment_name ?? "").trim() || "deployment name not set";
+  }
+  return KIND_DEFAULTS[profile.kind].model || "model not set";
+}
 
 export function kindLabel(kind: ProviderKind): string {
   return KIND_LABELS[kind];
 }
 
-/** Prefill for a freshly added provider of `kind` (label, URL, model). */
+/** Prefill for a freshly added provider of `kind`: the kind defaults are
+ * auto-filled (model and base URL; azure/custom start empty because both
+ * are user-supplied there); the sampling overrides stay empty so the kind
+ * default applies. */
 export function prefillForKind(kind: ProviderKind): ProviderProfile {
-  switch (kind) {
-    case "zai":
-      // z.ai: defaults apply when left empty.
-      return { id: "", name: "", kind, base_url: "", model: "" };
-    case "anthropic":
-      // Anthropic: the endpoint must be explicit (never z.ai).
-      return {
-        id: "",
-        name: "",
-        kind,
-        base_url: "https://api.anthropic.com",
-        model: "claude-sonnet-4-5",
-      };
-    case "custom":
-      return { id: "", name: "", kind, base_url: "", model: "" };
-  }
+  const d = KIND_DEFAULTS[kind];
+  return { id: "", name: "", kind, base_url: d.base_url, model: d.model };
 }
 
 /** Placeholders for empty per-kind inputs (the backend default, if any). */
-export function placeholderForKind(kind: ProviderKind, field: "base_url" | "model"): string {
-  if (kind === "zai") {
-    return field === "base_url" ? "https://api.z.ai/api/anthropic (default)" : "glm-5 (default)";
+export function placeholderForKind(
+  kind: ProviderKind,
+  field: "base_url" | "model" | "temperature" | "max_tokens" | "timeout_secs" | "api_version",
+): string {
+  const d = KIND_DEFAULTS[kind];
+  switch (field) {
+    case "base_url":
+      if (kind === "azure_openai") return "https://<resource>.openai.azure.com";
+      if (kind === "custom") return "https://example.invalid/api";
+      if (kind === "bedrock") return "https://bedrock-runtime.<region>.amazonaws.com";
+      return `${d.base_url} (default)`;
+    case "model":
+      if (kind === "custom") return "model name";
+      return d.model ? `${d.model} (default)` : "model name";
+    case "temperature":
+      return `${d.temperature} (default)`;
+    case "max_tokens":
+      return `${d.max_tokens} (default)`;
+    case "timeout_secs":
+      return `${d.timeout_secs} s (default)`;
+    case "api_version":
+      return `${DEFAULT_AZURE_API_VERSION} (default)`;
   }
-  return field === "base_url" ? "https://example.invalid/api" : "model name";
+}
+
+/** Numeric bounds for the Advanced-section inputs (UI guard rails; empty
+ * means the kind default applies). */
+export const TEMPERATURE_BOUNDS = { min: 0, max: 2 } as const;
+export const MAX_TOKENS_BOUNDS = { min: 1, max: 32768 } as const;
+export const TIMEOUT_BOUNDS = { min: 1, max: 600 } as const;
+
+/** Form values of one provider row as typed (strings, untrimmed ok). */
+export interface ProviderFormValues {
+  kind: ProviderKind;
+  base_url: string;
+  model: string;
+  deployment_name: string;
+  api_version: string;
+  temperature: string;
+  max_tokens: string;
+  timeout_secs: string;
+}
+
+/** Inline-validation errors keyed by field (empty object = valid). These
+ * mirror the backend pairing rules that would refuse the save anyway
+ * (`vault_core::settings::check_profile_pairing`) plus the numeric bounds,
+ * so the mistake is caught in the form before any IPC round trip. */
+export function validateProviderForm(
+  values: ProviderFormValues,
+): Partial<Record<keyof ProviderFormValues, string>> {
+  const errors: Partial<Record<keyof ProviderFormValues, string>> = {};
+  const url = values.base_url.trim();
+  const vis = kindFieldVisibility(values.kind);
+  const urlRequired =
+    values.kind === "anthropic" ||
+    values.kind === "azure_openai" ||
+    values.kind === "custom";
+  if (urlRequired && url === "") {
+    errors.base_url =
+      values.kind === "custom"
+        ? "a base URL is required"
+        : "a base URL is required (e.g. https://api.anthropic.com)";
+  } else if (url !== "") {
+    let parsed: URL | null = null;
+    try {
+      parsed = new URL(url);
+    } catch {
+      // fall through to the malformed message
+    }
+    if (!parsed || (parsed.protocol !== "http:" && parsed.protocol !== "https:")) {
+      errors.base_url = "must be an absolute http(s) URL";
+    } else if (
+      parsed.protocol === "http:" &&
+      parsed.hostname !== "localhost" &&
+      parsed.hostname !== "127.0.0.1" &&
+      parsed.hostname !== "[::1]"
+    ) {
+      errors.base_url =
+        "the API key must not travel over plaintext http — use https (or a localhost endpoint)";
+    } else if (values.kind === "zai" && parsed.hostname !== "api.z.ai") {
+      errors.base_url = "a z.ai key is only ever sent to the z.ai endpoint — remove the base URL to use the default";
+    }
+  }
+  if (vis.model) {
+    const model = values.model.trim();
+    const modelRequired =
+      values.kind === "anthropic" || values.kind === "custom";
+    if (modelRequired && model === "") {
+      errors.model = "a model name is required";
+    }
+  }
+  if (vis.deployment_name && values.deployment_name.trim() === "") {
+    errors.deployment_name = "a deployment name is required (it is the model id on Azure)";
+  }
+  if (vis.api_version) {
+    const v = values.api_version.trim();
+    if (v !== "" && !/^\d{4}-\d{2}-\d{2}$/.test(v)) {
+      errors.api_version = "expected a YYYY-MM-DD api-version";
+    }
+  }
+  const num = (raw: string): number | null => {
+    const t = raw.trim();
+    if (t === "") return null;
+    const n = Number(t);
+    return Number.isFinite(n) ? n : NaN;
+  };
+  const temp = num(values.temperature);
+  if (
+    temp !== null &&
+    (Number.isNaN(temp) || temp < TEMPERATURE_BOUNDS.min || temp > TEMPERATURE_BOUNDS.max)
+  ) {
+    errors.temperature = "must be a number between 0 and 2 (empty = kind default)";
+  }
+  const tokens = num(values.max_tokens);
+  if (
+    tokens !== null &&
+    (Number.isNaN(tokens) || tokens < MAX_TOKENS_BOUNDS.min || tokens > MAX_TOKENS_BOUNDS.max)
+  ) {
+    errors.max_tokens = "must be a whole number between 1 and 32768 (empty = kind default)";
+  }
+  const timeout = num(values.timeout_secs);
+  if (
+    timeout !== null &&
+    (Number.isNaN(timeout) || timeout < TIMEOUT_BOUNDS.min || timeout > TIMEOUT_BOUNDS.max)
+  ) {
+    errors.timeout_secs = "must be a whole number between 1 and 600 (empty = kind default)";
+  }
+  return errors;
+}
+
+/** The active provider/model line for the top of the page: what Ask uses
+ * right now, at a glance. */
+export function activeProviderSummary(view: {
+  providers: Array<ProviderView>;
+  default_provider: string | null;
+  env: EnvProviderView | null;
+}): string {
+  const id = view.default_provider;
+  if (id && id !== ENV_ID) {
+    const p = view.providers.find((x) => x.id === id);
+    if (p) {
+      const model = effectiveModel(p);
+      const url = (p.base_url || KIND_DEFAULTS[p.kind].base_url).trim();
+      let host = "unknown host";
+      try {
+        if (url) host = new URL(url).host;
+      } catch {
+        // keep the fallback
+      }
+      return `Active provider: ${providerName(p)} — ${model} via ${host}`;
+    }
+  }
+  if (view.env) {
+    return `Active provider: environment fallback — ${view.env.model} via ${view.env.host}`;
+  }
+  return "Active provider: none — Ask runs fully locally until a default provider or environment variables are set";
 }
 
 /** Placeholder for the write-only env key inputs. */

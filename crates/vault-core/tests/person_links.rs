@@ -13,10 +13,17 @@
 //!   explanation instead of silently moving the link;
 //! - people and links persist in the vault and survive a reopen and a
 //!   backup/restore round trip.
+//!
+//! The A5a scenarios below cover the interaction contract on top:
+//! preview/commit with an organization revision, one-transaction
+//! commits that roll back on refusal, the history ledger (migration
+//! 23), and same-label ambiguity staying distinct.
 
 use vault_core::backup::{self, BackupOptions, RestoreOptions};
 use vault_core::message::NewMessage;
-use vault_core::storage::{NewPersonIdentityLink, PersonAnchorKind, Storage};
+use vault_core::storage::{
+    NewPersonIdentityLink, PersonAnchorKind, PersonLinkOp, PersonLinkOperation, Storage,
+};
 use vault_core::Error;
 
 /// The canonical source-instance id a legacy import under `namespace`
@@ -567,4 +574,433 @@ fn new_imports_under_a_linked_stable_key_resolve_automatically() {
         1,
         "no new link rows appeared — the anchor already covers them"
     );
+}
+
+// ---------------------------------------------------------------------
+// Preview / commit with an organization revision (A5a)
+// ---------------------------------------------------------------------
+
+/// The full cycle: preview reports per-identity counts and
+/// representative messages with the revision it was read at; commit
+/// applies the set in one transaction and bumps the revision; a
+/// second commit carrying the old revision is rejected with the
+/// current one and applies nothing.
+#[test]
+fn preview_commit_then_stale_commit_is_rejected_with_the_current_revision() {
+    let storage = Storage::open_in_memory().unwrap();
+    let m1 = insert_one(
+        &storage,
+        "mbox",
+        "m1",
+        "Ana <ana@example.com>",
+        "first message",
+    );
+    insert_one(
+        &storage,
+        "mbox",
+        "m2",
+        "ana@example.com",
+        "second message, bare address",
+    );
+    insert_one(
+        &storage,
+        "mbox",
+        "m3",
+        "Bo <bo@example.com>",
+        "other person",
+    );
+
+    let person = storage.create_person("Ana Ilic").unwrap();
+    let instance = instance_for(&storage, "mbox");
+    assert_eq!(storage.organization_revision().unwrap(), 0);
+
+    let ops = [PersonLinkOp::Link {
+        person_id: &person.id,
+        link: mail_link(&instance, "ana@example.com"),
+    }];
+    let preview = storage.person_link_preview(&ops).unwrap();
+    assert_eq!(preview.organization_revision, 0);
+    assert_eq!(preview.entries.len(), 1);
+    let entry = &preview.entries[0];
+    assert_eq!(entry.person_id, person.id);
+    assert_eq!(entry.anchor_kind, PersonAnchorKind::StableKey);
+    assert_eq!(entry.anchor_value, "ana@example.com");
+    assert_eq!(entry.matched_messages, 2, "both author forms match");
+    assert_eq!(
+        entry.representative_messages.len(),
+        2,
+        "few matches are all representative"
+    );
+    assert_eq!(entry.representative_messages[0].id, m1);
+    assert_eq!(
+        entry.representative_messages[0].author,
+        "Ana <ana@example.com>"
+    );
+    assert!(entry.representative_messages[0]
+        .snippet
+        .contains("first message"));
+    assert!(entry.current_owner.is_none());
+    // A preview writes nothing.
+    assert!(storage
+        .person_identity_links(&person.id)
+        .unwrap()
+        .is_empty());
+    assert_eq!(storage.organization_revision().unwrap(), 0);
+
+    let commit = storage.person_links_commit(0, &ops).unwrap();
+    assert_eq!(commit.organization_revision, 1);
+    assert_eq!(storage.organization_revision().unwrap(), 1);
+    assert_eq!(
+        storage
+            .person_for_anchor(&instance, PersonAnchorKind::StableKey, "ana@example.com")
+            .unwrap()
+            .as_ref(),
+        Some(&person)
+    );
+    let history = storage.person_link_history(&person.id).unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].operation, PersonLinkOperation::Link);
+    assert_eq!(history[0].anchor_value, "ana@example.com");
+    assert_eq!(history[0].organization_revision, 1);
+
+    // A second commit carrying the stale revision 0 is rejected with
+    // the current revision — and applies nothing.
+    let stale_ops = [PersonLinkOp::Link {
+        person_id: &person.id,
+        link: mail_link(&instance, "other@example.com"),
+    }];
+    let err = storage.person_links_commit(0, &stale_ops).unwrap_err();
+    match &err {
+        Error::PersonLinksStaleRevision { expected, current } => {
+            assert_eq!(*expected, 0);
+            assert_eq!(*current, 1);
+        }
+        other => panic!("expected PersonLinksStaleRevision, got {other:?}"),
+    }
+    assert!(
+        err.to_string().contains('1'),
+        "the error exposes the current revision: {err}"
+    );
+    assert_eq!(
+        storage.person_identity_links(&person.id).unwrap().len(),
+        1,
+        "the stale commit applied nothing"
+    );
+    assert_eq!(storage.organization_revision().unwrap(), 1);
+
+    // Re-previewed at the current revision, the same set commits.
+    let fresh = storage.person_link_preview(&stale_ops).unwrap();
+    assert_eq!(fresh.organization_revision, 1);
+    storage
+        .person_links_commit(fresh.organization_revision, &stale_ops)
+        .unwrap();
+    assert_eq!(storage.organization_revision().unwrap(), 2);
+    assert_eq!(storage.person_identity_links(&person.id).unwrap().len(), 2);
+}
+
+/// The stable-key preview matches only real address evidence: both
+/// `Name <address>` and bare-address author forms fold to the anchor,
+/// while display-only authors and lookalike addresses never match.
+#[test]
+fn preview_stable_key_matches_address_evidence_only() {
+    let storage = Storage::open_in_memory().unwrap();
+    insert_one(
+        &storage,
+        "mbox",
+        "m1",
+        "Ana <ana@example.com>",
+        "bracketed form",
+    );
+    insert_one(&storage, "mbox", "m2", "ana@example.com", "bare form");
+    insert_one(
+        &storage,
+        "mbox",
+        "m3",
+        "ANA <Ana@Example.COM>",
+        "bracketed, different case",
+    );
+    // Display-only chat authors have no stable key...
+    insert_one(&storage, "telegram-work", "t1", "Ana", "chat display name");
+    // ...and a lookalike address is a different identity.
+    insert_one(
+        &storage,
+        "mbox",
+        "m4",
+        "ana@example.com.co",
+        "lookalike domain",
+    );
+
+    let person = storage.create_person("Ana Ilic").unwrap();
+    let mail = instance_for(&storage, "mbox");
+    let chat = instance_for(&storage, "telegram-work");
+
+    let mail_preview = storage
+        .person_link_preview(&[PersonLinkOp::Link {
+            person_id: &person.id,
+            link: mail_link(&mail, "ana@example.com"),
+        }])
+        .unwrap();
+    assert_eq!(mail_preview.entries[0].matched_messages, 3);
+    assert!(mail_preview.entries[0]
+        .representative_messages
+        .iter()
+        .all(|m| m.id <= 3));
+
+    let chat_preview = storage
+        .person_link_preview(&[PersonLinkOp::Link {
+            person_id: &person.id,
+            link: mail_link(&chat, "ana@example.com"),
+        }])
+        .unwrap();
+    assert_eq!(
+        chat_preview.entries[0].matched_messages, 0,
+        "a display-name chat author never matches a stable-key anchor"
+    );
+
+    // The author-name anchor stays verbatim and source-scoped: only
+    // the exact "Ana" rows in the chat instance.
+    let name_preview = storage
+        .person_link_preview(&[PersonLinkOp::Link {
+            person_id: &person.id,
+            link: name_link(&chat, "Ana"),
+        }])
+        .unwrap();
+    assert_eq!(name_preview.entries[0].matched_messages, 1);
+    assert_eq!(name_preview.entries[0].representative_messages.len(), 1);
+    assert_eq!(name_preview.entries[0].representative_messages[0].id, 4);
+}
+
+/// A wrong link is reversible through the commit path: preview the
+/// unlink, commit it, and the prior state is restored without a single
+/// archived row — message bodies or sender strings — changing.
+#[test]
+fn wrong_link_committed_then_unlinked_restores_the_prior_state() {
+    let storage = Storage::open_in_memory().unwrap();
+    let ids: Vec<i64> = ["one", "two", "three"]
+        .iter()
+        .enumerate()
+        .map(|(i, body)| {
+            insert_one(
+                &storage,
+                "mbox",
+                &format!("m{i}"),
+                "Ana <ana@example.com>",
+                body,
+            )
+        })
+        .collect();
+    insert_one(&storage, "mbox", "mx", "Bo <bo@example.com>", "unrelated");
+
+    let ana = storage.create_person("Ana Ilic").unwrap();
+    let instance = instance_for(&storage, "mbox");
+    storage
+        .person_links_commit(
+            0,
+            &[PersonLinkOp::Link {
+                person_id: &ana.id,
+                link: mail_link(&instance, "ana@example.com"),
+            }],
+        )
+        .unwrap();
+
+    // Wrong link noticed: preview the unlink before committing it.
+    let link_id = storage.person_identity_links(&ana.id).unwrap()[0]
+        .id
+        .clone();
+    let unlink_ops = [PersonLinkOp::Unlink {
+        person_id: &ana.id,
+        link_id: &link_id,
+    }];
+    let preview = storage.person_link_preview(&unlink_ops).unwrap();
+    assert_eq!(preview.entries.len(), 1);
+    assert_eq!(preview.entries[0].anchor_value, "ana@example.com");
+    assert_eq!(preview.entries[0].matched_messages, 3);
+
+    let commit = storage
+        .person_links_commit(preview.organization_revision, &unlink_ops)
+        .unwrap();
+    assert_eq!(commit.organization_revision, 2);
+
+    // Prior state restored: the anchor is free and linkable again.
+    assert!(storage.person_identity_links(&ana.id).unwrap().is_empty());
+    assert!(storage
+        .person_for_anchor(&instance, PersonAnchorKind::StableKey, "ana@example.com")
+        .unwrap()
+        .is_none());
+    let next = storage.create_person("Ana Ilic (redo)").unwrap();
+    storage
+        .link_person_identity(&next.id, &mail_link(&instance, "ana@example.com"))
+        .unwrap();
+
+    // Message rows and sender strings untouched throughout.
+    for (id, body) in ids.iter().zip(["one", "two", "three"]) {
+        let msg = storage.get(*id).unwrap().unwrap();
+        assert_eq!(msg.author, "Ana <ana@example.com>");
+        assert_eq!(msg.body, body);
+    }
+    assert_eq!(storage.stats().unwrap().total, 4);
+
+    // The audit ledger kept both sides of the mistake.
+    let mut history = storage.person_link_history(&ana.id).unwrap();
+    history.sort_by_key(|r| r.id);
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].operation, PersonLinkOperation::Link);
+    assert_eq!(history[1].operation, PersonLinkOperation::Unlink);
+    assert_eq!(history[1].organization_revision, 2);
+}
+
+/// Two same-label identities ("Mom" x2) stay distinct through preview
+/// and commit: one entry per source instance, linkable to different
+/// persons, never merged.
+#[test]
+fn same_label_identities_stay_distinct_through_preview_and_commit() {
+    let storage = Storage::open_in_memory().unwrap();
+    insert_one(&storage, "telegram-work", "w1", "Mom", "work chat");
+    insert_one(&storage, "telegram-work", "w2", "Mom", "more work chat");
+    insert_one(&storage, "telegram-family", "f1", "Mom", "family chat");
+
+    let mom_work = storage.create_person("Mom (work)").unwrap();
+    let mom_family = storage.create_person("Mom (family)").unwrap();
+    let work = instance_for(&storage, "telegram-work");
+    let family = instance_for(&storage, "telegram-family");
+
+    let ops = [
+        PersonLinkOp::Link {
+            person_id: &mom_work.id,
+            link: name_link(&work, "Mom"),
+        },
+        PersonLinkOp::Link {
+            person_id: &mom_family.id,
+            link: name_link(&family, "Mom"),
+        },
+    ];
+    let preview = storage.person_link_preview(&ops).unwrap();
+    assert_eq!(
+        preview.entries.len(),
+        2,
+        "same label, two identities: one entry each, never merged"
+    );
+    assert_ne!(
+        preview.entries[0].source_instance_id,
+        preview.entries[1].source_instance_id
+    );
+    assert_eq!(preview.entries[0].matched_messages, 2);
+    assert_eq!(preview.entries[1].matched_messages, 1);
+    assert_eq!(preview.entries[0].anchor_value, "Mom");
+    assert_eq!(preview.entries[1].anchor_value, "Mom");
+
+    let commit = storage
+        .person_links_commit(preview.organization_revision, &ops)
+        .unwrap();
+    assert_eq!(
+        commit.organization_revision, 1,
+        "one set, one revision bump"
+    );
+    assert_eq!(
+        storage
+            .person_for_anchor(&work, PersonAnchorKind::AuthorName, "Mom")
+            .unwrap()
+            .as_ref(),
+        Some(&mom_work)
+    );
+    assert_eq!(
+        storage
+            .person_for_anchor(&family, PersonAnchorKind::AuthorName, "Mom")
+            .unwrap()
+            .as_ref(),
+        Some(&mom_family)
+    );
+    assert_eq!(
+        storage.person_identity_links(&mom_work.id).unwrap().len(),
+        1
+    );
+    assert_eq!(
+        storage.person_identity_links(&mom_family.id).unwrap().len(),
+        1
+    );
+}
+
+/// A conflicting anchor is forecast by the preview and refused by the
+/// commit — one transaction, nothing applied.
+#[test]
+fn preview_forecasts_conflicts_and_commit_refuses_them_atomically() {
+    let storage = Storage::open_in_memory().unwrap();
+    insert_one(&storage, "mbox", "m1", "Ana <ana@example.com>", "body");
+    let instance = instance_for(&storage, "mbox");
+    let ana = storage.create_person("Ana Ilic").unwrap();
+    let impostor = storage.create_person("Someone Else").unwrap();
+    storage
+        .person_links_commit(
+            0,
+            &[PersonLinkOp::Link {
+                person_id: &ana.id,
+                link: mail_link(&instance, "ana@example.com"),
+            }],
+        )
+        .unwrap();
+
+    let ops = [
+        PersonLinkOp::Link {
+            person_id: &impostor.id,
+            link: mail_link(&instance, "ana@example.com"),
+        },
+        PersonLinkOp::Link {
+            person_id: &impostor.id,
+            link: mail_link(&instance, "bo@example.com"),
+        },
+    ];
+    let preview = storage.person_link_preview(&ops).unwrap();
+    assert_eq!(
+        preview.entries[0].current_owner.as_ref(),
+        Some(&ana),
+        "the preview names the current owner before any commit"
+    );
+    assert!(preview.entries[1].current_owner.is_none());
+
+    let err = storage
+        .person_links_commit(preview.organization_revision, &ops)
+        .unwrap_err();
+    assert!(matches!(err, Error::IdentityLinkConflict { .. }));
+    // One transaction: the refusable set applied nothing, not even its
+    // acceptable half, and the revision did not move.
+    assert!(storage
+        .person_identity_links(&impostor.id)
+        .unwrap()
+        .is_empty());
+    assert_eq!(storage.person_identity_links(&ana.id).unwrap().len(), 1);
+    assert_eq!(storage.organization_revision().unwrap(), 1);
+    assert!(storage
+        .person_link_history(&impostor.id)
+        .unwrap()
+        .is_empty());
+}
+
+/// Deleting a person removes organization only: the audit ledger —
+/// deliberately not a foreign key — survives as the record of what was
+/// organized.
+#[test]
+fn person_deletion_removes_organization_only_and_keeps_the_audit_ledger() {
+    let storage = Storage::open_in_memory().unwrap();
+    insert_one(&storage, "mbox", "m1", "Ana <ana@example.com>", "body");
+    let instance = instance_for(&storage, "mbox");
+    let person = storage.create_person("Ana Ilic").unwrap();
+    storage
+        .person_links_commit(
+            0,
+            &[PersonLinkOp::Link {
+                person_id: &person.id,
+                link: mail_link(&instance, "ana@example.com"),
+            }],
+        )
+        .unwrap();
+
+    storage.delete_person(&person.id).unwrap();
+    assert!(storage.list_people().unwrap().is_empty());
+    let history = storage.person_link_history(&person.id).unwrap();
+    assert_eq!(
+        history.len(),
+        1,
+        "the ledger is an audit record, not a live association"
+    );
+    assert_eq!(history[0].operation, PersonLinkOperation::Link);
 }

@@ -482,6 +482,92 @@ fn json_lines_import_round_trip_through_the_importer() {
     assert_eq!(s.stats().unwrap().total, 3);
 }
 
+/// A2b: a completed bounded import carries the receipt its completing
+/// commit wrote — run-total new counts, the failing record, observed
+/// bounds — on the outcome (the shape the job runner serializes
+/// verbatim), while a cancelled run claims no receipt, and job results
+/// written before the field existed still deserialize.
+#[test]
+fn import_outcome_carries_the_completion_receipt() {
+    let rows = vec![
+        chat("r-1", "marko", "2026-11-01T10:00:00Z", "prva", "arhiva"),
+        chat("r-2", "ana", "2026-11-02T11:00:00Z", "druga", "arhiva"),
+    ];
+    let s = seeded(rows);
+    let (_, mut bytes) = export_to_vec(&s, &SearchQuery::default(), ExportFormat::Json);
+    // One line that cannot be a row (no source/external_id identity):
+    // a durable failure record, not a run abort.
+    bytes.extend_from_slice(b"{\"id\": \"orphan\"}\n");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("receipt.jsonl");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let mut target = Storage::open_in_memory().unwrap();
+    let outcome = vault_core::chat_export::import_bounded(
+        &mut target,
+        &path,
+        false,
+        None,
+        &|| false,
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    assert_eq!(outcome.summary.inserted, 2);
+    assert_eq!(outcome.summary.failed, 1);
+    let receipt = outcome
+        .receipt
+        .as_ref()
+        .expect("a completed run carries its receipt");
+    assert_eq!(receipt.new_records, 2);
+    assert!(receipt.failed_records > 0, "the failing record is counted");
+    assert_eq!(receipt.failed_records, 1);
+    assert_eq!(
+        receipt.observed_min.as_deref(),
+        Some("2026-11-01T10:00:00Z")
+    );
+    assert_eq!(
+        receipt.observed_max.as_deref(),
+        Some("2026-11-02T11:00:00Z")
+    );
+
+    // The receipt rides the serialized outcome (the job runner and the
+    // direct commands serialize this shape verbatim), and a job result
+    // written before the field existed still deserializes — an absent
+    // receipt means None, never an error.
+    let value = serde_json::to_value(vault_core::chat_export::ChatImportOutcome::from(
+        outcome.clone(),
+    ))
+    .unwrap();
+    assert_eq!(
+        value
+            .pointer("/receipt/failed_records")
+            .and_then(|v| v.as_u64()),
+        Some(1),
+        "the serialized outcome carries the receipt: {value}"
+    );
+    let mut legacy = value;
+    legacy.as_object_mut().unwrap().remove("receipt");
+    let parsed: vault_core::chat_export::ChatImportOutcome =
+        serde_json::from_value(legacy).unwrap();
+    assert!(parsed.receipt.is_none());
+
+    // A cancelled run claims no receipt: committed work stays exactly as
+    // the checkpoint left it, but no completion is reported that did
+    // not happen.
+    let mut other = Storage::open_in_memory().unwrap();
+    let cancelled = vault_core::chat_export::import_bounded(
+        &mut other,
+        &path,
+        false,
+        None,
+        &|| true,
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    assert!(cancelled.cancelled);
+    assert!(cancelled.receipt.is_none());
+}
+
 // ---------------------------------------------------------------------------
 // MBOX
 // ---------------------------------------------------------------------------
@@ -1807,4 +1893,78 @@ fn mbox_export_skips_signal_rows_and_counts_them() {
     assert!(!text.contains("vidi sliku"));
     assert!(!text.contains("signal-2023-11-01-110050.jpg"));
     assert!(!text.contains("gone.jpg"));
+}
+
+// ---------------------------------------------------------------------------
+// HTML bundle scope parity (A8): the readable bundle exports the exact
+// same normalized search scope the JSON Lines stream does
+// ---------------------------------------------------------------------------
+
+#[test]
+fn html_search_bundle_matches_the_v2_stream_scope() {
+    let rows = vec![
+        email(
+            "h1@e.com",
+            "S",
+            "shared zebra body one",
+            "2026-11-01T09:00:00Z",
+            "t@e.com",
+        ),
+        email(
+            "h2@e.com",
+            "S",
+            "shared zebra body two",
+            "2026-11-02T09:00:00Z",
+            "t@e.com",
+        ),
+        chat(
+            "h-w",
+            "ana",
+            "2026-11-03T09:00:00Z",
+            "zebra chat row",
+            "ekipa",
+        ),
+        email(
+            "h3@e.com",
+            "S",
+            "unrelated body",
+            "2026-11-04T09:00:00Z",
+            "t@e.com",
+        ),
+    ];
+    let s = seeded(rows);
+
+    // The same request through the streaming seam and the HTML bundle:
+    // identical scope, identical rows, pagination ignored by both.
+    let request = SearchArchiveRequest {
+        text: "zebra".into(),
+        limit: Some(1),
+        ..Default::default()
+    };
+    let mut streamed = 0u64;
+    s.search_archive_export_stream(&request, &mut |_| {
+        streamed += 1;
+        Ok(())
+    })
+    .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("html");
+    let objects = vault_core::object_store::ObjectStore::new(dir.path());
+    let scope = vault_core::export_html::HtmlExportScope::Search { request };
+    let outcome =
+        vault_core::export_html::export_html(&s, &scope, &dest, &objects, &|| false).unwrap();
+    let summary = match outcome {
+        Some(vault_core::export_html::HtmlExportOutcome::Complete(summary)) => summary,
+        other => panic!("expected a completed HTML export, got {other:?}"),
+    };
+
+    assert_eq!(streamed, 3, "two emails plus the chat row carry zebra");
+    assert_eq!(summary.count, 3, "plan count equals the streamed scope");
+    assert_eq!(summary.written, 3);
+    let page = std::fs::read_to_string(dest.join("page-0001.html")).unwrap();
+    assert!(page.contains("shared zebra body one"));
+    assert!(page.contains("shared zebra body two"));
+    assert!(page.contains("zebra chat row"));
+    assert!(!page.contains("unrelated body"));
 }

@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use vault_core::chat_export::import_bounded;
 use vault_core::files::{
-    self, FilesBackfillOutcome, FilesSearchRequest, FilesSearchPage, ThumbnailStatus,
+    self, FilesBackfillOutcome, FilesSearchPage, FilesSearchRequest, ThumbnailStatus,
 };
 use vault_core::jobs::{DbPool, JobId, JobState, PoolConfig};
 use vault_core::storage::Storage;
@@ -201,7 +201,10 @@ fn backfill_stops_at_a_batch_limit_and_resumes_to_coverage_success() {
     assert!(!first.completed, "{first:?}");
     assert_eq!(first.scanned_messages, 2, "{first:?}");
     assert!(first.refs_upserted >= 2, "{first:?}");
-    assert!(first.coverage.is_none(), "a partial run never claims coverage");
+    assert!(
+        first.coverage.is_none(),
+        "a partial run never claims coverage"
+    );
     let (partial_rows, checkpoint) = pool.with_read(|s| {
         let rows = s
             .connection()
@@ -290,7 +293,10 @@ fn identical_bytes_attached_twice_group_as_one_unique_file() {
         assert!(!row.source_instance_id.is_empty(), "source provenance");
         assert!(!row.import_id.is_empty(), "import provenance: {row:?}");
         assert_eq!(row.availability, "preserved");
-        assert!(row.name.contains("photo_10"), "kept the export name: {row:?}");
+        assert!(
+            row.name.contains("photo_10"),
+            "kept the export name: {row:?}"
+        );
     }
     let authors: Vec<&str> = references
         .references
@@ -306,7 +312,10 @@ fn identical_bytes_attached_twice_group_as_one_unique_file() {
     let all = search(&storage, &FilesSearchRequest::default());
     assert_eq!(all.files.len(), 4, "{:?}", all.files);
     let occurrences: u64 = all.files.iter().map(|f| f.occurrences).sum();
-    assert_eq!(occurrences, 4, "2 photo + 1 plan + 1 ghost references: {all:?}");
+    assert_eq!(
+        occurrences, 4,
+        "2 photo + 1 plan + 1 ghost references: {all:?}"
+    );
 
     // The thumbnail stub answers the availability fact for the digest.
     assert_eq!(
@@ -392,7 +401,10 @@ fn missing_references_surface_through_the_availability_filter() {
     assert_eq!(group.name, MISSING_NAME, "{group:?}");
     assert_eq!(group.sha256, None, "no digest exists for missing bytes");
     assert_eq!(group.occurrences, 1, "{group:?}");
-    assert_eq!(group.reason, "not-in-export", "the recorded reason: {group:?}");
+    assert_eq!(
+        group.reason, "not-in-export",
+        "the recorded reason: {group:?}"
+    );
 
     // And the inverse filter keeps it out.
     let preserved = search(
@@ -403,12 +415,10 @@ fn missing_references_surface_through_the_availability_filter() {
         },
     );
     assert_eq!(preserved.files.len(), 3, "{:?}", preserved.files); // photo + plan + stray
-    assert!(
-        preserved
-            .files
-            .iter()
-            .all(|f| f.name != MISSING_NAME && f.availability == "preserved")
-    );
+    assert!(preserved
+        .files
+        .iter()
+        .all(|f| f.name != MISSING_NAME && f.availability == "preserved"));
 
     // An invalid filter value is a clear error, never a silent default.
     let err = files::files_search(

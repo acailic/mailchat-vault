@@ -99,22 +99,33 @@ import {
   pluginNotifyChannel,
 } from "./notify";
 import {
+  activeProviderSummary,
   applyTheme,
   envKeyPlaceholder,
   envTestPayload,
   keyStoreNote,
+  kindFieldVisibility,
   kindLabel,
   menuItemLabel,
+  modelChoicesForKind,
   placeholderForKind,
   prefillForKind,
   uniqueProviderId,
+  validateProviderForm,
   ENV_ANTHROPIC_KEY_ID,
   ENV_ZAI_KEY_ID,
   LOCAL_ID,
   ENV_ID,
+  SELECTABLE_KINDS,
+  KIND_DEFAULTS,
+  TEMPERATURE_BOUNDS,
+  MAX_TOKENS_BOUNDS,
+  TIMEOUT_BOUNDS,
   type LlmTestPayload,
+  type ProviderFormValues,
   type ProviderKind,
   type ProviderMenuItem,
+  type ProviderProfile,
   type SaveSettingsPayload,
   type SettingsView,
   type StoredTheme,
@@ -310,6 +321,9 @@ const envTestButton = document.querySelector<HTMLButtonElement>("#env-test-btn")
 const envTestStatus = document.querySelector<HTMLElement>("#env-test-status")!;
 const envClearKeysButton = document.querySelector<HTMLButtonElement>("#env-clear-keys-btn")!;
 const providerRows = document.querySelector<HTMLElement>("#provider-rows")!;
+const activeProviderSummaryLine = document.querySelector<HTMLElement>(
+  "#active-provider-summary",
+)!;
 const addKind = document.querySelector<HTMLSelectElement>("#add-kind")!;
 const addProviderButton = document.querySelector<HTMLButtonElement>("#add-provider-btn")!;
 const themeSelect = document.querySelector<HTMLSelectElement>("#theme")!;
@@ -895,21 +909,132 @@ function preferDefaultInMenu(): void {
 // Settings (providers, default, options)
 // ---------------------------------------------------------------------------
 
-function rowInputs(row: HTMLElement): Record<string, HTMLInputElement> {
-  const pick = (cls: string) => row.querySelector<HTMLInputElement>(`.${cls}`)!;
+function rowInputs(row: HTMLElement): {
+  kind: HTMLSelectElement;
+  name: HTMLInputElement;
+  base_url: HTMLInputElement;
+  model: HTMLInputElement;
+  deployment: HTMLInputElement;
+  apiVersion: HTMLInputElement;
+  temperature: HTMLInputElement;
+  maxTokens: HTMLInputElement;
+  timeout: HTMLInputElement;
+  key: HTMLInputElement;
+} {
+  const pick = <T extends HTMLElement>(cls: string) =>
+    row.querySelector<T>(`.${cls}`)!;
   return {
-    name: pick("prov-name"),
-    base_url: pick("prov-url"),
-    model: pick("prov-model"),
-    key: pick("prov-key"),
+    kind: pick<HTMLSelectElement>("prov-kind"),
+    name: pick<HTMLInputElement>("prov-name"),
+    base_url: pick<HTMLInputElement>("prov-url"),
+    model: pick<HTMLInputElement>("prov-model"),
+    deployment: pick<HTMLInputElement>("prov-deployment"),
+    apiVersion: pick<HTMLInputElement>("prov-api-version"),
+    temperature: pick<HTMLInputElement>("prov-temperature"),
+    maxTokens: pick<HTMLInputElement>("prov-max-tokens"),
+    timeout: pick<HTMLInputElement>("prov-timeout"),
+    key: pick<HTMLInputElement>("prov-key"),
   };
 }
 
-/** One provider row: default radio, name/url/model inputs, write-only key
- * field, clear-key, remove, and Test buttons plus a per-row status line.
- * `takenIds` feeds id generation for newly added rows. */
+/** Additive profile fields with no input of their own (bedrock's region —
+ * part 3): kept per row so a save round-trips them unchanged. */
+const rowExtras = new WeakMap<HTMLElement, { region?: string }>();
+
+/** Per-kind value memory: values typed for one kind survive switching the
+ * row to another kind and back (the stash is keyed by kind per row). */
+interface KindValues {
+  base_url: string;
+  model: string;
+  deployment_name: string;
+  api_version: string;
+  temperature: string;
+  max_tokens: string;
+  timeout_secs: string;
+}
+
+const rowKindMemory = new WeakMap<HTMLElement, Map<ProviderKind, KindValues>>();
+
+function stashKindValues(row: HTMLElement, kind: ProviderKind): void {
+  const inputs = rowInputs(row);
+  const values: KindValues = {
+    base_url: inputs.base_url.value,
+    model: inputs.model.value,
+    deployment_name: inputs.deployment.value,
+    api_version: inputs.apiVersion.value,
+    temperature: inputs.temperature.value,
+    max_tokens: inputs.maxTokens.value,
+    timeout_secs: inputs.timeout.value,
+  };
+  let memory = rowKindMemory.get(row);
+  if (!memory) {
+    memory = new Map();
+    rowKindMemory.set(row, memory);
+  }
+  memory.set(kind, values);
+}
+
+function recallKindValues(row: HTMLElement, kind: ProviderKind): KindValues | undefined {
+  return rowKindMemory.get(row)?.get(kind);
+}
+
+/** One labelled provider field: control + helper text + inline error slot. */
+function providerField(
+  label: string,
+  control: HTMLElement,
+  opts: { hintClass?: string; hint?: string; errorKey?: keyof ProviderFormValues } = {},
+): HTMLElement {
+  const wrap = document.createElement("label");
+  wrap.className = "form-field prov-field";
+  const text = document.createElement("span");
+  text.textContent = label;
+  wrap.append(text, control);
+  if (opts.hint !== undefined) {
+    const hint = document.createElement("span");
+    hint.className = opts.hintClass ?? "field-hint";
+    hint.textContent = opts.hint;
+    wrap.append(hint);
+  }
+  if (opts.errorKey) {
+    const error = document.createElement("span");
+    error.className = "field-error";
+    error.dataset.field = opts.errorKey;
+    error.hidden = true;
+    wrap.append(error);
+  }
+  return wrap;
+}
+
+function textInput(cls: string, value: string, placeholder: string): HTMLInputElement {
+  const input = document.createElement("input");
+  input.className = cls;
+  input.type = "text";
+  input.value = value;
+  input.placeholder = placeholder;
+  return input;
+}
+
+function numberInput(
+  cls: string,
+  value: string,
+  placeholder: string,
+  bounds: { min: number; max: number },
+): HTMLInputElement {
+  const input = document.createElement("input");
+  input.className = cls;
+  input.type = "number";
+  input.value = value;
+  input.placeholder = placeholder;
+  input.min = String(bounds.min);
+  input.max = String(bounds.max);
+  return input;
+}
+
+/** One provider row as four labelled sections — Provider, Model,
+ * Credentials, Advanced — with per-kind conditional fields, helper text,
+ * and inline error slots. */
 function providerRow(
-  profile: { id: string; name: string; kind: ProviderKind; base_url: string; model: string },
+  profile: ProviderProfile,
   hasKey: boolean,
   isDefault: boolean,
 ): HTMLElement {
@@ -917,7 +1042,22 @@ function providerRow(
   row.className = "provider-row";
   row.dataset.id = profile.id;
   row.dataset.kind = profile.kind;
+  row.dataset.hasKey = String(hasKey);
+  if (profile.region) rowExtras.set(row, { region: profile.region });
 
+  const section = (name: string): HTMLElement => {
+    const el = document.createElement("div");
+    el.className = "prov-section";
+    el.dataset.section = name;
+    const title = document.createElement("span");
+    title.className = "prov-section-title";
+    title.textContent = name;
+    el.append(title);
+    return el;
+  };
+
+  // --- Provider: default radio, kind, display name, remove.
+  const head = section("Provider");
   const radio = document.createElement("input");
   radio.type = "radio";
   radio.name = "default-provider";
@@ -925,34 +1065,68 @@ function providerRow(
   radio.checked = isDefault;
   radio.title = "Use as the default provider for Ask";
 
-  const kind = document.createElement("span");
-  kind.className = "kind-label";
-  kind.textContent = kindLabel(profile.kind);
+  const kindSelect = document.createElement("select");
+  kindSelect.className = "prov-kind";
+  kindSelect.setAttribute("aria-label", "Provider kind");
+  for (const kind of SELECTABLE_KINDS) {
+    const option = document.createElement("option");
+    option.value = kind;
+    option.textContent = kind === "zai" ? "z.ai GLM (default)" : kindLabel(kind);
+    kindSelect.append(option);
+  }
+  if (!SELECTABLE_KINDS.includes(profile.kind as ProviderKind)) {
+    // bedrock: the backend kind renders and saves unchanged, but its
+    // configuration UI is part 3 — listed here (already selected) yet
+    // disabled so it cannot be newly chosen.
+    const option = document.createElement("option");
+    option.value = profile.kind;
+    option.textContent = kindLabel(profile.kind);
+    option.disabled = true;
+    kindSelect.append(option);
+  }
+  kindSelect.value = profile.kind;
 
-  const name = document.createElement("input");
-  name.className = "prov-name";
-  name.type = "text";
-  name.value = profile.name;
-  name.placeholder = `${kindLabel(profile.kind)} name`;
+  const name = textInput("prov-name", profile.name, `${kindLabel(profile.kind)} name`);
 
-  const url = document.createElement("input");
-  url.className = "prov-url";
-  url.type = "text";
-  url.value = profile.base_url;
-  url.placeholder = placeholderForKind(profile.kind, "base_url");
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "small-btn remove-prov-btn";
+  remove.textContent = "Remove";
+  remove.title = "Drop this provider (picked up by the next save)";
 
-  const model = document.createElement("input");
-  model.className = "prov-model";
-  model.type = "text";
-  model.value = profile.model;
-  model.placeholder = placeholderForKind(profile.kind, "model");
+  head.append(radio, providerField("Kind", kindSelect), providerField("Name", name), remove);
 
+  // --- Model: per-kind dropdown (datalist) + free text; on Azure the
+  // deployment name is the model id, so the plain model input hides.
+  const modelSection = section("Model");
+  const model = textInput("prov-model", profile.model, "");
+  model.setAttribute("list", `prov-models-${profile.id}`);
+  const datalist = document.createElement("datalist");
+  datalist.id = `prov-models-${profile.id}`;
+  datalist.className = "prov-model-options";
+  modelSection.append(providerField("Model", model, { errorKey: "model" }), datalist);
+
+  const deployment = textInput("prov-deployment", profile.deployment_name ?? "", "");
+  modelSection.append(
+    providerField("Deployment name", deployment, {
+      hint: "The deployed model — on Azure the deployment name is the model id",
+      errorKey: "deployment_name",
+    }),
+  );
+
+  // --- Credentials: write-only key field + per-row Test connection.
+  const credentials = section("Credentials");
   const key = document.createElement("input");
   key.className = "prov-key";
   key.type = "password";
   key.autocomplete = "off";
+  key.value = "";
   key.placeholder = hasKey ? "stored — type to replace" : "API key";
-  row.dataset.hasKey = String(hasKey);
+  const keyNote = document.createElement("span");
+  keyNote.className = "field-hint prov-key-note";
+  keyNote.hidden = true;
+  const keyField = providerField("API key", key);
+  keyField.append(keyNote);
 
   const clearKey = document.createElement("button");
   clearKey.type = "button";
@@ -960,23 +1134,213 @@ function providerRow(
   clearKey.textContent = "Clear key";
   clearKey.hidden = !hasKey;
 
-  const remove = document.createElement("button");
-  remove.type = "button";
-  remove.className = "small-btn remove-prov-btn";
-  remove.textContent = "Remove";
-
   const test = document.createElement("button");
   test.type = "button";
   test.className = "small-btn test-btn";
-  test.textContent = "Test";
+  test.textContent = "Test connection";
   test.title = "Send one minimal request (max_tokens=1, no vault data) to check this provider";
 
   const testStatus = document.createElement("span");
   testStatus.className = "meta prov-test-status";
   testStatus.setAttribute("role", "status");
+  credentials.append(keyField, clearKey, test, testStatus);
 
-  row.append(radio, kind, name, url, model, key, clearKey, remove, test, testStatus);
+  // --- Advanced: base URL (per-kind), api-version (Azure), sampling
+  // overrides, and reset-to-defaults. Empty overrides = kind default.
+  const advanced = section("Advanced");
+  const url = textInput("prov-url", profile.base_url, "");
+  const urlHint = document.createElement("span");
+  urlHint.className = "field-hint prov-url-hint";
+  const urlField = providerField("Base URL", url, { errorKey: "base_url" });
+  urlField.append(urlHint);
+
+  const apiVersion = textInput("prov-api-version", profile.api_version ?? "", "");
+  const apiVersionField = providerField("API version", apiVersion, {
+    errorKey: "api_version",
+  });
+
+  const temperature = numberInput(
+    "prov-temperature",
+    profile.temperature == null ? "" : String(profile.temperature),
+    "",
+    TEMPERATURE_BOUNDS,
+  );
+  const maxTokens = numberInput(
+    "prov-max-tokens",
+    profile.max_tokens == null ? "" : String(profile.max_tokens),
+    "",
+    MAX_TOKENS_BOUNDS,
+  );
+  const timeout = numberInput(
+    "prov-timeout",
+    profile.timeout_secs == null ? "" : String(profile.timeout_secs),
+    "",
+    TIMEOUT_BOUNDS,
+  );
+
+  const reset = document.createElement("button");
+  reset.type = "button";
+  reset.className = "small-btn reset-btn";
+  reset.textContent = "Reset to defaults";
+  reset.title = "Restore this provider's kind defaults (name and key are kept)";
+
+  advanced.append(
+    urlField,
+    apiVersionField,
+    providerField("Temperature", temperature, { errorKey: "temperature" }),
+    providerField("Max tokens", maxTokens, { errorKey: "max_tokens" }),
+    providerField("Timeout (s)", timeout, { errorKey: "timeout_secs" }),
+    reset,
+  );
+
+  row.append(head, modelSection, credentials, advanced);
+  refreshKindChrome(row);
+  refreshRowValidation(row);
   return row;
+}
+
+/** Apply everything kind-dependent except the values: which fields are
+ * visible, placeholders, dropdown entries, and helper text. */
+function refreshKindChrome(row: HTMLElement): void {
+  const kind = row.dataset.kind as ProviderKind;
+  const inputs = rowInputs(row);
+  const vis = kindFieldVisibility(kind);
+  const defaults = KIND_DEFAULTS[kind];
+  inputs.kind.value = kind;
+
+  const setShown = (el: HTMLElement, shown: boolean) => {
+    el.hidden = !shown;
+  };
+  setShown(inputs.base_url.closest<HTMLElement>(".prov-field")!, vis.base_url);
+  setShown(inputs.model.closest<HTMLElement>(".prov-field")!, vis.model);
+  setShown(inputs.deployment.closest<HTMLElement>(".prov-field")!, vis.deployment_name);
+  setShown(inputs.apiVersion.closest<HTMLElement>(".prov-field")!, vis.api_version);
+
+  inputs.base_url.placeholder = placeholderForKind(kind, "base_url");
+  const urlHint = row.querySelector<HTMLElement>(".prov-url-hint")!;
+  urlHint.textContent = vis.base_url
+    ? kind === "azure_openai"
+      ? "Your Azure resource endpoint, e.g. https://<resource>.openai.azure.com"
+      : kind === "ollama"
+        ? `The local Ollama server (${defaults.base_url} by default)`
+        : "Any OpenAI-compatible /chat/completions endpoint (base URL without the path)"
+    : `Endpoint fixed by the kind: ${defaults.base_url || "derived from the region"}`;
+
+  inputs.model.placeholder = placeholderForKind(kind, "model");
+  inputs.deployment.placeholder = "e.g. glm-deployment";
+
+  inputs.apiVersion.placeholder = placeholderForKind(kind, "api_version");
+  inputs.temperature.placeholder = placeholderForKind(kind, "temperature");
+  inputs.maxTokens.placeholder = placeholderForKind(kind, "max_tokens");
+  inputs.timeout.placeholder = placeholderForKind(kind, "timeout_secs");
+
+  // The model dropdown offers the kind default; free text stays allowed.
+  const datalist = row.querySelector<HTMLDataListElement>("datalist.prov-model-options")!;
+  datalist.replaceChildren(
+    ...modelChoicesForKind(kind).map((m) => {
+      const option = document.createElement("option");
+      option.value = m;
+      return option;
+    }),
+  );
+
+  const keyNote = row.querySelector<HTMLElement>(".prov-key-note")!;
+  if (kind === "ollama") {
+    keyNote.hidden = false;
+    keyNote.textContent = "Ollama runs locally — no API key needed";
+  } else {
+    // refreshed by refreshRowValidation (a key is required to *use* the
+    // provider, but a keyless row may still be saved)
+    keyNote.textContent = "An API key is required to use this provider";
+  }
+}
+
+/** The row's form values as typed (untrimmed), for validation. */
+function rowFormValues(row: HTMLElement): ProviderFormValues {
+  const inputs = rowInputs(row);
+  return {
+    kind: row.dataset.kind as ProviderKind,
+    base_url: inputs.base_url.value,
+    model: inputs.model.value,
+    deployment_name: inputs.deployment.value,
+    api_version: inputs.apiVersion.value,
+    temperature: inputs.temperature.value,
+    max_tokens: inputs.maxTokens.value,
+    timeout_secs: inputs.timeout.value,
+  };
+}
+
+/** Re-run inline validation for one row: field errors appear and clear,
+ * and the missing-key note follows the key field. */
+function refreshRowValidation(row: HTMLElement): void {
+  const kind = row.dataset.kind as ProviderKind;
+  const errors = validateProviderForm(rowFormValues(row));
+  for (const error of row.querySelectorAll<HTMLElement>(".field-error")) {
+    const message = errors[error.dataset.field as keyof ProviderFormValues];
+    error.textContent = message ?? "";
+    error.hidden = !message;
+  }
+  const keyNote = row.querySelector<HTMLElement>(".prov-key-note")!;
+  if (kind !== "ollama") {
+    keyNote.hidden = !(
+      rowInputs(row).key.value.trim() === "" && row.dataset.hasKey !== "true"
+    );
+  }
+}
+
+/** Switch a row to another kind: the current values are stashed for the
+ * old kind (they come back on a later switch), then the new kind's
+ * remembered values or defaults are applied. */
+function switchRowKind(row: HTMLElement, kind: ProviderKind): void {
+  const prev = row.dataset.kind as ProviderKind;
+  if (prev === kind) return;
+  stashKindValues(row, prev);
+  const memory = recallKindValues(row, kind);
+  const prefill = prefillForKind(kind);
+  const inputs = rowInputs(row);
+  inputs.base_url.value = memory?.base_url ?? prefill.base_url;
+  inputs.model.value = memory?.model ?? prefill.model;
+  inputs.deployment.value = memory?.deployment_name ?? "";
+  inputs.apiVersion.value = memory?.api_version ?? "";
+  inputs.temperature.value = memory?.temperature ?? "";
+  inputs.maxTokens.value = memory?.max_tokens ?? "";
+  inputs.timeout.value = memory?.timeout_secs ?? "";
+  row.dataset.kind = kind;
+  refreshKindChrome(row);
+  refreshRowValidation(row);
+}
+
+/** Reset the row's kind-dependent fields to the kind defaults (the
+ * per-kind stash for this kind is dropped; name and key are kept). */
+function resetRowToDefaults(row: HTMLElement): void {
+  const kind = row.dataset.kind as ProviderKind;
+  rowKindMemory.get(row)?.delete(kind);
+  const prefill = prefillForKind(kind);
+  const inputs = rowInputs(row);
+  inputs.base_url.value = prefill.base_url;
+  inputs.model.value = prefill.model;
+  inputs.deployment.value = "";
+  inputs.apiVersion.value = "";
+  inputs.temperature.value = "";
+  inputs.maxTokens.value = "";
+  inputs.timeout.value = "";
+  refreshKindChrome(row);
+  refreshRowValidation(row);
+}
+
+/** First inline-validation error across all rows (also (re)shows every
+ * error), or null when the form is valid. Blocks the save so the
+ * backend's identical refusal never needs a round trip. */
+function firstValidationError(): string | null {
+  for (const row of [...providerRows.querySelectorAll<HTMLElement>(".provider-row")]) {
+    refreshRowValidation(row);
+    const error = row.querySelector<HTMLElement>(".field-error:not([hidden])");
+    if (error) {
+      const name = rowInputs(row).name.value.trim() || kindLabel(row.dataset.kind as ProviderKind);
+      return `provider “${name}”: ${error.textContent}`;
+    }
+  }
+  return null;
 }
 
 /** The vesper theme choice persists across launches (machine-local). The
@@ -1009,6 +1373,7 @@ function renderSettings(view: SettingsView): void {
   // while vesper is active — the backend enum has no vesper variant).
   const theme: Theme = readThemeVesper() ? "vesper" : view.theme;
   settingsRendered = true;
+  activeProviderSummaryLine.textContent = activeProviderSummary(view);
   providerRows.replaceChildren(
     ...view.providers.map((p) =>
       providerRow(p, p.has_key, view.default_provider === p.id),
@@ -1073,16 +1438,44 @@ function parsedSummarizeTop(value: string): number {
  * back over the persisted ones. */
 let settingsRendered = false;
 
-/** Collect the form into a `settings_save` payload. */
+/** Collect the form into a `settings_save` payload. Per-kind additive
+ * fields only cross when their kind applies (and are omitted when empty,
+ * so old payloads round-trip byte-for-byte); bedrock's region has no
+ * input yet (part 3) and passes through unchanged. */
 function collectSettings(): SaveSettingsPayload {
   const rows = [...providerRows.querySelectorAll<HTMLElement>(".provider-row")];
-  const providers = rows.map((row) => ({
-    id: row.dataset.id!,
-    name: rowInputs(row).name.value.trim(),
-    kind: row.dataset.kind as ProviderKind,
-    base_url: rowInputs(row).base_url.value.trim(),
-    model: rowInputs(row).model.value.trim(),
-  }));
+  const providers: ProviderProfile[] = rows.map((row) => {
+    const inputs = rowInputs(row);
+    const kind = row.dataset.kind as ProviderKind;
+    const vis = kindFieldVisibility(kind);
+    const profile: ProviderProfile = {
+      id: row.dataset.id!,
+      name: inputs.name.value.trim(),
+      kind,
+      base_url: inputs.base_url.value.trim(),
+      // on Azure the deployment name is the model; the model input hides
+      model: (vis.model ? inputs.model.value : "").trim(),
+    };
+    if (vis.deployment_name) {
+      const deployment = inputs.deployment.value.trim();
+      if (deployment) profile.deployment_name = deployment;
+    }
+    if (vis.api_version) {
+      const apiVersion = inputs.apiVersion.value.trim();
+      if (apiVersion) profile.api_version = apiVersion;
+    }
+    if (kind === "bedrock") {
+      const region = rowExtras.get(row)?.region;
+      if (region) profile.region = region;
+    }
+    const temperature = inputs.temperature.value.trim();
+    if (temperature !== "") profile.temperature = Number(temperature);
+    const maxTokens = inputs.maxTokens.value.trim();
+    if (maxTokens !== "") profile.max_tokens = Number.parseInt(maxTokens, 10);
+    const timeout = inputs.timeout.value.trim();
+    if (timeout !== "") profile.timeout_secs = Number.parseInt(timeout, 10);
+    return profile;
+  });
   const checked = document.querySelector<HTMLInputElement>(
     'input[name="default-provider"]:checked',
   );
@@ -1118,6 +1511,14 @@ notifyToggle.addEventListener("change", () => {
 
 async function saveSettings(): Promise<void> {
   if (!settingsRendered) return;
+  // Inline validation first: the mirrored pairing/bounds rules block the
+  // save before any IPC round trip (the backend refuses the same input).
+  const validation = firstValidationError();
+  if (validation) {
+    settingsNote.classList.add("error");
+    settingsNote.textContent = `Not saved: ${validation}`;
+    return;
+  }
   const payload = collectSettings();
   // Record the vesper choice beside the "dark" placeholder save; saving
   // any other theme clears the override so the saved theme rules again.
@@ -1192,10 +1593,16 @@ async function runLlmTest(
 
 function testPayloadForRow(row: HTMLElement): LlmTestPayload {
   const inputs = rowInputs(row);
+  // On Azure the deployment name is the model; the hidden model input's
+  // stale value must not pose as typed input (empty falls back to the
+  // stored/effective values server-side).
+  const model = kindFieldVisibility(row.dataset.kind as ProviderKind).model
+    ? inputs.model.value.trim()
+    : "";
   return {
     provider: row.dataset.id!,
     base_url: inputs.base_url.value.trim(),
-    model: inputs.model.value.trim(),
+    model,
     key: inputs.key.value.trim(),
     zai_key: "",
     anthropic_key: "",
@@ -1208,7 +1615,7 @@ function addProviderRow(): void {
     (row) => row.dataset.id!,
   );
   const prefill = prefillForKind(kind);
-  const id = uniqueProviderId(kind === "zai" ? "zai" : kind, taken);
+  const id = uniqueProviderId(kind, taken);
   providerRows.append(providerRow({ ...prefill, id }, false, false));
 }
 
@@ -3545,12 +3952,30 @@ providerRows.addEventListener("click", (event) => {
     void clearProviderKey(row.dataset.id);
   } else if (target.classList.contains("remove-prov-btn")) {
     row.remove();
+  } else if (target.classList.contains("reset-btn")) {
+    resetRowToDefaults(row);
   } else if (target.classList.contains("test-btn")) {
     const status = row.querySelector<HTMLElement>(".prov-test-status");
     if (status) {
       void runLlmTest(testPayloadForRow(row), target.closest<HTMLButtonElement>("button")!, status);
     }
   }
+});
+// Kind switches refill the row from the per-kind memory or defaults;
+// every edit re-runs the inline validation so errors appear and clear.
+providerRows.addEventListener("change", (event) => {
+  const target = event.target as HTMLElement;
+  const row = target.closest<HTMLElement>(".provider-row");
+  if (!row || !row.dataset.id) return;
+  if (target.classList.contains("prov-kind")) {
+    switchRowKind(row, (target as HTMLSelectElement).value as ProviderKind);
+  }
+});
+providerRows.addEventListener("input", (event) => {
+  const target = event.target as HTMLElement;
+  const row = target.closest<HTMLElement>(".provider-row");
+  if (!row || !row.dataset.id) return;
+  refreshRowValidation(row);
 });
 
 envTestButton.addEventListener("click", () => {

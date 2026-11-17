@@ -81,6 +81,10 @@
 //!   and sync jobs since it.
 //! - [`export`]: export search results or whole chats to CSV / JSON Lines /
 //!   MBOX.
+//! - [`export_html`]: the A8 readable offline HTML export bundle — static
+//!   escaped pages, copied media objects, a provenance/missing-file
+//!   manifest written last, staged publication, and honest
+//!   reconstructed-versus-original fidelity labels.
 //! - [`staged_write`]: staged file publication for exports — the export
 //!   streams into a private temp sibling of the destination and only a
 //!   fully written, flushed, fsynced file is renamed into place, so a
@@ -104,6 +108,7 @@ pub mod chat_export;
 pub mod demo;
 pub mod discord;
 pub mod export;
+pub mod export_html;
 pub mod extract;
 pub mod files;
 pub mod health;
@@ -216,4 +221,6 @@ pub enum Error {
     },
     #[error("identity link not found: {0}")]
     IdentityLinkNotFound(String),
+    #[error("person organization changed: the commit carried organization revision {expected} but the vault is at {current}; re-preview and confirm against the current revision")]
+    PersonLinksStaleRevision { expected: u64, current: u64 },
 }

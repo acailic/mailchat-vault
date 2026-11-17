@@ -28,7 +28,7 @@ This document plans the requested end state and recommends an implementation ord
 | [UX specification](ux-specification.md) | Owns approved interaction contracts; incorporate the journeys below per slice |
 | [Architecture](architecture.md) and [data/API contracts](data-and-api-contracts.md) | Preserve storage, identity, job, and recovery invariants; add People, Files, and vault-location contracts before their migrations |
 | [Implementation roadmap](implementation-roadmap.md) | M1–M7 remain the implementation history; the work packages below extend and reconcile that roadmap |
-| [User success plan](user-success-plan.md) | Reuse U03–U09 and the existing research/pilot kits instead of commissioning another parallel discovery process |
+| [User success plan](internal/user-success-plan.md) | Reuse U03–U09 and the existing research/pilot kits instead of commissioning another parallel discovery process |
 | [Validation and release](validation-and-release.md) | Existing recovery, privacy, accessibility, and native-release requirements still apply |
 | [Decisions](decisions.md) | Record adopted architectural decisions, preserving earlier rationale |
 

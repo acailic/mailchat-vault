@@ -1,10 +1,21 @@
 # Mailchat Vault
 
-Mailchat Vault is a local email and chat archive — a Tauri 2 desktop app (Rust backend, TypeScript frontend) with SQLite FTS5 full-text search over your own messages.
+[![License: GPL-3.0-only](https://img.shields.io/badge/License-GPL--3.0--only-blue.svg)](LICENSE)
+[![GitHub release](https://img.shields.io/github/v/release/acailic/mailchat-vault)](https://github.com/acailic/mailchat-vault/releases/latest)
+[![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](docs/download.md)
 
-![The wide workspace view: navigation, results, and reading pane in three areas side by side, with synthetic demo data](tests/e2e/fixtures/screenshots/16-wide.png)
+Mailchat Vault is a local email and chat archive — a Tauri 2 desktop app (Rust backend, TypeScript frontend) that turns your own mail and chat exports into one offline, full-text-searchable vault: import `.mbox`/`.eml` and WhatsApp, Telegram, Signal, Discord, or Messenger exports, then search them with SQLite FTS5 highlighting, filters, and conversation context, all on your machine and without handing your messages to a cloud service.
 
 The archive and search stay on your machine, and search works fully offline. Network use is separate and explicit: connecting an account contacts your mail provider (Google sign-in contacts Google; IMAP sync is read-only), and optional [AI-assisted search](docs/ai-search.md) sends the query and the top matching rows to a configured provider only after an explicit consent prompt. The app does not encrypt the archive or backups itself — at rest they rely on your OS account and disk protection.
+
+## Screenshots
+
+Captured from the running app with synthetic demo data in the light theme by the [workspace-layout e2e spec](tests/e2e/specs/16-workspace-layout.e2e.mjs); recipes for these and further views (import preview, Ask answers, settings, themes) are in [docs/screenshots](docs/screenshots/README.md).
+
+| Wide workspace | Medium: reading replaces results |
+| --- | --- |
+| ![Wide workspace at 1280×800: navigation, results, and reading pane in three areas side by side; a search for "vault" with highlighted matches in the result rows and the top hit open in the reading pane; synthetic demo data, light theme](tests/e2e/fixtures/screenshots/16-wide.png) | ![Medium layout at 900×700: the open message replaces the results area, with a Back to results button above it to restore the query and rows; synthetic demo data, light theme](tests/e2e/fixtures/screenshots/16-medium.png) |
+| ![Compact layout at 700×700: a single column with the navigation drawer open over the content; synthetic demo data, light theme](tests/e2e/fixtures/screenshots/16-compact.png) | ![Compact layout at 640×480, the 200% zoom-equivalent width: the same single column with the navigation drawer closed and no horizontal clipping; synthetic demo data, light theme](tests/e2e/fixtures/screenshots/16-compact-zoom.png) |
 
 ## What it does
 

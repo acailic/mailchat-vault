@@ -103,6 +103,7 @@ fn outcome_summary(source: &str, inserted: u64, skipped: u64, failed: u64) -> Bo
         cancelled: false,
         resumed_from: 0,
         committed_items: inserted + skipped,
+        receipt: None,
     }
 }
 

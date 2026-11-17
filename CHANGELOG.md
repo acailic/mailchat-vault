@@ -50,6 +50,75 @@ and packagers run, not item by item.
   per-unit import states (pending/running/succeeded/failed). The Retry
   affordance in the watching panel ships separately.
 
+### Added (Vesper — a fourth theme)
+
+- **Vesper** — Settings → Appearance gains a fourth theme choice: a warm,
+  paper-like palette — warm charcoal surfaces, warm off-white text, muted
+  sand secondary text, and a warm orange accent — applied through the same
+  design-token seam as the existing themes and held to the same contrast
+  floor. Light, dark, and system are visually unchanged, and the Vesper
+  choice persists across launches (#214).
+
+### Added (saved searches)
+
+- A search can now be saved as a named definition and re-run later exactly
+  as defined: the full v2 request (source ids, author, day bounds and
+  timezone, attachment/honesty filters, import scope, sort order) is
+  persisted, and re-running re-executes the live query — newly imported
+  matching messages appear — while canonical source ids keep label renames
+  and duplicate labels from redirecting it (#196). The saved-search UI in
+  the workspace ships separately.
+
+### Added (collections)
+
+- Messages can be grouped across sources into named collections — an
+  additive organization layer over the archive: membership references
+  canonical messages, is idempotent per (collection, message), and never
+  touches message text, timestamps, provenance, deduplication, or
+  conversation identity (#195). The collections UI ships separately.
+
+### Added (people — confirmed identities across sources)
+
+- The vault can hold people records with user-confirmed identity links
+  across sources, so the same correspondent in two accounts resolves to
+  one person (#207). The merge also retired latent lint/compile debt on
+  main that blocked verification. The people UI ships separately.
+
+### Added (what's-new boot digest)
+
+- One vault-side call now answers "what changed since my last visit":
+  newly archived messages per source plus finished or failed imports and
+  syncs, with a vault-scoped last-visit cutoff that advances exactly once
+  per read — the next call counts only newer changes, and a first visit
+  is a deliberately quiet, empty digest (#201). The boot-surface UI in
+  the window ships separately.
+
+### Added (attachment index and files search)
+
+- Attachments and unlinked export files gain one honest index: a derived,
+  repairable projection spans both the per-message media references and
+  the media-object registry, records availability as preserved or missing
+  per reference, backfills resumably, and answers archive-wide files
+  queries from it (#211). The Files view ships separately.
+
+### Added (deep-page search — keyset cursors)
+
+- Both search paths (full-text and browse) return a stable, opaque
+  next-page cursor, and sending it back fetches the following page at
+  constant cost — a deep page costs the same as the first page instead of
+  degrading linearly with offset (#200). Deterministic ordering is
+  preserved across pages. The workspace's own paging UI adopts the
+  cursor separately.
+
+### Added (AI provider registry — internal substrate)
+
+- The provider registry behind Settings' AI configuration became data:
+  every provider kind carries its auth style, request wire, and versioned
+  defaults (model, base URL, temperature, max tokens, timeout), with
+  per-profile sampling overrides and one OpenAI-compatible client shared
+  by the openai/groq/openrouter/ollama/custom kinds (#210). No visible
+  Settings change yet; the configuration UI lands with its own slice.
+
 The media release: attachments and chat-export media are now preserved
 and viewable in the app, AI answers run only behind your explicit
 consent, new mail can notify you, and the Linux packages install as

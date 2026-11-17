@@ -11,7 +11,7 @@
 //!   the same FTS5 leg fused with the local hash-vector leg by
 //!   reciprocal rank fusion — the existing FTS5+RRF ranking.
 //!
-//! Metrics per U07 (`docs/user-success-plan.md`): top-5 recall
+//! Metrics per U07 (`docs/internal/user-success-plan.md`): top-5 recall
 //! (correct-original task success), recall@1/@10, MRR, false-confidence
 //! cases, latency percentiles — reported per category and language.
 //!
