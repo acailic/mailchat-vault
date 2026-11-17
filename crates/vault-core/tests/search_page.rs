@@ -3,6 +3,7 @@
 
 use vault_core::message::NewMessage;
 use vault_core::query::{ChatContext, SearchQuery};
+use vault_core::search2::SearchArchiveRequest;
 use vault_core::storage::Storage;
 
 fn chat_msg(
@@ -805,5 +806,216 @@ fn v1_cursor_rejects_wrong_mode_and_malformed_cursors() {
             })
             .unwrap_err();
         assert!(err.to_string().contains("malformed cursor"), "{err}");
+    }
+}
+
+// ----------------------------------------------------------------------
+// Honesty filters (v2 archive search) — issue #108 reconciliation
+// ----------------------------------------------------------------------
+
+/// Seed the honesty fixture and return the storage plus the row id of
+/// every message keyed by external id, so assertions read as names while
+/// comparing stable ids.
+fn honesty_seeded() -> (Storage, std::collections::BTreeMap<&'static str, i64>) {
+    let s = Storage::open_in_memory().unwrap();
+    let mut ids = std::collections::BTreeMap::new();
+    let mut remember = |key: &'static str, outcome: vault_core::message::InsertOutcome| {
+        let vault_core::message::InsertOutcome::Inserted(id) = outcome else {
+            panic!("fixture row {key} must insert");
+        };
+        ids.insert(key, id);
+    };
+    let dated = |key: &'static str, day: u32| {
+        let mut m = NewMessage::new(
+            "demo",
+            key,
+            "Ana",
+            &format!("2026-01-{day:02}T10:00:00Z"),
+            format!("needle body {key}"),
+        );
+        m.time_confidence = "explicit_offset".into();
+        m
+    };
+
+    // Time dimension: exact and confirmed vs derived legacy_assumed
+    // (dated, no explicit confidence) and derived missing (no time).
+    let mut exact = dated("exact", 1);
+    exact.time_confidence = "explicit_offset".into();
+    remember("exact", s.insert_message(&exact).unwrap());
+    let mut confirmed = dated("confirmed", 2);
+    confirmed.time_confidence = "user_confirmed".into();
+    remember("confirmed", s.insert_message(&confirmed).unwrap());
+    let mut assumed = NewMessage::new(
+        "demo",
+        "assumed",
+        "Ana",
+        "2026-01-03T10:00:00Z",
+        "needle body assumed",
+    );
+    assumed.time_confidence = String::new(); // derived legacy_assumed
+    remember("assumed", s.insert_message(&assumed).unwrap());
+    let mut notime = NewMessage::new("demo", "notime", "Ana", "", "needle body notime");
+    notime.time_confidence = String::new(); // derived missing
+    remember("notime", s.insert_message(&notime).unwrap());
+
+    // Grouping dimension: verified (provider key), legacy chat-name
+    // grouping, and standalone.
+    let mut verified = dated("verified-group", 4);
+    verified.channel = "chat".into();
+    verified.chat_id = "team".into();
+    verified.conversation_key = "telegram:chat:9".into();
+    remember("verified-group", s.insert_message(&verified).unwrap());
+    let mut legacy = dated("legacy-group", 5);
+    legacy.channel = "chat".into();
+    legacy.chat_id = "oldgroup".into(); // no provider key → legacy grouping
+    remember("legacy-group", s.insert_message(&legacy).unwrap());
+    remember("standalone", s.insert_message(&dated("standalone", 6)).unwrap());
+
+    // Files dimension: preserved media entry, recorded-missing entry,
+    // WhatsApp placeholder with no stored entry, and a plain message.
+    for (key, day, json) in [
+        (
+            "stored",
+            7u32,
+            serde_json::json!({
+                "media": [{
+                    "sha256": "h",
+                    "path": "media/h.jpg",
+                    "name": "h.jpg",
+                    "kind": "image",
+                    "size": 10
+                }]
+            }),
+        ),
+        (
+            "gone",
+            8,
+            serde_json::json!({
+                "media": [{
+                    "name": "gone.jpg",
+                    "kind": "image",
+                    "missing": true,
+                    "reason": "not-in-export"
+                }]
+            }),
+        ),
+        (
+            "placeholder",
+            9,
+            serde_json::json!({ "attachment": { "kind": "image", "name": "lost.jpg" } }),
+        ),
+    ] {
+        let mut m = dated(key, day);
+        m.raw_json = json.to_string();
+        remember(key, s.insert_message(&m).unwrap());
+    }
+    remember("plain", s.insert_message(&dated("plain", 10)).unwrap());
+    (s, ids)
+}
+
+/// Sorted row ids of one filtered browse over the fixture, plus its total.
+fn honesty_hits(s: &Storage, request: &SearchArchiveRequest) -> (Vec<i64>, u64) {
+    let page = s.search_archive(request).unwrap();
+    let mut ids: Vec<i64> = page.hits.iter().map(|h| h.id).collect();
+    ids.sort();
+    (ids, page.total)
+}
+
+#[test]
+fn honesty_filters_change_results_partition_the_set_and_drive_totals() {
+    let (s, row_ids) = honesty_seeded();
+    let base = SearchArchiveRequest::default(); // browse, no filters
+    let request = |label: &str, setting: Option<bool>| {
+        let mut r = base.clone();
+        match label {
+            "time_assumed" => r.time_assumed = setting,
+            "grouping_unverified" => r.grouping_unverified = setting,
+            "files_missing" => r.files_missing = setting,
+            other => unreachable!("unknown filter {other}"),
+        }
+        r
+    };
+    let named = |keys: &[&str]| -> Vec<i64> {
+        let mut ids: Vec<i64> = keys.iter().map(|k| row_ids[*k]).collect();
+        ids.sort();
+        ids
+    };
+
+    // Expected sides per filter, as sorted row-id sets.
+    let expected_true: [Vec<&str>; 3] = [
+        vec!["assumed", "notime"],
+        vec![
+            "assumed", "confirmed", "exact", "gone", "legacy-group", "notime", "placeholder",
+            "plain", "standalone", "stored",
+        ],
+        vec!["gone", "placeholder"],
+    ];
+    let expected_false: [Vec<&str>; 3] = [
+        vec![
+            "exact", "confirmed", "gone", "legacy-group", "placeholder", "plain", "standalone",
+            "stored", "verified-group",
+        ],
+        vec!["verified-group"],
+        vec![
+            "assumed", "confirmed", "exact", "legacy-group", "notime", "plain", "standalone",
+            "stored", "verified-group",
+        ],
+    ];
+    let every_name: Vec<&str> = row_ids.keys().copied().collect();
+
+    for (index, label) in ["time_assumed", "grouping_unverified", "files_missing"]
+        .into_iter()
+        .enumerate()
+    {
+        let (unfiltered, unfiltered_total) = honesty_hits(&s, &base);
+        assert_eq!(
+            unfiltered,
+            named(&every_name),
+            "no-filter browse lists the whole fixture"
+        );
+        assert_eq!(unfiltered_total, 11);
+
+        let (yes, yes_total) = honesty_hits(&s, &request(label, Some(true)));
+        let (no, no_total) = honesty_hits(&s, &request(label, Some(false)));
+        assert_eq!(
+            yes,
+            named(&expected_true[index]),
+            "{label}=Some(true) selects the flagged rows"
+        );
+        assert_eq!(
+            no,
+            named(&expected_false[index]),
+            "{label}=Some(false) selects the complement"
+        );
+
+        // The two settings partition the unfiltered set: together exactly
+        // the whole fixture, with no row on both sides.
+        let mut union = yes.clone();
+        union.extend(no.iter().copied());
+        union.sort();
+        union.dedup();
+        assert_eq!(union, unfiltered, "{label}: true/false partition the set");
+
+        // Totals respect the filter in every setting, and a small page
+        // keeps reporting the whole filtered set as its total.
+        for (setting, filtered, total) in [
+            (Some(true), &yes, yes_total),
+            (Some(false), &no, no_total),
+            (None, &unfiltered, unfiltered_total),
+        ] {
+            assert_eq!(
+                total,
+                filtered.len() as u64,
+                "{label}={setting:?}: total equals the filtered hit count"
+            );
+            let mut small = request(label, setting);
+            small.limit = Some(2);
+            let page = s.search_archive(&small).unwrap();
+            assert!(page.hits.len() <= 2);
+            assert_eq!(
+                page.total, total,
+                "{label}={setting:?}: small page keeps the full-set total"
+            );
+        }
     }
 }
