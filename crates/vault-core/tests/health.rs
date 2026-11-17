@@ -1,18 +1,27 @@
-//! Persisted archive-health evidence: the media verification summary
-//! and the per-import-source last-import records (see
-//! `vault_core::health`). Absence is an explicit not-checked answer; a
-//! failed or cancelled attempt never overwrites the recorded last
-//! success.
+//! Persisted archive-health evidence: the media verification summary,
+//! the per-import-source last-import records (see
+//! `vault_core::health`), and the `archive_health` read model composed
+//! from committed facts only. Absence is an explicit not-checked
+//! answer; a failed or cancelled attempt never overwrites the recorded
+//! last success; sync, import, and verified backup never merge into
+//! one shared status claim.
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use vault_core::backup::{BackupCounts, LastBackupRecord, LAST_BACKUP_KEY};
 use vault_core::bounded::BoundedOutcome;
 use vault_core::health::{
-    import_source_records, media_verification, record_import_attempt, record_media_verification,
-    ImportAttempt, ImportCounts, MediaVerificationSummary, SourceImportRecord, IMPORTS_KEY,
+    archive_health, import_source_records, media_verification, record_import_attempt,
+    record_media_verification, ArchiveHealth, ImportAttempt, ImportCounts,
+    MediaVerificationSummary, SourceHealth, SourceImportRecord, IMPORTS_KEY,
     MEDIA_VERIFICATION_KEY,
 };
 use vault_core::ingest::IngestSummary;
 use vault_core::object_store::ReconcileReport;
-use vault_core::storage::Storage;
+use vault_core::storage::{
+    JobLedgerEntry, NewSourceInstance, SourceReceiptKind, SourceReceiptRecord, Storage,
+};
 
 fn storage() -> Storage {
     Storage::open_in_memory().expect("open in-memory storage")
@@ -347,5 +356,246 @@ fn import_counts_mirror_the_ingest_summary() {
             skipped: 1,
             failed: 1
         }
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Archive-health read model (committed facts only)
+// ---------------------------------------------------------------------------
+
+/// One durable IMAP source instance, as a connector would register it.
+fn imap_instance(storage: &Storage, label: &str) -> String {
+    storage
+        .ensure_source_instance(&NewSourceInstance {
+            kind: "imap",
+            label,
+            connector_key: &format!("imap|imap.a.test|993|implicit-tls|{label}"),
+            config_json: "{}",
+        })
+        .unwrap()
+}
+
+/// One terminal ledger row, as the job runner would persist it.
+fn ledger_entry(kind: &str, state: &str, finished_at: &str) -> JobLedgerEntry {
+    JobLedgerEntry {
+        job_id: 1,
+        kind: kind.to_string(),
+        submitted_at: "2026-11-16T08:00:00Z".to_string(),
+        finished_at: finished_at.to_string(),
+        state: state.to_string(),
+        summary: "run summary".to_string(),
+        payload: format!(r#"{{"state":"{state}"}}"#),
+    }
+}
+
+#[test]
+fn fresh_vault_reads_never_done_not_invented_times() {
+    let s = storage();
+
+    // Nothing ever happened: zeros and nulls, the explicit never-done
+    // answers — not one invented timestamp.
+    assert_eq!(
+        archive_health(&s).unwrap(),
+        ArchiveHealth {
+            sources: Vec::new(),
+            unresolved_job_failures: BTreeMap::new(),
+            last_verified_backup: None,
+        }
+    );
+
+    // A registered source that never completed a run stays present
+    // with None facts — never-done, not a missing entry.
+    let id = imap_instance(&s, "Ana's mail");
+    assert_eq!(
+        archive_health(&s).unwrap().sources,
+        vec![SourceHealth {
+            source_instance_id: id,
+            last_sync: None,
+            last_import: None,
+        }]
+    );
+}
+
+#[test]
+fn sync_import_and_backup_stay_three_separate_facts() {
+    let s = storage();
+    let id = imap_instance(&s, "Ana's mail");
+
+    // A completed sync leaves its receipt; the verified-backup fact
+    // stays None — a successful sync is never a backup.
+    s.record_source_success(&id).unwrap();
+    let after_sync = archive_health(&s).unwrap();
+    let sync = after_sync.sources[0].last_sync.clone().unwrap();
+    assert_eq!(sync.kind, SourceReceiptKind::Sync);
+    assert!(after_sync.sources[0].last_import.is_none());
+    assert!(after_sync.last_verified_backup.is_none());
+
+    // A manual import completes with an observed range, and a verified
+    // backup finishes: three separate facts now coexist.
+    s.record_source_receipt(&SourceReceiptRecord {
+        source_instance_id: &id,
+        kind: SourceReceiptKind::Import,
+        observed_min: Some("2026-10-01T00:00:00Z"),
+        observed_max: Some("2026-10-31T23:59:59Z"),
+        new_records: 5,
+        present_records: 2,
+        failed_records: 1,
+        files_preserved: 3,
+        files_missing: 1,
+        facts_json: r#"{"import_id": "imp-1"}"#,
+    })
+    .unwrap();
+    let backup = LastBackupRecord {
+        created_at: "2026-11-10T10:00:00Z".into(),
+        path: PathBuf::from("/backups/vault.vaultbak"),
+        size: 2048,
+        counts: BackupCounts {
+            messages: 7,
+            sources: 1,
+            media_objects: 4,
+        },
+        schema_version: 24,
+    };
+    s.set_archive_meta(LAST_BACKUP_KEY, &serde_json::to_string(&backup).unwrap())
+        .unwrap();
+
+    let health = archive_health(&s).unwrap();
+    let source = &health.sources[0];
+    let import = source.last_import.as_ref().unwrap();
+    assert_eq!(import.kind, SourceReceiptKind::Import);
+    assert_eq!(import.observed_min.as_deref(), Some("2026-10-01T00:00:00Z"));
+    assert_eq!(import.observed_max.as_deref(), Some("2026-10-31T23:59:59Z"));
+    // The sync fact kept its own receipt — the import replaced
+    // nothing.
+    assert_eq!(
+        source.last_sync.as_ref().unwrap().kind,
+        SourceReceiptKind::Sync
+    );
+    assert_eq!(
+        health.last_verified_backup.as_ref().unwrap().created_at,
+        "2026-11-10T10:00:00Z"
+    );
+
+    // The contract: no serialized field of the read model can carry
+    // "backup" and "sync" in one shared status claim — the three facts
+    // live in separate keys and no shared status field exists.
+    let model = serde_json::to_value(&health).unwrap();
+    let mut model_keys: Vec<&str> = model
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    model_keys.sort_unstable();
+    assert_eq!(
+        model_keys,
+        vec!["last_verified_backup", "sources", "unresolved_job_failures"]
+    );
+    let source_value = serde_json::to_value(&health.sources[0]).unwrap();
+    let mut source_keys: Vec<&str> = source_value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    source_keys.sort_unstable();
+    assert_eq!(
+        source_keys,
+        vec!["last_import", "last_sync", "source_instance_id"]
+    );
+    for key in model_keys.iter().chain(source_keys.iter()) {
+        assert!(
+            !(key.contains("backup") && key.contains("sync")),
+            "no field may merge backup and sync: {key}"
+        );
+    }
+}
+
+#[test]
+fn failing_import_leaves_failure_counts_visible_after_reopen() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = tmp.path().join("vault.db");
+    {
+        let s = Storage::open(&db).unwrap();
+        s.record_job_ledger(&ledger_entry(
+            "import_mbox",
+            "failed",
+            "2026-11-16T09:00:00Z",
+        ))
+        .unwrap();
+        assert_eq!(
+            archive_health(&s)
+                .unwrap()
+                .unresolved_job_failures
+                .get("import_mbox"),
+            Some(&1)
+        );
+    }
+
+    // Storage closed and reopened: the ledger is a committed table, so
+    // the failure count survives.
+    let s = Storage::open(&db).unwrap();
+    assert_eq!(
+        archive_health(&s)
+            .unwrap()
+            .unresolved_job_failures
+            .get("import_mbox"),
+        Some(&1),
+        "the failed import stays visible after reopen"
+    );
+
+    // A later succeeded run of the same kind resolves its failures…
+    s.record_job_ledger(&ledger_entry(
+        "import_mbox",
+        "succeeded",
+        "2026-11-16T10:00:00Z",
+    ))
+    .unwrap();
+    // …while another kind's failure stands on its own, and a later
+    // cancelled run (the user's own action) neither fails nor resolves.
+    s.record_job_ledger(&ledger_entry("imap_sync", "failed", "2026-11-16T10:30:00Z"))
+        .unwrap();
+    s.record_job_ledger(&ledger_entry(
+        "imap_sync",
+        "cancelled",
+        "2026-11-16T11:00:00Z",
+    ))
+    .unwrap();
+    let mut expected = BTreeMap::new();
+    expected.insert("imap_sync".to_string(), 1);
+    assert_eq!(
+        archive_health(&s).unwrap().unresolved_job_failures,
+        expected
+    );
+}
+
+#[test]
+fn verified_backup_fact_reads_the_persisted_record_tolerantly() {
+    let s = storage();
+
+    // An unreadable stored record degrades to the never-done answer
+    // instead of taking the health read down.
+    s.set_archive_meta(LAST_BACKUP_KEY, "not json").unwrap();
+    assert!(archive_health(&s).unwrap().last_verified_backup.is_none());
+
+    // The next finished, verified backup overwrites the junk and the
+    // read model reports its time — the only fact that ever advances
+    // this field.
+    let backup = LastBackupRecord {
+        created_at: "2026-11-17T09:30:00Z".into(),
+        path: PathBuf::from("/backups/vault.vaultbak"),
+        size: 4096,
+        counts: BackupCounts {
+            messages: 9,
+            sources: 2,
+            media_objects: 6,
+        },
+        schema_version: 24,
+    };
+    s.set_archive_meta(LAST_BACKUP_KEY, &serde_json::to_string(&backup).unwrap())
+        .unwrap();
+    assert_eq!(
+        archive_health(&s).unwrap().last_verified_backup,
+        Some(backup)
     );
 }

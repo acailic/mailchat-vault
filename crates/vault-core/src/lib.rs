@@ -91,7 +91,10 @@
 //!   failed export never replaces a previously valid user file.
 //! - [`health`]: persisted archive-health evidence — the media
 //!   verification summary and per-import-source last-import records the
-//!   health overview reads (absent records read as not checked).
+//!   health overview reads (absent records read as not checked), plus
+//!   the `archive_health` read model composing the overview's three
+//!   separate committed facts (last sync, last import, last verified
+//!   backup) with the ledger's unresolved failure counts.
 //! - [`vault_session`]: the vault session seam (A4) — one owner of
 //!   vault identity, the exclusive advisory session lock, and the
 //!   derived vault paths, so every consumer resolves the vault through
