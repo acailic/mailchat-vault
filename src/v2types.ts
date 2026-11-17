@@ -54,6 +54,13 @@ export interface MessageSummary {
   attachment_count: number;
   available_attachment_count: number;
   has_conflicting_revision: boolean;
+  /** Near-duplicate copies folded into this row (NEWWO-101): how many
+   *  copies the representative hides, excluding itself. Absent = 0 —
+   *  the row renders exactly as before the fold existed. */
+  cluster_count?: number;
+  /** Ids of the folded near-duplicate copies (matching cluster_count);
+   *  absent = none. Ids only — the detail payload carries the rest. */
+  member_ids?: number[];
 }
 
 /** One v2 search page from a single read snapshot. */

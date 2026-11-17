@@ -55,9 +55,11 @@ describe("flat results", () => {
       activeIndex: 1,
       selectedId: null,
       selection: new Set(),
+      expandedFolds: new Set(),
       terms: [],
       onOpen: () => {},
       onToggleSelect: () => {},
+      onToggleFold: () => {},
     });
     const rows = el.querySelectorAll("li.hit-item");
     expect(rows.length).toBe(2);
@@ -77,9 +79,11 @@ describe("flat results", () => {
       activeIndex: -1,
       selectedId: null,
       selection: new Set(),
+      expandedFolds: new Set(),
       terms: [],
       onOpen: () => {},
       onToggleSelect: () => {},
+      onToggleFold: () => {},
     });
     // The list item is a plain list item: the checkbox inside it is a
     // sibling interactive control, not a control nested in a button
@@ -110,9 +114,11 @@ describe("flat results", () => {
       activeIndex: -1,
       selectedId: null,
       selection: new Set(),
+      expandedFolds: new Set(),
       terms: [],
       onOpen: () => {},
       onToggleSelect: () => {},
+      onToggleFold: () => {},
     });
     const mark = el.querySelector("mark.hit");
     expect(mark?.textContent).toBe("vault");
@@ -134,9 +140,11 @@ describe("flat results", () => {
       activeIndex: -1,
       selectedId: null,
       selection: new Set(),
+      expandedFolds: new Set(),
       terms: [],
       onOpen: () => {},
       onToggleSelect: () => {},
+      onToggleFold: () => {},
     });
     const body = el.querySelector("li.hit-item .body") as HTMLElement;
     expect(body.className).toBe("body");
@@ -159,9 +167,11 @@ describe("flat results", () => {
       activeIndex: -1,
       selectedId: null,
       selection: new Set(),
+      expandedFolds: new Set(),
       terms: [],
       onOpen: () => {},
       onToggleSelect: () => {},
+      onToggleFold: () => {},
     });
     const badges = el.querySelectorAll(".badge.attachments");
     // The visible words carry their units ("files kept"); the exact
@@ -202,9 +212,11 @@ describe("flat results", () => {
       activeIndex: -1,
       selectedId: null,
       selection: new Set(),
+      expandedFolds: new Set(),
       terms: [],
       onOpen: () => {},
       onToggleSelect: () => {},
+      onToggleFold: () => {},
     });
     const badges = [...el.querySelectorAll(".badge.attachments")] as HTMLElement[];
     expect(badges.length).toBe(3);
@@ -233,9 +245,11 @@ describe("flat results", () => {
       activeIndex: -1,
       selectedId: null,
       selection: new Set(),
+      expandedFolds: new Set(),
       terms: [],
       onOpen: () => {},
       onToggleSelect: () => {},
+      onToggleFold: () => {},
     });
     const times = [...el.querySelectorAll(".hit-main .meta span.time")] as HTMLElement[];
     expect(times.length).toBe(3);
@@ -261,9 +275,11 @@ describe("flat results", () => {
       activeIndex: -1,
       selectedId: null,
       selection: new Set([6]),
+      expandedFolds: new Set(),
       terms: [],
       onOpen: () => {},
       onToggleSelect: (id) => toggled.push(id),
+      onToggleFold: () => {},
     });
     const boxes = el.querySelectorAll("input.row-select");
     expect(boxes.length).toBe(2);
@@ -281,9 +297,11 @@ describe("flat results", () => {
       activeIndex: -1,
       selectedId: null,
       selection: new Set(),
+      expandedFolds: new Set(),
       terms: [],
       onOpen: (id) => opened.push(id),
       onToggleSelect: () => {},
+      onToggleFold: () => {},
     });
     (el.querySelector("li.hit-item") as HTMLElement).click();
     expect(opened).toEqual([9]);
@@ -297,9 +315,11 @@ describe("flat results", () => {
       activeIndex: -1,
       selectedId: null,
       selection: new Set(),
+      expandedFolds: new Set(),
       terms: [],
       onOpen: (id) => opened.push(id),
       onToggleSelect: () => {},
+      onToggleFold: () => {},
     });
     const main = el.querySelector(".hit-main") as HTMLElement;
     main.dispatchEvent(
@@ -312,6 +332,112 @@ describe("flat results", () => {
     // The checkbox is a sibling control: its clicks never open the row.
     (el.querySelector("input.row-select") as HTMLElement).click();
     expect(opened).toEqual([9, 9]);
+  });
+
+  it("a folded hit renders a collapsed 'N similar copies' expander as a sibling control", () => {
+    const el = document.createElement("div");
+    const toggled: number[] = [];
+    const opened: number[] = [];
+    renderFlatResults(el, {
+      hits: [hit({ id: 4, cluster_count: 2, member_ids: [11, 12] })],
+      activeIndex: -1,
+      selectedId: null,
+      selection: new Set(),
+      expandedFolds: new Set(),
+      terms: [],
+      onOpen: (id) => opened.push(id),
+      onToggleSelect: () => {},
+      onToggleFold: (id) => toggled.push(id),
+    });
+    const li = el.querySelector("li.hit-item") as HTMLElement;
+    const main = li.querySelector(".hit-main") as HTMLElement;
+    const toggle = li.querySelector("button.fold-toggle") as HTMLButtonElement;
+    expect(toggle).toBeTruthy();
+    // Collapsed by default, and the count label reads as words.
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.textContent).toBe("2 similar copies");
+    expect(toggle.getAttribute("aria-controls")).toBe("fold-members-4");
+    // A sibling of the row's main area, never nested inside its
+    // role=button (same a11y rule as the selection checkbox).
+    expect(main.contains(toggle)).toBe(false);
+    expect(li.querySelector("ul.fold-members")).toBeNull();
+    // Toggling reports the representative and never opens the row.
+    toggle.click();
+    expect(toggled).toEqual([4]);
+    expect(opened).toEqual([]);
+  });
+
+  it("the expander label carries its singular and plural forms", () => {
+    const el = document.createElement("div");
+    renderFlatResults(el, {
+      hits: [
+        hit({ id: 1, cluster_count: 1, member_ids: [21] }),
+        hit({ id: 2, cluster_count: 3, member_ids: [22, 23, 24] }),
+      ],
+      activeIndex: -1,
+      selectedId: null,
+      selection: new Set(),
+      expandedFolds: new Set(),
+      terms: [],
+      onOpen: () => {},
+      onToggleSelect: () => {},
+      onToggleFold: () => {},
+    });
+    const labels = [...el.querySelectorAll("button.fold-toggle")].map((b) => b.textContent);
+    expect(labels).toEqual(["1 similar copy", "3 similar copies"]);
+  });
+
+  it("an expanded fold lists its copies by message id; each opens through the shared path", () => {
+    const el = document.createElement("div");
+    const opened: number[] = [];
+    const toggled: number[] = [];
+    renderFlatResults(el, {
+      hits: [hit({ id: 4, cluster_count: 2, member_ids: [11, 12] })],
+      activeIndex: -1,
+      selectedId: null,
+      selection: new Set(),
+      expandedFolds: new Set([4]),
+      terms: [],
+      onOpen: (id) => opened.push(id),
+      onToggleSelect: () => {},
+      onToggleFold: (id) => toggled.push(id),
+    });
+    const toggle = el.querySelector("button.fold-toggle") as HTMLButtonElement;
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    const members = [...el.querySelectorAll("ul.fold-members li.fold-member button")];
+    expect(members.map((b) => b.textContent)).toEqual(["Open copy 11", "Open copy 12"]);
+    // Opening a copy opens the copy's id, not the representative's, and
+    // does not double-fire the row's own open.
+    (members[1] as HTMLElement).click();
+    expect(opened).toEqual([12]);
+    // The expander itself still toggles the representative.
+    toggle.click();
+    expect(toggled).toEqual([4]);
+    expect(opened).toEqual([12]);
+  });
+
+  it("count-0 and absent-count hits render exactly the row of today", () => {
+    const el = document.createElement("div");
+    renderFlatResults(el, {
+      hits: [hit({ id: 1, cluster_count: 0, member_ids: [] }), hit({ id: 2 })],
+      activeIndex: -1,
+      selectedId: null,
+      selection: new Set(),
+      expandedFolds: new Set([1, 2]),
+      terms: [],
+      onOpen: () => {},
+      onToggleSelect: () => {},
+      onToggleFold: () => {},
+    });
+    // No expander, no member list — even for rows sitting in the
+    // expanded set (nothing to expand).
+    expect(el.querySelector(".fold-toggle")).toBeNull();
+    expect(el.querySelector(".fold-members")).toBeNull();
+    for (const li of [...el.querySelectorAll("li.hit-item")] as HTMLElement[]) {
+      expect(li.children.length).toBe(2);
+      expect(li.children[0].className).toBe("row-select");
+      expect(li.children[1].className).toBe("hit-main");
+    }
   });
 });
 

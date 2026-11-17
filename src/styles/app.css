@@ -819,6 +819,25 @@ button.link-btn:hover:not(:disabled) { background: none; color: var(--accent-hov
   overflow: hidden;
 }
 
+/* Near-duplicate fold (NEWWO-101): the "N similar copies" expander and
+ * its inline copies list. The toggle is a sibling control of the row's
+ * main area (never nested in its role=button), so it reads as one quiet
+ * line under the snippet; the caret is decorative (aria-expanded carries
+ * the state). */
+.fold-toggle {
+  margin-top: 2px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: var(--text-meta);
+}
+.fold-toggle:hover:not(:disabled) { background: none; color: var(--text); }
+.fold-toggle::before { content: "▸ "; }
+.fold-toggle[aria-expanded="true"]::before { content: "▾ "; }
+.fold-members { list-style: none; margin: 4px 0 0; padding: 0; }
+.fold-member-open { font-size: var(--text-meta); }
+
 mark.hit {
   background: var(--match);
   color: var(--match-ink);

@@ -414,6 +414,36 @@ export function selectionIds(hits: MessageSummary[], selected: Set<number>): num
 }
 
 // ---------------------------------------------------------------------------
+// Near-duplicate fold expander (NEWWO-101)
+// ---------------------------------------------------------------------------
+
+/** How many near-duplicate copies a row folds (absent count = 0). */
+export function foldCount(hit: MessageSummary): number {
+  return hit.cluster_count ?? 0;
+}
+
+/** The expander row's label: "1 similar copy" / "N similar copies". */
+export function similarCopiesLabel(count: number): string {
+  return `${count} similar ${count === 1 ? "copy" : "copies"}`;
+}
+
+/** Pure toggle for one representative's inline copies list: returns the
+ * next expanded set, input untouched. */
+export function toggleFold(expanded: Set<number>, representativeId: number): Set<number> {
+  const next = new Set(expanded);
+  if (next.has(representativeId)) next.delete(representativeId);
+  else next.add(representativeId);
+  return next;
+}
+
+/** The expanded set a new results page starts with: none. A new query's
+ * hits replace the page, and an expanded row from the previous page must
+ * not survive into them. */
+export function resetFolds(): Set<number> {
+  return new Set();
+}
+
+// ---------------------------------------------------------------------------
 // Copy text (format-compatible with Rust `detail_as_text`, except the
 // source line reads the plain-word label with the stored one in parens)
 // ---------------------------------------------------------------------------

@@ -1378,6 +1378,56 @@ describe("restorable selection and scroll", () => {
   });
 });
 
+describe("near-duplicate fold expander (NEWWO-101)", () => {
+  /** Page with one folded representative (2 copies) + one plain row. */
+  const foldedPage = (): SearchArchivePage =>
+    pageOf(
+      [
+        { ...summary(1, "mbox", "thread-a", "ana"), cluster_count: 2, member_ids: [11, 12] },
+        summary(2, "mbox", "thread-a", "bruno"),
+      ],
+      2,
+    );
+
+  it("expands a folded row inline, opens a copy, and collapses on a new query", async () => {
+    await boot();
+    tauri.handlers.set("conversation_context_v2", () => CTX);
+    searchRespondsWith(foldedPage);
+    await runQuery("vault");
+    await vi.waitFor(() => expect($("#results .hit-item")).toBeTruthy());
+
+    // Collapsed by default; a row without copies renders no expander.
+    const toggle = () =>
+      win.document.querySelector('.hit-item[data-id="1"] button.fold-toggle') as unknown as HTMLButtonElement;
+    expect(toggle().textContent).toBe("2 similar copies");
+    expect(toggle().getAttribute("aria-expanded")).toBe("false");
+    expect(win.document.querySelector('.hit-item[data-id="2"] .fold-toggle')).toBeNull();
+
+    // Expanding lists the copies; it never opens the representative.
+    toggle().click();
+    await vi.waitFor(() => expect(toggle().getAttribute("aria-expanded")).toBe("true"));
+    expect($("#detail").classList.contains("open")).toBe(false);
+    const members = () =>
+      [...win.document.querySelectorAll("ul.fold-members li.fold-member button")] as unknown as HTMLElement[];
+    expect(members().map((b) => b.textContent)).toEqual(["Open copy 11", "Open copy 12"]);
+
+    // A copy opens through the normal open path (its own id).
+    members()[1].click();
+    await vi.waitFor(() =>
+      expect(ctxCalls().some((c) => (c.args as { id: number }).id === 12)).toBe(true),
+    );
+    expect($("#detail").classList.contains("open")).toBe(true);
+
+    // A fresh query replaces the page: every fold starts collapsed.
+    ($(".close-btn") as HTMLElement).click();
+    await vi.waitFor(() => expect($("#detail").classList.contains("open")).toBe(false));
+    searchRespondsWith(foldedPage);
+    await runQuery("vault again");
+    await vi.waitFor(() => expect(toggle().getAttribute("aria-expanded")).toBe("false"));
+    expect(win.document.querySelector("ul.fold-members")).toBeNull();
+  });
+});
+
 describe("archive revision refresh (A07)", () => {
   it("a page response at a different revision offers Refresh instead of silently restarting", async () => {
     await boot();

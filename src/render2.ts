@@ -22,7 +22,9 @@ import {
   type ContextEntry,
   type EraBucket,
   type FilterChip,
+  foldCount,
   messageLink,
+  similarCopiesLabel,
 } from "./searchstate";
 import {
   highlightSegments,
@@ -50,10 +52,13 @@ export interface FlatResultsOptions {
   selectedId: number | null;
   /** Ids checked for selection export. */
   selection: Set<number>;
+  /** Representative rows whose folded copies are expanded inline. */
+  expandedFolds: Set<number>;
   /** Query terms for client-side highlighting in browse mode. */
   terms: string[];
   onOpen: (id: number) => void;
   onToggleSelect: (id: number) => void;
+  onToggleFold: (id: number) => void;
 }
 
 /** The time-uncertainty marker shown instead of a fabricated timestamp. */
@@ -160,6 +165,51 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
 
   main.append(meta, body);
   li.append(check, main);
+  // Near-duplicate fold (NEWWO-101): a row that folds copies carries an
+  // expander under the main area — a sibling control like the selection
+  // checkbox, never nested inside the row's role=button. A count of 0
+  // (or an absent count) renders nothing: the row stays exactly as it
+  // was before the fold existed.
+  const copies = foldCount(hit);
+  if (copies > 0) {
+    const expanded = opts.expandedFolds.has(hit.id);
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "fold-toggle";
+    toggle.setAttribute("aria-expanded", String(expanded));
+    toggle.setAttribute("aria-controls", `fold-members-${hit.id}`);
+    toggle.textContent = similarCopiesLabel(copies);
+    toggle.title = expanded
+      ? `Hide the ${similarCopiesLabel(copies)} folded into this row`
+      : `Show the ${similarCopiesLabel(copies)} folded into this row`;
+    toggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      opts.onToggleFold(hit.id);
+    });
+    li.append(toggle);
+    if (expanded) {
+      // The payload carries member ids only, so each copy is labeled by
+      // its message id and opens through the same path as any other hit.
+      const members = document.createElement("ul");
+      members.className = "fold-members";
+      members.id = `fold-members-${hit.id}`;
+      for (const memberId of hit.member_ids ?? []) {
+        const item = document.createElement("li");
+        item.className = "fold-member";
+        const open = document.createElement("button");
+        open.type = "button";
+        open.className = "fold-member-open";
+        open.textContent = `Open copy ${memberId}`;
+        open.addEventListener("click", (event) => {
+          event.stopPropagation();
+          opts.onOpen(memberId);
+        });
+        item.append(open);
+        members.append(item);
+      }
+      li.append(members);
+    }
+  }
   const open = () => opts.onOpen(hit.id);
   // Clicks anywhere in the row except the checkbox open the message:
   // the li listener is plain delegation (the li carries no button
