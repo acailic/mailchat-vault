@@ -2074,6 +2074,11 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
+/// RFC 3339 UTC now (shared with the A7 move journal).
+pub(crate) fn now_rfc3339_utc() -> String {
+    now_rfc3339()
+}
+
 /// `20261127153045` → `2026-11-27T15:30:45Z` (best effort).
 fn raw_stamp_to_rfc3339(raw: &str) -> String {
     if raw.len() == 14 && raw.chars().all(|c| c.is_ascii_digit()) {
@@ -2117,7 +2122,8 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_slice(&bytes).map_err(Error::Json)
 }
 
-fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+/// Staged-rename JSON write (shared with the A7 move journal).
+pub(crate) fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value).map_err(Error::Json)?;
     write_bytes_synced(path, &bytes)
 }
@@ -2176,14 +2182,14 @@ fn fsync_file(path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn fsync_dir(path: &Path) -> Result<()> {
+pub(crate) fn fsync_dir(path: &Path) -> Result<()> {
     File::open(path)
         .and_then(|f| f.sync_all())
         .map_err(Error::Io)
 }
 
 #[cfg(not(unix))]
-fn fsync_dir(_path: &Path) -> Result<()> {
+pub(crate) fn fsync_dir(_path: &Path) -> Result<()> {
     Ok(())
 }
 
