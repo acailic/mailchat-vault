@@ -6,6 +6,7 @@
 //! so the Tauri shell stays thin and the flow is testable without the app.
 
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,7 @@ use crate::bounded::{
 use crate::discord::{
     is_discord_export, is_discord_export_dir, is_discord_export_reader, DiscordSource,
 };
+use crate::imessage::{is_imessage_chat_db, IMessageSource, SQLITE_HEADER};
 use crate::import_bounds::{expand_zip_bounded, verify_input_fingerprint, ImportBounds};
 use crate::ingest::IngestSummary;
 use crate::jsonl::{is_jsonl_export, is_jsonl_export_reader, JsonlSource};
@@ -41,6 +43,11 @@ pub enum ChatFormat {
     /// The app's own JSON Lines export (`.jsonl`): one stored message
     /// object per line, each row keeping its original source identity.
     Jsonl,
+    /// A Mac Messages `chat.db` SQLite store, picked directly or as a
+    /// manual copy: the byte probe only checks the SQLite header; the
+    /// iMessage adapter copies the file before opening it (see
+    /// [`crate::imessage`]).
+    IMessage,
 }
 
 /// Detect which chat export format `bytes` hold, if any.
@@ -53,10 +60,12 @@ pub enum ChatFormat {
 /// checked next, before the Telegram probe can claim it; a top-level
 /// JSON array of Signal Desktop message objects is a Signal
 /// conversation export; otherwise a Telegram `messages` array
-/// decides, then a WhatsApp header within the first lines; last, a
+/// decides, then a WhatsApp header within the first lines; a
 /// first line shaped like the app's own JSON Lines export rows (an
-/// object with `source` + `external_id`) claims it. Anything
-/// else returns `None`.
+/// object with `source` + `external_id`) claims it; last, a SQLite
+/// file header claims the iMessage store (a byte-level check only —
+/// no database is opened for detection). Anything else returns
+/// `None`.
 pub fn detect_chat_format(bytes: &[u8]) -> Option<ChatFormat> {
     if is_discord_export(bytes) {
         return Some(ChatFormat::Discord);
@@ -76,13 +85,17 @@ pub fn detect_chat_format(bytes: &[u8]) -> Option<ChatFormat> {
     if is_jsonl_export(bytes) {
         return Some(ChatFormat::Jsonl);
     }
+    if is_imessage_chat_db(bytes) {
+        return Some(ChatFormat::IMessage);
+    }
     None
 }
 
 /// [`detect_chat_format`] streamed from the picked file: detection reads
 /// the format probes' bounded views (the JSON walkers skip `messages`
 /// element by element; WhatsApp only looks at the first 30 lines), so an
-/// arbitrarily large export is detected without loading it (M2.2).
+/// arbitrarily large export is detected without loading it (M2.2). The
+/// iMessage probe reads only the 16-byte SQLite header.
 pub fn detect_chat_format_reader(path: &Path) -> Result<Option<ChatFormat>> {
     let file = fs::File::open(path)?;
     let mut file = std::io::BufReader::new(file);
@@ -109,6 +122,14 @@ pub fn detect_chat_format_reader(path: &Path) -> Result<Option<ChatFormat>> {
     file.rewind()?;
     if is_jsonl_export_reader(&mut file) {
         return Ok(Some(ChatFormat::Jsonl));
+    }
+    file.rewind()?;
+    let mut header = [0u8; 16];
+    match file.read_exact(&mut header) {
+        Ok(()) if &header == SQLITE_HEADER => return Ok(Some(ChatFormat::IMessage)),
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {}
+        Err(e) => return Err(e.into()),
     }
     Ok(None)
 }
@@ -255,7 +276,7 @@ pub fn resolve_stream_source(
     }
     let format = detect_chat_format_reader(&file)?.ok_or_else(|| {
         Error::ChatImport(format!(
-            "unrecognized chat export format: {} (expected a WhatsApp .txt export, a Telegram result.json, a Messenger message_*.json, a Signal conversation .json, a Discord messages.json, or a JSON Lines .jsonl export)",
+            "unrecognized chat export format: {} (expected a WhatsApp .txt export, a Telegram result.json, a Messenger message_*.json, a Signal conversation .json, a Discord messages.json, a JSON Lines .jsonl export, or an iMessage chat.db)",
             file.display()
         ))
     })?;
@@ -281,6 +302,9 @@ pub fn resolve_stream_source(
         ChatFormat::Discord => Box::new(DiscordSource::new(&file)),
         ChatFormat::Messenger => Box::new(MessengerSource::new(&file)),
         ChatFormat::Jsonl => Box::new(JsonlSource::new(&file)),
+        // The adapter copies the picked file before opening it, so
+        // the bounded stream never holds the live Messages store.
+        ChatFormat::IMessage => Box::new(IMessageSource::new(&file)),
     };
     Ok((format, file, source))
 }
@@ -418,13 +442,19 @@ pub fn import_bounded_with(
             // container is the whole-vault tool). Messenger joins the
             // media kinds only for a tree pick: a single-file pick says
             // nothing about the tree around it, so its references stay
-            // in `raw_json` only (spec decision).
+            // in `raw_json` only (spec decision). iMessage attachments
+            // are referenced only — their bytes sit under
+            // ~/Library/Attachments until a follow-up grants that
+            // folder, so no media pass runs.
             let kind = match format {
                 ChatFormat::Telegram => Some(MediaKind::Telegram),
                 ChatFormat::WhatsApp => Some(MediaKind::WhatsApp),
                 ChatFormat::Signal => Some(MediaKind::Signal),
                 ChatFormat::Messenger if file.is_dir() => Some(MediaKind::Messenger),
-                ChatFormat::Discord | ChatFormat::Messenger | ChatFormat::Jsonl => None,
+                ChatFormat::Discord
+                | ChatFormat::Messenger
+                | ChatFormat::Jsonl
+                | ChatFormat::IMessage => None,
             };
             if let Some(kind) = kind {
                 let pass = if kind == MediaKind::Messenger {

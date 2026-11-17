@@ -26,6 +26,8 @@
 //! - [`whatsapp`]: the WhatsApp `.txt` chat export source.
 //! - [`telegram`]: the Telegram `result.json` chat export source.
 //! - [`signal`]: the Signal Desktop conversation JSON export source.
+//! - [`imessage`]: the iMessage source — a copy-first read of the Mac
+//!   Messages app's `chat.db` SQLite store.
 //! - [`discord`]: the Discord Data Package chat export source.
 //! - [`jsonl`]: the JSON Lines import source — rows from the app's own
 //!   JSON Lines export, each keeping its original source identity.
@@ -117,6 +119,7 @@ pub mod files;
 pub mod health;
 pub mod imap;
 pub mod imap_coordinator;
+pub mod imessage;
 pub mod import_bounds;
 pub mod ingest;
 pub mod jobs;
