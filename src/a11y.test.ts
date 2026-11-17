@@ -33,7 +33,8 @@ function tokenBlock(from: string, to: string): Record<string, string> {
 }
 
 const light = tokenBlock(":root {", ':root[data-theme="dark"]');
-const dark = tokenBlock(':root[data-theme="dark"]', '/* "System" theme');
+const dark = tokenBlock(':root[data-theme="dark"]', ':root[data-theme="vesper"]');
+const vesper = tokenBlock(':root[data-theme="vesper"]', '/* "System" theme');
 
 /** WCAG 2.x relative luminance of a #rrggbb color. */
 function luminance(hex: string): number {
@@ -50,8 +51,12 @@ function contrast(fg: string, bg: string): number {
 }
 
 describe("placeholder contrast (computed from committed token values)", () => {
-  it("meets 4.5:1 on panel and panel-2 in both themes", () => {
-    for (const [themeName, theme] of [["light", light], ["dark", dark]] as const) {
+  it("meets 4.5:1 on panel and panel-2 in every theme", () => {
+    for (const [themeName, theme] of [
+      ["light", light],
+      ["dark", dark],
+      ["vesper", vesper],
+    ] as const) {
       for (const surface of ["panel", "panel-2"] as const) {
         const ratio = contrast(theme["muted"], theme[surface]);
         expect(ratio, `${themeName} --muted on --${surface}`).toBeGreaterThanOrEqual(4.5);
@@ -69,6 +74,8 @@ describe("placeholder contrast (computed from committed token values)", () => {
     expect(comment).toContain(`${contrast(light["muted"], light["panel-2"]).toFixed(2)}:1`);
     expect(comment).toContain(`${contrast(dark["muted"], dark["panel"]).toFixed(2)}:1`);
     expect(comment).toContain(`${contrast(dark["muted"], dark["panel-2"]).toFixed(2)}:1`);
+    expect(comment).toContain(`${contrast(vesper["muted"], vesper["panel"]).toFixed(2)}:1`);
+    expect(comment).toContain(`${contrast(vesper["muted"], vesper["panel-2"]).toFixed(2)}:1`);
   });
 });
 

@@ -4296,6 +4296,61 @@ describe("settings screen", () => {
     expect($("#settings-note").textContent).toContain("session memory");
   });
 
+  it("vesper applies immediately and saves as dark with a local override", async () => {
+    // The backend enum has no vesper variant: the save payload must carry
+    // "dark" while the machine-local localStorage flag records the real
+    // choice, and every settings render re-applies the flag's theme.
+    let savedTheme: string | undefined;
+    tauri.handlers.set("settings_get", () => viewWith());
+    tauri.handlers.set("settings_save", (args: unknown) => {
+      const payload = (args as { payload: { theme?: string } }).payload;
+      savedTheme = payload.theme;
+      return viewWith((v) => {
+        v.theme = payload.theme;
+      });
+    });
+    tauri.handlers.set("llm_status", () => ({
+      enabled: true,
+      model: "glm-5",
+      host: "api.z.ai",
+      summarize_top: 8,
+      providers: [LOCAL_ITEM, ZAI_ITEM],
+      default_provider: "zai",
+    }));
+    await boot();
+    // Settings must have rendered once before saving is allowed.
+    await vi.waitFor(() => expect(input("#summarize-top").value).toBe("8"));
+    expect(win.localStorage.getItem("mcv.themeVesper")).toBe(null);
+
+    // Selecting vesper applies the explicit theme immediately.
+    const select = input("#theme");
+    select.value = "vesper";
+    fireChange(select);
+    expect(document.documentElement.dataset.theme).toBe("vesper");
+    expect(document.documentElement.style.colorScheme).toBe("dark");
+
+    // Saving stores "dark" in settings.json plus the local flag; the save
+    // response re-renders through the override, so vesper survives (the
+    // same path a restart takes).
+    $("#settings-save-general").click();
+    await vi.waitFor(() => expect($("#settings-note").textContent).toContain("Saved."));
+    expect(savedTheme).toBe("dark");
+    expect(win.localStorage.getItem("mcv.themeVesper")).toBe("1");
+    expect(input("#theme").value).toBe("vesper");
+    expect(document.documentElement.dataset.theme).toBe("vesper");
+
+    // Saving any other theme clears the override; the saved theme rules.
+    select.value = "light";
+    fireChange(select);
+    $("#settings-save-general").click();
+    await vi.waitFor(() =>
+      expect(win.localStorage.getItem("mcv.themeVesper")).toBe("0"),
+    );
+    expect(savedTheme).toBe("light");
+    expect(input("#theme").value).toBe("light");
+    expect(document.documentElement.dataset.theme).toBe("light");
+  });
+
   it("renders the M7 keep-alive toggles from the view and saves them back", async () => {
     // Boot with both options on: the checkboxes must render the saved
     // state (the HTML ships them unchecked, so a checked box proves the

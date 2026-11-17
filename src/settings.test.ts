@@ -151,4 +151,14 @@ describe("applyTheme", () => {
     expect(document.documentElement.style.colorScheme).toBe("");
     expect(document.documentElement.dataset.theme).toBeUndefined();
   });
+
+  it("pins vesper as an explicit theme with a dark color-scheme", () => {
+    applyTheme("vesper");
+    expect(document.documentElement.dataset.theme).toBe("vesper");
+    // "vesper" is not a color-scheme keyword; the engine gets "dark".
+    expect(document.documentElement.style.colorScheme).toBe("dark");
+    applyTheme("system");
+    expect(document.documentElement.style.colorScheme).toBe("");
+    expect(document.documentElement.dataset.theme).toBeUndefined();
+  });
 });
