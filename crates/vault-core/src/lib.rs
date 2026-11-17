@@ -153,6 +153,15 @@ pub mod whatsapp;
 
 use thiserror::Error;
 
+/// Fidelity label for a record whose original source bytes were not
+/// retained (A3b): every record archived without original retention —
+/// all rows from before the feature existed, and any import that did
+/// not opt in — carries this label; only records with an
+/// `original_references` row carry retained original bytes. The A8
+/// export fidelity surfaces consume this constant so the wording stays
+/// identical everywhere.
+pub const ORIGINAL_NOT_RETAINED: &str = "original not retained";
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Error)]

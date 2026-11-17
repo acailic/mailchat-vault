@@ -1276,10 +1276,13 @@ impl Storage {
         let mut counts = ImportBatchCounts::default();
         for msg in messages {
             match insert_message_in_tx(&tx, import_id, msg)? {
-                InsertOutcome::Inserted(_) => {
+                InsertOutcome::Inserted(id) => {
                     counts.inserted += 1;
                     if !media_entries(&msg.raw_json).is_empty() {
                         counts.media_linked += 1;
+                    }
+                    if let Some(object) = &msg.original_ref {
+                        record_original_in_tx(&tx, id, object)?;
                     }
                 }
                 InsertOutcome::Duplicate(id) => {
@@ -1287,6 +1290,13 @@ impl Storage {
                     let entries = media_entries(&msg.raw_json);
                     if !entries.is_empty() && attach_media_in_tx(&tx, id, &entries)? {
                         counts.media_linked += 1;
+                    }
+                    // A re-import that retained the bytes still links the
+                    // original to the existing row: the reference says
+                    // "these exact bytes are stored", never anything
+                    // about which run first saw the message.
+                    if let Some(object) = &msg.original_ref {
+                        record_original_in_tx(&tx, id, object)?;
                     }
                 }
             }
@@ -3610,6 +3620,35 @@ impl Storage {
         media_digests_on(&self.conn)
     }
 
+    /// The retained original of one archived message (A3b): the digest
+    /// of its raw RFC 5322 bytes as stored in the object store, or
+    /// `None` when the record has no retained original — every row
+    /// archived without retention, whose export fidelity label is then
+    /// [`crate::ORIGINAL_NOT_RETAINED`]. The bytes themselves are
+    /// opened through the object store
+    /// ([`crate::object_store::ObjectStore`]) by digest.
+    pub fn original_for_message(&self, message_id: i64) -> Result<Option<OriginalObject>> {
+        let value = self
+            .conn
+            .query_row(
+                "SELECT o.digest, o.size, o.kind, o.retained_at
+                 FROM original_references r
+                 JOIN original_objects o ON o.digest = r.digest
+                 WHERE r.message_id = ?1",
+                params![message_id],
+                |row| {
+                    Ok(OriginalObject {
+                        digest: row.get(0)?,
+                        size: row.get::<_, i64>(1)?.max(0) as u64,
+                        kind: row.get(2)?,
+                        retained_at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(value)
+    }
+
     /// The digests referenced by stored messages only (the
     /// message-linked side of the reference set — what the M4.2
     /// unlinked pass skips as already reachable).
@@ -4917,6 +4956,18 @@ pub(crate) fn media_digests_on(conn: &Connection) -> Result<std::collections::Ha
             digests.insert(sha);
         }
     }
+    // Retained originals (A3b): the raw RFC 5322 bytes are objects in
+    // the same store, referenced by the `original_objects` registry —
+    // backup carries them and reconciliation covers them exactly like
+    // media objects.
+    if table_exists_on(conn, "original_objects")? {
+        let mut stmt = conn.prepare("SELECT digest FROM original_objects")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let sha: String = row.get(0)?;
+            digests.insert(sha);
+        }
+    }
     Ok(digests)
 }
 
@@ -5057,6 +5108,30 @@ fn attach_media_in_tx(
         )?;
     }
     Ok(changed)
+}
+
+/// Record one retained original for `message_id` inside an open ingest
+/// transaction (A3b): the object row is idempotent on the digest (the
+/// retention pass already stored/deduped the bytes through the object
+/// store before this transaction — reference rows land *after* promote,
+/// mirroring the media-reference order), and the reference row is
+/// idempotent on the pair, so re-imports write nothing new.
+fn record_original_in_tx(
+    tx: &Transaction<'_>,
+    message_id: i64,
+    object: &crate::object_store::ObjectRef,
+) -> Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO original_objects (digest, size, kind)
+         VALUES (?1, ?2, 'rfc5322')",
+        params![object.sha256, object.size],
+    )?;
+    tx.execute(
+        "INSERT OR IGNORE INTO original_references (message_id, digest)
+         VALUES (?1, ?2)",
+        params![message_id, object.sha256],
+    )?;
+    Ok(())
 }
 
 /// Find the legacy source instance for `namespace`, creating an
@@ -6404,6 +6479,21 @@ pub struct RegisteredMediaObject {
     pub origin: String,
     pub import_id: String,
     pub first_seen: String,
+}
+
+/// One retained original object (A3b, `original_objects`): the raw
+/// RFC 5322 bytes of a message, stored by digest in the object store.
+/// See [`Storage::original_for_message`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OriginalObject {
+    /// SHA-256 of the retained bytes — the object-store digest.
+    pub digest: String,
+    /// Size of the retained bytes.
+    pub size: u64,
+    /// What the bytes are (`"rfc5322"`).
+    pub kind: String,
+    /// When the bytes were first retained.
+    pub retained_at: String,
 }
 
 /// One archived message that references a media digest (the resolution
