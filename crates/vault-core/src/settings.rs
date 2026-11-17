@@ -691,7 +691,7 @@ pub fn check_profile_pairing(profile: &ProviderProfile) -> crate::Result<()> {
                 )));
             }
             check_no_plaintext_http(&format!("provider “{name}”"), &profile.base_url)?;
-            if profile.deployment_name.as_deref().map_or(true, str::is_empty) {
+            if profile.deployment_name.as_deref().is_none_or(str::is_empty) {
                 return Err(settings_error(format!(
                     "provider “{name}”: an Azure OpenAI provider needs a deployment name"
                 )));
@@ -1553,8 +1553,8 @@ mod tests {
         // Two providers of different kinds with distinct sampling
         // overrides and distinct base URLs: nothing of one may leak
         // into the other through a save + reopen.
-        let mut s = Settings::default();
-        s.providers = vec![
+        let mut s = Settings {
+            providers: vec![
             ProviderProfile {
                 id: "openai-main".into(),
                 name: "OpenAI".into(),
@@ -1581,8 +1581,10 @@ mod tests {
                 api_version: None,
                 region: None,
             },
-        ];
-        s.default_provider = Some("ollama-local".into());
+        ],
+            default_provider: Some("ollama-local".into()),
+            ..Settings::default()
+        };
         s.normalize();
         s.validate().unwrap();
         s.save(&path).unwrap();
