@@ -368,6 +368,12 @@ fn seed_populated_vault(sb: &Sandbox) -> (PathBuf, Seeded) {
         kind: vault_core::settings::ProviderKind::Custom,
         base_url: "https://example.invalid/api".to_string(),
         model: "proof-model".to_string(),
+        temperature: None,
+        max_tokens: None,
+        timeout_secs: None,
+        deployment_name: None,
+        api_version: None,
+        region: None,
     });
     settings.save(&data_dir.join(SETTINGS_FILE)).unwrap();
 
