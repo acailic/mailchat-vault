@@ -3287,6 +3287,7 @@ fn run_bounded(
         import_id: import_id.into(),
         limits: Default::default(),
         media,
+        originals: None,
     };
     let mut sink = PoolSink(pool);
     let cancelled = || ctx.is_cancelled();

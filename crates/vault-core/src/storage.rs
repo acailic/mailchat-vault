@@ -1053,6 +1053,44 @@ const MIGRATIONS: &[(i64, &str)] = &[
         );
         "#,
     ),
+    (
+        26,
+        // Original retention for new mail imports (A3b, #230): one
+        // row per distinct retained original *object* — the raw RFC
+        // 5322 bytes of a message, stored through the object store and
+        // identified by its digest (identical bytes are one object,
+        // re-imports and cross-message duplicates dedup on the PK) —
+        // plus one reference row per archived message that has a
+        // retained original. A message with no reference row was
+        // archived without retention (every pre-A3b row, and any import
+        // that did not opt in) and its export fidelity label is
+        // `crate::ORIGINAL_NOT_RETAINED`; nothing is ever backfilled.
+        // Both tables are additive rows only; `message_id` and `digest`
+        // deliberately carry no foreign keys, following migration 22:
+        // the projection is derived from import runs, and a dangling
+        // row (a vault restored from a partial copy) surfaces through
+        // reconciliation instead of silently vanishing.
+        //
+        // Originally authored as migration 25 in #230; #228's merge
+        // clobbered that slot with `reminder_preferences`, so the
+        // original tables are restored here as 26 — the ledger keeps
+        // every applied version immutable.
+        r#"
+        CREATE TABLE original_objects (
+            digest      TEXT PRIMARY KEY,
+            size        INTEGER NOT NULL,
+            retained_at TEXT NOT NULL DEFAULT (datetime('now')),
+            kind        TEXT NOT NULL DEFAULT 'rfc5322'
+        );
+
+        CREATE TABLE original_references (
+            message_id INTEGER NOT NULL,
+            digest     TEXT NOT NULL,
+            PRIMARY KEY (message_id, digest)
+        );
+        CREATE INDEX idx_original_references_digest ON original_references (digest);
+        "#,
+    ),
 ];
 
 /// Rust halves of migrations, for backfill logic that SQL alone cannot

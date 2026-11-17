@@ -484,6 +484,7 @@ fn bounded_broken_part_commits_completes_and_repairs() {
             max_batch_text_bytes: usize::MAX,
         },
         media: None,
+        originals: None,
     };
 
     // Run 1: one item per batch — ana's message_1 commits before the
