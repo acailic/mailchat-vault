@@ -296,17 +296,35 @@ fn version17_db(db: &std::path::Path) -> i64 {
     drop(s);
 
     let conn = Connection::open(db).unwrap();
+    // Roll back to the version-17 shape by removing exactly what
+    // migrations 18+ added (18 saved_searches, 19 collections +
+    // members, 20 people + identity links, 21 the digest index, 22
+    // attachment_refs, 23 person_link_history, 24 source_receipts +
+    // the import_checkpoints count columns). Tables take their
+    // indexes with them. Keep this list in step with new migrations -
+    // a missed object resurfaces as "already exists" on reopen.
     conn.execute_batch(
-        "DROP TABLE collection_members;
-         DROP TABLE collections;
-         DROP TABLE person_identity_links;
-         DROP TABLE people;
-         DROP TABLE saved_searches;
+        "DROP TABLE IF EXISTS source_receipts;
+         DROP TABLE IF EXISTS person_link_history;
          DROP TABLE IF EXISTS attachment_refs;
-         DROP INDEX IF EXISTS idx_archive_messages_created_source;
-         DELETE FROM schema_migrations WHERE version >= 18;",
+         DROP TABLE IF EXISTS person_identity_links;
+         DROP TABLE IF EXISTS people;
+         DROP TABLE IF EXISTS collection_members;
+         DROP TABLE IF EXISTS collections;
+         DROP TABLE IF EXISTS saved_searches;
+         DROP INDEX IF EXISTS idx_archive_messages_created_source;",
     )
     .unwrap();
+    // Migration 24 also added run-total columns to an existing table;
+    // SQLite cannot re-add an existing column, so take them back too.
+    for col in ["inserted_total", "skipped_total"] {
+        let _ = conn.execute(
+            &format!("ALTER TABLE import_checkpoints DROP COLUMN {col}"),
+            [],
+        );
+    }
+    conn.execute_batch("DELETE FROM schema_migrations WHERE version >= 18;")
+        .unwrap();
     id
 }
 

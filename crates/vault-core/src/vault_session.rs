@@ -143,8 +143,9 @@ impl VaultIdentity {
                 self.format_version, IDENTITY_FORMAT_VERSION
             )));
         }
-        let vault_id = Uuid::parse_str(&self.vault_id)
-            .map_err(|e| SessionError::InvalidIdentity(format!("vault UUID does not parse: {e}")))?;
+        let vault_id = Uuid::parse_str(&self.vault_id).map_err(|e| {
+            SessionError::InvalidIdentity(format!("vault UUID does not parse: {e}"))
+        })?;
         // The name check binds the identity to this directory *name*,
         // never an absolute path: the same vault directory name under a
         // different parent still opens (a move rewrites the name only
@@ -164,7 +165,8 @@ impl VaultIdentity {
 /// The directory's own name (`"Vault"` in `/a/b/Vault`), lossily; `None`
 /// for a path with no file name (a filesystem root).
 fn directory_name_of(dir: &Path) -> Option<String> {
-    dir.file_name().map(|name| name.to_string_lossy().into_owned())
+    dir.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
 }
 
 /// One open vault: the single owner of the vault identity, the
