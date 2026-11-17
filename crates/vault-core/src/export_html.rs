@@ -88,9 +88,7 @@ pub enum HtmlExportScope {
     /// An explicit selection of message row ids, in the given order
     /// (exactly what the user picked; unknown ids are skipped and
     /// listed in the manifest).
-    Selected {
-        ids: Vec<i64>,
-    },
+    Selected { ids: Vec<i64> },
     /// The current search results: a `SearchArchiveRequest` whose
     /// filters and order the UI shows. Pagination fields are ignored —
     /// all matching pages export.
@@ -99,9 +97,7 @@ pub enum HtmlExportScope {
     },
     /// The whole conversation containing the anchor message, oldest →
     /// newest (the same canonical identity the detail view walks).
-    Conversation {
-        anchor_id: i64,
-    },
+    Conversation { anchor_id: i64 },
 }
 
 impl HtmlExportScope {
@@ -478,11 +474,12 @@ impl PageWriter {
                 .get("name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unnamed");
-            let kind = entry
-                .get("kind")
-                .and_then(|v| v.as_str())
-                .unwrap_or("file");
-            if entry.get("missing").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let kind = entry.get("kind").and_then(|v| v.as_str()).unwrap_or("file");
+            if entry
+                .get("missing")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 let reason = entry
                     .get("reason")
                     .and_then(|v| v.as_str())
@@ -507,11 +504,7 @@ impl PageWriter {
                 continue;
             };
             let Some(store_name) = objects.object_name(sha256) else {
-                manifest.file_missing(
-                    m.id,
-                    name,
-                    "referenced object missing from the media store",
-                );
+                manifest.file_missing(m.id, name, "referenced object missing from the media store");
                 let _ = write!(
                     self.buf,
                     "<li>{name} ({kind}) — object missing from the archive</li>\n",

@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use vault_core::export_html::{
-    export_html, html_export_job, plan_html_export, FIDELITY_LABEL, HtmlExportOutcome,
-    HtmlExportScope,
+    export_html, html_export_job, plan_html_export, HtmlExportOutcome, HtmlExportScope,
+    FIDELITY_LABEL,
 };
 use vault_core::message::NewMessage;
 use vault_core::object_store::{Capacity, ObjectStore};
@@ -27,13 +27,7 @@ use vault_core::storage::Storage;
 
 /// An email-shaped row.
 fn email(id: &str, body: &str, sent_at: &str) -> NewMessage {
-    NewMessage::new(
-        "mbox",
-        id,
-        "Ana Sender <ana@example.com>",
-        sent_at,
-        body,
-    )
+    NewMessage::new("mbox", id, "Ana Sender <ana@example.com>", sent_at, body)
 }
 
 /// A chat-shaped row.
@@ -66,8 +60,7 @@ fn stored_media_entry(data_dir: &Path, name: &str, bytes: &[u8]) -> serde_json::
     let src = data_dir.join("incoming");
     fs::write(&src, bytes).unwrap();
     let (entry, _written) =
-        vault_core::media::store(data_dir, &src, name, "image", &mut Capacity::default())
-            .unwrap();
+        vault_core::media::store(data_dir, &src, name, "image", &mut Capacity::default()).unwrap();
     serde_json::json!({
         "sha256": entry.sha256,
         "path": entry.path,
@@ -205,21 +198,13 @@ fn plan_states_scope_and_count_without_writing() {
     assert_eq!(plan.count, 2);
 
     // Conversation scope: the whole thread, not just the anchor.
-    let plan = plan_html_export(
-        &s,
-        &HtmlExportScope::Conversation { anchor_id: ids[2] },
-    )
-    .unwrap();
+    let plan = plan_html_export(&s, &HtmlExportScope::Conversation { anchor_id: ids[2] }).unwrap();
     assert_eq!(plan.scope_label, "conversation");
     assert_eq!(plan.count, 2);
 
     // An unknown anchor plans as an empty conversation, and the export
     // declines (Ok(None)) without creating anything.
-    let plan = plan_html_export(
-        &s,
-        &HtmlExportScope::Conversation { anchor_id: 424242 },
-    )
-    .unwrap();
+    let plan = plan_html_export(&s, &HtmlExportScope::Conversation { anchor_id: 424242 }).unwrap();
     assert_eq!(plan.count, 0);
 }
 
@@ -249,7 +234,13 @@ fn bundle_is_static_escaped_and_offline() {
             Some("<p>Original <em>HTML</em></p><script>evil()</script>"),
         ),
         with_extras(
-            chat("w-1", "marko", "2026-11-02T09:00:00Z", "plain chat body", "ekipa"),
+            chat(
+                "w-1",
+                "marko",
+                "2026-11-02T09:00:00Z",
+                "plain chat body",
+                "ekipa",
+            ),
             serde_json::json!([dangling_media_entry("vanished.mp4")]),
             None,
         ),
@@ -275,7 +266,9 @@ fn bundle_is_static_escaped_and_offline() {
     assert_eq!(summary.assets_copied, 1);
     assert_eq!(summary.assets_missing, 2);
     assert_eq!(summary.fidelity, FIDELITY_LABEL);
-    assert!(summary.fidelity.contains("original MIME bytes are not retained"));
+    assert!(summary
+        .fidelity
+        .contains("original MIME bytes are not retained"));
 
     // One page plus index, the copied asset, and the manifest.
     let files = bundle_files(&dest);
@@ -287,7 +280,10 @@ fn bundle_is_static_escaped_and_offline() {
     assert!(names.contains(&"page-0001.html".to_string()));
     assert!(names.contains(&"manifest".to_string()));
     assert!(names.contains(&format!("assets/{sha}.jpg")));
-    assert!(staging_artifacts(dir.path()).is_empty(), "no staging litter");
+    assert!(
+        staging_artifacts(dir.path()).is_empty(),
+        "no staging litter"
+    );
 
     // Offline rules over every file: no scripts, no remote URLs, and
     // (for the html pages) no absolute or scheme-bearing reference.
@@ -323,9 +319,8 @@ fn bundle_is_static_escaped_and_offline() {
     // (single quotes escape as &#39; inside the attribute value).
     assert!(page.contains("<iframe sandbox=\"\""));
     assert!(page.contains("srcdoc=\"&lt;!doctype html&gt;"));
-    assert!(page.contains(
-        "default-src &#39;none&#39;; style-src &#39;unsafe-inline&#39;; img-src data:"
-    ));
+    assert!(page
+        .contains("default-src &#39;none&#39;; style-src &#39;unsafe-inline&#39;; img-src data:"));
     assert!(page.contains("&lt;base target=&quot;_blank&quot;&gt;"));
     assert!(page.contains("Original &lt;em&gt;HTML&lt;/em&gt;"));
     // The asset link is relative and content-addressed.
@@ -487,7 +482,13 @@ fn selected_scope_is_exact_and_reports_missing_ids() {
     let (s, ids) = seeded_with_ids(vec![
         email("a@e.com", "alpha body", "2026-11-01T09:00:00Z"),
         email("b@e.com", "beta body", "2026-11-02T09:00:00Z"),
-        chat("w-1", "marko", "2026-11-03T09:00:00Z", "gamma body", "ekipa"),
+        chat(
+            "w-1",
+            "marko",
+            "2026-11-03T09:00:00Z",
+            "gamma body",
+            "ekipa",
+        ),
         email("d@e.com", "delta body", "2026-11-04T09:00:00Z"),
     ]);
     let dir = tempfile::tempdir().unwrap();
@@ -600,18 +601,16 @@ fn failed_export_cleans_up_after_itself() {
     fs::write(&parent, b"file").unwrap();
     let dest = parent.join("bundle");
     let objects = ObjectStore::new(dir.path());
-    assert!(
-        export_html(
-            &s,
-            &HtmlExportScope::Search {
-                request: SearchArchiveRequest::default()
-            },
-            &dest,
-            &objects,
-            &|| false,
-        )
-        .is_err()
-    );
+    assert!(export_html(
+        &s,
+        &HtmlExportScope::Search {
+            request: SearchArchiveRequest::default()
+        },
+        &dest,
+        &objects,
+        &|| false,
+    )
+    .is_err());
     assert!(!dest.exists());
 }
 

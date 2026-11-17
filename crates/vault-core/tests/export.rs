@@ -1831,7 +1831,13 @@ fn html_search_bundle_matches_the_v2_stream_scope() {
             "2026-11-02T09:00:00Z",
             "t@e.com",
         ),
-        chat("h-w", "ana", "2026-11-03T09:00:00Z", "zebra chat row", "ekipa"),
+        chat(
+            "h-w",
+            "ana",
+            "2026-11-03T09:00:00Z",
+            "zebra chat row",
+            "ekipa",
+        ),
         email(
             "h3@e.com",
             "S",
