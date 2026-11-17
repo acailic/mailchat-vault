@@ -12,7 +12,7 @@ an hour. The gate itself stays **open** until five records exist below.
 - A build of the app under test (record commit hash + platform).
 - The participant's own export (their file, their machine — never commit
   content; only the observation record below is kept, synthetic examples
-  in [fixtures](../../../tests/e2e/fixtures) are for dry runs).
+  in [fixtures](../../tests/e2e/fixtures) are for dry runs).
 - This sheet printed or open on a second screen. Do **not** coach: the
   only permitted help is reading the app's own text aloud if the
   participant asks where to look.

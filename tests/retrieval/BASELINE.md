@@ -1,7 +1,7 @@
 # Retrieval quality baseline — `vault-retrieval`
 
 Recorded baseline results for the U07 retrieval-quality benchmark
-(`docs/user-success-plan.md`, work package U07: "Retrieval quality
+(`docs/internal/user-success-plan.md`, work package U07: "Retrieval quality
 benchmark and claim calibration"). The harness lives in this directory;
 it measures **only** — improvement work (learned embedding models, query
 expansion, pagination changes) is out of scope by design and conditional
