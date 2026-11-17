@@ -539,7 +539,9 @@ fn import_outcome_carries_the_completion_receipt() {
     ))
     .unwrap();
     assert_eq!(
-        value.pointer("/receipt/failed_records").and_then(|v| v.as_u64()),
+        value
+            .pointer("/receipt/failed_records")
+            .and_then(|v| v.as_u64()),
         Some(1),
         "the serialized outcome carries the receipt: {value}"
     );

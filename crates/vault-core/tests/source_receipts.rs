@@ -321,7 +321,10 @@ fn completing_commit_returns_the_receipt_it_wrote() {
             false,
         )
         .unwrap();
-    assert!(mid.receipt.is_none(), "an intermediate batch completes nothing");
+    assert!(
+        mid.receipt.is_none(),
+        "an intermediate batch completes nothing"
+    );
 
     // Completing batch: the duplicate of m1 (present), one new message
     // carrying a preserved and a missing file, and one failing record.
@@ -349,8 +352,14 @@ fn completing_commit_returns_the_receipt_it_wrote() {
     assert_eq!(receipt.failed_records, 1);
     assert_eq!(receipt.files_preserved, 1);
     assert_eq!(receipt.files_missing, 1);
-    assert_eq!(receipt.observed_min.as_deref(), Some("2026-11-01T09:00:00Z"));
-    assert_eq!(receipt.observed_max.as_deref(), Some("2026-11-02T10:00:00Z"));
+    assert_eq!(
+        receipt.observed_min.as_deref(),
+        Some("2026-11-01T09:00:00Z")
+    );
+    assert_eq!(
+        receipt.observed_max.as_deref(),
+        Some("2026-11-02T10:00:00Z")
+    );
     assert!(
         receipt.facts_json.contains("imp-carry"),
         "the receipt names its import: {}",
