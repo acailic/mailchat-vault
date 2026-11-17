@@ -159,6 +159,7 @@ pub mod staged_write;
 pub mod stats;
 pub mod storage;
 pub mod telegram;
+pub mod transcription;
 pub mod util;
 pub mod vault_move;
 pub mod vault_session;

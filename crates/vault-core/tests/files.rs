@@ -155,7 +155,7 @@ fn wait_terminal(pool: &Arc<DbPool>, id: JobId) -> vault_core::jobs::JobRecord {
 fn backfill_via_job(pool: &Arc<DbPool>, batch_limit: Option<u64>) -> vault_core::jobs::JobRecord {
     let id = pool
         .submit_job(files::FILES_BACKFILL_KIND, move |ctx| {
-            files::run_backfill_job(ctx, batch_limit)
+            files::run_backfill_job(ctx, batch_limit, false)
         })
         .unwrap();
     wait_terminal(pool, id)

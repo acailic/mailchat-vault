@@ -42,7 +42,9 @@ use std::io::Write;
 
 use crate::message::Message;
 use crate::query::{day_instant_utc, escape_like, parse_day};
-use crate::storage::{Storage, BM25_WEIGHT_AUTHOR, BM25_WEIGHT_BODY, BM25_WEIGHT_SUBJECT};
+use crate::storage::{
+    Storage, BM25_WEIGHT_AUTHOR, BM25_WEIGHT_BODY, BM25_WEIGHT_SUBJECT, BM25_WEIGHT_TRANSCRIPT,
+};
 use crate::{Error, Result};
 
 /// Upper bound for search text length (Unicode characters).
@@ -1631,7 +1633,7 @@ fn archive_order(req: &NormalizedSearch) -> String {
 pub(crate) fn bm25_rank_expr() -> String {
     format!(
         "bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, \
-         {BM25_WEIGHT_SUBJECT})"
+         {BM25_WEIGHT_SUBJECT}, {BM25_WEIGHT_TRANSCRIPT})"
     )
 }
 

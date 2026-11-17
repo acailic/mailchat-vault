@@ -313,6 +313,7 @@ fn version17_db(db: &std::path::Path) -> i64 {
     for stmt in rollback_column_drops_after(17) {
         let _ = conn.execute(&stmt, []);
     }
+    let _ = conn.execute("ALTER TABLE archive_messages DROP COLUMN transcript", []);
     conn.execute_batch("DELETE FROM schema_migrations WHERE version >= 18;")
         .unwrap();
     id
