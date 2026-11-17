@@ -1792,7 +1792,9 @@ describe("import picker → preview → confirm (U03)", () => {
       total: 4,
       message: "reading messages",
     });
-    expect($(".import-progress-line").textContent).toBe("2/4 (50%) · reading messages");
+    // A single progress sample gives no rate yet: the ETA suffix stays
+    // at the honest "estimating…" instead of inventing a number.
+    expect($(".import-progress-line").textContent).toBe("2/4 (50%) · reading messages · estimating…");
     expect(($(".progress-fill") as HTMLElement).style.width).toBe("50%");
 
     // Success hands off: the summary line lands, the card steps aside.
@@ -2134,7 +2136,7 @@ describe("import picker → preview → confirm (U03)", () => {
     });
     expect(($("#import-cancel-btn") as HTMLButtonElement).disabled).toBe(true);
     expect($("#import-cancel-btn").textContent).toBe("Cancelling…");
-    expect($(".import-progress-line").textContent).toBe("2/4 (50%) · messages");
+    expect($(".import-progress-line").textContent).toBe("2/4 (50%) · messages · estimating…");
 
     // Cooperative: the stop is requested, the engine confirms by event.
     emitJob({ seq: 3, at: "t", job: 35, type: "cancelled" });
@@ -2398,7 +2400,7 @@ describe("import picker → preview → confirm (U03)", () => {
     }));
     await boot();
     await vi.waitFor(() => expect($("#import-progress").getAttribute("hidden")).toBeNull());
-    expect($(".import-progress-line").textContent).toBe("10/40 (25%) · reading messages");
+    expect($(".import-progress-line").textContent).toBe("10/40 (25%) · reading messages · estimating…");
     expect(($(".progress-fill") as HTMLElement).style.width).toBe("25%");
     expect($("#import-cancel-btn")).toBeTruthy();
     // While it runs, this flow will not start a second import.
@@ -2473,11 +2475,21 @@ describe("drag-drop import", () => {
     await boot();
     const zones = [...win.document.querySelectorAll(".drop-zone")] as unknown as HTMLElement[];
     expect(zones.map((z) => z.id)).toEqual(["first-run-drop", "import-drop"]);
-    for (const zone of zones) {
-      expect(zone.textContent?.trim()).toBe(
-        "Drop archives here — .mbox · .eml · .json · .jsonl · .txt",
-      );
-    }
+    // P0·02: the first-run zone is the single call to action; the
+    // Sources zone keeps the full format advertisement.
+    expect($("#first-run-drop").textContent).toContain("Drop your archive here");
+    expect($("#first-run-drop").textContent).toContain("the format is detected for you");
+    expect($("#import-drop").textContent?.trim()).toBe(
+      "Drop archives here — .mbox · .eml · .json · .jsonl · .txt",
+    );
+    // The two fastest sources get their how-to cards beside the CTA.
+    const cards = [...win.document.querySelectorAll(".first-run-card")] as unknown as HTMLElement[];
+    expect(cards.map((c) => c.querySelector(".first-run-card-name")?.textContent)).toEqual([
+      "Gmail",
+      "WhatsApp",
+    ]);
+    expect(cards[0].textContent).toContain("Takeout");
+    expect(cards[1].textContent).toContain("Export chat (.zip)");
   });
 
   it("a dropped file routes through the same bounded preview as the picker", async () => {
@@ -2508,13 +2520,17 @@ describe("drag-drop import", () => {
     // The first path previews immediately; the rest queue behind it.
     await vi.waitFor(() => expect($(".preview-path").textContent).toBe("/tmp/a.mbox"));
     expect(previewedPaths()).toEqual(["/tmp/a.mbox"]);
-    expect($("#import-status").textContent).toBe("2 dropped archives waiting.");
+    expect($("#import-status").textContent).toBe(
+      "2 more archives waiting — imports run one at a time.",
+    );
 
     // Cancelling the first preview hands the flow to the second.
     $("#preview-cancel-btn").click();
     await vi.waitFor(() => expect($(".preview-path").textContent).toBe("/tmp/b.json"));
     expect(previewedPaths()).toEqual(["/tmp/a.mbox", "/tmp/b.json"]);
-    expect($("#import-status").textContent).toBe("1 dropped archive waiting.");
+    expect($("#import-status").textContent).toBe(
+      "1 more archive waiting — imports run one at a time.",
+    );
 
     // The third previews the same way; the drained queue goes quiet.
     $("#preview-cancel-btn").click();
@@ -2542,7 +2558,9 @@ describe("drag-drop import", () => {
     dropPaths(["/tmp/b.mbox"]);
     await flush();
     expect(previewedPaths()).toEqual(["/tmp/a.mbox"]);
-    expect($("#import-status").textContent).toBe("1 dropped archive waiting.");
+    expect($("#import-status").textContent).toBe(
+      "1 more archive waiting — imports run one at a time.",
+    );
 
     // The terminal event frees the flow — the next path previews.
     emitJob({ seq: 1, at: "t", job: 71, type: "submitted", kind: "import_chat_export" });

@@ -160,6 +160,7 @@ import {
   activeJobCount,
   applyJobEvent,
   applyJobsPage,
+  describeJobError,
   hasActiveJob,
   jobsStatusText,
   newJobsTracker,
@@ -2217,6 +2218,7 @@ document.addEventListener("keydown", (event) => {
 // ---------------------------------------------------------------------------
 
 import {
+  buildImportCompletion,
   formatLabel,
   hideImportPreview,
   hideImportProgress,
@@ -2224,6 +2226,15 @@ import {
   renderImportPreview,
   renderImportProgress,
 } from "./importview";
+import {
+  RollingEta,
+  etaText,
+  initialOnboardingState,
+  queueWaitLine,
+  reduceOnboarding,
+  topAuthorSeed,
+} from "./onboarding";
+import type { ImportCompletion } from "./onboarding";
 
 /** The pick currently awaiting confirmation, if any. */
 let pendingImport: { path: string; kind: string } | null = null;
@@ -2255,6 +2266,22 @@ let dropQueue: string[] = [];
  * against starting a second preview before the first resolves (and so
  * before it can set `pendingImport`). */
 let dropPreviewInFlight = false;
+/** The drop-to-search onboarding model (P0·02): the pure state machine
+ * from src/onboarding.ts, fed at this wiring's own seams (drop, detect,
+ * import start, terminal events). Its completion state is what the
+ * completion card renders — the counts the outcome really carried. */
+let onboarding = initialOnboardingState();
+/** The current import's rolling-rate ETA (fed from its job's progress
+ * counters); reset per run, honest "estimating…" while unknown. */
+const importEta = new RollingEta();
+/** The completion card currently in #import-followup, if any (rebuilt
+ * in place when the top-author seed lands; removed with the section). */
+let completionCardEl: HTMLElement | null = null;
+/** The completion the card renders (kept for the seed-time rebuild). */
+let lastCompletion: ImportCompletion | null = null;
+/** The machine's key for a job adopted after a restart (its original
+ * path did not survive) — a key no dropped path can collide with. */
+const RECOVERED_PATH = "\u0000recovered-import";
 
 /** Highlight both drop zones while a drag is over the window (the
  * first-run zone hides with its card; the class is harmless there). */
@@ -2265,19 +2292,28 @@ function setDropZonesActive(active: boolean): void {
 }
 
 /** The waiting-drops line for #import-status; empty when the queue is
- * drained (the status line then belongs to the flow's own messages). */
+ * drained (the status line then belongs to the flow's own messages).
+ * The copy lives in the onboarding module so the model and the wiring
+ * can never disagree about the queue's honesty. */
 function dropQueueStatusLine(): string {
-  const n = dropQueue.length;
-  return n > 0 ? `${n} dropped archive${n === 1 ? "" : "s"} waiting.` : "";
+  return queueWaitLine(dropQueue.length);
 }
 
 /** Route dropped paths (files or folders, in drop order) into the
  * bounded preview flow — the same entry point the native pickers
  * produce. Ignored while the demo archive is open, exactly like the
- * pickers. */
+ * pickers. The section the flow lives in becomes visible: a drop is an
+ * explicit ask for feedback, so wherever it landed, its preview,
+ * progress, and completion card are on screen (the drop's auto-detect
+ * needs no mode picked — the preview is the detection). */
 function handleDroppedPaths(paths: string[]): void {
   if (demoActive || paths.length === 0) return;
+  onboarding = reduceOnboarding(onboarding, { type: "drop", paths });
   dropQueue.push(...paths);
+  const { view, sourcesSection } = workspace.store.get();
+  if (view !== "sources" || sourcesSection !== "import") {
+    workspace.store.setSourcesSection("import");
+  }
   pumpDropQueue();
   // A queue that did not drain (the flow is busy or a preview is up)
   // says so through the status line; a path that started previewing
@@ -2357,13 +2393,19 @@ function importSourceNames(): string[] {
   return (lastStats?.by_source ?? []).map((s) => s.source);
 }
 
-/** Preview a picked path: bounded scan, nothing stored. */
+/** Preview a picked path: bounded scan, nothing stored. The scan is
+ * also the drop flow's auto-detect — the preview's `kind` is the
+ * detection, no mode was picked. */
 async function showPreview(path: string): Promise<void> {
   importStatus.textContent = `Reading ${path}…`;
   importFollowup.hidden = true;
+  completionCardEl = null; // a stale card must not capture the late seed/focus
+  lastCompletion = null;
+  onboarding = reduceOnboarding(onboarding, { type: "detect-started", path });
   try {
     const preview = await ipc.previewImport(path);
     pendingImport = { path, kind: preview.kind };
+    onboarding = reduceOnboarding(onboarding, { type: "detected", path, preview });
     renderImportPreview(importPreviewEl, preview, {
       path,
       freeBytes: preview.free_bytes,
@@ -2379,7 +2421,9 @@ async function showPreview(path: string): Promise<void> {
   } catch (e) {
     pendingImport = null;
     hideImportPreview(importPreviewEl);
-    importStatus.textContent = friendlyImportError(e, path);
+    const message = friendlyImportError(e, path);
+    importStatus.textContent = message;
+    onboarding = reduceOnboarding(onboarding, { type: "detect-failed", path, message });
   }
 }
 
@@ -2405,6 +2449,8 @@ async function confirmImport(confirmed: { zone: string | null; source: string })
   const extractMedia = chatMediaToggle.checked;
   hideImportPreview(importPreviewEl);
   importFollowup.hidden = true;
+  completionCardEl = null; // a stale card must not capture the late seed/focus
+  lastCompletion = null;
   importStatus.textContent = "";
   const kind =
     target.kind === "mbox" || target.kind === "eml" ? "import_mbox" : "import_chat_export";
@@ -2434,13 +2480,17 @@ async function submitImportJob(
     const handle = await ipc.jobSubmit(kind, params);
     importJob = { id: handle.id, kind, path };
     importCancelRequested = false; // a fresh run: its Cancel is live
+    onboarding = reduceOnboarding(onboarding, { type: "import-started", path });
+    importEta.startRun(); // this run's rate is estimated on its own samples
     renderImportProgressCard(); // queued card — events take over from here
   } catch (e) {
     // Refused before any job existed (queue full, demo lockout, moved
     // file): no card, the friendly line says what to do.
     importBusy = false;
+    const message = friendlyImportError(e, path);
+    onboarding = reduceOnboarding(onboarding, { type: "import-failed", path, message });
     pumpDropQueue(); // the refusal freed the flow: the next dropped path previews
-    importStatus.textContent = friendlyImportError(e, path);
+    importStatus.textContent = message;
   }
 }
 
@@ -2481,11 +2531,20 @@ function renderImportProgressCard(): void {
     hideImportProgress(importProgressEl);
     return;
   }
+  // The run's own progress counters feed the rolling-rate ETA: known
+  // totals get "~N minutes" (never moving backwards), unknown totals
+  // stay at the honest "estimating…" — nothing is invented.
+  let eta: string | undefined;
+  if (record.state.state === "running" && record.progress) {
+    importEta.sample(record.progress.done, Date.now());
+    eta = etaText(importEta.etaMs(record.progress.total));
+  }
   renderImportProgress(importProgressEl, record, {
     path: importJob?.path ?? undefined,
     onCancel: () => void cancelImportJob(),
     onDismiss: dismissImportFailure,
     onRetry: () => void retryImport(),
+    eta,
   });
   // A `progress` event after Cancel re-renders the card (the tracker
   // changed) and would rebuild the button enabled; while the cancel
@@ -2560,23 +2619,29 @@ function importSummaryLine(outcome: ChatImportOutcome): string {
 
 /** Feed this flow's import job through its inline card. Terminal states
  * hand off (the card re-renders via renderJobs on every tracker
- * change): success → the summary line + "View imported messages"
- * follow-up (plus the refreshes the generic job handler does not own);
- * cancel → the card goes and the section returns to its start state;
- * failure → the card keeps the message until dismissed or the next
- * import. */
+ * change): success → the summary line, the completion card, and the
+ * "View imported messages" follow-up (plus the refreshes the generic
+ * job handler does not own); cancel → the card goes and the section
+ * returns to its start state; failure → the card keeps the message
+ * until dismissed or the next import. */
 function feedImportJobEvent(event: JobEvent): void {
   const job = importJob;
   if (job === null || event.job !== job.id) return;
+  const flowPath = job.path ?? RECOVERED_PATH; // the machine's key for this run
   if (event.type === "succeeded") {
     importJob = null;
     importBusy = false;
     importCancelRequested = false;
     hideImportProgress(importProgressEl);
     const outcome = importOutcomeOf(event.result);
-    if (outcome) {
+    onboarding = outcome
+      ? reduceOnboarding(onboarding, { type: "import-succeeded", path: flowPath, outcome })
+      : reduceOnboarding(onboarding, { type: "reset" }); // unreadable outcome: no invented counts
+    const completion = onboarding.completion;
+    if (outcome && completion) {
       importStatus.textContent = importSummaryLine(outcome);
-      showImportFollowup(outcome.import_id, outcome.summary.inserted);
+      showImportCompletionCard(completion);
+      appendImportedMessagesButton(outcome.import_id, completion.inserted);
       showImportRecoveryActions(outcome);
       // The archive view is live from here on — but the counts must
       // land first: runSearch reads archiveTotal, which refreshStats
@@ -2594,6 +2659,7 @@ function feedImportJobEvent(event: JobEvent): void {
         if (!landed) return;
         initialBrowseDone = true; // the archive view is live from here on
         void runSearch(0); // newest-first browse, ready when the user returns
+        void seedAndFocusCompletionSearch(); // the wow beat: search, now
       });
       if (outcome.media) void refreshMediaUsage(); // media landed in the store
     } else {
@@ -2608,12 +2674,18 @@ function feedImportJobEvent(event: JobEvent): void {
     importBusy = false;
     importCancelRequested = false;
     hideImportProgress(importProgressEl);
+    onboarding = reduceOnboarding(onboarding, { type: "import-cancelled", path: flowPath });
     importStatus.textContent = "";
     pumpDropQueue(); // the run ended: the next dropped path previews
   } else if (event.type === "failed") {
     // A new import may start; the failure card stays until dismissed.
     importBusy = false;
     importCancelRequested = false;
+    onboarding = reduceOnboarding(onboarding, {
+      type: "import-failed",
+      path: flowPath,
+      message: describeJobError(event.error),
+    });
     pumpDropQueue(); // the run ended: the next dropped path previews
   }
 }
@@ -2645,18 +2717,65 @@ function showImportRecoveryActions(outcome: ChatImportOutcome): void {
   }
 }
 
-/** The post-import affordance: jump to the messages this run brought
- * in, scoped by the import-scope filter. */
-function showImportFollowup(importId: string | undefined, inserted: number): void {
+/** The completion card (P0·02): the run's real counts from the
+ * onboarding machine's completion state, plus the search box that gets
+ * seeded and focused once the stats refresh lands. The card omits any
+ * receipt id — the job result carries none. */
+function showImportCompletionCard(completion: ImportCompletion): void {
+  lastCompletion = completion;
+  completionCardEl = null;
   importFollowup.replaceChildren();
-  if (!importId || inserted === 0) {
-    importFollowup.hidden = true;
-    return;
+  importFollowup.classList.add("with-completion");
+  renderCompletionCard(null); // unseeded until the top author is known
+  importFollowup.hidden = false;
+}
+
+/** (Re)build the completion card in place — once unseeded at success,
+ * then again with the archive's most frequent sender as the search
+ * example. Rebuilding (not mutating) keeps the card's hint and its
+ * input honest about the same seed. */
+function renderCompletionCard(seed: string | null): void {
+  const completion = lastCompletion;
+  if (completion === null) return;
+  const card = buildImportCompletion(completion, {
+    seed,
+    onSearch: (query) => {
+      searchInput.value = query;
+      workspace.store.setWorkspaceSection("search");
+      void runSearch(0);
+    },
+  });
+  if (completionCardEl !== null) completionCardEl.replaceWith(card);
+  else importFollowup.prepend(card);
+  completionCardEl = card;
+}
+
+/** After the post-import stats refresh lands: seed the completion
+ * search box with the imported archive's most frequent sender (one
+ * archive_stats round trip; no seed invented on failure) and focus it
+ * — the drop-to-search beat, ready for one Enter press. */
+async function seedAndFocusCompletionSearch(): Promise<void> {
+  if (lastCompletion === null || completionCardEl === null) return;
+  let seed: string | null = null;
+  try {
+    seed = topAuthorSeed(await ipc.archiveStats(1));
+  } catch {
+    // Stats unavailable: the box still focuses, just unseeded.
   }
+  if (lastCompletion === null || completionCardEl === null) return; // a new flow took the section
+  renderCompletionCard(seed);
+  completionCardEl.querySelector<HTMLInputElement>("#import-done-search")?.focus();
+}
+
+/** The post-import affordance: jump to the messages this run brought
+ * in, scoped by the import-scope filter. Appends after the completion
+ * card (which owns the section's reset); absent when there is nothing
+ * to scope (no id, or nothing inserted). */
+function appendImportedMessagesButton(importId: string | undefined, inserted: number): void {
+  if (!importId || inserted === 0) return;
   const view = document.createElement("button");
   view.type = "button";
   view.id = "view-imported-btn";
-  view.className = "primary";
   view.textContent = "View imported messages";
   view.addEventListener("click", () => {
     // The scope select may not list this run yet (its refresh is async
@@ -2676,7 +2795,6 @@ function showImportFollowup(importId: string | undefined, inserted: number): voi
     void runSearch(0);
   });
   importFollowup.append(view);
-  importFollowup.hidden = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -3318,6 +3436,10 @@ function adoptRecoveredImportJob(): void {
     importJob = { id: recovered.id, kind: recovered.kind, path: null };
     importBusy = true; // the pick/confirm guards hold until it ends
     importCancelRequested = false; // this run was never cancelled here
+    // The onboarding machine follows the recovered run too — its
+    // terminal event renders the completion card like any other.
+    onboarding = reduceOnboarding(onboarding, { type: "detect-started", path: RECOVERED_PATH });
+    onboarding = reduceOnboarding(onboarding, { type: "import-started", path: RECOVERED_PATH });
   }
 }
 
