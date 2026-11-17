@@ -872,6 +872,8 @@ impl IngestSink for MediaCountingSink {
             } else {
                 self.per_batch_linked
             },
+            // The receipt the real commit wrote rides through untouched.
+            receipt: counts.receipt,
         })
     }
 }

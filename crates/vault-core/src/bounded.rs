@@ -377,6 +377,12 @@ pub struct BoundedOutcome {
     /// Total items whose fate is durable after this run (the checkpoint
     /// value a later run would resume from).
     pub committed_items: u64,
+    /// The completed import's receipt (A2b), written by the completing
+    /// commit in the same transaction as the batch it summarizes and
+    /// carried here so the caller can show kept work without re-reading
+    /// storage. `None` when the run did not complete — a cancelled run
+    /// claims no receipt, exactly as it claims no completion.
+    pub receipt: Option<crate::storage::SourceReceipt>,
 }
 
 /// One bounded import: identity, limits, and the optional media pass.
@@ -439,6 +445,7 @@ impl<'a> BoundedRun<'a> {
             committed_items: resumed_from,
             next_position: resumed_from,
             cancelled: false,
+            receipt: None,
             consumed_paths: HashSet::new(),
             unlinked_objects: Vec::new(),
         };
@@ -536,6 +543,10 @@ struct RunState<'a, 'b> {
     committed_items: u64,
     next_position: u64,
     cancelled: bool,
+    /// The receipt the completing commit wrote and returned (A2b) —
+    /// `None` until the run completes; the registry-only commit after
+    /// it writes none, so `None` never clobbers a stored receipt.
+    receipt: Option<crate::storage::SourceReceipt>,
     /// Export files the message media passes stored — every file a
     /// message claimed (M4.2; the unlinked pass stores everything else).
     consumed_paths: HashSet<PathBuf>,
@@ -678,6 +689,9 @@ impl RunState<'_, '_> {
             self.committed_items + (self.batch.len() + self.issues.len()) as u64,
             completes,
         )?;
+        // The completing commit's receipt (A2b) rides the counts; move
+        // it out before the (non-Copy) counts are read for numbers.
+        let receipt = counts.receipt;
         self.summary.inserted += counts.inserted;
         self.summary.skipped += counts.skipped;
         // Media links are a storage outcome (inserts carrying a `media`
@@ -689,6 +703,9 @@ impl RunState<'_, '_> {
         self.summary.failed += self.issues.len() as u64;
         self.summary.seen += (self.batch.len() + self.issues.len()) as u64;
         self.committed_items += (self.batch.len() + self.issues.len()) as u64;
+        if receipt.is_some() {
+            self.receipt = receipt;
+        }
         self.batch.clear();
         self.issues.clear();
         self.batch_text_bytes = 0;
@@ -704,6 +721,7 @@ impl RunState<'_, '_> {
             cancelled: self.cancelled,
             resumed_from,
             committed_items: self.committed_items,
+            receipt: self.receipt,
         }
     }
 }

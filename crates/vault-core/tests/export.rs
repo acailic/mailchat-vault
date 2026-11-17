@@ -482,6 +482,90 @@ fn json_lines_import_round_trip_through_the_importer() {
     assert_eq!(s.stats().unwrap().total, 3);
 }
 
+/// A2b: a completed bounded import carries the receipt its completing
+/// commit wrote — run-total new counts, the failing record, observed
+/// bounds — on the outcome (the shape the job runner serializes
+/// verbatim), while a cancelled run claims no receipt, and job results
+/// written before the field existed still deserialize.
+#[test]
+fn import_outcome_carries_the_completion_receipt() {
+    let rows = vec![
+        chat("r-1", "marko", "2026-11-01T10:00:00Z", "prva", "arhiva"),
+        chat("r-2", "ana", "2026-11-02T11:00:00Z", "druga", "arhiva"),
+    ];
+    let s = seeded(rows);
+    let (_, mut bytes) = export_to_vec(&s, &SearchQuery::default(), ExportFormat::Json);
+    // One line that cannot be a row (no source/external_id identity):
+    // a durable failure record, not a run abort.
+    bytes.extend_from_slice(b"{\"id\": \"orphan\"}\n");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("receipt.jsonl");
+    std::fs::write(&path, &bytes).unwrap();
+
+    let mut target = Storage::open_in_memory().unwrap();
+    let outcome = vault_core::chat_export::import_bounded(
+        &mut target,
+        &path,
+        false,
+        None,
+        &|| false,
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    assert_eq!(outcome.summary.inserted, 2);
+    assert_eq!(outcome.summary.failed, 1);
+    let receipt = outcome
+        .receipt
+        .as_ref()
+        .expect("a completed run carries its receipt");
+    assert_eq!(receipt.new_records, 2);
+    assert!(receipt.failed_records > 0, "the failing record is counted");
+    assert_eq!(receipt.failed_records, 1);
+    assert_eq!(
+        receipt.observed_min.as_deref(),
+        Some("2026-11-01T10:00:00Z")
+    );
+    assert_eq!(
+        receipt.observed_max.as_deref(),
+        Some("2026-11-02T11:00:00Z")
+    );
+
+    // The receipt rides the serialized outcome (the job runner and the
+    // direct commands serialize this shape verbatim), and a job result
+    // written before the field existed still deserializes — an absent
+    // receipt means None, never an error.
+    let value = serde_json::to_value(vault_core::chat_export::ChatImportOutcome::from(
+        outcome.clone(),
+    ))
+    .unwrap();
+    assert_eq!(
+        value.pointer("/receipt/failed_records").and_then(|v| v.as_u64()),
+        Some(1),
+        "the serialized outcome carries the receipt: {value}"
+    );
+    let mut legacy = value;
+    legacy.as_object_mut().unwrap().remove("receipt");
+    let parsed: vault_core::chat_export::ChatImportOutcome =
+        serde_json::from_value(legacy).unwrap();
+    assert!(parsed.receipt.is_none());
+
+    // A cancelled run claims no receipt: committed work stays exactly as
+    // the checkpoint left it, but no completion is reported that did
+    // not happen.
+    let mut other = Storage::open_in_memory().unwrap();
+    let cancelled = vault_core::chat_export::import_bounded(
+        &mut other,
+        &path,
+        false,
+        None,
+        &|| true,
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    assert!(cancelled.cancelled);
+    assert!(cancelled.receipt.is_none());
+}
+
 // ---------------------------------------------------------------------------
 // MBOX
 // ---------------------------------------------------------------------------

@@ -294,3 +294,74 @@ fn interrupted_import_reports_run_totals_after_restart() {
         Some("2026-10-09T10:00:00Z")
     );
 }
+
+#[test]
+fn completing_commit_returns_the_receipt_it_wrote() {
+    // A2b: the completing batch's counts carry the receipt the same
+    // transaction wrote, so an importer's outcome can show kept work
+    // without re-reading storage — and what they carry is exactly the
+    // row the listing serves. Intermediate batches carry no receipt.
+    let storage = Storage::open_in_memory().unwrap();
+    let mut with_media = msg("mbox:exports", "m2", "2026-11-02T10:00:00Z", "media mail");
+    with_media.raw_json = r#"{"media": [
+        {"name": "photo.jpg", "kind": "image", "sha256": "a1b2c3"},
+        {"name": "clip.mp4", "kind": "video", "missing": true, "reason": "not-in-export"}
+    ]}"#
+    .to_string();
+
+    // Intermediate batch: one message, no receipt yet.
+    let mid = storage
+        .commit_import_batch(
+            "imp-carry",
+            "mbox:exports",
+            &[msg("mbox:exports", "m1", "2026-11-01T09:00:00Z", "plain")],
+            &[],
+            &[],
+            1,
+            false,
+        )
+        .unwrap();
+    assert!(mid.receipt.is_none(), "an intermediate batch completes nothing");
+
+    // Completing batch: the duplicate of m1 (present), one new message
+    // carrying a preserved and a missing file, and one failing record.
+    let counts = storage
+        .commit_import_batch(
+            "imp-carry",
+            "mbox:exports",
+            &[
+                msg("mbox:exports", "m1", "2026-11-01T09:00:00Z", "plain"),
+                with_media,
+            ],
+            &[issue(3, "broken-entry")],
+            &[],
+            4,
+            true,
+        )
+        .unwrap();
+    let receipt = counts
+        .receipt
+        .expect("the completing commit carries its receipt");
+    assert_eq!(receipt.kind, SourceReceiptKind::Import);
+    assert_eq!(receipt.new_records, 2);
+    assert_eq!(receipt.present_records, 1, "the resumed duplicate");
+    assert!(receipt.failed_records > 0, "the failing record is counted");
+    assert_eq!(receipt.failed_records, 1);
+    assert_eq!(receipt.files_preserved, 1);
+    assert_eq!(receipt.files_missing, 1);
+    assert_eq!(receipt.observed_min.as_deref(), Some("2026-11-01T09:00:00Z"));
+    assert_eq!(receipt.observed_max.as_deref(), Some("2026-11-02T10:00:00Z"));
+    assert!(
+        receipt.facts_json.contains("imp-carry"),
+        "the receipt names its import: {}",
+        receipt.facts_json
+    );
+
+    // What the caller received is the stored row, verbatim: the listing
+    // serves the same receipt (id and completed_at included).
+    let instance = instance_for(&storage, "mbox:exports");
+    assert_eq!(
+        storage.list_source_receipts(&instance, 10).unwrap(),
+        vec![receipt]
+    );
+}
