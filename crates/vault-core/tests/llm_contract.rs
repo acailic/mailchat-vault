@@ -797,8 +797,13 @@ fn openai_compatible_wire_shape_and_parsed_completion() {
         model: "gpt-4o-mini".into(),
     };
     let backend = OpenAiLlm::new(config);
-    let answer = backend.complete("answer tersely", "summarize this").unwrap();
-    assert_eq!(answer, "served completion [1].", "the served completion parses");
+    let answer = backend
+        .complete("answer tersely", "summarize this")
+        .unwrap();
+    assert_eq!(
+        answer, "served completion [1].",
+        "the served completion parses"
+    );
 
     let req = server.join().expect("recorder thread");
     assert_eq!(req.request_line, "POST /v1/chat/completions HTTP/1.1");
@@ -813,7 +818,10 @@ fn openai_compatible_wire_shape_and_parsed_completion() {
         !req.headers.to_ascii_lowercase().contains("x-api-key:"),
         "no anthropic-style header on the OpenAI-compatible path"
     );
-    assert!(!req.body.contains(KEY), "the key must never be in the payload");
+    assert!(
+        !req.body.contains(KEY),
+        "the key must never be in the payload"
+    );
     let body: serde_json::Value = serde_json::from_str(&req.body).unwrap();
     assert_eq!(body["model"], "gpt-4o-mini");
     assert_eq!(body["max_tokens"], vault_core::llm::DEFAULT_MAX_TOKENS);

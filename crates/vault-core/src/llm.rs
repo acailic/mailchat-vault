@@ -397,7 +397,11 @@ impl OpenAiLlm {
                 .map_err(|e| Error::Llm(format!("unreadable response body: {e}"))),
             Err(ureq::Error::Status(code, response)) => {
                 let body = response.into_string().unwrap_or_default();
-                Err(Error::Llm(classify_status(code, &body, &self.config.host())))
+                Err(Error::Llm(classify_status(
+                    code,
+                    &body,
+                    &self.config.host(),
+                )))
             }
             Err(e) => Err(Error::Llm(format!(
                 "request to {} failed: {e}",
@@ -2257,8 +2261,7 @@ mod tests {
         let seen = seen.into_inner().unwrap();
         assert_eq!(seen.len(), 1, "exactly one round trip");
         assert_eq!(
-            seen[0].url,
-            "https://api.openai.com/v1/chat/completions",
+            seen[0].url, "https://api.openai.com/v1/chat/completions",
             "the transport saw the built request"
         );
         // A transport failure surfaces; a body without text is an error.

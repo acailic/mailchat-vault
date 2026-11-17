@@ -869,7 +869,10 @@ fn honesty_seeded() -> (Storage, std::collections::BTreeMap<&'static str, i64>) 
     legacy.channel = "chat".into();
     legacy.chat_id = "oldgroup".into(); // no provider key → legacy grouping
     remember("legacy-group", s.insert_message(&legacy).unwrap());
-    remember("standalone", s.insert_message(&dated("standalone", 6)).unwrap());
+    remember(
+        "standalone",
+        s.insert_message(&dated("standalone", 6)).unwrap(),
+    );
 
     // Files dimension: preserved media entry, recorded-missing entry,
     // WhatsApp placeholder with no stored entry, and a plain message.
@@ -945,20 +948,42 @@ fn honesty_filters_change_results_partition_the_set_and_drive_totals() {
     let expected_true: [Vec<&str>; 3] = [
         vec!["assumed", "notime"],
         vec![
-            "assumed", "confirmed", "exact", "gone", "legacy-group", "notime", "placeholder",
-            "plain", "standalone", "stored",
+            "assumed",
+            "confirmed",
+            "exact",
+            "gone",
+            "legacy-group",
+            "notime",
+            "placeholder",
+            "plain",
+            "standalone",
+            "stored",
         ],
         vec!["gone", "placeholder"],
     ];
     let expected_false: [Vec<&str>; 3] = [
         vec![
-            "exact", "confirmed", "gone", "legacy-group", "placeholder", "plain", "standalone",
-            "stored", "verified-group",
+            "exact",
+            "confirmed",
+            "gone",
+            "legacy-group",
+            "placeholder",
+            "plain",
+            "standalone",
+            "stored",
+            "verified-group",
         ],
         vec!["verified-group"],
         vec![
-            "assumed", "confirmed", "exact", "legacy-group", "notime", "plain", "standalone",
-            "stored", "verified-group",
+            "assumed",
+            "confirmed",
+            "exact",
+            "legacy-group",
+            "notime",
+            "plain",
+            "standalone",
+            "stored",
+            "verified-group",
         ],
     ];
     let every_name: Vec<&str> = row_ids.keys().copied().collect();

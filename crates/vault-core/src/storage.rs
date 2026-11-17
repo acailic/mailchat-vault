@@ -970,6 +970,57 @@ const MIGRATIONS: &[(i64, &str)] = &[
             ON person_link_history (person_id);
         "#,
     ),
+    (
+        24,
+        // Durable source receipts (the archive-experience plan's §6
+        // `source_receipts` row): one appended row per *completed*
+        // import or sync, so long-lived source health rests on
+        // committed facts rather than the bounded `job_ledger` tail
+        // (migration 16 keeps only the newest terminal jobs). The row
+        // records what the run observed and what it did — counts and
+        // file outcomes, an observed date range as *separate nullable
+        // bounds* (an observed range is evidence of what the run saw,
+        // never a claim of complete provider coverage between the
+        // endpoints), and a `facts_json` scope object. No message
+        // bodies. Rows are append-only facts; nothing prunes or
+        // resurrects them. The added `import_checkpoints` columns make
+        // the completing batch's new/present counts run totals across
+        // an interrupted-and-resumed import: every intermediate batch
+        // accumulates into the checkpoint row, and the receipt written
+        // by the completing transaction reads them there before the
+        // checkpoint is deleted (a single-batch import has no
+        // checkpoint row and contributes its counts directly).
+        r#"
+        CREATE TABLE source_receipts (
+            id                 INTEGER PRIMARY KEY,
+            source_instance_id TEXT    NOT NULL,
+            -- 'import' (a completed bounded import) or 'sync' (a
+            -- completed account sync).
+            kind               TEXT    NOT NULL CHECK (kind IN ('import', 'sync')),
+            completed_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+            -- Observed sent-time bounds of the messages this run
+            -- actually saw; NULL when the run observed none. Evidence,
+            -- not a completeness claim.
+            observed_min       TEXT,
+            observed_max       TEXT,
+            new_records        INTEGER NOT NULL DEFAULT 0,
+            present_records    INTEGER NOT NULL DEFAULT 0,
+            failed_records     INTEGER NOT NULL DEFAULT 0,
+            files_preserved    INTEGER NOT NULL DEFAULT 0,
+            files_missing      INTEGER NOT NULL DEFAULT 0,
+            -- Scope facts (import id, run scope, …); never message
+            -- content.
+            facts_json         TEXT    NOT NULL DEFAULT '{}'
+        );
+        CREATE INDEX idx_source_receipts_source_completed
+            ON source_receipts (source_instance_id, completed_at);
+
+        ALTER TABLE import_checkpoints ADD COLUMN inserted_total
+            INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE import_checkpoints ADD COLUMN skipped_total
+            INTEGER NOT NULL DEFAULT 0;
+        "#,
+    ),
 ];
 
 /// Rust halves of migrations, for backfill logic that SQL alone cannot
@@ -1235,18 +1286,71 @@ impl Storage {
             )?;
         }
         if completes {
+            // Run-total new/present counts (migration 22): intermediate
+            // batches accumulated into the checkpoint row; a single-
+            // batch import has none (zero baseline).
+            let (mut new_records, mut present_records): (u64, u64) = (0, 0);
+            if let Some((stored_new, stored_present)) = tx
+                .query_row(
+                    "SELECT inserted_total, skipped_total
+                     FROM import_checkpoints WHERE import_id = ?1",
+                    params![import_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?.max(0) as u64,
+                            row.get::<_, i64>(1)?.max(0) as u64,
+                        ))
+                    },
+                )
+                .optional()?
+            {
+                new_records += stored_new;
+                present_records += stored_present;
+            }
+            new_records += counts.inserted;
+            present_records += counts.skipped;
             tx.execute(
                 "DELETE FROM import_checkpoints WHERE import_id = ?1",
                 params![import_id],
             )?;
+            // The completing commit appends the import's receipt
+            // (migration 22) in the same transaction — except the M4.2
+            // registry commit (empty batch carrying only unlinked
+            // objects, after the real final batch already completed
+            // the import): it is a registry transaction of an already
+            // completed run, not a second completed import.
+            let registry_only =
+                messages.is_empty() && issues.is_empty() && !media_objects.is_empty();
+            if !registry_only {
+                record_import_receipt_in_tx(
+                    &tx,
+                    import_id,
+                    source,
+                    messages,
+                    new_records,
+                    present_records,
+                )?;
+            }
         } else {
             tx.execute(
-                "INSERT INTO import_checkpoints (import_id, source, committed_items, updated_at)
-                 VALUES (?1, ?2, ?3, datetime('now'))
+                "INSERT INTO import_checkpoints
+                     (import_id, source, committed_items,
+                      inserted_total, skipped_total, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, datetime('now'))
                  ON CONFLICT(import_id) DO UPDATE SET
                     committed_items = excluded.committed_items,
-                    updated_at     = excluded.updated_at",
-                params![import_id, source, committed_after],
+                    inserted_total  = import_checkpoints.inserted_total
+                                     + excluded.inserted_total,
+                    skipped_total   = import_checkpoints.skipped_total
+                                     + excluded.skipped_total,
+                    updated_at      = excluded.updated_at",
+                params![
+                    import_id,
+                    source,
+                    committed_after,
+                    counts.inserted.min(i64::MAX as u64) as i64,
+                    counts.skipped.min(i64::MAX as u64) as i64,
+                ],
             )?;
         }
         // Any committed batch can change what a paginated search sees:
@@ -1406,6 +1510,40 @@ impl Storage {
     }
 
     // ------------------------------------------------------------------
+    // Source receipts (migration 22)
+    // ------------------------------------------------------------------
+
+    /// Append one completed-run receipt (migration 22). The import and
+    /// sync completion seams call this (directly or through
+    /// [`insert_source_receipt_in_tx`]) so every completed run leaves a
+    /// durable, restart-safe fact row; callers that complete runs
+    /// outside those seams can record their own.
+    pub fn record_source_receipt(&self, receipt: &SourceReceiptRecord<'_>) -> Result<()> {
+        insert_source_receipt_in_tx(&self.conn, receipt)
+    }
+
+    /// One source instance's receipt rows, newest first (at most
+    /// `limit`; 0 yields none). Receipts are append-only facts — a
+    /// listing never prunes or reorders history.
+    pub fn list_source_receipts(&self, source_id: &str, limit: u32) -> Result<Vec<SourceReceipt>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT id, source_instance_id, kind, completed_at,
+                    observed_min, observed_max,
+                    new_records, present_records, failed_records,
+                    files_preserved, files_missing, facts_json
+             FROM source_receipts
+             WHERE source_instance_id = ?1
+             ORDER BY completed_at DESC, id DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![source_id, limit as i64], source_receipt_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    // ------------------------------------------------------------------
     // Durable source instances (M1.2)
     // ------------------------------------------------------------------
 
@@ -1493,14 +1631,40 @@ impl Storage {
     /// (`last_success_at`, `state = 'connected'`). A previously recorded
     /// failure is cleared — the error record is the state of the *last*
     /// finished attempt.
+    ///
+    /// The same transaction appends a `sync` receipt (migration 22) so
+    /// the completed run leaves a durable fact. This seam does not
+    /// thread the run's counters through, so the receipt's counts are
+    /// honestly zero and its observed bounds `NULL`; a later slice can
+    /// widen the facts without changing this row's shape. Unknown ids
+    /// remain a no-op — no stamp, no receipt.
     pub fn record_source_success(&self, id: &str) -> Result<()> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let updated = tx.execute(
             "UPDATE source_instances
-             SET last_success_at = datetime('now'), state = 'connected',
-                 last_error_class = NULL, last_error = NULL, last_error_at = NULL
+              SET last_success_at = datetime('now'), state = 'connected',
+                  last_error_class = NULL, last_error = NULL, last_error_at = NULL
              WHERE id = ?1",
             params![id],
         )?;
+        if updated > 0 {
+            insert_source_receipt_in_tx(
+                &tx,
+                &SourceReceiptRecord {
+                    source_instance_id: id,
+                    kind: SourceReceiptKind::Sync,
+                    observed_min: None,
+                    observed_max: None,
+                    new_records: 0,
+                    present_records: 0,
+                    failed_records: 0,
+                    files_preserved: 0,
+                    files_missing: 0,
+                    facts_json: "{}",
+                },
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -3812,9 +3976,7 @@ impl Storage {
                             match anchor {
                                 Some(columns) => columns,
                                 None => {
-                                    return Err(Error::IdentityLinkNotFound(
-                                        link_id.to_string(),
-                                    ))
+                                    return Err(Error::IdentityLinkNotFound(link_id.to_string()))
                                 }
                             };
                         if owner_id != *person_id {
@@ -3822,8 +3984,8 @@ impl Storage {
                                 "link {link_id} belongs to person {owner_id}, not {person_id}"
                             )));
                         }
-                        let anchor_kind = PersonAnchorKind::from_str_opt(&kind_raw)
-                            .ok_or_else(|| {
+                        let anchor_kind =
+                            PersonAnchorKind::from_str_opt(&kind_raw).ok_or_else(|| {
                                 Error::Sqlite(rusqlite::Error::FromSqlConversionFailure(
                                     2,
                                     rusqlite::types::Type::Text,
@@ -4412,6 +4574,97 @@ fn insert_message_in_tx(
         params![id, msg.external_id, import_id],
     )?;
     Ok(InsertOutcome::Inserted(id))
+}
+
+/// Build and append the completed import's receipt row (migration 22)
+/// inside the completing batch's transaction — the durable fact of what
+/// the run observed, recorded, and failed. Every count is a run total
+/// read from committed rows (new/present accumulated through the
+/// checkpoint by [`commit_import_batch`]'s intermediate commits,
+/// failures from `import_issues`, observed bounds and file outcomes
+/// over the messages this import's occurrences point at), so an
+/// interrupted-and-resumed run reports the same facts a clean run
+/// would. No message bodies.
+fn record_import_receipt_in_tx(
+    tx: &Transaction<'_>,
+    import_id: &str,
+    source: &str,
+    messages: &[NewMessage],
+    new_records: u64,
+    present_records: u64,
+) -> Result<()> {
+    // The instance the run stored under: the batch's first message
+    // names it (a bounded import is one source); an empty completing
+    // batch falls back to the checkpoint's namespace.
+    let instance = match messages.first() {
+        Some(msg) => resolve_legacy_instance(tx, &msg.source, "")?,
+        None => resolve_legacy_instance(tx, source, "")?,
+    };
+    // Observed sent-time bounds over every message this import
+    // touched, across all its batches. NULL bounds mean the run
+    // observed no dated messages — the pair is evidence, never a
+    // completeness claim between the endpoints.
+    let (observed_min, observed_max): (Option<String>, Option<String>) = tx.query_row(
+        "SELECT MIN(m.sent_instant), MAX(m.sent_instant)
+         FROM archive_messages m
+         JOIN message_occurrences o ON o.message_id = m.id
+         WHERE o.import_id = ?1 AND m.sent_instant IS NOT NULL",
+        params![import_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let failed_records: u64 = tx.query_row(
+        "SELECT COUNT(*) FROM import_issues WHERE import_id = ?1",
+        params![import_id],
+        |row| Ok(row.get::<_, i64>(0)?.max(0) as u64),
+    )?;
+    // File outcomes from the run's committed media entries: an entry
+    // carrying a digest is a preserved file; a `missing` entry is a
+    // reference the run could not preserve. Unlinked registry objects
+    // belong to no message entry and are outside these counts.
+    let (mut files_preserved, mut files_missing) = (0u64, 0u64);
+    {
+        let mut stmt = tx.prepare(
+            "SELECT m.raw_json
+             FROM archive_messages m
+             JOIN message_occurrences o ON o.message_id = m.id
+             WHERE o.import_id = ?1 AND m.raw_json LIKE '%\"media\"%'",
+        )?;
+        let mut rows = stmt.query(params![import_id])?;
+        while let Some(row) = rows.next()? {
+            let raw: String = row.get(0)?;
+            for entry in media_entries(&raw) {
+                if entry
+                    .get("missing")
+                    .and_then(|m| m.as_bool())
+                    .unwrap_or(false)
+                {
+                    files_missing += 1;
+                } else if entry
+                    .get("sha256")
+                    .and_then(|s| s.as_str())
+                    .is_some_and(|s| !s.is_empty())
+                {
+                    files_preserved += 1;
+                }
+            }
+        }
+    }
+    let facts_json = serde_json::json!({ "import_id": import_id }).to_string();
+    insert_source_receipt_in_tx(
+        tx,
+        &SourceReceiptRecord {
+            source_instance_id: &instance,
+            kind: SourceReceiptKind::Import,
+            observed_min: observed_min.as_deref(),
+            observed_max: observed_max.as_deref(),
+            new_records,
+            present_records,
+            failed_records,
+            files_preserved,
+            files_missing,
+            facts_json: &facts_json,
+        },
+    )
 }
 
 /// Increment `archive_meta.archive_revision` inside a content-changing
@@ -5436,17 +5689,14 @@ fn anchor_message_evidence(
                 "{REPRESENTATIVE_SQL} AND author = ?2
                  ORDER BY COALESCE(sent_instant, ''), id LIMIT {limit}"
             ))?;
-            let rows = stmt.query_map(
-                params![source_instance_id, anchor_value],
-                |row| {
-                    Ok(PersonLinkPreviewMessage {
-                        id: row.get(0)?,
-                        author: row.get(1)?,
-                        sent_at: row.get(2)?,
-                        snippet: preview_snippet(&row.get::<_, String>(3)?),
-                    })
-                },
-            )?;
+            let rows = stmt.query_map(params![source_instance_id, anchor_value], |row| {
+                Ok(PersonLinkPreviewMessage {
+                    id: row.get(0)?,
+                    author: row.get(1)?,
+                    sent_at: row.get(2)?,
+                    snippet: preview_snippet(&row.get::<_, String>(3)?),
+                })
+            })?;
             let representative = rows.collect::<rusqlite::Result<Vec<_>>>()?;
             Ok((matched.max(0) as u64, representative))
         }
@@ -5867,6 +6117,131 @@ pub struct JobLedgerRow {
     pub state: String,
     pub summary: String,
     pub payload: String,
+}
+
+/// Which kind of completed run a [`SourceReceipt`] documents. The DB
+/// CHECK constraint stores the lowercase spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SourceReceiptKind {
+    /// A completed bounded import (a file/export import).
+    Import,
+    /// A completed account sync (e.g. one IMAP run).
+    Sync,
+}
+
+impl SourceReceiptKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Import => "import",
+            Self::Sync => "sync",
+        }
+    }
+}
+
+/// One completed-run receipt to append to `source_receipts` (migration
+/// 22), handed to [`Storage::record_source_receipt`]. The import and
+/// sync completion seams build this from what their transaction
+/// durably knows; counts that a seam cannot know stay zero (never
+/// guessed), and the observed bounds stay `None` when the run observed
+/// no dated messages.
+#[derive(Debug, Clone)]
+pub struct SourceReceiptRecord<'a> {
+    pub source_instance_id: &'a str,
+    pub kind: SourceReceiptKind,
+    pub observed_min: Option<&'a str>,
+    pub observed_max: Option<&'a str>,
+    pub new_records: u64,
+    pub present_records: u64,
+    pub failed_records: u64,
+    pub files_preserved: u64,
+    pub files_missing: u64,
+    /// Scope facts as a JSON object (`import_id`, run scope, …). Never
+    /// message content.
+    pub facts_json: &'a str,
+}
+
+/// One stored receipt row, as returned by
+/// [`Storage::list_source_receipts`] (newest first). The exposed
+/// observed range is a pair of independent nullable bounds — an
+/// observed range is evidence of what the run saw, and this type has
+/// no field that could claim complete provider coverage between them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceReceipt {
+    pub id: i64,
+    pub source_instance_id: String,
+    pub kind: SourceReceiptKind,
+    pub completed_at: String,
+    pub observed_min: Option<String>,
+    pub observed_max: Option<String>,
+    pub new_records: u64,
+    pub present_records: u64,
+    pub failed_records: u64,
+    pub files_preserved: u64,
+    pub files_missing: u64,
+    pub facts_json: String,
+}
+
+/// Append one receipt row inside an open transaction — the shared body
+/// of [`Storage::record_source_receipt`] and the completing-batch path
+/// of [`Storage::commit_import_batch`], which writes its import receipt
+/// in the same transaction as the batch it summarizes.
+fn insert_source_receipt_in_tx(tx: &Connection, receipt: &SourceReceiptRecord<'_>) -> Result<()> {
+    tx.execute(
+        "INSERT INTO source_receipts
+             (source_instance_id, kind, observed_min, observed_max,
+              new_records, present_records, failed_records,
+              files_preserved, files_missing, facts_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            receipt.source_instance_id,
+            receipt.kind.as_str(),
+            receipt.observed_min,
+            receipt.observed_max,
+            receipt.new_records.min(i64::MAX as u64) as i64,
+            receipt.present_records.min(i64::MAX as u64) as i64,
+            receipt.failed_records.min(i64::MAX as u64) as i64,
+            receipt.files_preserved.min(i64::MAX as u64) as i64,
+            receipt.files_missing.min(i64::MAX as u64) as i64,
+            receipt.facts_json,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Map one `source_receipts` row to its [`SourceReceipt`] (column order:
+/// `id, source_instance_id, kind, completed_at, observed_min,
+/// observed_max, new_records, present_records, failed_records,
+/// files_preserved, files_missing, facts_json`). A `kind` outside the
+/// enum (written by some other tool) surfaces as an error rather than
+/// being silently re-labeled.
+fn source_receipt_from_row(row: &Row<'_>) -> rusqlite::Result<SourceReceipt> {
+    let kind: String = row.get(2)?;
+    let kind = match kind.as_str() {
+        "import" => SourceReceiptKind::Import,
+        "sync" => SourceReceiptKind::Sync,
+        other => {
+            return Err(rusqlite::Error::FromSqlConversionFailure(
+                2,
+                rusqlite::types::Type::Text,
+                format!("unknown source receipt kind: {other}").into(),
+            ))
+        }
+    };
+    Ok(SourceReceipt {
+        id: row.get(0)?,
+        source_instance_id: row.get(1)?,
+        kind,
+        completed_at: row.get(3)?,
+        observed_min: row.get(4)?,
+        observed_max: row.get(5)?,
+        new_records: row.get::<_, i64>(6)?.max(0) as u64,
+        present_records: row.get::<_, i64>(7)?.max(0) as u64,
+        failed_records: row.get::<_, i64>(8)?.max(0) as u64,
+        files_preserved: row.get::<_, i64>(9)?.max(0) as u64,
+        files_missing: row.get::<_, i64>(10)?.max(0) as u64,
+        facts_json: row.get(11)?,
+    })
 }
 
 /// One row of the `media_objects` registry (M4.2): an object stored

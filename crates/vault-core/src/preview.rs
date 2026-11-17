@@ -1021,10 +1021,7 @@ mod tests {
             "unchanged bytes import exactly as the plain path"
         );
         assert_eq!(actual.media, expected.media);
-        assert_eq!(
-            bound.stats().unwrap().total,
-            plain.stats().unwrap().total
-        );
+        assert_eq!(bound.stats().unwrap().total, plain.stats().unwrap().total);
     }
 
     #[test]
@@ -1036,8 +1033,14 @@ mod tests {
             let file = std::fs::File::create(&zip_path).unwrap();
             let mut zip = zip::ZipWriter::new(file);
             let mut entries = vec![
-                ("1.eml", b"Subject: a\nMessage-ID: <1@x>\n\nA\n".as_slice().to_vec()),
-                ("2.eml", b"Subject: b\nMessage-ID: <2@x>\n\nB\n".as_slice().to_vec()),
+                (
+                    "1.eml",
+                    b"Subject: a\nMessage-ID: <1@x>\n\nA\n".as_slice().to_vec(),
+                ),
+                (
+                    "2.eml",
+                    b"Subject: b\nMessage-ID: <2@x>\n\nB\n".as_slice().to_vec(),
+                ),
             ];
             if extra {
                 entries.push((

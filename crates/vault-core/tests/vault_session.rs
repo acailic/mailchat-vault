@@ -48,8 +48,7 @@ fn legacy_vault_opens_in_place_and_gains_identity() {
     let id = session.vault_id();
     drop(session);
     let identity_path = vault.path().join("vault.json");
-    let identity =
-        fs::read_to_string(&identity_path).expect("identity file written on first open");
+    let identity = fs::read_to_string(&identity_path).expect("identity file written on first open");
     assert!(
         identity.contains(&id.to_string()),
         "identity file carries the minted UUID: {identity}"
@@ -91,7 +90,11 @@ fn copied_vault_under_a_different_directory_name_refuses_to_open() {
     let moved_home = tempfile::tempdir().unwrap();
     let same_name = moved_home.path().join(origin.path().file_name().unwrap());
     fs::create_dir(&same_name).unwrap();
-    fs::copy(origin.path().join("vault.json"), same_name.join("vault.json")).unwrap();
+    fs::copy(
+        origin.path().join("vault.json"),
+        same_name.join("vault.json"),
+    )
+    .unwrap();
     let moved = VaultSession::open(&same_name)
         .expect("identity follows the directory name, not the absolute path");
     assert_eq!(moved.vault_id(), id);
