@@ -1894,3 +1894,77 @@ fn mbox_export_skips_signal_rows_and_counts_them() {
     assert!(!text.contains("signal-2023-11-01-110050.jpg"));
     assert!(!text.contains("gone.jpg"));
 }
+
+// ---------------------------------------------------------------------------
+// HTML bundle scope parity (A8): the readable bundle exports the exact
+// same normalized search scope the JSON Lines stream does
+// ---------------------------------------------------------------------------
+
+#[test]
+fn html_search_bundle_matches_the_v2_stream_scope() {
+    let rows = vec![
+        email(
+            "h1@e.com",
+            "S",
+            "shared zebra body one",
+            "2026-11-01T09:00:00Z",
+            "t@e.com",
+        ),
+        email(
+            "h2@e.com",
+            "S",
+            "shared zebra body two",
+            "2026-11-02T09:00:00Z",
+            "t@e.com",
+        ),
+        chat(
+            "h-w",
+            "ana",
+            "2026-11-03T09:00:00Z",
+            "zebra chat row",
+            "ekipa",
+        ),
+        email(
+            "h3@e.com",
+            "S",
+            "unrelated body",
+            "2026-11-04T09:00:00Z",
+            "t@e.com",
+        ),
+    ];
+    let s = seeded(rows);
+
+    // The same request through the streaming seam and the HTML bundle:
+    // identical scope, identical rows, pagination ignored by both.
+    let request = SearchArchiveRequest {
+        text: "zebra".into(),
+        limit: Some(1),
+        ..Default::default()
+    };
+    let mut streamed = 0u64;
+    s.search_archive_export_stream(&request, &mut |_| {
+        streamed += 1;
+        Ok(())
+    })
+    .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("html");
+    let objects = vault_core::object_store::ObjectStore::new(dir.path());
+    let scope = vault_core::export_html::HtmlExportScope::Search { request };
+    let outcome =
+        vault_core::export_html::export_html(&s, &scope, &dest, &objects, &|| false).unwrap();
+    let summary = match outcome {
+        Some(vault_core::export_html::HtmlExportOutcome::Complete(summary)) => summary,
+        other => panic!("expected a completed HTML export, got {other:?}"),
+    };
+
+    assert_eq!(streamed, 3, "two emails plus the chat row carry zebra");
+    assert_eq!(summary.count, 3, "plan count equals the streamed scope");
+    assert_eq!(summary.written, 3);
+    let page = std::fs::read_to_string(dest.join("page-0001.html")).unwrap();
+    assert!(page.contains("shared zebra body one"));
+    assert!(page.contains("shared zebra body two"));
+    assert!(page.contains("zebra chat row"));
+    assert!(!page.contains("unrelated body"));
+}
