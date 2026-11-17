@@ -100,6 +100,7 @@ fn media_summary_tallies_the_report_and_knows_when_it_was_clean() {
 /// bounded outcome's summary shape.
 fn outcome_summary(source: &str, inserted: u64, skipped: u64, failed: u64) -> BoundedOutcome {
     BoundedOutcome {
+        originals: None,
         summary: IngestSummary {
             source: source.to_string(),
             seen: inserted + skipped + failed,
