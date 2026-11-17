@@ -482,6 +482,7 @@ fn driver_batches_respect_both_limits() {
             max_batch_text_bytes: 8 * 1024 * 1024,
         },
         media: None,
+        originals: None,
     };
     let outcome = run
         .run(&source, &mut sink, &|| false, &mut |_, _, _| {})
@@ -539,6 +540,7 @@ fn driver_flushes_on_text_budget() {
             max_batch_text_bytes: 1024,
         },
         media: None,
+        originals: None,
     };
     run.run(&source, &mut sink, &|| false, &mut |_, _, _| {})
         .unwrap();
@@ -665,6 +667,7 @@ fn cancellation_preserves_committed_data_and_counts() {
             max_batch_text_bytes: usize::MAX,
         },
         media: None,
+        originals: None,
     };
     let outcome = run
         .run(
@@ -709,6 +712,7 @@ fn cancelled_run_resumes_and_completes_without_duplicates() {
                 max_batch_text_bytes: usize::MAX,
             },
             media: None,
+            originals: None,
         };
         let outcome = run
             .run(
@@ -736,6 +740,7 @@ fn cancelled_run_resumes_and_completes_without_duplicates() {
             max_batch_text_bytes: usize::MAX,
         },
         media: None,
+        originals: None,
     };
     let outcome = run
         .run(&source, &mut sink, &|| false, &mut |_, _, _| {})
@@ -774,6 +779,7 @@ fn restart_recovers_from_last_committed_position() {
                 max_batch_text_bytes: usize::MAX,
             },
             media: None,
+            originals: None,
         };
         let outcome = run.run(&source, &mut sink, &|| false, &mut |_, _, _| {});
         assert!(outcome.is_err(), "the injected interruption must surface");
@@ -799,6 +805,7 @@ fn restart_recovers_from_last_committed_position() {
                 max_batch_text_bytes: usize::MAX,
             },
             media: None,
+            originals: None,
         };
         let outcome = run
             .run(&source, &mut sink, &|| false, &mut |_, _, _| {})
@@ -898,6 +905,7 @@ fn media_linked_counts_reach_the_outcome_summary() {
         // outcome carries a media summary; the fixture references no
         // files, so the extraction pass itself is a no-op (its behavior
         // is media_extract.rs's domain).
+        originals: None,
         media: Some(vault_core::bounded::MediaPass {
             kind: MediaKind::Telegram,
             export_root: dir.path(),
@@ -988,6 +996,7 @@ fn driver_never_holds_more_than_one_batch() {
             max_batch_text_bytes: usize::MAX,
         },
         media: None,
+        originals: None,
     };
     let pulled = Cell::new(0u64);
     let outcome = run
