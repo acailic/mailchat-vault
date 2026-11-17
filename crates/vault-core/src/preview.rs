@@ -159,6 +159,7 @@ fn format_name(format: ChatFormat) -> &'static str {
         ChatFormat::Discord => "discord",
         ChatFormat::Messenger => "messenger",
         ChatFormat::Jsonl => "jsonl",
+        ChatFormat::IMessage => "imessage",
     }
 }
 
