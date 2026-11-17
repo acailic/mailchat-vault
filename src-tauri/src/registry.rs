@@ -434,7 +434,7 @@ impl LlmRegistry {
 /// One provider profile as the Settings UI sees it: the file data plus
 /// whether a key is stored (the key itself never crosses the IPC boundary
 /// back to the frontend).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProviderView {
     #[serde(flatten)]
     pub profile: ProviderProfile,
@@ -464,7 +464,7 @@ pub struct EnvOverridesView {
 }
 
 /// Response of `settings_get` (and of a successful `settings_save`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SettingsView {
     pub providers: Vec<ProviderView>,
     pub default_provider: Option<String>,
@@ -493,7 +493,7 @@ pub struct SettingsView {
 /// Request of `settings_save`: the complete intended settings plus API-key
 /// updates. A non-empty `key` stores/overwrites the key for that provider
 /// id; an empty string clears it; ids not mentioned keep their stored key.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct SaveSettingsPayload {
     pub providers: Vec<ProviderProfile>,
     pub default_provider: Option<String>,
