@@ -181,6 +181,7 @@ use vault_core::storage::{
     FailedItem, MediaMessageReference, RegisteredMediaObject, SavedSearch, SourceInstance, Storage,
     UnlinkedMediaPage, UnlinkedMediaPageRequest,
 };
+use vault_core::vault_session::VaultSession;
 use vault_core::vector::{
     self, EmbedJobSummary, Embedder, EmbeddingStatus, HashEmbedder, EMBED_BODY_PREFIX_CHARS,
 };
@@ -249,8 +250,14 @@ struct AppState {
     embedder: HashEmbedder,
     watcher: FolderWatcher,
     scheduler: Arc<SyncScheduler>,
-    /// The vault root (app data dir): `vault.db`, `media/`,
-    /// `settings.json` — what the M4.4 backup containers capture.
+    /// The open vault session (A4): the single owner of the vault
+    /// identity, the exclusive advisory `vault.lock`, and the derived
+    /// vault paths, held for this app instance's lifetime. Every vault
+    /// path resolution goes through it (or the mirrors below).
+    vault: VaultSession,
+    /// The vault root resolved by the session (today the app data dir:
+    /// `vault.db`, `media/`, `settings.json` — what the M4.4 backup
+    /// containers capture); the session's [`VaultSession::dir`].
     data_dir: PathBuf,
     /// Serializes `restore_commit` / `return_to_previous_vault` /
     /// `recovery_forget` and the `backup_create` / `restore_preview`
@@ -540,15 +547,12 @@ fn saved_searches_delete(state: State<AppState>, id: String) -> Result<(), AppEr
 /// health overview can say *when* the store was last verified and what
 /// that pass saw — an explicit not-checked before the first pass.
 #[tauri::command]
-async fn media_reconcile(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<ReconcileReport, String> {
+async fn media_reconcile(state: State<'_, AppState>) -> Result<ReconcileReport, String> {
     // The report compares the store on disk against the *personal*
     // vault's references; against the demo's empty reference set every
     // real object would read as an orphan, so it refuses instead.
     state.refuse_in_demo()?;
-    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let data_dir = state.data_dir.clone();
     let digests = ActiveVault::from(&state)
         .with_read(|s| s.media_digests())
         .map_err(|e| e.to_string())?;
@@ -578,11 +582,11 @@ async fn media_reconcile(
 /// and the largest objects — the "what is eating my disk" report over
 /// the same enumeration `media_reconcile` sees.
 #[tauri::command]
-async fn media_usage(app: AppHandle, state: State<'_, AppState>) -> Result<MediaUsage, String> {
+async fn media_usage(state: State<'_, AppState>) -> Result<MediaUsage, String> {
     // Same reasoning as `media_reconcile`: the referenced/orphaned
     // split is only meaningful against the personal vault.
     state.refuse_in_demo()?;
-    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let data_dir = state.data_dir.clone();
     let digests = ActiveVault::from(&state)
         .with_read(|s| s.media_digests())
         .map_err(|e| e.to_string())?;
@@ -720,7 +724,6 @@ fn resolve_findings(
 /// without it the report shows every finding's first page.
 #[tauri::command]
 async fn media_reconcile_detail(
-    app: AppHandle,
     state: State<'_, AppState>,
     digest: Option<String>,
     offset: Option<u32>,
@@ -729,7 +732,7 @@ async fn media_reconcile_detail(
     // Same reasoning as `media_reconcile`: findings resolve against the
     // personal vault's messages and imports, never the demo's.
     state.refuse_in_demo()?;
-    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let data_dir = state.data_dir.clone();
     let reference_offset = offset.unwrap_or(0);
     let reference_limit = limit.unwrap_or(DEFAULT_REFERENCES_LIMIT);
     let digests = ActiveVault::from(&state)
@@ -808,14 +811,13 @@ async fn media_reconcile_detail(
 /// `media_open_external` on the returned `path`.
 #[tauri::command]
 async fn media_unlinked_page(
-    app: AppHandle,
     state: State<'_, AppState>,
     request: UnlinkedMediaPageRequest,
 ) -> Result<UnlinkedMediaPage, String> {
     // Same reasoning as `media_usage`: the registry's provenance belongs
     // to the personal vault, never the demo corpus.
     state.refuse_in_demo()?;
-    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let data_dir = state.data_dir.clone();
     let mut page = ActiveVault::from(&state)
         .with_read(|s| s.unlinked_media_page(&request))
         .map_err(|e| e.to_string())?;
@@ -858,12 +860,12 @@ fn validated_object_name(name: &str) -> Result<String, String> {
 /// never moved, linked, or mutated.
 #[tauri::command]
 async fn media_export(
-    app: AppHandle,
+    state: State<'_, AppState>,
     name: String,
     path: String,
 ) -> Result<MediaExportSummary, String> {
     let name = validated_object_name(&name)?;
-    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let data_dir = state.data_dir.clone();
     let src = media_proto::store_path(&data_dir, &name);
     tauri::async_runtime::spawn_blocking(move || {
         let meta =
@@ -937,12 +939,12 @@ fn restrict_preview_permissions(_path: &Path, _dir: bool) -> std::io::Result<()>
 /// tree is private to the user (0700 dirs / 0600 files).
 #[tauri::command]
 async fn media_open_external(
-    app: AppHandle,
+    state: State<'_, AppState>,
     name: String,
     display_name: Option<String>,
 ) -> Result<MediaOpenSummary, String> {
     let name = validated_object_name(&name)?;
-    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let data_dir = state.data_dir.clone();
     let src = media_proto::store_path(&data_dir, &name);
     let display = display_name.unwrap_or_else(|| name.clone());
     tauri::async_runtime::spawn_blocking(move || -> Result<MediaOpenSummary, String> {
@@ -1856,12 +1858,11 @@ fn embed_status(state: State<AppState>) -> Result<EmbeddingStatus, String> {
 /// "View imported messages" scoped to exactly this run.
 #[tauri::command]
 async fn import_mbox(
-    app: AppHandle,
     state: State<'_, AppState>,
     path: String,
 ) -> Result<ChatImportOutcome, String> {
     state.refuse_in_demo()?;
-    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let data_dir = state.data_dir.clone();
     let pool = Arc::clone(&state.pool);
     tauri::async_runtime::spawn_blocking(move || {
         // The shared bounded body resolves the pick (directory → `.eml`
@@ -1908,7 +1909,6 @@ async fn import_mbox(
 /// resumes from its committed position when re-invoked on the same file).
 #[tauri::command]
 async fn import_chat_export(
-    app: AppHandle,
     state: State<'_, AppState>,
     path: String,
     extract_media: Option<bool>,
@@ -1918,7 +1918,7 @@ async fn import_chat_export(
     state.refuse_in_demo()?;
     let extract_media = extract_media.unwrap_or(true);
     let data_dir = if extract_media {
-        Some(app.path().app_data_dir().map_err(|e| e.to_string())?)
+        Some(state.data_dir.clone())
     } else {
         None
     };
@@ -2021,7 +2021,6 @@ impl SyncFailureView {
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn sync_imap(
-    app: AppHandle,
     state: State<'_, AppState>,
     secrets: State<'_, Arc<secrets::Secrets>>,
     host: String,
@@ -2045,10 +2044,7 @@ async fn sync_imap(
     let folders = folders.unwrap_or_default();
     let port = port.unwrap_or(imap::GMAIL_IMAP_PORT);
 
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| SyncFailureView::config(e.to_string()))?;
+    let data_dir = state.data_dir.clone();
     let pool = Arc::clone(&state.pool);
     let secrets = Arc::clone(secrets.inner());
     // Secret resolution (keyring), token refresh (blocking HTTP), and the
@@ -2322,8 +2318,11 @@ struct PreviewImportView {
 /// presence, and input size — nothing is stored. The confirm step then
 /// dispatches to `import_mbox` / `import_chat_export` on the same path.
 #[tauri::command]
-async fn preview_import(app: AppHandle, path: String) -> Result<PreviewImportView, String> {
-    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+async fn preview_import(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<PreviewImportView, String> {
+    let data_dir = state.data_dir.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let preview =
             vault_core::preview::preview_import(Path::new(&path)).map_err(|e| e.to_string())?;
@@ -2674,7 +2673,6 @@ fn resolve_imap_auth(
 /// recover missed ones with `job_events_since`.
 #[tauri::command]
 fn job_submit(
-    app: AppHandle,
     state: State<AppState>,
     secrets: State<'_, Arc<secrets::Secrets>>,
     kind: String,
@@ -2703,7 +2701,7 @@ fn job_submit(
         }
         other => other,
     };
-    submit_job_spec(&app, &state, secrets.inner(), spec)
+    submit_job_spec(&state, secrets.inner(), spec)
 }
 
 /// What the M5.2 ask job kinds need beyond the shared pool: demo-aware
@@ -2724,7 +2722,6 @@ struct AskJobDeps {
 /// job-record semantics. `Err` is the user-facing refusal (demo
 /// lockout, queue full).
 fn submit_job_spec(
-    app: &AppHandle,
     state: &AppState,
     secrets: &Arc<secrets::Secrets>,
     spec: JobSpec,
@@ -2742,7 +2739,7 @@ fn submit_job_spec(
     }
     let pool = Arc::clone(&state.pool);
     let embedder = state.embedder;
-    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let data_dir = state.data_dir.clone();
     let job_pool = Arc::clone(&pool);
     let secrets = Arc::clone(secrets);
     let switch_gate = Arc::clone(&state.switch_gate);
@@ -2773,7 +2770,7 @@ fn submit_job_spec(
 fn submit_sync_now(app: &AppHandle) -> Result<JobHandle, String> {
     let state = app.state::<AppState>();
     let secrets = app.state::<Arc<secrets::Secrets>>();
-    submit_job_spec(app, &state, &secrets, JobSpec::ImapSyncAll)
+    submit_job_spec(&state, &secrets, JobSpec::ImapSyncAll)
 }
 
 /// Execute one validated [`JobSpec`] on the job runner thread. All storage
@@ -4077,7 +4074,12 @@ pub fn run() {
         // ranged — can stall the UI thread; range requests answer with
         // an exact slice, so arbitrarily large objects stream on demand.
         .register_asynchronous_uri_scheme_protocol("mcmedia", |ctx, request, responder| {
-            let data_dir = ctx.app_handle().path().app_data_dir().ok();
+            // A4: the vault root comes from the managed session's
+            // state, never a fresh application-data-dir resolution.
+            let data_dir = ctx
+                .app_handle()
+                .try_state::<AppState>()
+                .map(|state| state.data_dir.clone());
             let range = request
                 .headers()
                 .get("Range")
@@ -4132,12 +4134,23 @@ pub fn run() {
                     .into());
                 }
             };
+            // A4 (vault-session seam): one session now owns the vault
+            // identity, the exclusive advisory `vault.lock`, and every
+            // derived vault path. The default location is still the
+            // application-data directory bootstrapped above — this is
+            // the single remaining `app_data_dir()` resolution; a
+            // legacy vault without `vault.json` opens in place and
+            // gains its identity here, on first open. The session is
+            // held for the app's lifetime in `AppState`, so the lock
+            // releases only at exit.
+            let session = VaultSession::open(&data_dir)
+                .map_err(|e| format!("cannot open the vault: {e}"))?;
             // M2.1: one pool over the vault file — writer worker + two
             // read connections. Job events stream to the UI; the same
             // events are recoverable by polling `job_events_since`.
             let emit_handle = app.handle().clone();
             let pool = DbPool::spawn(
-                data_dir.join("vault.db"),
+                session.db_path().to_owned(),
                 PoolConfig::default(),
                 move |event| {
                     let _ = emit_handle.emit("job-event", event);
@@ -4148,7 +4161,7 @@ pub fn run() {
             // working as a read-only fallback provider exactly as before
             // the Settings UI existed.
             let secrets = Arc::new(secrets::Secrets::new());
-            let settings_path = data_dir.join(settings::SETTINGS_FILE);
+            let settings_path = session.settings_path().to_owned();
             let settings = Settings::load(&settings_path);
             if let Err(e) = &settings {
                 eprintln!("Settings ignored: {e}");
@@ -4196,6 +4209,7 @@ pub fn run() {
                 embedder: HashEmbedder::new(),
                 watcher,
                 scheduler,
+                vault: session,
                 data_dir,
                 switch_gate: Arc::new(SwitchGate::default()),
                 startup_recovery,
