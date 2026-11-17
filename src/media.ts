@@ -11,6 +11,7 @@
 /// row with explicit actions only, never inline: HTML in an attachment
 /// is data to export, never content to execute.
 
+import { type IconName, iconEl } from "./icons";
 import { humanSize } from "./format";
 import type { AttachmentSummary } from "./v2types";
 
@@ -67,6 +68,138 @@ export interface MediaItemHandlers {
   onExport: (attachment: AttachmentSummary) => void;
   /** Open the object with the OS default app (explicit; M4.3). */
   onOpenExternal: (attachment: AttachmentSummary) => void;
+}
+
+// ---------------------------------------------------------------------------
+// Attachment chips (the media section's compact overview)
+// ---------------------------------------------------------------------------
+
+/** Sprite icon for one attachment kind (chips lead with it; decorative,
+ * aria-hidden — the chip's text is the accessible name). */
+export function mediaChipIcon(kind: string): IconName {
+  switch (kind) {
+    case "image":
+    case "photo":
+    case "gif":
+    case "animation":
+    case "sticker":
+      return "image";
+    case "audio":
+    case "voice_message":
+    case "audio_file":
+      return "audio";
+    case "video":
+    case "video_file":
+    case "video_message":
+      return "video";
+    default:
+      return "file";
+  }
+}
+
+/** How many attachment chips stay on the collapsed row before the
+ * "+N more" expander — a fixed count like the era-chip cap
+ * (ERA_CHIP_VISIBLE), never a layout measurement. */
+export const MEDIA_CHIP_VISIBLE = 4;
+
+/** Build one chip <li>: icon by kind, name, humanSize (.tnum). An
+ * available attachment is a button whose one action opens it with the
+ * OS default app (Enter included); an unpreserved one renders as a
+ * quiet non-interactive chip that says "not in export". */
+function mediaChipItem(
+  attachment: AttachmentSummary,
+  handlers: MediaItemHandlers,
+): HTMLLIElement {
+  const li = document.createElement("li");
+  const name = document.createElement("span");
+  name.className = "media-chip-name";
+  name.textContent = attachment.name;
+  const size = document.createElement("span");
+  size.className = "media-chip-size tnum";
+  if (!attachment.available) {
+    // A reference the export did not preserve: an honest quiet chip,
+    // never an actionable one.
+    const chip = document.createElement("span");
+    chip.className = "chip media-chip unresolved";
+    chip.title = "This attachment is a reference — the file was not preserved in the export";
+    size.textContent = "not in export";
+    chip.append(iconEl(mediaChipIcon(attachment.kind)), name, size);
+    li.append(chip);
+    return li;
+  }
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "chip media-chip";
+  chip.title = `Open ${attachment.name} with your system's default application`;
+  size.textContent = humanSize(attachment.size);
+  chip.append(iconEl(mediaChipIcon(attachment.kind)), name, size);
+  const open = () => handlers.onOpenExternal(attachment);
+  chip.addEventListener("click", open);
+  // Buttons activate on Enter/Space natively; handling the keys here
+  // with preventDefault keeps activation explicit (and testable)
+  // without double-firing the native click.
+  chip.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      open();
+    }
+  });
+  li.append(chip);
+  return li;
+}
+
+/** Fill one chips row (the era-chip pattern): the first
+ * [`MEDIA_CHIP_VISIBLE`] chips plus a "+N more" expander whose click
+ * flips the row's own data-expanded state and re-renders in place, so
+ * the expansion survives re-renders without any measurement. */
+export function renderMediaChips(
+  el: HTMLUListElement,
+  attachments: AttachmentSummary[],
+  handlers: MediaItemHandlers,
+): void {
+  const expanded = el.dataset.expanded === "true";
+  const hidden = Math.max(0, attachments.length - MEDIA_CHIP_VISIBLE);
+  if (hidden === 0) {
+    // At or below the cap a stale expanded flag renders identically,
+    // but resets now so a regrow starts collapsed (era-chip discipline).
+    delete el.dataset.expanded;
+  }
+  const visible =
+    expanded || hidden === 0 ? attachments : attachments.slice(0, MEDIA_CHIP_VISIBLE);
+  el.replaceChildren(...visible.map((a) => mediaChipItem(a, handlers)));
+  if (hidden > 0) {
+    const li = document.createElement("li");
+    li.className = "media-chip-more-item";
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "chip media-chip-more";
+    toggle.textContent = expanded ? "Fewer" : `+${hidden} more`;
+    toggle.setAttribute("aria-expanded", String(expanded));
+    toggle.title = expanded
+      ? "Show only the first attachments"
+      : `Show ${hidden} more attachment${hidden === 1 ? "" : "s"}`;
+    toggle.addEventListener("click", () => {
+      el.dataset.expanded = expanded ? "false" : "true";
+      renderMediaChips(el, attachments, handlers);
+    });
+    li.append(toggle);
+    el.append(li);
+  }
+}
+
+/** Build the media section's compact chips row. `initiallyExpanded`
+ * carries the previous render's expansion for the same message (the
+ * caller reads it off the old card, the exportPicker pattern). */
+export function buildMediaChips(
+  attachments: AttachmentSummary[],
+  handlers: MediaItemHandlers,
+  initiallyExpanded = false,
+): HTMLUListElement {
+  const list = document.createElement("ul");
+  list.className = "media-chips";
+  if (initiallyExpanded) list.dataset.expanded = "true";
+  renderMediaChips(list, attachments, handlers);
+  return list;
 }
 
 /** Build one attachment row of the reading pane's media section. */

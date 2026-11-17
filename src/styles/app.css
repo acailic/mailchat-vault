@@ -1150,7 +1150,47 @@ mark.hit {
 .detail-card header { display: flex; justify-content: space-between; align-items: center; gap: var(--sp-2); }
 .detail-card header .header-actions { display: flex; gap: 6px; align-items: center; }
 .detail-card h2 { font-size: var(--text-section); margin: 0 0 var(--sp-2); }
-.detail-card .body { max-width: 78ch; }
+
+/* --- Editorial reading measure (reader task) -----------------------------
+ * Subject, the quiet meta row, and the body share one column capped at
+ * 72ch, centered in the pane: a consistent measure is the reader's
+ * rhythm. Other card bodies (thread rows) keep the cap without the
+ * centering — they sit in their own boxed rows. */
+
+/* The subject: display-line partner of the participant headline. */
+.detail-subject {
+  max-width: 72ch;
+  margin: 0 0 var(--sp-2);
+  margin-inline: auto;
+  font-size: var(--text-base);
+  font-weight: var(--text-display-weight);
+  letter-spacing: var(--text-display-tracking);
+}
+
+/* The quiet meta row: date · source · conversation in muted small
+ * text, tabular digits for the timestamp, one hairline of separation
+ * from the body below. */
+.detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-2);
+  align-items: baseline;
+  max-width: 72ch;
+  margin: 0 0 var(--sp-4);
+  margin-inline: auto;
+  padding-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: var(--text-meta);
+  font-variant-numeric: tabular-nums;
+}
+
+.detail-card .body { max-width: 72ch; }
+.detail-card .detail-body .body {
+  max-width: 72ch;
+  margin-inline: auto;
+  line-height: var(--lh-reading);
+}
 /* Rendered/Raw toggle for email bodies: quiet segmented control over
  * the plain-text body. */
 .detail-card .mode-toggle {
@@ -1265,6 +1305,37 @@ summary.icon-btn::-webkit-details-marker { display: none; }
   margin: 0 0 var(--sp-1);
 }
 .media-list { list-style: none; margin: 0 0 var(--sp-3); padding: 0; }
+/* Attachment chips: the compact overview row. Collapsed, the fixed
+ * visible count keeps it to one line; expanded it wraps. Chip recipe
+ * inherits the .chip hover/pressed states; sizes ride .tnum (set on
+ * the size span in media.ts). */
+.media-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  list-style: none;
+  margin: 0 0 var(--sp-2);
+  padding: 0;
+}
+.media-chips li { display: inline-flex; max-width: 100%; }
+.media-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+}
+.media-chip .icon { width: 12px; height: 12px; flex: none; }
+.media-chip .media-chip-name {
+  min-width: 0;
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.media-chip .media-chip-size { color: var(--muted); }
+/* Unpreserved references: quiet, inert — no hover surface to press. */
+span.media-chip.unresolved { color: var(--muted); }
+span.media-chip.unresolved:hover { background: transparent; }
 .media-item {
   display: flex;
   flex-direction: column;

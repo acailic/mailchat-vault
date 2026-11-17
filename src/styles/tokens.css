@@ -83,9 +83,12 @@
   --text-display-tracking: -0.01em;
 
   /* Density line-heights: body copy and message rows ride comfortable;
-   * compact is the second step a later density mode switches to. */
+   * compact is the second step a later density mode switches to. The
+   * reading body (message prose in the reader) breathes at 1.6 — the
+   * editorial measure pairs with the looser leading. */
   --lh-comfortable: 1.5;
   --lh-compact: 1.35;
+  --lh-reading: 1.6;
 
   /* 4px spacing scale; rows padded 8–12px; radii 4–6px. */
   --sp-1: 4px;
