@@ -12,8 +12,9 @@
 //!   …                 order per scope, relative links only
 //!   assets/           copied media objects, assets/<sha256>.<ext>
 //!   manifest.json     the tamper-evident verification manifest (A9)
-//!   README.md         what the manifest proves and what it does not
-//!   manifest          provenance + missing-file report, written LAST
+//!   README.md         what the manifest (and its inclusion proofs) proves and what it does not
+//!   manifest          provenance + missing-file report + Merkle root
+//!                     and per-message inclusion proofs, written LAST
 //! ```
 //!
 //! An **evidence pack** ([`HtmlExportScope::EvidencePack`]) reuses the
@@ -535,6 +536,7 @@ fn write_bundle(
         attachment_refs,
         digest_commitment,
     };
+    write_readme(staging)?;
     manifest.finish(staging, &summary)?;
     write_index(staging, &summary, scope_statement.as_deref())?;
     publish(staging, dest)?;
@@ -894,27 +896,6 @@ fn bates_number(prefix: &str, number: u64) -> String {
     format!("{prefix}-{number:0width$}", width = BATES_DIGITS)
 }
 
-/// The per-message SHA-256 digest the evidence pack commits to: a
-/// canonical unit-separator-joined serialization of every stored
-/// field (attachments ride inside `raw_json`), hex-encoded. The
-/// commitment is SHA-256 over these digests in exported order.
-fn message_digest(m: &Message) -> String {
-    let canonical = format!(
-        "{id}\u{1f}{source}\u{1f}{external_id}\u{1f}{channel}\u{1f}{chat_id}\u{1f}\
-         {author}\u{1f}{sent_at}\u{1f}{body}\u{1f}{raw_json}",
-        id = m.id,
-        source = m.source,
-        external_id = m.external_id,
-        channel = m.channel,
-        chat_id = m.chat_id,
-        author = m.author,
-        sent_at = m.sent_at,
-        body = m.body,
-        raw_json = m.raw_json,
-    );
-    hex_encode(&Sha256::digest(canonical.as_bytes()))
-}
-
 /// Lowercase hex of a byte slice (no hex dependency for 32-byte
 /// digests).
 fn hex_encode(bytes: &[u8]) -> String {
@@ -993,6 +974,11 @@ struct ManifestWriter {
     /// Evidence packs: the running commitment hasher over the ordered
     /// per-message digests (`None` for a plain bundle).
     commitment: Option<Sha256>,
+    /// `(external_id, message digest)` of every exported message — the
+    /// Merkle leaf set, ordered deterministically at `finish` time
+    /// (external_id ascending, ties by digest). The digests are 32
+    /// bytes each, so even a multi-million-message set stays bounded.
+    leaves: Vec<(String, crate::merkle::Digest)>,
 }
 
 impl ManifestWriter {
@@ -1011,38 +997,30 @@ impl ManifestWriter {
             missing: 0,
             attachments: 0,
             commitment: evidence.then(Sha256::new),
+            leaves: Vec::new(),
         })
     }
 
-    /// One provenance line per exported message. Evidence packs append
-    /// the message's digest and fold it into the commitment.
+    /// One provenance line per exported message. Every line carries the
+    /// digest its Merkle leaf covers; evidence packs also fold it into
+    /// the running commitment.
     fn provenance(&mut self, page_no: u64, m: &Message) -> Result<()> {
-        if self.commitment.is_some() {
-            let digest = message_digest(m);
-            if let Some(h) = &mut self.commitment {
-                h.update(digest.as_bytes());
-                h.update(b"\n");
-            }
-            return writeln!(
-                self.out,
-                "[{}] id={} source={} external_id={} sent_at={} digest={}",
-                page_name(page_no),
-                m.id,
-                m.source,
-                m.external_id,
-                m.sent_at,
-                digest
-            )
-            .map_err(Into::into);
+        let digest = message_digest(m);
+        let digest_hex = crate::merkle::hex(&digest);
+        if let Some(h) = &mut self.commitment {
+            h.update(&digest);
+            h.update(b"\n");
         }
+        self.leaves.push((m.external_id.clone(), digest));
         writeln!(
             self.out,
-            "[{}] id={} source={} external_id={} sent_at={}",
+            "[{}] id={} source={} external_id={} sent_at={} digest={}",
             page_name(page_no),
             m.id,
             m.source,
             m.external_id,
-            m.sent_at
+            m.sent_at,
+            digest_hex,
         )
         .map_err(Into::into)
     }
@@ -1074,6 +1052,7 @@ impl ManifestWriter {
 
     /// Footer, flush, fsync, and the completeness rename.
     fn finish(mut self, staging: &Path, summary: &HtmlExportSummary) -> Result<()> {
+        self.write_merkle_section()?;
         writeln!(self.out)?;
         writeln!(
             self.out,
@@ -1100,11 +1079,258 @@ impl ManifestWriter {
         fs::rename(&self.path, manifest)?;
         Ok(())
     }
+
+    /// The Merkle section: the root over all exported message digests
+    /// and each message's inclusion-proof path, in the wire format
+    /// [`read_manifest_proofs`] parses (see `proof:` lines below). Leaf
+    /// order is fixed — external_id ascending (byte order), ties broken
+    /// by digest — so the same data always yields the same root.
+    fn write_merkle_section(&mut self) -> Result<()> {
+        writeln!(self.out)?;
+        writeln!(self.out, "message merkle proofs:")?;
+        let mut leaves = std::mem::take(&mut self.leaves);
+        leaves.sort();
+        let digests: Vec<crate::merkle::Digest> = leaves.iter().map(|(_, d)| *d).collect();
+        match crate::merkle::merkle_root(&digests) {
+            Some(root) => {
+                writeln!(self.out, "merkle-root: {}", crate::merkle::hex(&root))?;
+                writeln!(
+                    self.out,
+                    "leaf-order: external_id ascending (byte order), ties by digest"
+                )?;
+                writeln!(
+                    self.out,
+                    "hashing: leaf = sha256(0x00 + message digest); node = sha256(0x01 + left + right); a lone trailing node is promoted unchanged"
+                )?;
+                let proofs = crate::merkle::inclusion_proofs(&digests);
+                for ((external_id, digest), path) in leaves.iter().zip(&proofs) {
+                    let steps: Vec<String> = path
+                        .iter()
+                        .map(|s| match s.side {
+                            crate::merkle::Side::Left => {
+                                format!("L{}", crate::merkle::hex(&s.sibling))
+                            }
+                            crate::merkle::Side::Right => {
+                                format!("R{}", crate::merkle::hex(&s.sibling))
+                            }
+                        })
+                        .collect();
+                    writeln!(
+                        self.out,
+                        "proof:{}:{}:{}",
+                        crate::merkle::hex(digest),
+                        steps.join(","),
+                        external_id
+                    )?;
+                }
+            }
+            None => writeln!(self.out, "merkle-root: none (no messages exported)")?,
+        }
+        Ok(())
+    }
+}
+
+/// The per-message digest the Merkle tree covers: SHA-256 of the
+/// message's serde JSON serialization in the exact shape the JSON
+/// Lines export writer emits ([`serde_json::to_writer`] on the
+/// `Message` in [`crate::export`]) — one definition, decided once, so
+/// re-deriving a digest for verification reproduces it byte-for-byte.
+fn message_digest(m: &Message) -> crate::merkle::Digest {
+    let bytes = serde_json::to_vec(m).expect("a Message always serializes");
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher.finalize().into()
+}
+
+// ---------------------------------------------------------------------------
+// Bundle verification
+// ---------------------------------------------------------------------------
+
+/// The manifest's Merkle section, parsed back out of a written bundle.
+struct ManifestProofs {
+    /// The root line's digest, `None` when the bundle exported no
+    /// messages (or predates the section).
+    stated_root: Option<crate::merkle::Digest>,
+    /// `(external_id, digest, proof path)` per exported message, in
+    /// manifest order.
+    leaves: Vec<(String, crate::merkle::Digest, Vec<crate::merkle::ProofStep>)>,
+}
+
+/// Parse the Merkle section of `bundle/manifest`. A `proof:` line is
+/// `proof:<digest-hex>:<steps>:<external-id>` where the id is the rest
+/// of the line (it may contain colons) and steps are comma-separated
+/// `L<hex>`/`R<hex>` sibling hashes (empty for a single-message
+/// bundle).
+fn read_manifest_proofs(bundle: &Path) -> Result<ManifestProofs> {
+    let text = fs::read_to_string(bundle.join("manifest"))?;
+    let mut stated_root = None;
+    let mut leaves = Vec::new();
+    for line in text.lines() {
+        if let Some(root) = line.strip_prefix("merkle-root: ") {
+            stated_root = crate::merkle::unhex(root.trim());
+        } else if let Some(rest) = line.strip_prefix("proof:") {
+            let Some((digest_text, rest)) = rest.split_once(':') else {
+                continue;
+            };
+            let Some((steps_text, external_id)) = rest.split_once(':') else {
+                continue;
+            };
+            let Some(digest) = crate::merkle::unhex(digest_text) else {
+                continue;
+            };
+            let mut path = Vec::new();
+            if !steps_text.is_empty() {
+                for step in steps_text.split(',') {
+                    let mut chars = step.chars();
+                    let side = match chars.next() {
+                        Some('L') => crate::merkle::Side::Left,
+                        Some('R') => crate::merkle::Side::Right,
+                        _ => continue,
+                    };
+                    if let Some(sibling) = crate::merkle::unhex(chars.as_str()) {
+                        path.push(crate::merkle::ProofStep { side, sibling });
+                    }
+                }
+            }
+            leaves.push((external_id.to_string(), digest, path));
+        }
+    }
+    Ok(ManifestProofs {
+        stated_root,
+        leaves,
+    })
+}
+
+/// The full-root check over a written bundle: the root recomputed from
+/// every digest the manifest lists, against the root it records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundleProofCheck {
+    /// The root recorded in the manifest (hex; `None` when the bundle
+    /// exported no messages).
+    pub stated_root: Option<String>,
+    /// The root recomputed from the manifest's listed digests (hex;
+    /// `None` when no digests are listed).
+    pub recomputed_root: Option<String>,
+    /// Message digests the manifest lists.
+    pub messages: usize,
+    /// Whether the recomputed root equals the recorded root. A root
+    /// mismatch marks the whole bundle invalid — no single proof path
+    /// can override it.
+    pub valid: bool,
+}
+
+/// Verify a written bundle's Merkle root: recompute the root from all
+/// listed message digests and compare with the recorded root.
+pub fn verify_bundle_full(bundle: &Path) -> Result<BundleProofCheck> {
+    let proofs = read_manifest_proofs(bundle)?;
+    let digests: Vec<crate::merkle::Digest> = proofs.leaves.iter().map(|(_, d, _)| *d).collect();
+    let recomputed = crate::merkle::merkle_root(&digests);
+    let valid = match (proofs.stated_root, recomputed) {
+        (Some(stated), Some(computed)) => stated == computed,
+        _ => false,
+    };
+    Ok(BundleProofCheck {
+        stated_root: proofs.stated_root.map(|d| crate::merkle::hex(&d)),
+        recomputed_root: recomputed.map(|d| crate::merkle::hex(&d)),
+        messages: proofs.leaves.len(),
+        valid,
+    })
+}
+
+/// The single-message check: whether one cited message's digest plus
+/// its recorded proof path hash to the bundle's recorded root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BundleMessageCheck {
+    /// The message's external id, as cited.
+    pub external_id: String,
+    /// Whether the digest + path prove membership in the bundle's
+    /// recorded root.
+    pub path_valid: bool,
+    /// The root the digest + path actually prove membership in (hex) —
+    /// the original root when the bundle was tampered with after
+    /// export, which is how tampering is distinguishable.
+    pub proved_root: String,
+    /// The root the manifest records (hex; what `path_valid` compares
+    /// against).
+    pub bundle_root: Option<String>,
+}
+
+/// Verify one cited message of a written bundle by `external_id`
+/// without reading any other message: fold its proof path over its
+/// digest and report the root that proves membership. `Ok(None)` when
+/// the manifest lists no such id. Note the reported validity is about
+/// this path alone — a root mismatch found by [`verify_bundle_full`]
+/// marks the whole bundle invalid regardless.
+pub fn verify_bundle_message(
+    bundle: &Path,
+    external_id: &str,
+) -> Result<Option<BundleMessageCheck>> {
+    let proofs = read_manifest_proofs(bundle)?;
+    let Some((id, digest, path)) = proofs
+        .leaves
+        .iter()
+        .find(|(id, _, _)| id == external_id)
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    let proved = crate::merkle::prove(&digest, &path);
+    let bundle_root = proofs.stated_root;
+    let path_valid = bundle_root == Some(proved);
+    Ok(Some(BundleMessageCheck {
+        external_id: id,
+        path_valid,
+        proved_root: crate::merkle::hex(&proved),
+        bundle_root: bundle_root.map(|d| crate::merkle::hex(&d)),
+    }))
 }
 
 // ---------------------------------------------------------------------------
 // Index and publication
 // ---------------------------------------------------------------------------
+
+/// The plain-language proof statement placed beside the manifest: what
+/// an inclusion proof proves, and — stated plainly — that it is not
+/// third-party notarization.
+fn write_readme(staging: &Path) -> Result<()> {
+    write_synced(&staging.join("README"), PROOFS_README.as_bytes())
+}
+
+/// The README-in-bundle text (see [`write_readme`]).
+const PROOFS_README: &str = "\
+Mailchat Vault export bundle: Merkle inclusion proofs
+=====================================================
+
+The manifest beside this file records, for every exported message, a
+SHA-256 digest of that message and a short \"inclusion proof\" — a
+handful of hashes (about log2 of the message count) — plus a single
+Merkle root covering the whole exported set.
+
+What an inclusion proof proves
+------------------------------
+Given one message, its digest, and its proof path, anyone can recompute
+the bundle root without reading, opening, or trusting any other message
+in the bundle: fold the path's sibling hashes into the digest (each from
+the side the manifest states) and compare the result with the
+manifest's merkle-root line. A match proves this message was one of the
+leaves of the tree the exporter built at export time; changing any byte
+of any message digest changes the recomputed root.
+
+What it does NOT prove
+----------------------
+- It is NOT third-party notarization. Everything here is computed by
+  the same software that wrote the export. The proofs detect accidental
+  corruption and after-the-fact edits when compared against a root you
+  saved; they do not vouch for the exporter's honesty.
+- There is no trusted timestamp. \"At export time\" means what the
+  bundle's own records say, nothing more.
+- It does not prove the bundle is complete relative to the source
+  account: messages outside the export scope were never in the tree.
+- The tree covers the digests recorded in the manifest, so a proof says
+  the manifest's view of the message is unchanged — the digest itself
+  is SHA-256 of the message's JSON serialization, as the manifest
+  states.
+";
 
 /// The bundle's `index.html`: scope, count, fidelity label, and
 /// relative links to every page (the exact query scope, not the
