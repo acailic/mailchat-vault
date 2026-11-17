@@ -300,11 +300,14 @@ fn version17_db(db: &std::path::Path) -> i64 {
     // migrations 18+ added (18 saved_searches, 19 collections +
     // members, 20 people + identity links, 21 the digest index, 22
     // attachment_refs, 23 person_link_history, 24 source_receipts +
-    // the import_checkpoints count columns). Tables take their
-    // indexes with them. Keep this list in step with new migrations -
-    // a missed object resurfaces as "already exists" on reopen.
+    // the import_checkpoints count columns, 25 reminder_preferences,
+    // 26 original objects/references, 27 message_fingerprints).
+    // Tables take their indexes with them. Keep this list in step with
+    // new migrations - a missed object resurfaces as "already exists"
+    // on reopen.
     conn.execute_batch(
-        "DROP TABLE IF EXISTS source_receipts;
+        "DROP TABLE IF EXISTS message_fingerprints;
+         DROP TABLE IF EXISTS source_receipts;
          DROP TABLE IF EXISTS reminder_preferences;
          DROP TABLE IF EXISTS original_references;
          DROP TABLE IF EXISTS original_objects;
