@@ -39,7 +39,7 @@
 //! deliberate: personal-use clients (fewer than 100 users) are exempt
 //! from Google's OAuth verification, so the app itself never needs a
 //! verified public client — the flow stays labeled advanced setup. See
-//! `docs/evidence/gmail-oauth-scope-2026-11-15.md` for the scope and
+//! `docs/evidence/gmail-oauth-scope-analysis-2026-11-15.md` for the scope and
 //! verification analysis (issue #82).
 //!
 //! # Testing
@@ -81,7 +81,7 @@ pub const GMAIL_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 /// be reached on the IMAP path — the narrower-scope alternative is a Gmail
 /// API connector with `gmail.readonly`, a separate project (issue #82);
 /// until then this flow stays labeled advanced setup, BYO client only.
-/// Analysis: `docs/evidence/gmail-oauth-scope-2026-11-15.md`.
+/// Analysis: `docs/evidence/gmail-oauth-scope-analysis-2026-11-15.md`.
 pub const GMAIL_SCOPE: &str = "https://mail.google.com/";
 
 /// Environment variable carrying the user's own Google OAuth client id.
@@ -643,7 +643,7 @@ mod tests {
         // usage cannot narrow the permission, so a well-meant
         // "least-privilege" edit here would break every Google sign-in —
         // the granular alternative is a Gmail API connector (issue #82,
-        // docs/evidence/gmail-oauth-scope-2026-11-15.md).
+        // docs/evidence/gmail-oauth-scope-analysis-2026-11-15.md).
         assert_eq!(GMAIL_SCOPE, "https://mail.google.com/");
         // The Gmail preset — and therefore the env-configured client —
         // requests exactly it, unmodified.

@@ -43,7 +43,7 @@ Two ways to authenticate, picked in the UI:
 
 ### Gmail (Google sign-in / OAuth)
 
-**Advanced setup** — this path needs a Google Cloud project you register yourself (below); the app deliberately ships no public one-click Gmail sign-in, and the full-mail scope below cannot be narrowed while staying on IMAP ([scope analysis](evidence/gmail-oauth-scope-2026-11-15.md), issue #82). The simpler default is the [app password](#gmail-app-password) path.
+**Advanced setup** — this path needs a Google Cloud project you register yourself (below); the app deliberately ships no public one-click Gmail sign-in, and the full-mail scope below cannot be narrowed while staying on IMAP ([scope analysis](evidence/gmail-oauth-scope-analysis-2026-11-15.md), issue #82). The simpler default is the [app password](#gmail-app-password) path.
 
 The browser-based desktop OAuth2 flow: click **Sign in with Google…**, consent once in the browser window that opens, done — the app receives an access token plus a refresh token and authenticates IMAP via SASL `XOAUTH2`. No app password needed, and every sync refreshes a fresh short-lived access token from the stored refresh token.
 
@@ -58,7 +58,7 @@ The browser-based desktop OAuth2 flow: click **Sign in with Google…**, consent
    | `MAILCHAT_GMAIL_CLIENT_ID` | your OAuth client ID (`…apps.googleusercontent.com`) |
    | `MAILCHAT_GMAIL_CLIENT_SECRET` | your client secret (`GOCSPX-…`) |
 
-   Both must be set (or both unset — then the Google sign-in UI says it is not configured). The scope requested is `https://mail.google.com/` — the full, restricted mail scope Gmail's IMAP endpoint demands for `AUTHENTICATE XOAUTH2`. The app itself only ever issues read-only IMAP commands (`EXAMINE`, `UID SEARCH`, `UID FETCH`), but that does **not** narrow the OAuth permission: Google refuses narrower tokens at IMAP login and directs apps that do not need the full scope to the Gmail API instead ([scope analysis](evidence/gmail-oauth-scope-2026-11-15.md)). Personal-use clients like this one (your own, under 100 users) are exempt from Google's verification.
+   Both must be set (or both unset — then the Google sign-in UI says it is not configured). The scope requested is `https://mail.google.com/` — the full, restricted mail scope Gmail's IMAP endpoint demands for `AUTHENTICATE XOAUTH2`. The app itself only ever issues read-only IMAP commands (`EXAMINE`, `UID SEARCH`, `UID FETCH`), but that does **not** narrow the OAuth permission: Google refuses narrower tokens at IMAP login and directs apps that do not need the full scope to the Gmail API instead ([scope analysis](evidence/gmail-oauth-scope-analysis-2026-11-15.md)). Personal-use clients like this one (your own, under 100 users) are exempt from Google's verification.
 4. In the app: choose **Google sign-in (OAuth)**, enter your address, sign in once, then **Sync** like with any other account.
 
 ### Gmail (app password)
