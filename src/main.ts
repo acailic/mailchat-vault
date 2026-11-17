@@ -82,8 +82,10 @@ import {
   messageToText,
   parseMessageLink,
   restoreIndices,
+  resetFolds,
   revisionChanged,
   selectionIds,
+  toggleFold,
   withoutChip,
   type EraBucket,
   type FilterChip,
@@ -678,6 +680,7 @@ function renderAll(): void {
     activeIndex: state.activeIndex,
     selectedId: state.selectedId,
     selection: state.selection,
+    expandedFolds: state.expandedFolds,
     terms,
     onOpen: (id: number) => {
       const at = state.hits.findIndex((h) => h.id === id);
@@ -685,6 +688,7 @@ function renderAll(): void {
       void openDetail(id);
     },
     onToggleSelect: toggleRowSelection,
+    onToggleFold: toggleFoldRow,
   });
   renderPagination(pagination, pageModel(state.total, state.offset, PAGE_SIZE), {
     onPrev: () => void runSearch(state.offset - PAGE_SIZE),
@@ -1844,6 +1848,7 @@ async function runSearch(offset = 0): Promise<void> {
     state.activeIndex = -1;
     state.selectedId = null;
     state.selection.clear();
+    state.expandedFolds = resetFolds();
     state.pageRevision = null;
     state.refreshNeeded = false;
     setStatus("Your archive is empty — add a source to get started.");
@@ -1883,6 +1888,7 @@ async function runSearch(offset = 0): Promise<void> {
       state.activeIndex = -1;
       state.selectedId = null;
       state.selection.clear();
+      state.expandedFolds = resetFolds();
       state.resultsSnapshot = null;
     }
     const range =
@@ -1927,6 +1933,12 @@ function clearFilters(): void {
 function toggleRowSelection(id: number): void {
   if (state.selection.has(id)) state.selection.delete(id);
   else state.selection.add(id);
+  renderAll();
+}
+
+/** Expand/collapse one folded row's inline copies list (NEWWO-101). */
+function toggleFoldRow(id: number): void {
+  state.expandedFolds = toggleFold(state.expandedFolds, id);
   renderAll();
 }
 
@@ -2632,6 +2644,7 @@ async function refreshAfterVaultSwitch(): Promise<void> {
   state.activeIndex = -1;
   state.selectedId = null;
   state.selection.clear();
+  state.expandedFolds = resetFolds();
   state.resultsSnapshot = null;
   // A selected source id belongs to the vault it was picked in: the
   // other vault's ids resolve to nothing and would render as a raw-uuid

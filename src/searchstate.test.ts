@@ -15,15 +15,19 @@ import {
   DEFAULT_FILTERS,
   eraBuckets,
   filterChips,
+  foldCount,
   hasActiveFilters,
   mergeContextPages,
   messageLink,
   messageToText,
   parseMessageLink,
+  resetFolds,
   restoreResults,
   revisionChanged,
   selectionIds,
   Sequence,
+  similarCopiesLabel,
+  toggleFold,
   withoutChip,
   type SearchFilters,
 } from "./searchstate";
@@ -416,6 +420,59 @@ describe("selection export model", () => {
     const selected = new Set([12, 10]);
     expect(selectionIds(hits, selected)).toEqual([10, 12]);
     expect(selectionIds(hits, new Set())).toEqual([]);
+  });
+});
+
+describe("near-duplicate fold expander (NEWWO-101)", () => {
+  const hit = (id: number, over: Partial<MessageSummary> = {}): MessageSummary => ({
+    id,
+    source_id: `s${id}`,
+    source_label: `Source ${id}`,
+    conversation_id: null,
+    conversation_label: null,
+    author: "Ana",
+    subject: null,
+    sent_at: "2026-01-01T10:00:00Z",
+    time_confidence: "legacy_assumed",
+    snippet: "",
+    attachment_count: 0,
+    available_attachment_count: 0,
+    has_conflicting_revision: false,
+    ...over,
+  });
+
+  it("toggles one representative's fold without touching the input set", () => {
+    const start = resetFolds();
+    const one = toggleFold(start, 7);
+    expect(one.has(7)).toBe(true);
+    const two = toggleFold(one, 9);
+    expect([...two].sort((a, b) => a - b)).toEqual([7, 9]);
+    const back = toggleFold(two, 7);
+    expect(back.has(7)).toBe(false);
+    expect(back.has(9)).toBe(true);
+    // Pure: the sets it came from are unchanged.
+    expect(start.size).toBe(0);
+    expect(one.has(7)).toBe(true);
+  });
+
+  it("a new query's results page starts with every fold collapsed", () => {
+    const expanded = toggleFold(toggleFold(resetFolds(), 3), 5);
+    expect(expanded.size).toBe(2);
+    expect(resetFolds().size).toBe(0);
+  });
+
+  it("the count label carries its singular and plural forms", () => {
+    expect(similarCopiesLabel(1)).toBe("1 similar copy");
+    expect(similarCopiesLabel(2)).toBe("2 similar copies");
+    expect(similarCopiesLabel(5)).toBe("5 similar copies");
+  });
+
+  it("an absent cluster count is no copies at all", () => {
+    // Before part 3/5 lands (and for unfolded rows after), the fields
+    // are simply absent — the row behaves like count 0.
+    expect(foldCount(hit(1))).toBe(0);
+    expect(foldCount(hit(1, { cluster_count: 0 }))).toBe(0);
+    expect(foldCount(hit(1, { cluster_count: 3, member_ids: [2, 3, 4] }))).toBe(3);
   });
 });
 

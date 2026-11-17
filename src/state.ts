@@ -235,6 +235,9 @@ export interface UiState {
   selectedId: number | null;
   /** Rows checked for the explicit selection export. */
   selection: Set<number>;
+  /** Representative rows whose folded near-duplicate copies are
+   * expanded inline (NEWWO-101); reset with every fresh results page. */
+  expandedFolds: Set<number>;
   /** Archive revision of the visible results (refresh signal, A07). */
   pageRevision: number | null;
   refreshNeeded: boolean;
@@ -257,6 +260,7 @@ export function initialUiState(): UiState {
     activeIndex: -1,
     selectedId: null,
     selection: new Set(),
+    expandedFolds: new Set(),
     pageRevision: null,
     refreshNeeded: false,
     detail: null,
