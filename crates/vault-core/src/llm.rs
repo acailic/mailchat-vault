@@ -1043,9 +1043,13 @@ pub struct SynthesisPayload {
 
 /// Build the exact synthesis prompts over the top `top` of `results`
 /// (truncated, in [`lim_order`] placement); `None` when there are no
-/// results — nothing would be sent. When `collected` is non-empty, up to
-/// [`SUMMARY_LINK_LIMIT`] `url · author · date` lines are appended and the
-/// system prompt gains a rule for describing the links; with no collected
+/// results — nothing would be sent. When retrieval returned more than
+/// `top`, one line stating the dropped count is appended after the
+/// context blocks (counts only — no dropped content leaves the
+/// machine), so the model can say that more results exist. When
+/// `collected` is non-empty, up to [`SUMMARY_LINK_LIMIT`] `url ·
+/// author · date` lines are appended after that note and the system
+/// prompt gains a rule for describing the links; with no collected
 /// links both prompts are built exactly as before.
 pub fn build_synthesis_payload(
     question: &str,
@@ -1064,6 +1068,14 @@ pub fn build_synthesis_payload(
         .join("\n\n");
     let mut user =
         format!("Question: {question}\n\nMessages (numbered by relevance):\n\n{contexts}");
+    if results.len() > top_messages.len() {
+        let further = results.len() - top_messages.len();
+        user.push_str(&format!(
+            "\n\nNote: {further} further matching messages exist beyond the {} shown; \
+             you may say that more results exist.",
+            top_messages.len()
+        ));
+    }
     let mut system = SUMMARY_SYSTEM_PROMPT.to_string();
     if !collected.is_empty() {
         let mut lines: Vec<String> = Vec::new();
@@ -1098,6 +1110,9 @@ pub fn build_synthesis_payload(
 /// results. Only those rows (truncated) are sent — the privacy guarantee.
 /// Skipped entirely when there are no results. The prompts come from
 /// [`build_synthesis_payload`], the same builder the v2 preview uses.
+/// When retrieval returned more than `top`, the success arm carries one
+/// honest note in [`Summarized.notes`] (the established channel into
+/// `AskOutcome.notes` in the UI) stating the dropped count.
 pub fn summarize_results(
     llm: &dyn Llm,
     question: &str,
@@ -1112,10 +1127,20 @@ pub fn summarize_results(
         };
     };
     match llm.complete(&payload.system, &payload.user) {
-        Ok(answer) => Summarized {
-            answer: Some(answer),
-            notes: Vec::new(),
-        },
+        Ok(answer) => {
+            let notes = if results.len() > top {
+                vec![format!(
+                    "summary used the top {top} of {} retrieved results",
+                    results.len()
+                )]
+            } else {
+                Vec::new()
+            };
+            Summarized {
+                answer: Some(answer),
+                notes,
+            }
+        }
         Err(e) => Summarized {
             answer: None,
             notes: vec![format!(
@@ -2279,6 +2304,96 @@ mod tests {
             );
         }
         assert_eq!(marker_order(user, 3), vec![1, 3, 2]);
+    }
+
+    #[test]
+    fn summary_prompt_discloses_the_dropped_passage_count() {
+        // 14 retrieved, window 6: the prompt states the exact count of
+        // further matches — counts only, never the dropped content.
+        let msgs: Vec<Message> = (0..14).map(lim_msg).collect();
+        let llm = MockLlm::with_replies(["summary"]);
+        summarize_results(&llm, "vault?", &msgs, 6, &[]);
+        let user = &llm.prompts()[0].1;
+        assert!(
+            user.contains("8 further matching messages exist beyond the 6 shown"),
+            "dropped-count note missing: {user}"
+        );
+
+        // The note sits after every context block and before the
+        // collected-links section (proved via the shared builder).
+        let link_msgs: Vec<Message> = (0..10)
+            .map(|i| {
+                link_msg(
+                    i as i64,
+                    "ana",
+                    &format!("see https://example.com/{i} vault"),
+                )
+            })
+            .collect();
+        let collected = extract_links(&link_msgs);
+        let payload = build_synthesis_payload("vault?", &link_msgs, 6, &collected).unwrap();
+        let note_at = payload
+            .user
+            .find("further matching messages")
+            .expect("note present when rows are dropped");
+        for k in 1..=6 {
+            assert!(
+                payload.user.find(&format!("[{k}] author")).unwrap() < note_at,
+                "note must follow context block [{k}]: {}",
+                payload.user
+            );
+        }
+        assert!(
+            note_at < payload.user.find("Collected links").unwrap(),
+            "note must precede the collected-links section: {}",
+            payload.user
+        );
+    }
+
+    #[test]
+    fn summary_prompt_has_no_dropped_note_when_all_results_fit() {
+        // Below the window and exactly at it: nothing was dropped, so
+        // the prompt stays silent about further matches.
+        for n in [5usize, 8usize] {
+            let msgs: Vec<Message> = (0..n).map(lim_msg).collect();
+            let llm = MockLlm::with_replies(["summary"]);
+            summarize_results(&llm, "vault?", &msgs, 8, &[]);
+            let user = &llm.prompts()[0].1;
+            assert!(
+                !user.contains("further matching messages"),
+                "n={n}: nothing dropped, no note expected: {user}"
+            );
+        }
+    }
+
+    #[test]
+    fn summary_prompt_notes_report_dropped_results_only_when_dropped() {
+        // Dropped: the honest note rides the established notes channel.
+        let msgs: Vec<Message> = (0..11).map(lim_msg).collect();
+        let llm = MockLlm::with_replies(["summary"]);
+        let s = summarize_results(&llm, "vault?", &msgs, 8, &[]);
+        assert_eq!(s.answer.as_deref(), Some("summary"));
+        assert_eq!(
+            s.notes,
+            vec!["summary used the top 8 of 11 retrieved results".to_string()],
+            "the dropped count must surface in Summarized.notes"
+        );
+
+        // Everything fits: no note.
+        let msgs: Vec<Message> = (0..8).map(lim_msg).collect();
+        let llm = MockLlm::with_replies(["summary"]);
+        let s = summarize_results(&llm, "vault?", &msgs, 8, &[]);
+        assert!(
+            s.notes.is_empty(),
+            "nothing dropped, notes must stay empty: {:?}",
+            s.notes
+        );
+
+        // A failed summary keeps its failure note only.
+        let failing = MockLlm::failing("provider exploded");
+        let s = summarize_results(&failing, "vault?", &msgs, 8, &[]);
+        assert_eq!(s.notes.len(), 1);
+        assert!(s.notes[0].contains("LLM summary failed"));
     }
 
     #[test]

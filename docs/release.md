@@ -27,6 +27,34 @@ are also attached as workflow-run artifacts (`linux-bundles`,
 Version bump flow: raise `version` in `src-tauri/tauri.conf.json` and the
 workspace `Cargo.toml`, commit, tag `v<version>`, push the tag.
 
+### SBOM (CycloneDX)
+
+Each release attaches a **CycloneDX JSON** bill of materials of the
+workspace dependencies (`*.cdx.json`, one per workspace crate:
+`crates/vault-core/`, `src-tauri/`) as a release asset alongside
+`SHA256SUMS`. Generation route mirrors the execution-route decision: the
+`sbom` job of the supply-chain workflow (hosted route, once runners
+start — the workflow is staged verbatim at
+[`docs/supply-chain.workflow.yml`](supply-chain.workflow.yml) pending
+the owner move recorded in [launch-checklist.md](launch-checklist.md)),
+or locally with
+
+```sh
+cargo install --locked cargo-cyclonedx
+cargo cyclonedx --format json   # → crates/vault-core/*.cdx.json, src-tauri/*.cdx.json
+```
+
+then upload the generated files to the draft release (they are
+gitignored build outputs; the release asset is their home).
+The SBOM files are covered by the same checksums rule as every other
+asset: a line each in `SHA256SUMS`
+([Checksums & verifying a published release](#checksums--verifying-a-published-release)),
+so "the SBOM I read is the SBOM shipped" is verifiable. Honest status:
+the `sbom` job is committed config that starts no runners while Actions
+billing is blocked (#80/#102) — until a hosted run or the local command
+executes for a release, that release ships without an SBOM and its
+notes must not claim one.
+
 > **Honest status (2026-11-17, v0.2.0 execution):** the release executed
 > on the authorized local route. Gate evidence at tag `e9f227f`:
 > `cargo test -p vault-core` 59/59 binaries green, `npm test` 702 passed /

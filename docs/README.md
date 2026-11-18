@@ -20,6 +20,7 @@ Hands-on guides sit alongside the specification set:
 | [Download & install](download.md) | Version × OS × architecture matrix, minimum requirements, checksum verification, limitations, manual upgrade path |
 | [Distribution](distribution.md) | Package-manager kit (Homebrew, winget, Scoop, AUR, Flathub): version-bump script, per-manager owner publication steps, flatpak permissions, the signing gate (#78) |
 | [Release](release.md) | Installers, local builds, smoke tests, checksums, publishing |
+| [Launch checklist](launch-checklist.md) | Owner actions that cannot be committed: Actions billing, Scorecard, Dependabot, branch protection, signed tags |
 | [Native verification runbook](native-verification.md) | The G1/A14 procedure for real macOS/Windows verification hosts: exact commands per OS, evidence binding (artifact SHA-256, tester, date), and the templates native runs fill |
 | [Support matrix](support-matrix.md) | Current capability and claim status with evidence links, plus open go-public blockers |
 | [Security](security.md) | What the opt-in at-rest encryption (SQLCipher) does and does not protect: memory, swap, pre-migration backups, key custody |

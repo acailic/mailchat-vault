@@ -16,6 +16,12 @@ Mailchat Vault is one private, searchable archive for your email and your chats,
 [![macOS download](https://img.shields.io/badge/macOS-download-blue)](https://github.com/acailic/mailchat-vault/releases/latest)
 [![Windows download](https://img.shields.io/badge/Windows-download-blue)](https://github.com/acailic/mailchat-vault/releases/latest)
 [![Linux download](https://img.shields.io/badge/Linux-download-blue)](https://github.com/acailic/mailchat-vault/releases/latest)
+<!-- OpenSSF Scorecard badge — uncomment when the repository is public
+     (owner action, docs/launch-checklist.md; Scorecard analysis only
+     scores public repos, so the badge would render "no analysis" while
+     private):
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/acailic/mailchat-vault/badge)](https://securityscorecards.dev/viewer/?uri=github.com/acailic/mailchat-vault)
+-->
 
 Installers for every platform, `SHA256SUMS` verification, and the version matrix: [download page](docs/download.md).
 
@@ -70,7 +76,7 @@ Captured from the running app with synthetic demo data in the light theme by the
 
 ## Quickstart
 
-Prerequisites: [Node.js](https://nodejs.org) 22+, [Rust](https://rustup.rs) stable, and on Ubuntu/Debian the Tauri system libraries (macOS/Windows need Xcode / MSVC):
+Prerequisites: [Node.js](https://nodejs.org) 22+ (older majors crash vitest workers mid-run; enforced by the engines field), [Rust](https://rustup.rs) stable, and on Ubuntu/Debian the Tauri system libraries (macOS/Windows need Xcode / MSVC):
 
 ```sh
 sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
