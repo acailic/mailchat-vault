@@ -4527,6 +4527,190 @@ impl Storage {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// The linkable author identities of one source instance — the
+    /// candidate listing the linking picker shows. Per source
+    /// instance: every distinct author identity available to link,
+    /// how many archived messages it accounts for (exactly what
+    /// [`Storage::person_link_preview`] reports for the same anchor,
+    /// so the picker's preview reads naturally against the listing),
+    /// and the person already holding it, from the user-confirmed
+    /// association rows only — never inferred.
+    ///
+    /// Authors whose strings yield a stable key
+    /// ([`author_stable_key`]: `Name <address>` and bare-address
+    /// forms) collapse into one [`PersonAnchorKind::StableKey`]
+    /// candidate per case-folded key — one address is one identity,
+    /// however many display forms it was archived under. Authors
+    /// without a stable key surface as [`PersonAnchorKind::AuthorName`]
+    /// candidates, verbatim and one per distinct author string, marked
+    /// `ambiguous`: display-string evidence, scoped to this source
+    /// instance (the same display name in another source is a
+    /// different candidate that never inherits an owner here).
+    ///
+    /// A pure read: nothing is linked, merged, or rewritten, and the
+    /// listing works against any open vault. The listing is bounded
+    /// per source instance (`limit` defaults to
+    /// [`PERSON_CANDIDATES_DEFAULT_LIMIT`], clamped to
+    /// `1..=PERSON_CANDIDATES_MAX_LIMIT`); `total` carries the full
+    /// pre-bound count so the picker can announce truncation, and the
+    /// order is deterministic (matched messages descending, then
+    /// anchor value, then anchor kind). An unknown or empty source
+    /// instance id is refused with [`Error::InvalidQuery`]; a source
+    /// instance without messages lists empty.
+    pub fn person_identity_candidates(
+        &self,
+        request: &PersonIdentityCandidatesRequest,
+    ) -> Result<PersonIdentityCandidatesPage> {
+        let source_instance_id = request.source_instance_id.trim();
+        if source_instance_id.is_empty() {
+            return Err(Error::InvalidQuery(
+                "the candidate listing needs a source instance id".to_string(),
+            ));
+        }
+        let limit = request
+            .limit
+            .unwrap_or(PERSON_CANDIDATES_DEFAULT_LIMIT)
+            .clamp(1, PERSON_CANDIDATES_MAX_LIMIT);
+
+        let tx = self.conn.unchecked_transaction()?;
+
+        let source_label: Option<String> = tx
+            .query_row(
+                "SELECT label FROM source_instances WHERE id = ?1",
+                params![source_instance_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(source_label) = source_label else {
+            return Err(Error::InvalidQuery(format!(
+                "no source instance {source_instance_id}"
+            )));
+        };
+
+        // One group-by per source instance; the stable-key fold and
+        // the exact match check run in Rust over the distinct author
+        // strings — the same extraction the preview matcher applies
+        // per row, so per-author folding and the preview's per-row
+        // scan count the same messages.
+        let mut stmt = tx.prepare(
+            "SELECT author, COUNT(*) FROM archive_messages
+             WHERE source_instance_id = ?1
+             GROUP BY author",
+        )?;
+        let authors = stmt.query_map(params![source_instance_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?.max(0) as u64,
+            ))
+        })?;
+
+        let mut candidates: Vec<PersonIdentityCandidate> = Vec::new();
+        let mut stable_fold: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for entry in authors {
+            let (author, count) = entry?;
+            match author_stable_key(&author) {
+                Some(key) => {
+                    // Every author form folding to the key feeds one
+                    // stable-key candidate; the address it pins is the
+                    // label (the verbatim forms are the preview's
+                    // representative-message evidence, not the
+                    // listing's).
+                    let index = match stable_fold.get(&key) {
+                        Some(&index) => index,
+                        None => {
+                            let index = candidates.len();
+                            let display_label = key.clone();
+                            stable_fold.insert(key.clone(), index);
+                            candidates.push(PersonIdentityCandidate {
+                                source_instance_id: source_instance_id.to_string(),
+                                anchor_kind: PersonAnchorKind::StableKey,
+                                anchor_value: key,
+                                display_label,
+                                matched_messages: 0,
+                                current_owner: None,
+                                ambiguous: false,
+                            });
+                            index
+                        }
+                    };
+                    candidates[index].matched_messages += count;
+                }
+                None => candidates.push(PersonIdentityCandidate {
+                    source_instance_id: source_instance_id.to_string(),
+                    anchor_kind: PersonAnchorKind::AuthorName,
+                    anchor_value: author.clone(),
+                    display_label: author,
+                    matched_messages: count,
+                    current_owner: None,
+                    ambiguous: true,
+                }),
+            }
+        }
+        drop(stmt);
+
+        // Owner attribution from the association rows of this source
+        // instance only (source-scoped: an anchor of another instance
+        // never leaks an owner here).
+        let mut owners: std::collections::HashMap<(String, String), Person> =
+            std::collections::HashMap::new();
+        {
+            let mut stmt = tx.prepare(
+                "SELECT l.anchor_kind, l.anchor_value,
+                        p.id, p.name, p.created_at, p.updated_at
+                 FROM person_identity_links AS l
+                 JOIN people AS p ON p.id = l.person_id
+                 WHERE l.source_instance_id = ?1",
+            )?;
+            let rows = stmt.query_map(params![source_instance_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    Person {
+                        id: row.get(2)?,
+                        name: row.get(3)?,
+                        created_at: row.get(4)?,
+                        updated_at: row.get(5)?,
+                    },
+                ))
+            })?;
+            for entry in rows {
+                let (kind_raw, anchor_value, person) = entry?;
+                owners.insert((kind_raw, anchor_value), person);
+            }
+        }
+        for candidate in &mut candidates {
+            candidate.current_owner = owners
+                .get(&(
+                    candidate.anchor_kind.as_str().to_string(),
+                    candidate.anchor_value.clone(),
+                ))
+                .cloned();
+        }
+
+        candidates.sort_by(|a, b| {
+            b.matched_messages
+                .cmp(&a.matched_messages)
+                .then_with(|| a.anchor_value.cmp(&b.anchor_value))
+                .then_with(|| a.anchor_kind.as_str().cmp(b.anchor_kind.as_str()))
+        });
+        let total = candidates.len() as u64;
+        candidates.truncate(limit as usize);
+
+        let archive_revision = archive_revision_on(&tx)?;
+        let organization_revision = organization_revision_on(&tx)?;
+        tx.commit()?;
+        Ok(PersonIdentityCandidatesPage {
+            source_instance_id: source_instance_id.to_string(),
+            source_label,
+            candidates,
+            total,
+            limit,
+            archive_revision,
+            organization_revision,
+        })
+    }
+
     // ------------------------------------------------------------------
     // Saved searches (migration 18)
     // ------------------------------------------------------------------
@@ -5924,6 +6108,90 @@ pub struct PersonLinkHistoryRecord {
     /// produced.
     pub organization_revision: u64,
     pub recorded_at: String,
+}
+
+/// Default and maximum bound of one source instance's candidate
+/// identity listing (see [`Storage::person_identity_candidates`]) —
+/// the search2 page convention: the picker holds one bounded page,
+/// `total` announces the rest.
+pub const PERSON_CANDIDATES_DEFAULT_LIMIT: u32 = 50;
+pub const PERSON_CANDIDATES_MAX_LIMIT: u32 = 200;
+
+/// The [`Storage::person_identity_candidates`] request: one source
+/// instance's listing and a bound on the returned rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonIdentityCandidatesRequest {
+    /// The canonical source instance whose author identities are
+    /// listed. Unknown or empty ids are refused with
+    /// [`Error::InvalidQuery`].
+    pub source_instance_id: String,
+    /// Bound of the returned listing. Defaults to
+    /// [`PERSON_CANDIDATES_DEFAULT_LIMIT`], clamped to
+    /// `1..=PERSON_CANDIDATES_MAX_LIMIT`; the page's `total` carries
+    /// the full pre-bound count either way.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// One linkable author identity of one source instance, as the
+/// linking picker lists it (see [`Storage::person_identity_candidates`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonIdentityCandidate {
+    pub source_instance_id: String,
+    /// How this candidate links: [`PersonAnchorKind::StableKey`] when
+    /// a stable key is derivable from the archived author strings,
+    /// [`PersonAnchorKind::AuthorName`] otherwise.
+    pub anchor_kind: PersonAnchorKind,
+    /// The anchor value exactly as [`Storage::link_person_identity`]
+    /// would store it: the case-folded stable key, or the verbatim
+    /// author display string.
+    pub anchor_value: String,
+    /// Rendered label for the picker (the address a stable-key
+    /// candidate pins, or the display string of a name-only author);
+    /// display only, never identity.
+    pub display_label: String,
+    /// Archived messages in this source instance the anchor matches —
+    /// exactly what [`Storage::person_link_preview`] reports for the
+    /// same anchor: author forms folding to one stable key count as
+    /// one identity; name-only candidates count their verbatim author
+    /// string.
+    pub matched_messages: u64,
+    /// The person already holding this anchor, when the user has
+    /// linked one — the picker's taken marker, read from the
+    /// user-confirmed association rows only, never inferred. The same
+    /// anchor in another source instance is a different candidate and
+    /// never inherits this owner.
+    pub current_owner: Option<Person>,
+    /// Name-only authors carry no stable key: the display string is
+    /// inherently ambiguous (two humans can share it), so the
+    /// candidate is marked and stays scoped to its source instance.
+    /// Always `false` for stable-key candidates.
+    pub ambiguous: bool,
+}
+
+/// The [`Storage::person_identity_candidates`] result: one source
+/// instance's bounded candidate listing. A pure read — the archive and
+/// the association rows are unchanged, and the revision markers let a
+/// picker detect that either moved underneath a stale listing instead
+/// of silently showing it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonIdentityCandidatesPage {
+    pub source_instance_id: String,
+    /// The source instance's display label (the picker's heading).
+    pub source_label: String,
+    /// The bounded candidates, deterministically ordered (matched
+    /// messages descending, then anchor value, then anchor kind).
+    pub candidates: Vec<PersonIdentityCandidate>,
+    /// Distinct candidate identities in this source instance before
+    /// the bound applied.
+    pub total: u64,
+    /// The bound that produced `candidates` (already defaulted and
+    /// clamped).
+    pub limit: u32,
+    /// Snapshot markers of the read: the archive revision (content)
+    /// and the organization revision (links).
+    pub archive_revision: u64,
+    pub organization_revision: u64,
 }
 
 /// Extract the case-folded address a stable-key anchor matches from a
