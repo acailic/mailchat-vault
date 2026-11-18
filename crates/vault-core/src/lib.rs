@@ -35,6 +35,10 @@
 //!   (with media extraction) for picked files.
 //! - [`media`]: content-addressed media store and the extraction pass that
 //!   links export files to messages.
+//! - [`merkle`]: RFC 6962-style Merkle tree over per-message digests —
+//!   root, per-leaf inclusion proofs, full-set and single-leaf
+//!   verification — the proof base the HTML export bundle's manifest
+//!   carries (P3·20; the eDiscovery pack builds on it).
 //! - [`object_store`]: the M4.1 SHA-256 object store behind `media/` —
 //!   the stage → promote → reference lifecycle (no half-written object
 //!   is ever visible, references never dangle), the import capacity
@@ -134,6 +138,7 @@ pub mod llm;
 pub mod mail;
 pub mod mbox;
 pub mod media;
+pub mod merkle;
 pub mod message;
 pub mod messenger;
 // Test support only (doc-hidden, like `Storage::wipe_fts_for_tests`):

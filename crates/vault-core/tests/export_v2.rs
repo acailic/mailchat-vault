@@ -1,8 +1,16 @@
 //! Search/export parity through the public v2 API, including source ids
-//! whose display labels collide and filters absent from the legacy API.
+//! whose display labels collide and filters absent from the legacy API,
+//! plus the HTML bundle's Merkle inclusion-proof determinism and proof
+//! size (P3·20).
+
+use std::path::PathBuf;
 
 use vault_core::export::{export_search, export_search_v2, ExportFormat, ExportSummary};
+use vault_core::export_html::{
+    export_html, verify_bundle_full, verify_bundle_message, HtmlExportOutcome, HtmlExportScope,
+};
 use vault_core::message::{Message, NewMessage};
+use vault_core::object_store::ObjectStore;
 use vault_core::query::SearchQuery;
 use vault_core::search2::{SearchArchiveRequest, SearchSort};
 use vault_core::storage::{ConnectorIdentity, NewSourceInstance, Occurrence, Storage};
@@ -1149,4 +1157,115 @@ fn evidence_pack_plan_states_scope_and_count() {
         pack_bates_footers(&dir.path().join("unbounded"), summary.pages),
         vec!["VATL-000001", "VATL-000002", "VATL-000003"]
     );
+}
+
+// ----------------------------------------------------------------------
+// HTML bundle Merkle inclusion proofs (P3·20)
+// ----------------------------------------------------------------------
+
+/// Write the whole archive as an HTML export bundle into `dir/name` and
+/// return its path.
+fn write_html_bundle(storage: &Storage, dir: &std::path::Path, name: &str) -> PathBuf {
+    let objects = ObjectStore::new(dir);
+    let dest = dir.join(name);
+    match export_html(
+        storage,
+        &HtmlExportScope::Search {
+            request: SearchArchiveRequest::default(),
+        },
+        &dest,
+        &objects,
+        &|| false,
+    )
+    .unwrap()
+    .unwrap()
+    {
+        HtmlExportOutcome::Complete(_) => dest,
+        HtmlExportOutcome::Cancelled => panic!("uncancelled bundle must complete"),
+    }
+}
+
+fn merkle_seeded(ids: [&'static str; 4]) -> Storage {
+    let storage = Storage::open_in_memory().unwrap();
+    for (i, id) in ids.iter().enumerate() {
+        storage
+            .insert_message(&message(
+                "mbox",
+                id,
+                &format!("2026-01-0{}T10:00:00Z", i + 1),
+                &format!("body of {id}"),
+            ))
+            .unwrap();
+    }
+    storage
+}
+
+/// Determinism: two exports of the same data carry the same Merkle
+/// root, the full-root check verifies, one cited message verifies
+/// against that root without the rest, and the bundle's README states
+/// the non-guarantees plainly.
+#[test]
+fn html_bundle_merkle_root_is_deterministic_across_two_exports() {
+    let storage = merkle_seeded(["m4", "m2", "m3", "m1"]);
+    let dir_one = tempfile::tempdir().unwrap();
+    let dir_two = tempfile::tempdir().unwrap();
+    let one = write_html_bundle(&storage, dir_one.path(), "bundle-one");
+    let two = write_html_bundle(&storage, dir_two.path(), "bundle-two");
+
+    let check_one = verify_bundle_full(&one).unwrap();
+    let check_two = verify_bundle_full(&two).unwrap();
+    assert!(check_one.valid, "first bundle's root recomputes");
+    assert!(check_two.valid, "second bundle's root recomputes");
+    assert_eq!(check_one.messages, 4);
+    assert_eq!(
+        check_one.stated_root, check_two.stated_root,
+        "same data, same root across two exports"
+    );
+    assert_eq!(check_one.stated_root, check_one.recomputed_root);
+
+    // The single-message check: one cited message, verified against the
+    // root without opening the rest of the bundle.
+    let single = verify_bundle_message(&one, "m2")
+        .unwrap()
+        .expect("m2 is listed in the manifest");
+    assert!(single.path_valid);
+    assert_eq!(single.proved_root, check_one.stated_root.unwrap());
+    assert_eq!(single.bundle_root, check_two.stated_root);
+    assert!(verify_bundle_message(&one, "no-such-id").unwrap().is_none());
+
+    // The guarantee statement travels with the bundle.
+    let readme = std::fs::read_to_string(one.join("README")).unwrap();
+    assert!(readme.contains("NOT third-party notarization"));
+}
+
+/// Proof-size sanity: with four messages each recorded proof path holds
+/// at most log2(4) = 2 hashes (the wire form of a path is
+/// comma-separated `L<hex>`/`R<hex>` sibling hashes).
+#[test]
+fn html_bundle_proof_paths_hold_at_most_log2_hashes() {
+    let storage = merkle_seeded(["m1", "m2", "m3", "m4"]);
+    let dir = tempfile::tempdir().unwrap();
+    let bundle = write_html_bundle(&storage, dir.path(), "bundle");
+    let manifest = std::fs::read_to_string(bundle.join("manifest")).unwrap();
+
+    let mut proof_lines = 0;
+    for line in manifest.lines().filter(|l| l.starts_with("proof:")) {
+        proof_lines += 1;
+        // proof:<digest>:<steps>:<external-id>
+        let steps = line.split(':').nth(2).unwrap();
+        let hashes = if steps.is_empty() {
+            0
+        } else {
+            steps.split(',').count()
+        };
+        assert!(
+            hashes <= 2,
+            "n=4: each proof path holds at most 2 hashes, got {hashes}"
+        );
+        for step in steps.split(',').filter(|s| !s.is_empty()) {
+            assert_eq!(step.len(), 65, "one side marker + 64 hex chars");
+            assert!(step.starts_with('L') || step.starts_with('R'));
+        }
+    }
+    assert_eq!(proof_lines, 4, "one proof line per exported message");
 }
