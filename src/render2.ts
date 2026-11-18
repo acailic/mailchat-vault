@@ -149,11 +149,8 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
   main.setAttribute("tabindex", "0");
   main.title = "Open this message";
   const meta = document.createElement("div");
-  meta.className = "meta hit-heading";
+  meta.className = "meta";
   const displayAuthor = authorDisplayName(hit.author) || "unknown";
-  const author = document.createElement("span");
-  author.className = "hit-author";
-  author.textContent = displayAuthor;
   // The time sits in its own span so a marked-uncertain time can
   // explain itself on hover: "(assumed)" no longer waits for the
   // detail pane to say what it means (A04 honesty). The wording is
@@ -170,24 +167,10 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
   }
   // The author run is marked like the body when an author filter (or a
   // from:/to: operator) is in effect — the row shows why it matched
-  // (text content is unchanged; only <mark> runs differ): replace the
-  // plain-text author span content with the marked segments.
-  author.textContent = "";
-  appendSegments(author, highlightSegments(displayAuthor, opts.terms));
-  meta.append(author, " ", time);
-  // Provenance gets its own subdued line under the author/time row
-  // (UI professionalization: scanning weight off the primary meta).
-  const provenance = document.createElement("div");
-  provenance.className = "meta hit-provenance";
-  const source = document.createElement("span");
-  source.textContent = friendlySourceLabel(hit.source_label);
-  provenance.append(source);
-  if (hit.conversation_label) {
-    const conversation = document.createElement("span");
-    conversation.className = "hit-conversation";
-    conversation.textContent = hit.conversation_label;
-    provenance.append(" ", conversation);
-  }
+  // (text content is unchanged; only <mark> runs differ).
+  appendSegments(meta, highlightSegments(displayAuthor, opts.terms));
+  meta.append(" · ", time, " · ", friendlySourceLabel(hit.source_label));
+  if (hit.conversation_label) meta.append(" · ", hit.conversation_label);
   // The full "Name <address>" form stays one hover away.
   if (displayAuthor !== (hit.author || "unknown")) meta.title = hit.author;
   if (hit.attachment_count > 0) {
@@ -208,14 +191,14 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
       (hit.available_attachment_count < hit.attachment_count
         ? `${hit.available_attachment_count} of ${hit.attachment_count} files kept`
         : `${hit.attachment_count} ${hit.attachment_count === 1 ? "file" : "files"}`);
-    provenance.append(" ", files);
+    meta.append(" ", files);
   }
   if (hit.has_conflicting_revision) {
     const conflict = document.createElement("span");
     conflict.className = "badge conflict";
     conflict.title = "Another revision of this message exists in the archive";
     conflict.textContent = "revisions";
-    provenance.append(" ", conflict);
+    meta.append(" ", conflict);
   }
 
   const body = document.createElement("div");
@@ -232,7 +215,7 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
     body.textContent = "";
   }
 
-  main.append(meta, body, provenance);
+  main.append(meta, body);
   li.append(check, main);
   // Near-duplicate fold (NEWWO-101): a row that folds copies carries an
   // expander under the main area — a sibling control like the selection

@@ -96,8 +96,6 @@
   --sp-3: 12px;
   --sp-4: 16px;
   --sp-5: 24px;
-  --sp-6: 32px;
-  --sp-7: 40px;
   --radius-s: 4px;
   --radius-m: 6px;
   --radius-pill: 999px;
@@ -116,7 +114,7 @@
   --ease-press: cubic-bezier(0.33, 1, 0.68, 1);
 
   /* Workspace geometry (ux-specification.md "Workspace and navigation"). */
-  --nav-width: 224px;
+  --nav-width: 208px;
   --results-min: 320px;
   --reading-min: 400px;
   /* Optical alignment: the one 8px-grid horizontal padding step shared
@@ -152,8 +150,6 @@
   --chart-3: #3f6f9e;
   --chart-idle: #a9a08d;
   --selection: #cfe5d8;
-  --selection-soft: color-mix(in srgb, var(--selection) 45%, var(--panel));
-  --nav-surface: color-mix(in srgb, var(--panel-2) 64%, var(--panel));
   --match: #f5d66b;          /* amber search-match highlight (mark.hit) */
   --match-ink: #3a2f00;
   --success: #256b3c;

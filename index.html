@@ -176,7 +176,7 @@
               <!-- Search / Ask: two modes over the same archive, one column.
                    Panels stay mounted; data-workspace-section picks the
                    visible one (CSS), so results and answers survive switches. -->
-              <div id="workspace-tabs" class="row workspace-tabs" role="tablist" aria-label="Workspace sections">
+              <div id="workspace-tabs" class="row" role="tablist" aria-label="Workspace sections">
                 <button type="button" id="tab-search" class="workspace-tab-btn" data-workspace-tab="search" role="tab" aria-selected="true" aria-controls="search-section">Search</button>
                 <button type="button" id="tab-ask" class="workspace-tab-btn" data-workspace-tab="ask" role="tab" aria-selected="false" aria-controls="ask-section">Ask</button>
               </div>
@@ -191,14 +191,12 @@
                      The advanced filters (author, dates, files, import scope)
                      live behind the Filters disclosure; the applied state
                      stays visible as removable chips below. -->
-                <div class="row search-toolbar">
-                  <div class="search-query">
+                <div class="row">
                   <label class="visually-hidden" for="search">Search messages</label>
                   <input id="search" type="text" placeholder="Search messages…" autofocus />
                   <button id="search-btn" class="primary" type="button">
                     <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-search"></use></svg><span>Search</span>
                   </button>
-                  </div>
                   <details id="filters">
                     <summary id="filters-summary" title="Narrow by author, dates, attachments, or one import run">Filters</summary>
                     <div class="filter-fields">
@@ -444,9 +442,8 @@
                 <button id="back-to-results" type="button">Back to results</button>
               </header>
               <div id="reading-empty">
-                <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-archive"></use></svg>
-                <p>Select a result to read it here, with its conversation
-                context and provenance.</p>
+                Select a result to read it here, with its conversation
+                context and provenance.
               </div>
               <div id="detail"></div>
             </aside>

@@ -1,7 +1,5 @@
 # Gmail OAuth scope analysis — keep BYO-client as advanced setup (2026-11-15)
 
-> **Qualification, 2026-11-17:** the historical assessment statements in finding 4 and USER step 3 below are too categorical. Public restricted-scope verification and a third-party security assessment are distinct requirements; Google's current guidance conditions assessment on server access to restricted data. Evaluate the actual data flow, including optional remote AI, with Google's reviewers before concluding that assessment is required or exempt. The IMAP scope finding and the recommendation against a scope-only change remain valid. See [official verification guidance](https://developers.google.com/identity/protocols/oauth2/production-readiness/restricted-scope-verification) and the [new investigation](archive-experience-investigation-2026-11-17.md).
-
 Status: **analysis and recommendation recorded** against [#82](https://github.com/acailic/mailchat-vault/issues/82). The launch decision authority is the working go-public plan (kept outside this repository per the 2026-11-14 decision, [docs index](../README.md)); this record is its in-repo evidence surface. Sources were fetched and read 2026-11-15.
 
 ## Question
