@@ -1,0 +1,9 @@
+{
+  "version": "0.0.0",
+  "description": "Local email & chat archive with full-text search",
+  "homepage": "https://github.com/acailic/mailchat-vault",
+  "license": "GPL-3.0-only",
+  "url": "https://github.com/acailic/mailchat-vault/releases/download/v0.0.0/mailchat-vault_0.0.0_x64_en-US.msi",
+  "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "notes": "BLOCKED - DO NOT SUBMIT to a bucket until signing lands (#78): the MSI is unsigned and Windows shows a SmartScreen warning on install and first launch. This manifest is a placeholder kept version-current by scripts/update-manifests.sh; submission is an owner action (docs/distribution.md)."
+}

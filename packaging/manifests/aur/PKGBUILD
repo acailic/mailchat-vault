@@ -1,0 +1,41 @@
+# BLOCKED — DO NOT SUBMIT to the AUR until signing lands (#78).
+#
+# The release artifacts are currently unsigned; an AUR package would
+# install them with the same OS warnings users hit on a direct
+# download, without telling them first. Keep this PKGBUILD
+# unsubmitted until owner signing (#78) ships signed artifacts;
+# scripts/update-manifests.sh rewrites pkgver and the sha256 sum from
+# a release's SHA256SUMS (see docs/distribution.md).
+#
+# Why a -bin (binary release) package and not a source build:
+# building Mailchat Vault from source means compiling the full Rust
+# workspace plus the web frontend on the user's machine — tens of
+# minutes of compilation, several hundred MB of toolchain download,
+# and toolchain churn on every release. The published .deb carries
+# the identical FHS layout the other platforms ship (launcher, icons,
+# .mbox association), so this package installs it instead. A source
+# based `mailchat-vault` package can be added later if demand exists.
+#
+# Maintainer placeholder — replace before submitting (owner action).
+pkgname=mailchat-vault-bin
+pkgver=0.0.0
+pkgrel=1
+pkgdesc='Local email & chat archive with full-text search (binary release)'
+arch=('x86_64')
+url='https://github.com/acailic/mailchat-vault'
+license=('GPL-3.0-only')
+depends=('webkit2gtk-4.1' 'gtk3' 'libayatana-appindicator' 'libarchive')
+provides=('mailchat-vault')
+conflicts=('mailchat-vault')
+source_x86_64=("mailchat-vault_${pkgver}_amd64.deb::https://github.com/acailic/mailchat-vault/releases/download/v${pkgver}/mailchat-vault_${pkgver}_amd64.deb")
+sha256sums_x86_64=('0000000000000000000000000000000000000000000000000000000000000000')
+noextract=("mailchat-vault_${pkgver}_amd64.deb")
+
+package() {
+  cd "${srcdir}"
+  # The .deb is an ar archive; extract its data member and unpack the
+  # FHS tree (usr/bin, usr/share/applications, icons, mime) into pkgdir.
+  bsdtar -xf "mailchat-vault_${pkgver}_amd64.deb" data.tar.*
+  bsdtar -xf data.tar.* -C "${pkgdir}"
+  rm -f data.tar.*
+}
