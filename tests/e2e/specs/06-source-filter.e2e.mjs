@@ -39,16 +39,18 @@ export async function run(ctx) {
     assert.ok(await (await chip("demo")).isExisting(), "demo chip rendered");
     // The chip reads the plain-word label; the stored "mbox" identity
     // still resolves the id through sources_list above.
-    assert.includes(
-      await (await chip("mbox")).getText(),
-      "Mail import (8)",
-      "chip shows source and count",
-    );
-    assert.includes(
-      await (await chip("demo")).getText(),
-      `demo (${demoCount})`,
-      "chip shows source and count",
-    );
+    // Live-DOM reads: the chip row re-renders on per-source status
+    // updates, and the WebKit driver serves "" for elements re-rendered
+    // (replaceChildren) between the element query and getText.
+    const chipText = (source) =>
+      browser.execute(
+        (id) =>
+          document.querySelector(`#source-chips button.chip[data-source="${id}"]`)
+            ?.innerText ?? "",
+        idByLabel.get(source),
+      );
+    assert.includes(await chipText("mbox"), "Mail import (8)", "chip shows source and count");
+    assert.includes(await chipText("demo"), `demo (${demoCount})`, "chip shows source and count");
 
     // Unfiltered: vault lives in both sources — 4 in the fixture's mbox plus
     // however many the demo corpus contributes. Derive that from the UI so

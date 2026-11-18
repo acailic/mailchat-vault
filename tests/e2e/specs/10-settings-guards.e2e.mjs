@@ -54,12 +54,30 @@ export async function run(ctx) {
         await ui.openSettingsSection(browser, "ai");
         await setSelect(browser, "#add-kind", "custom");
         await browser.$("#add-provider-btn").click();
-        const row = await browser.$('.provider-row[data-id="custom"]');
-        await row.$(".prov-name").setValue("Mock Lab");
-        await row.$(".prov-url").setValue(`http://127.0.0.1:${mock.port}/api`);
-        await row.$(".prov-model").setValue("settings-model");
-        await row.$(".prov-key").setValue("guard-key");
-        await row.$('input[type="radio"]').click();
+        // Live-DOM writes through execute(): the driver's interactability
+        // check serves stale snapshots after the row re-renders (same
+        // class as the chip getText staleness — see spec 06).
+        const setProvField = (sel, value) =>
+          browser.execute(
+            (selector, val) => {
+              const row = document.querySelector('.provider-row[data-id="custom"]');
+              const el = row?.querySelector(selector);
+              if (!el) throw new Error(`no ${selector} in the custom row`);
+              el.focus();
+              el.value = val;
+              el.dispatchEvent(new Event("input", { bubbles: true }));
+              el.dispatchEvent(new Event("change", { bubbles: true }));
+            },
+            sel,
+            value,
+          );
+        await setProvField(".prov-name", "Mock Lab");
+        await setProvField(".prov-url", `http://127.0.0.1:${mock.port}/api`);
+        await setProvField(".prov-model", "settings-model");
+        await setProvField(".prov-key", "guard-key");
+        await (
+          await browser.$('.provider-row[data-id="custom"] input[type="radio"]')
+        ).click();
         await browser.$("#settings-save-ai").click();
         await ui.waitForText(browser, "#settings-note", "Saved.");
 
@@ -139,8 +157,16 @@ export async function run(ctx) {
         await ui.openSettingsSection(browser, "ai");
         await setSelect(browser, "#add-kind", "zai");
         await browser.$("#add-provider-btn").click();
-        const zaiRow = await browser.$('.provider-row[data-id="zai"]');
-        await zaiRow.$(".prov-url").setValue("https://api.anthropic.com");
+        // Live-DOM write (driver interactability goes stale after the
+        // row re-renders).
+        await browser.execute(() => {
+          const el = document.querySelector('.provider-row[data-id="zai"] .prov-url');
+          if (!el) throw new Error("no zai .prov-url");
+          el.focus();
+          el.value = "https://api.anthropic.com";
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        });
         await browser.$("#settings-save-ai").click();
         const misPair = await ui.waitForText(browser, "#settings-note", "Not saved");
         assert.includes(
@@ -159,13 +185,21 @@ export async function run(ctx) {
           1,
           "refused save leaves settings.json untouched",
         );
-        await zaiRow.$(".remove-prov-btn").click(); // clean the form
+        await (
+          await browser.$('.provider-row[data-id="zai"] .remove-prov-btn')
+        ).click(); // clean the form
 
         // --- plaintext http non-loopback refused BEFORE saving -------------
-        // (re-query: the successful save earlier replaced the row element)
-        await (
-          await browser.$('.provider-row[data-id="custom"] .prov-url')
-        ).setValue("http://attacker.example/api");
+        // (live-DOM write: the successful save earlier replaced the row
+        // element and the driver's snapshot went stale)
+        await browser.execute(() => {
+          const el = document.querySelector('.provider-row[data-id="custom"] .prov-url');
+          if (!el) throw new Error("no custom .prov-url");
+          el.focus();
+          el.value = "http://attacker.example/api";
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        });
         await browser.$("#settings-save-ai").click();
         const plaintext = await ui.waitForText(browser, "#settings-note", "Not saved");
         assert.includes(

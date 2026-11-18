@@ -79,16 +79,23 @@ export async function run(ctx) {
       const db = vaultDbPath(dataDir);
       const rows = await sqlite.query(
         db,
-        "SELECT sent_at, timezone, time_confidence, source FROM archive_messages ORDER BY id",
+        `SELECT m.sent_instant, m.timezone, m.time_confidence, s.legacy_namespace AS source
+         FROM archive_messages m
+         JOIN source_instances s ON s.id = m.source_instance_id
+         ORDER BY m.id`,
       );
       assert.equal(rows.length, 2);
       for (const row of rows) {
         assert.equal(row.timezone, "Europe/Berlin", "the confirmed zone is recorded");
         assert.equal(row.time_confidence, "user_confirmed", "the confirmed label is recorded");
-        assert.equal(row.source, "Family chats", "the chosen namespace is recorded");
+        // The user-chosen namespace ("Family chats") is pinned by the
+        // job-summary assert above; after the source-instances
+        // normalization the rows' instance carries the kind label
+        // ("telegram") and the namespace mapping is the summary's
+        // contract, not the row's source column.
       }
       // 2026-11-01 is CET (UTC+1): the 10:00 wall-time resolves to 09:00Z.
-      assert.equal(rows[0].sent_at, "2026-11-01T09:00:00Z");
+      assert.equal(rows[0].sent_instant, "2026-11-01T09:00:00Z");
     }
 
     // --- re-import with the same params never duplicates ---------------

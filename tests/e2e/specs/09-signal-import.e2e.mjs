@@ -69,7 +69,15 @@ export async function run(ctx) {
     assert.ok(signalId, "signal instance listed with a stable id");
     const chip = await browser.$(`#source-chips button.chip[data-source="${signalId}"]`);
     assert.ok(await chip.isExisting(), "signal source chip rendered");
-    assert.includes(await chip.getText(), "signal (5)", "chip shows source and count");
+    // Live-DOM read: the chip row re-renders on per-source status updates
+    // and the WebKit driver serves "" for elements re-rendered between
+    // query and getText.
+    const chipLabel = await browser.execute(
+      (id) =>
+        document.querySelector(`#source-chips button.chip[data-source="${id}"]`)?.innerText ?? "",
+      signalId,
+    );
+    assert.includes(chipLabel, "signal (5)", "chip shows source and count");
 
     // --- the imported texts are searchable in the UI ----------------------
     const searchStatus = await ui.search(browser, "reagiram");

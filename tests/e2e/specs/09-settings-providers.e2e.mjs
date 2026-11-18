@@ -71,12 +71,32 @@ export async function run(ctx) {
       await ui.openSettingsSection(browser, "ai");
       await setSelect(browser, "#add-kind", "custom");
       await browser.$("#add-provider-btn").click();
-      const row = await browser.$('.provider-row[data-id="custom"]');
-      await row.$(".prov-name").setValue("Mock Lab");
-      await row.$(".prov-url").setValue(`http://127.0.0.1:${mock.port}/api`);
-      await row.$(".prov-model").setValue("settings-model");
-      await row.$(".prov-key").setValue("settings-key");
-      await row.$('input[type="radio"]').click(); // make it the default
+      // Provider rows re-render on every field change and the WebKit
+      // driver's interactability check serves stale element snapshots
+      // under software rendering (the field is verifiably visible and
+      // enabled at the DOM level — the driver still refuses it). The
+      // suite's established answer is live-DOM writes through execute().
+      const setProvField = (sel, value) =>
+        browser.execute(
+          (selector, val) => {
+            const row = document.querySelector('.provider-row[data-id="custom"]');
+            const el = row?.querySelector(selector);
+            if (!el) throw new Error(`no ${selector} in the custom row`);
+            el.focus();
+            el.value = val;
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+          },
+          sel,
+          value,
+        );
+      await setProvField(".prov-name", "Mock Lab");
+      await setProvField(".prov-url", `http://127.0.0.1:${mock.port}/api`);
+      await setProvField(".prov-model", "settings-model");
+      await setProvField(".prov-key", "settings-key");
+      await (
+        await browser.$('.provider-row[data-id="custom"] input[type="radio"]')
+      ).click(); // make it the default
       await setSelect(browser, "#theme", "dark");
 
       await browser.$("#settings-save-ai").click();
@@ -187,9 +207,16 @@ export async function run(ctx) {
       await ui.openSettingsSection(browser, "ai");
       await setSelect(browser, "#add-kind", "zai");
       await browser.$("#add-provider-btn").click();
-      const zaiRow = await browser.$('.provider-row[data-id="zai"]');
-      // A z.ai provider pointed at the Anthropic host must be refused.
-      await zaiRow.$(".prov-url").setValue("https://api.anthropic.com");
+      // Live-DOM write (driver interactability goes stale after the
+      // row re-renders — same class as the chip staleness).
+      await browser.execute(() => {
+        const el = document.querySelector('.provider-row[data-id="zai"] .prov-url');
+        if (!el) throw new Error("no zai .prov-url");
+        el.focus();
+        el.value = "https://api.anthropic.com";
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      });
       await browser.$("#settings-save-ai").click();
       const refused = await ui.waitForText(browser, "#settings-note", "Not saved");
       assert.includes(

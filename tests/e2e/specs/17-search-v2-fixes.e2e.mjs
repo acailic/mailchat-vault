@@ -354,16 +354,25 @@ export async function run(ctx) {
     assert.equal(rows1.length, 50, "the first page holds the 50-row page size");
     const firstPageId = await rows1[0].getAttribute("data-id");
 
-    // Check a row on page 1, then move to page 2 and check another.
+    // Check a row on page 1, then load the rest and check another.
+    // The list pages through a scroll sentinel (auto-loads near the end;
+    // a Load-more button only appears past the 200-row render cap). The
+    // app exposes the load seam as a DOM event on the sentinel
+    // (mcv:load-more) precisely for environments where the intersection
+    // observer does not fire — use it instead of synthesizing scroll.
     await (await rows1[0].$(".row-select")).click();
-    await (await browser.$("#pagination .page-btn:last-child")).click();
+    await browser.execute(() => {
+      document
+        .querySelector("#pagination .load-sentinel")
+        ?.dispatchEvent(new Event("mcv:load-more", { bubbles: true }));
+    });
     await browser.waitUntil(
-      async () => (await browser.$$("#results li.hit-item")).length === 10,
-      { timeoutMsg: "Next did not show the second page" },
+      async () => (await browser.$$("#results li.hit-item")).length === 60,
+      { timeoutMsg: "the sentinel load never appended the remaining rows" },
     );
     const rows2 = await browser.$$("#results li.hit-item");
-    const secondPageId = await rows2[0].getAttribute("data-id");
-    await (await rows2[0].$(".row-select")).click();
+    const secondPageId = await rows2[50].getAttribute("data-id");
+    await (await rows2[50].$(".row-select")).click();
 
     // The announced set spans both pages... (the button lives inside the
     // Export… picker, so the picker is opened to read its label)
@@ -415,7 +424,7 @@ export async function run(ctx) {
     );
     assert.equal(
       (await browser.$$("#results li.hit-item")).length,
-      10,
+      60,
       "Back restores the same page (no fabricated rows)",
     );
     assert.equal(

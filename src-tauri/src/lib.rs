@@ -256,6 +256,9 @@ struct AppState {
     /// identity, the exclusive advisory `vault.lock`, and the derived
     /// vault paths, held for this app instance's lifetime. Every vault
     /// path resolution goes through it (or the mirrors below).
+    /// Never read directly — it exists to hold the session (and its
+    /// `vault.lock`) alive for as long as the app runs.
+    #[allow(dead_code)]
     vault: VaultSession,
     /// The vault root resolved by the session (today the app data dir:
     /// `vault.db`, `media/`, `settings.json` — what the M4.4 backup
@@ -4195,7 +4198,7 @@ pub fn run() {
             #[cfg(not(feature = "encryption"))]
             let pool_config = PoolConfig::default();
             let emit_handle = app.handle().clone();
-            let pool = DbPool::spawn(session.db_path().to_owned(), pool_config, move |event| {
+            let pool = DbPool::spawn(session.db_path(), pool_config, move |event| {
                 let _ = emit_handle.emit("job-event", event);
             })
             .map_err(|e| e.to_string())?;
