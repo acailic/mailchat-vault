@@ -76,7 +76,7 @@ Captured from the running app with synthetic demo data in the light theme by the
 
 ## Quickstart
 
-Prerequisites: [Node.js](https://nodejs.org) 22+, [Rust](https://rustup.rs) stable, and on Ubuntu/Debian the Tauri system libraries (macOS/Windows need Xcode / MSVC):
+Prerequisites: [Node.js](https://nodejs.org) 22+ (older majors crash vitest workers mid-run; enforced by the engines field), [Rust](https://rustup.rs) stable, and on Ubuntu/Debian the Tauri system libraries (macOS/Windows need Xcode / MSVC):
 
 ```sh
 sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev

@@ -2,7 +2,7 @@
 
 ## Quick path
 
-Prerequisites: [Node.js](https://nodejs.org) 22+, [Rust](https://rustup.rs) stable, and on Ubuntu/Debian the Tauri system libraries (`sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev`; macOS/Windows need Xcode / MSVC).
+Prerequisites: [Node.js](https://nodejs.org) 22+ (older majors crash vitest workers mid-run; `engines` in package.json and engine-strict in `.npmrc` enforce the floor), [Rust](https://rustup.rs) stable, and on Ubuntu/Debian the Tauri system libraries (`sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev`; macOS/Windows need Xcode / MSVC).
 
 ```sh
 git clone https://github.com/acailic/mailchat-vault.git
