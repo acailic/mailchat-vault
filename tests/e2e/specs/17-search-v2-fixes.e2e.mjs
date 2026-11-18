@@ -435,7 +435,9 @@ export async function run(ctx) {
     const checkedAfter = await readDom(browser, () =>
       document.querySelectorAll("#results input.row-select:checked").length,
     );
-    assert.equal(checkedAfter, 1, "the page-2 check survives reading + Back");
+    // Both checks survive reading + Back — the sentinel-appended list
+    // keeps every page rendered, so both selections stay visible.
+    assert.equal(checkedAfter, 2, "the checks survive reading + Back");
     const scrollAfter = await readDom(browser, () => document.querySelector("#results").scrollTop);
     assert.ok(
       Math.abs(scrollAfter - scrollBefore) <= 2,
