@@ -23,8 +23,18 @@
 //! - cursor pages continue at the pre-fold tail, so a folded row is
 //!   never re-read;
 //! - hits without a fingerprint neither fold nor absorb others.
+//!
+//! The Ask synthesis fold (P2.14, near-dup 5/5): one numbered context
+//! block per cluster —
+//!
+//! - a retrieval set holding a forwarded-copy cluster interleaved with
+//!   distinct messages yields one block for the representative (the
+//!   copy count on its header line, the representative's passage in
+//!   the body), fills the freed slots with distinct evidence, and
+//!   never numbers a copy.
 
 use rusqlite::Connection;
+use vault_core::llm::build_synthesis_payload;
 use vault_core::message::{InsertOutcome, NewMessage};
 use vault_core::search2::SearchArchiveRequest;
 use vault_core::simhash::{hamming_distance, simhash64};
@@ -569,4 +579,208 @@ fn hits_without_a_fingerprint_neither_fold_nor_absorb() {
 
     assert_eq!(page.hits[2].id, unrelated);
     assert_eq!(page.hits[2].cluster_count, 1);
+}
+
+// ---------------------------------------------------------------------------
+// P2.14 follow-up 5/5: one Ask context block per near-duplicate cluster
+// ---------------------------------------------------------------------------
+
+/// Distinct evidence beside the cluster: a paint-order body sharing no
+/// message content with the announcement trio, with `UNRELATED`, or
+/// with [`NOISE_COMPLAINT`] (the test's sanity block pins the
+/// distances before anything else is asserted).
+const PAINT_ORDER: &str = "paint order confirmed for the stairwell and the \
+kitchen ceiling with the eggshell finish ordered twice because the first \
+delivery arrived damaged and the supplier promised a replacement batch \
+before the handover walkthrough with the site foreman";
+
+/// A second distinct body — the message that stays beyond the top-N
+/// window once the fold has run.
+const NOISE_COMPLAINT: &str = "neighbors complained about the evening noise \
+from the sanding machines and asked the crew to finish every loud task \
+before dinner so the building stays quiet while the small children sleep";
+
+#[test]
+fn ask_context_collapses_a_near_duplicate_cluster_into_one_block() {
+    // Fixture sanity: the trio is pairwise near-duplicate (whichever
+    // member ranks first absorbs the other two), and every distinct
+    // body sits far from the trio and from the other distinct bodies.
+    let trio = [
+        simhash64(ANNOUNCEMENT),
+        simhash64(&forwarded_copy()),
+        simhash64(&short_quoted_reply()),
+    ];
+    for i in 0..trio.len() {
+        for j in (i + 1)..trio.len() {
+            assert!(
+                hamming_distance(trio[i], trio[j]) <= 3,
+                "trio must be pairwise near-duplicates ({i},{j})"
+            );
+        }
+    }
+    let distinct = [
+        simhash64(UNRELATED),
+        simhash64(PAINT_ORDER),
+        simhash64(NOISE_COMPLAINT),
+    ];
+    for &t in trio.iter() {
+        for &d in distinct.iter() {
+            assert!(
+                hamming_distance(t, d) > 3,
+                "distinct fixture folded into the cluster (distance {})",
+                hamming_distance(t, d)
+            );
+        }
+    }
+    for i in 0..distinct.len() {
+        for j in (i + 1)..distinct.len() {
+            assert!(
+                hamming_distance(distinct[i], distinct[j]) > 3,
+                "distinct fixtures must not fold together ({i},{j})"
+            );
+        }
+    }
+
+    let s = Storage::open_in_memory().unwrap();
+    let original = inserted_id(
+        &s,
+        &msg_at(
+            "email-a",
+            "announce-1",
+            ANNOUNCEMENT,
+            "2026-11-06T09:00:00Z",
+        ),
+    );
+    let distinct_one = inserted_id(
+        &s,
+        &msg_at("email-a", "budget-1", UNRELATED, "2026-11-05T09:00:00Z"),
+    );
+    let forward = inserted_id(
+        &s,
+        &msg_at(
+            "email-b",
+            "announce-2",
+            &forwarded_copy(),
+            "2026-11-04T09:00:00Z",
+        ),
+    );
+    let distinct_two = inserted_id(
+        &s,
+        &msg_at("email-a", "paint-1", PAINT_ORDER, "2026-11-03T09:00:00Z"),
+    );
+    let reply = inserted_id(
+        &s,
+        &msg_at(
+            "email-a",
+            "announce-3",
+            &short_quoted_reply(),
+            "2026-11-02T09:00:00Z",
+        ),
+    );
+    let distinct_three = inserted_id(
+        &s,
+        &msg_at(
+            "email-a",
+            "noise-1",
+            NOISE_COMPLAINT,
+            "2026-11-01T09:00:00Z",
+        ),
+    );
+
+    // The retrieval set as ranked: the forward and the quoted reply sit
+    // above two distinct messages, so without the fold they would spend
+    // two of the three passage slots on copies of rank 1.
+    let ids = [
+        original,
+        distinct_one,
+        forward,
+        distinct_two,
+        reply,
+        distinct_three,
+    ];
+    let results = s.get_many(&ids).unwrap();
+    assert_eq!(results.len(), 6);
+    let fingerprints = s.message_fingerprints(&ids).unwrap();
+    let payload = build_synthesis_payload(
+        "What is the renovation schedule?",
+        &results,
+        3,
+        &[],
+        &fingerprints,
+    )
+    .expect("results → a payload");
+    let user = &payload.user;
+
+    // Exactly three numbered blocks: the cluster's representative plus
+    // the two distinct messages the freed slots went to; no block is
+    // spent on a copy.
+    for k in 1..=3 {
+        assert!(
+            user.contains(&format!("[{k}] author:")),
+            "block [{k}] missing from the prompt: {user}"
+        );
+    }
+    assert!(
+        !user.contains("[4] author:"),
+        "a copy or an out-of-window row spent a slot: {user}"
+    );
+
+    // One block for the cluster: the representative (rank 1, the
+    // original announcement) carries the copy count on its header line
+    // — the only copy note in the prompt.
+    let header = user
+        .lines()
+        .find(|line| line.starts_with("[1] author:"))
+        .expect("representative header line");
+    assert!(
+        header.starts_with("[1] author: ana · "),
+        "representative header: {header}"
+    );
+    assert!(
+        header.ends_with(" · +2 near-identical copies"),
+        "the copy count must ride the representative's header: {header}"
+    );
+    assert_eq!(
+        user.matches("near-identical copies").count(),
+        1,
+        "exactly one copy note, on the representative: {user}"
+    );
+    assert!(
+        user.contains("The renovation crew confirmed the schedule"),
+        "the representative's passage must be the block body: {user}"
+    );
+
+    // No numbered block for the copies: their own-only text (the
+    // forward header, the reply attribution) never appears.
+    assert!(
+        !user.contains("Begin forwarded message"),
+        "the forwarded copy must not render its own block: {user}"
+    );
+    assert!(
+        !user.contains("On Mon, Ana wrote"),
+        "the quoted reply must not render its own block: {user}"
+    );
+
+    // The freed slots hold distinct evidence: rank 2, and rank 4 — a
+    // row that only reaches the three-slot window because the fold
+    // released the forward's slot.
+    assert!(
+        user.contains("wheelchair ramps roof insulation quotes"),
+        "the rank-2 distinct message fills the second slot: {user}"
+    );
+    assert!(
+        user.contains("eggshell finish ordered twice"),
+        "the rank-4 distinct message fills the freed slot: {user}"
+    );
+    assert!(
+        !user.contains("sanding machines"),
+        "the rank-6 distinct message stays beyond the window: {user}"
+    );
+
+    // The dropped-count note counts distinct matches beyond the window
+    // (one), not the two copies folded into shown representatives.
+    assert!(
+        user.contains("1 further matching messages exist beyond the 3 shown"),
+        "the further-note counts distinct evidence only: {user}"
+    );
 }
