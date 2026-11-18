@@ -22,7 +22,8 @@
 use vault_core::backup::{self, BackupOptions, RestoreOptions};
 use vault_core::message::NewMessage;
 use vault_core::storage::{
-    NewPersonIdentityLink, PersonAnchorKind, PersonLinkOp, PersonLinkOperation, Storage,
+    NewPersonIdentityLink, PersonAnchorKind, PersonIdentityCandidate,
+    PersonIdentityCandidateListing, PersonLinkOp, PersonLinkOperation, Storage,
 };
 use vault_core::Error;
 
@@ -1003,4 +1004,271 @@ fn person_deletion_removes_organization_only_and_keeps_the_audit_ledger() {
         "the ledger is an audit record, not a live association"
     );
     assert_eq!(history[0].operation, PersonLinkOperation::Link);
+}
+
+// ---------------------------------------------------------------------
+// Candidate identity listing
+// ---------------------------------------------------------------------
+
+/// The candidate of one listing, by anchor.
+fn candidate<'a>(
+    listing: &'a PersonIdentityCandidateListing,
+    kind: PersonAnchorKind,
+    anchor_value: &str,
+) -> &'a PersonIdentityCandidate {
+    listing
+        .candidates
+        .iter()
+        .find(|c| c.anchor_kind == kind && c.anchor_value == anchor_value)
+        .unwrap_or_else(|| panic!("no candidate for anchor {anchor_value:?}"))
+}
+
+/// Per source instance the listing reports every author identity
+/// available to link: author forms carrying one address fold into a
+/// single stable-key candidate, name-only authors stay verbatim and
+/// ambiguous, counts are exactly what a preview of the same anchor
+/// reports, owners are attributed per anchor, and nothing crosses
+/// source instances.
+#[test]
+fn candidate_listing_folds_anchors_marks_ambiguity_and_attributes_owners() {
+    let storage = Storage::open_in_memory().unwrap();
+    // Mail: three author forms carrying one address, a neighbor, and a
+    // lookalike domain that is a different identity.
+    insert_one(&storage, "mbox", "m1", "Ana <ana@example.com>", "one");
+    insert_one(&storage, "mbox", "m2", "Ana <ana@example.com>", "two");
+    insert_one(&storage, "mbox", "m3", "ana@example.com", "bare form");
+    insert_one(&storage, "mbox", "m4", "Bo <bo@example.com>", "neighbor");
+    insert_one(&storage, "mbox", "m5", "ana@example.com.co", "lookalike");
+    // Chat: display-name-only authors — nothing stable to derive.
+    insert_one(&storage, "telegram-work", "t1", "Ana", "chat one");
+    insert_one(&storage, "telegram-work", "t2", "Ana", "chat two");
+    insert_one(&storage, "telegram-work", "t3", "Bob", "chat bob");
+    // A second chat source: its "Bob" is a different identity and never
+    // part of the work listing.
+    insert_one(&storage, "telegram-family", "f1", "Bob", "family bob");
+
+    let mail = instance_for(&storage, "mbox");
+    let work = instance_for(&storage, "telegram-work");
+    let family = instance_for(&storage, "telegram-family");
+
+    // --- The mail listing: stable-key candidates, matched-count
+    // order, then anchor value for ties.
+    let mail_listing = storage.person_identity_candidates(&mail, 200).unwrap();
+    let anchors: Vec<(PersonAnchorKind, &str)> = mail_listing
+        .candidates
+        .iter()
+        .map(|c| (c.anchor_kind, c.anchor_value.as_str()))
+        .collect();
+    assert_eq!(
+        anchors,
+        vec![
+            (PersonAnchorKind::StableKey, "ana@example.com"),
+            (PersonAnchorKind::StableKey, "ana@example.com.co"),
+            (PersonAnchorKind::StableKey, "bo@example.com"),
+        ],
+        "matched descending, then anchor value ascending"
+    );
+    let ana = candidate(
+        &mail_listing,
+        PersonAnchorKind::StableKey,
+        "ana@example.com",
+    );
+    assert_eq!(
+        ana.matched_messages, 3,
+        "all author forms fold into one anchor"
+    );
+    assert!(!ana.ambiguous, "a stable key is not name-only ambiguity");
+    assert_eq!(ana.source_instance_id, mail);
+    assert_eq!(
+        ana.display_author, "Ana <ana@example.com>",
+        "the most frequent verbatim form renders the identity"
+    );
+    assert!(ana.current_owner.is_none());
+    assert_eq!(
+        candidate(
+            &mail_listing,
+            PersonAnchorKind::StableKey,
+            "ana@example.com.co"
+        )
+        .matched_messages,
+        1,
+        "a lookalike address is a different identity"
+    );
+
+    // --- The chat listing: name-only authors stay verbatim, ambiguous,
+    // and source-scoped.
+    let work_listing = storage.person_identity_candidates(&work, 200).unwrap();
+    assert_eq!(work_listing.candidates.len(), 2);
+    let chat_ana = candidate(&work_listing, PersonAnchorKind::AuthorName, "Ana");
+    assert_eq!(chat_ana.matched_messages, 2);
+    assert!(
+        chat_ana.ambiguous,
+        "a display-name-only author is ambiguous"
+    );
+    assert_eq!(chat_ana.display_author, "Ana");
+    let chat_bob = candidate(&work_listing, PersonAnchorKind::AuthorName, "Bob");
+    assert_eq!(chat_bob.matched_messages, 1);
+    assert!(chat_bob.ambiguous);
+    assert_eq!(
+        work_listing.candidates[0].anchor_value, "Ana",
+        "matched descending within the source"
+    );
+    // A stable-key anchor never appears for display-only authors.
+    assert!(!work_listing
+        .candidates
+        .iter()
+        .any(|c| c.anchor_kind == PersonAnchorKind::StableKey));
+
+    // --- Per-source scoping: the family listing holds its own "Bob"
+    // and nothing from the other instances.
+    let family_listing = storage.person_identity_candidates(&family, 200).unwrap();
+    assert_eq!(family_listing.candidates.len(), 1);
+    let family_bob = candidate(&family_listing, PersonAnchorKind::AuthorName, "Bob");
+    assert_eq!(family_bob.matched_messages, 1);
+    assert_eq!(family_bob.source_instance_id, family);
+
+    // --- Counts are the preview's counts: a preview of a listed
+    // anchor reports the same matched-message total.
+    let person = storage.create_person("Ana Ilic").unwrap();
+    let preview = storage
+        .person_link_preview(&[PersonLinkOp::Link {
+            person_id: &person.id,
+            link: mail_link(&mail, "ana@example.com"),
+        }])
+        .unwrap();
+    assert_eq!(preview.entries[0].matched_messages, ana.matched_messages);
+    let name_preview = storage
+        .person_link_preview(&[PersonLinkOp::Link {
+            person_id: &person.id,
+            link: name_link(&work, "Ana"),
+        }])
+        .unwrap();
+    assert_eq!(
+        name_preview.entries[0].matched_messages,
+        chat_ana.matched_messages
+    );
+
+    // --- Owner attribution: once linked, exactly the matching anchor
+    // carries its person — including a name-only anchor on another
+    // person, the conflict the picker must explain.
+    let other = storage.create_person("Someone Else").unwrap();
+    storage
+        .link_person_identity(&person.id, &mail_link(&mail, "ana@example.com"))
+        .unwrap();
+    storage
+        .link_person_identity(&person.id, &name_link(&work, "Ana"))
+        .unwrap();
+    storage
+        .link_person_identity(&other.id, &name_link(&work, "Bob"))
+        .unwrap();
+
+    let mail_listing = storage.person_identity_candidates(&mail, 200).unwrap();
+    assert_eq!(
+        candidate(
+            &mail_listing,
+            PersonAnchorKind::StableKey,
+            "ana@example.com"
+        )
+        .current_owner
+        .as_ref(),
+        Some(&person)
+    );
+    assert!(
+        candidate(&mail_listing, PersonAnchorKind::StableKey, "bo@example.com")
+            .current_owner
+            .is_none()
+    );
+
+    let work_listing = storage.person_identity_candidates(&work, 200).unwrap();
+    assert_eq!(
+        candidate(&work_listing, PersonAnchorKind::AuthorName, "Ana")
+            .current_owner
+            .as_ref(),
+        Some(&person)
+    );
+    assert_eq!(
+        candidate(&work_listing, PersonAnchorKind::AuthorName, "Bob")
+            .current_owner
+            .as_ref(),
+        Some(&other)
+    );
+    // Linking changed no archived row the listing reads.
+    assert_eq!(storage.stats().unwrap().total, 9);
+}
+
+/// The listing is bounded per source instance: a limit below the
+/// candidate count truncates deterministically (a prefix of the full
+/// order), pathological limits clamp into range, and an empty or
+/// unknown source lists nothing.
+#[test]
+fn candidate_listing_is_bounded_per_source_instance() {
+    let storage = Storage::open_in_memory().unwrap();
+    for i in 0..5 {
+        insert_one(
+            &storage,
+            "telegram-work",
+            &format!("t{i}"),
+            &format!("Author{}", char::from_u32('A' as u32 + i).unwrap()),
+            "body",
+        );
+    }
+    let work = instance_for(&storage, "telegram-work");
+
+    let full = storage.person_identity_candidates(&work, 200).unwrap();
+    assert_eq!(full.candidates.len(), 5);
+    assert!(!full.truncated);
+    assert!(full.candidates.iter().all(|c| c.matched_messages == 1));
+
+    let bounded = storage.person_identity_candidates(&work, 3).unwrap();
+    assert_eq!(bounded.candidates.len(), 3);
+    assert!(bounded.truncated);
+    assert_eq!(
+        &bounded.candidates,
+        &full.candidates[..3],
+        "the bound is a deterministic prefix of the full listing"
+    );
+
+    // Limits clamp into 1..=200: zero still returns one candidate.
+    let one = storage.person_identity_candidates(&work, 0).unwrap();
+    assert_eq!(one.candidates.len(), 1);
+    assert!(one.truncated);
+
+    // An unknown source instance is an empty listing, not an error —
+    // the picker reads it beside `list_source_instances`.
+    let empty = storage
+        .person_identity_candidates("no-such-instance", 200)
+        .unwrap();
+    assert!(empty.candidates.is_empty());
+    assert!(!empty.truncated);
+}
+
+/// The listing only offers identities a link could match: blank
+/// authors are not identities, and a padded name-only author string
+/// folds to its trimmed anchor without counting the padded rows —
+/// exactly the rows the preview matcher would match.
+#[test]
+fn candidate_listing_skips_unmatchable_authors() {
+    let storage = Storage::open_in_memory().unwrap();
+    insert_one(&storage, "telegram-work", "t1", "Ana", "plain form");
+    insert_one(&storage, "telegram-work", "t2", " Ana ", "padded form");
+    insert_one(&storage, "telegram-work", "t3", "   ", "blank author");
+
+    let work = instance_for(&storage, "telegram-work");
+    let listing = storage.person_identity_candidates(&work, 200).unwrap();
+    assert_eq!(listing.candidates.len(), 1, "one linkable identity");
+    let ana = candidate(&listing, PersonAnchorKind::AuthorName, "Ana");
+    assert_eq!(
+        ana.matched_messages, 1,
+        "the padded row is not matched by the trimmed anchor — mirroring the preview"
+    );
+
+    // And the preview of that anchor agrees, byte for byte.
+    let person = storage.create_person("Ana Ilic").unwrap();
+    let preview = storage
+        .person_link_preview(&[PersonLinkOp::Link {
+            person_id: &person.id,
+            link: name_link(&work, "Ana"),
+        }])
+        .unwrap();
+    assert_eq!(preview.entries[0].matched_messages, ana.matched_messages);
 }
