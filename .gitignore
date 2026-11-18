@@ -16,3 +16,7 @@ src-tauri/gen/
 # Local-only notes: monetization/strategy material must never be committed
 # (see the mailchat-vault-private directory outside the repo)
 docs/private/
+
+# cargo-cyclonedx SBOM output (generated per crate dir; release artifact,
+# never committed — see docs/release.md → SBOM)
+*.cdx.json
