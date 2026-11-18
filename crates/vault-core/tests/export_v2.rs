@@ -747,3 +747,406 @@ fn honesty_filters_export_parity_matches_search_hits_and_totals() {
         }
     }
 }
+
+// ----------------------------------------------------------------------
+// eDiscovery evidence pack (P2·10): Bates-numbered, print-ready
+// bundles on top of the A8 HTML export machinery
+// ----------------------------------------------------------------------
+
+use vault_core::export_html::{
+    export_html, BatesOptions, HtmlExportOutcome, HtmlExportScope, DIGEST_COMMITMENT_LABEL,
+    FIDELITY_LABEL, PENDING_PROOF_LINE,
+};
+use vault_core::object_store::{Capacity, ObjectStore};
+use vault_core::storage::{SourceReceiptKind, SourceReceiptRecord};
+
+/// One stored media object in `data_dir` and the `raw_json` media
+/// entry the archive links it with.
+fn pack_media_entry(data_dir: &std::path::Path, name: &str) -> serde_json::Value {
+    let src = data_dir.join("incoming");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join(name), b"evidence bytes").unwrap();
+    let (entry, _) = vault_core::media::store(
+        data_dir,
+        &src.join(name),
+        name,
+        "document",
+        &mut Capacity::default(),
+    )
+    .unwrap();
+    serde_json::json!({
+        "sha256": entry.sha256,
+        "path": entry.path,
+        "name": entry.name,
+        "kind": entry.kind,
+        "size": entry.size,
+    })
+}
+
+/// Seed the evidence-pack fixture: March 2026 rows from Ana and Bojan
+/// (one with a preserved attachment, one with a missing one), an
+/// April row outside the range, an undated row (inside the source and
+/// people scope, but outside any date range — date-bounded packs
+/// honestly exclude it), one receipt per source, and a second
+/// (unscoped) source that must not leak.
+/// Returns the storage, the scoped request, and the data_dir.
+fn evidence_fixture(dir: &std::path::Path) -> (Storage, SearchArchiveRequest) {
+    let data_dir = dir.join("data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let stored = pack_media_entry(&data_dir, "contract.pdf");
+
+    let mut ana_attach = message("mbox", "m1", "2026-03-05T09:00:00Z", "contract draft one");
+    ana_attach.raw_json = serde_json::json!({ "media": [stored] }).to_string();
+    let mut bojan_attach = message("mbox", "m2", "2026-03-12T09:00:00Z", "counterdraft two");
+    bojan_attach.author = "Bojan".into();
+    bojan_attach.raw_json =
+        r#"{"media":[{"name":"notes.txt","kind":"text","missing":true,"reason":"not-in-export"}]}"#
+            .into();
+    let ana_plain = message("mbox", "m3", "2026-03-20T09:00:00Z", "signed contract");
+    let mut april = message("mbox", "m4", "2026-04-02T09:00:00Z", "outside the range");
+    april.author = "Vlad".into();
+    let mut undated = message("mbox", "m5", "", "no timestamp recorded");
+    undated.author = "Ana".into();
+    let mut other_source = message("telegram", "t1", "2026-03-08T09:00:00Z", "different source");
+    other_source.author = "Ana".into();
+    let storage = Storage::open_in_memory().unwrap();
+    for m in [
+        ana_attach,
+        bojan_attach,
+        ana_plain,
+        april,
+        undated,
+        other_source,
+    ] {
+        storage.insert_message(&m).unwrap();
+    }
+
+    let mbox = storage
+        .list_source_instances()
+        .unwrap()
+        .into_iter()
+        .find(|i| i.label == "mbox")
+        .unwrap();
+    let telegram = storage
+        .list_source_instances()
+        .unwrap()
+        .into_iter()
+        .find(|i| i.label == "telegram")
+        .unwrap();
+    // Receipts for both sources; only the scoped one may appear in
+    // the custody appendix.
+    for (instance, kind) in [
+        (&mbox, SourceReceiptKind::Import),
+        (&telegram, SourceReceiptKind::Sync),
+    ] {
+        storage
+            .record_source_receipt(&SourceReceiptRecord {
+                source_instance_id: &instance.id,
+                kind,
+                observed_min: Some("2026-03-01T00:00:00Z"),
+                observed_max: Some("2026-03-31T23:59:59Z"),
+                new_records: 3,
+                present_records: 1,
+                failed_records: 0,
+                files_preserved: 1,
+                files_missing: 1,
+                facts_json: "{}",
+            })
+            .unwrap();
+    }
+
+    let request = SearchArchiveRequest {
+        cursor: None,
+        source_ids: vec![mbox.id],
+        author: "ana".into(),
+        from_date: Some("2026-03-01".into()),
+        to_date: Some("2026-03-31".into()),
+        timezone: "UTC".into(),
+        ..Default::default()
+    };
+    (storage, request)
+}
+
+/// Run an evidence-pack export into `dest` and unwrap the summary.
+fn pack_export_ok(
+    s: &Storage,
+    request: &SearchArchiveRequest,
+    bates: &BatesOptions,
+    dest: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> vault_core::export_html::HtmlExportSummary {
+    let objects = ObjectStore::new(data_dir);
+    let scope = HtmlExportScope::EvidencePack {
+        request: request.clone(),
+        bates: bates.clone(),
+    };
+    match export_html(s, &scope, dest, &objects, &|| false).unwrap() {
+        Some(HtmlExportOutcome::Complete(summary)) => summary,
+        other => panic!("expected a completed evidence pack, got {other:?}"),
+    }
+}
+
+/// Every file under `dir`, recursively, as sorted (relative path, bytes).
+fn pack_files(dir: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                out.push((
+                    path.strip_prefix(dir).unwrap().to_path_buf(),
+                    std::fs::read(&path).unwrap(),
+                ));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// The Bates footer strings of every page, in page order.
+fn pack_bates_footers(dest: &std::path::Path, pages: u64) -> Vec<String> {
+    let mut out = Vec::new();
+    for page in 1..=pages {
+        let html = std::fs::read_to_string(dest.join(format!("page-{page:04}.html"))).unwrap();
+        for line in html.lines() {
+            if let Some(number) = line
+                .strip_prefix("<footer class=\"bates\">")
+                .and_then(|l| l.strip_suffix("</footer>"))
+            {
+                out.push(number.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Re-exporting the same (selection, prefix, start) is byte-identical,
+/// Bates numbers are sequential and stable, and a different start
+/// shifts the whole sequence.
+#[test]
+fn evidence_pack_reexport_is_byte_identical_and_bates_sequential() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, request) = evidence_fixture(dir.path());
+    let bates = BatesOptions {
+        prefix: "VATL".into(),
+        start: 1,
+    };
+
+    let first = pack_export_ok(
+        &s,
+        &request,
+        &bates,
+        &dir.path().join("pack-a"),
+        &dir.path().join("data"),
+    );
+    let second = pack_export_ok(
+        &s,
+        &request,
+        &bates,
+        &dir.path().join("pack-b"),
+        &dir.path().join("data"),
+    );
+
+    assert_eq!(first, second, "identical input, identical summary");
+    assert_eq!(
+        pack_files(&dir.path().join("pack-a")),
+        pack_files(&dir.path().join("pack-b")),
+        "re-exporting the same selection, prefix, and start reproduces the bundle byte for byte"
+    );
+
+    // Two scoped rows survive the date range (Ana, March, mbox): the
+    // attachment row and the plain row — Bojan's counterdraft is
+    // dropped by the people filter, April sits outside the range, and
+    // the undated row honestly falls outside any date bound. Bates
+    // numbers are sequential across the bundle, oldest first.
+    assert_eq!(first.written, 2);
+    let footers = pack_bates_footers(&dir.path().join("pack-a"), first.pages);
+    assert_eq!(footers, vec!["VATL-000001", "VATL-000002"]);
+    assert_eq!(
+        first.bates_range.as_deref(),
+        Some("VATL-000001 to VATL-000002")
+    );
+
+    // Oldest-first: the March 5 draft carries the first number.
+    let page1 = std::fs::read_to_string(dir.path().join("pack-a/page-0001.html")).unwrap();
+    let draft = page1.find("contract draft one").unwrap();
+    let signed = page1.find("signed contract").unwrap();
+    assert!(draft < signed, "dated ascending");
+    assert!(!page1.contains("no timestamp recorded"));
+    let b1 = page1.find("VATL-000001").unwrap();
+    let b2 = page1.find("VATL-000002").unwrap();
+    assert!(draft < b1 && signed < b2, "the footer follows its message");
+
+    // A different start shifts every number; the bytes change with it.
+    let shifted = BatesOptions {
+        prefix: "VATL".into(),
+        start: 100,
+    };
+    let third = pack_export_ok(
+        &s,
+        &request,
+        &shifted,
+        &dir.path().join("pack-c"),
+        &dir.path().join("data"),
+    );
+    assert_eq!(third.written, 2);
+    assert_eq!(
+        pack_bates_footers(&dir.path().join("pack-c"), third.pages),
+        vec!["VATL-000100", "VATL-000101"]
+    );
+}
+
+/// The cover sheet states the exact scope, its counts match the
+/// exported rows, the commitment is labeled a digest commitment (and
+/// never anything stronger), the pending line is present, pages carry
+/// print CSS and headers, and the custody appendix shows only the
+/// scoped sources' receipts with verification instructions.
+#[test]
+fn evidence_pack_cover_counts_labels_and_custody_appendix() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, request) = evidence_fixture(dir.path());
+    let dest = dir.path().join("pack");
+    let summary = pack_export_ok(
+        &s,
+        &request,
+        &BatesOptions {
+            prefix: "VATL".into(),
+            start: 1,
+        },
+        &dest,
+        &dir.path().join("data"),
+    );
+
+    // The scoped rows are exactly Ana's March mbox rows: m1 (stored
+    // attachment), m3 (plain), m5 (undated) — Bojan's m2 carries an
+    // attachment but the people filter drops it, April and the
+    // telegram source are out of scope.
+    let page1 = std::fs::read_to_string(dest.join("page-0001.html")).unwrap();
+    let section_count = page1.matches("<section class=\"message\"").count() as u64;
+    let attachment_lis = page1.matches("<li>").count() as u64;
+
+    let cover = std::fs::read_to_string(dest.join("index.html")).unwrap();
+    // Scope statement: date range, source label, people filter.
+    assert!(cover.contains("date range 2026-03-01 to 2026-03-31"));
+    assert!(cover.contains("sources: mbox"));
+    assert!(cover.contains("people: ana"));
+    // Counts match the actual exported rows — not the planned count.
+    assert!(cover.contains(&format!("messages: {}", summary.written)));
+    assert_eq!(
+        summary.written, section_count,
+        "cover count equals exported rows"
+    );
+    assert!(cover.contains(&format!(
+        "attachment references: {}",
+        summary.attachment_refs.unwrap()
+    )));
+    assert_eq!(summary.attachment_refs, Some(attachment_lis));
+    // The commitment is labeled exactly a digest commitment and the
+    // pending line states cryptographic proof is outstanding; nothing
+    // claims a stronger proof.
+    assert!(cover.contains(DIGEST_COMMITMENT_LABEL));
+    assert!(cover.contains(PENDING_PROOF_LINE));
+    assert!(!cover.to_lowercase().contains("merkle"));
+    assert!(cover.contains(FIDELITY_LABEL));
+    assert!(cover.contains("Bates numbers: VATL-000001 to VATL-000002"));
+    assert!(cover.contains("href=\"custody.html\""));
+    // The commitment on the cover is the manifest's commitment.
+    let commitment = summary.digest_commitment.unwrap();
+    assert_eq!(commitment.len(), 64);
+    assert!(cover.contains(&commitment));
+    let manifest = std::fs::read_to_string(dest.join("manifest")).unwrap();
+    assert!(manifest.contains(&format!(
+        "{DIGEST_COMMITMENT_LABEL} (SHA-256 over the ordered per-message digests): {commitment}"
+    )));
+    assert!(manifest.matches(" digest=").count() == section_count as usize);
+
+    // Message pages: print CSS, Bates footers, headers, and the
+    // attachment digest.
+    assert!(page1.contains("@media print"));
+    assert!(page1.contains("@page"));
+    assert!(page1.contains("footer.bates"));
+    assert!(page1.contains("<footer class=\"bates\">VATL-000001</footer>"));
+    assert!(page1.contains("<th>From</th>"));
+    assert!(page1.contains("<th>To</th>"));
+    assert!(page1.contains("<th>Date</th>"));
+    assert!(page1.contains("<th>Source</th>"));
+    assert!(page1.contains("sha256 "));
+
+    // Chain of custody: only the scoped source's receipts, plus the
+    // release-checksum verification pointer.
+    let custody = std::fs::read_to_string(dest.join("custody.html")).unwrap();
+    assert!(custody.contains("Chain of custody"));
+    assert!(custody.contains("import"));
+    assert!(custody.contains("2026-03-01T00:00:00Z to 2026-03-31T23:59:59Z"));
+    assert!(custody.contains("docs/release.md"));
+    assert!(custody.contains("release-verify.sh"));
+    assert!(!custody.contains("different source"));
+
+    // Offline rules still hold across the whole bundle.
+    for (path, bytes) in pack_files(&dest) {
+        let text = String::from_utf8_lossy(&bytes).to_lowercase();
+        assert!(!text.contains("<script"), "{}: no scripts", path.display());
+        assert!(
+            !text.contains("http://") && !text.contains("https://"),
+            "{}: nothing remote",
+            path.display()
+        );
+    }
+}
+
+/// The plan step answers scope and count for the evidence-pack scope
+/// before anything is written, from the same normalized filters — and
+/// a pack without date bounds scopes to the undated row too, numbered
+/// last behind the dated ones.
+#[test]
+fn evidence_pack_plan_states_scope_and_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, request) = evidence_fixture(dir.path());
+    let bates = || BatesOptions {
+        prefix: "VATL".into(),
+        start: 1,
+    };
+    let plan = vault_core::export_html::plan_html_export(
+        &s,
+        &HtmlExportScope::EvidencePack {
+            request: request.clone(),
+            bates: bates(),
+        },
+    )
+    .unwrap();
+    assert_eq!(plan.scope_label, "evidence pack");
+    assert_eq!(plan.count, 2, "the date range excludes the undated row");
+
+    let unbounded = SearchArchiveRequest {
+        from_date: None,
+        to_date: None,
+        ..request.clone()
+    };
+    let summary = pack_export_ok(
+        &s,
+        &unbounded,
+        &bates(),
+        &dir.path().join("unbounded"),
+        &dir.path().join("data"),
+    );
+    assert_eq!(
+        summary.written, 3,
+        "no date bounds: the undated row rides along"
+    );
+    let page1 = std::fs::read_to_string(dir.path().join("unbounded/page-0001.html")).unwrap();
+    let draft = page1.find("contract draft one").unwrap();
+    let signed = page1.find("signed contract").unwrap();
+    let undated = page1.find("no timestamp recorded").unwrap();
+    assert!(
+        draft < signed && signed < undated,
+        "dated ascending, undated last"
+    );
+    assert_eq!(
+        pack_bates_footers(&dir.path().join("unbounded"), summary.pages),
+        vec!["VATL-000001", "VATL-000002", "VATL-000003"]
+    );
+}
