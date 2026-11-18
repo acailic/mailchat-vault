@@ -1,0 +1,29 @@
+{
+  "x-blocked-note": "DO NOT SUBMIT to Flathub until signing lands (#78), and not as-is regardless: this is a skeleton manifest that wires the app ID, runtime, and finish-args, with placeholder version/sha256 fields kept current by scripts/update-manifests.sh. A real submission needs a flatpak-builder recipe that actually builds and runs inside the sandbox, validated by the owner (docs/distribution.md).",
+  "app-id": "com.acailic.mailchatvault",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "47",
+  "sdk": "org.gnome.Sdk",
+  "command": "mailchat-vault",
+  "finish-args": [
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--share=network",
+    "--filesystem=xdg-download:ro"
+  ],
+  "modules": [
+    {
+      "name": "mailchat-vault",
+      "buildsystem": "simple",
+      "build-commands": [],
+      "sources": [
+        {
+          "type": "file",
+          "url": "https://github.com/acailic/mailchat-vault/releases/download/v0.0.0/mailchat-vault_0.0.0_amd64.deb",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "x-note": "Placeholder pointing at the release .deb so the version/checksum plumbing is exercised; the real recipe must decide how the binary enters the sandbox (docs/distribution.md)."
+        }
+      ]
+    }
+  ]
+}

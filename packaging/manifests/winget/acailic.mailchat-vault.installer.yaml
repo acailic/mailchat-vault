@@ -1,0 +1,23 @@
+# BLOCKED — DO NOT SUBMIT until signing lands (#78).
+#
+# The MSI is currently unsigned: Windows shows SmartScreen ("Windows
+# protected your PC") on install and first launch. Submitting this to
+# winget-pkgs would push that warning at users silently. Keep these
+# manifests unsubmitted until owner signing (#78) ships signed MSIs;
+# scripts/update-manifests.sh rewrites version and sha256 from a
+# release's SHA256SUMS (see docs/distribution.md).
+PackageIdentifier: acailic.mailchat-vault
+PackageVersion: 0.0.0
+MinimumOSVersion: 10.0.19041.0
+InstallerType: wix
+Installers:
+  - Architecture: x64
+    InstallerType: wix
+    InstallerUrl: https://github.com/acailic/mailchat-vault/releases/download/v0.0.0/mailchat-vault_0.0.0_x64_en-US.msi
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    InstallerLocale: en-US
+    Scope: machine
+    InstallationMetadata:
+      DefaultInstallLocation: "%ProgramFiles%\\mailchat-vault"
+ManifestType: installer
+ManifestVersion: 1.6.0
