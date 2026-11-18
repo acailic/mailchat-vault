@@ -28,7 +28,6 @@ import {
 import type { ArchiveStats } from "./types";
 import {
   type DayBar,
-  type PageModel,
   type Segment,
   barHeightPct,
   dashboardSummary,
@@ -69,6 +68,15 @@ export function appendSegments(el: HTMLElement, segments: Segment[]): void {
 // Flat results
 // ---------------------------------------------------------------------------
 
+/** The two results-list density modes (persisted choice, see main.ts). */
+export type DensityMode = "comfortable" | "compact";
+
+/** DOM-row ceiling: renderFlatResults never renders more rows than this
+ * (sentinel loading appends pages up to it, then an explicit Load more
+ * control takes over — the list stays scroll-smooth without unbounded
+ * DOM growth). */
+export const MAX_RENDERED_ROWS = 200;
+
 export interface FlatResultsOptions {
   hits: MessageSummary[];
   /** Keyboard-active row (-1 = none). */
@@ -81,6 +89,10 @@ export interface FlatResultsOptions {
   expandedFolds: Set<number>;
   /** Query terms for client-side highlighting in browse mode. */
   terms: string[];
+  /** Row density applied to the list container (data-density). */
+  density?: DensityMode;
+  /** Rendered-row ceiling (defaults to MAX_RENDERED_ROWS). */
+  renderCap?: number;
   onOpen: (id: number) => void;
   onToggleSelect: (id: number) => void;
   onToggleFold: (id: number) => void;
@@ -108,6 +120,14 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
   li.dataset.index = String(at);
   if (at === opts.activeIndex) li.setAttribute("aria-current", "true");
 
+  // Grid semantics for keyboard-first navigation: the list is the grid,
+  // each row an aria-row carrying the selection state. The activation
+  // discipline is unchanged — role=button + tabindex stay on the main
+  // area below, never on the row itself, and the checkbox stays its
+  // sibling (no control nested inside a control).
+  li.setAttribute("role", "row");
+  li.setAttribute("aria-selected", at === opts.activeIndex ? "true" : "false");
+
   // Selection checkbox for the explicit selection export — a sibling of
   // the row's button, never a control nested inside one (no double
   // announcement, no Space-key ambiguity).
@@ -120,10 +140,11 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
   check.addEventListener("change", () => opts.onToggleSelect(hit.id));
 
   // The row's activatable area: role=button + tabindex live here, on an
-  // element that contains only text. The li stays a plain list item
+  // element that contains only text. The li stays a plain grid row
   // (class/data/aria-current remain on it for styling and keyboard nav).
+  // mv-press gives the shared press feedback on the motion tokens.
   const main = document.createElement("div");
-  main.className = "hit-main";
+  main.className = "hit-main mv-press";
   main.setAttribute("role", "button");
   main.setAttribute("tabindex", "0");
   main.title = "Open this message";
@@ -144,7 +165,11 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
   ) {
     time.title = timeConfidenceDetail(hit.time_confidence);
   }
-  meta.append(displayAuthor, " · ", time, " · ", friendlySourceLabel(hit.source_label));
+  // The author run is marked like the body when an author filter (or a
+  // from:/to: operator) is in effect — the row shows why it matched
+  // (text content is unchanged; only <mark> runs differ).
+  appendSegments(meta, highlightSegments(displayAuthor, opts.terms));
+  meta.append(" · ", time, " · ", friendlySourceLabel(hit.source_label));
   if (hit.conversation_label) meta.append(" · ", hit.conversation_label);
   // The full "Name <address>" form stays one hover away.
   if (displayAuthor !== (hit.author || "unknown")) meta.title = hit.author;
@@ -181,7 +206,9 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
   if (hit.snippet) {
     appendSegments(body, parseSnippet(hit.snippet));
   } else if (hit.subject) {
-    body.textContent = hit.subject;
+    // No backend snippet: the subject is the preview line, and it gets
+    // the same bounded client-side highlighting the detail pane uses.
+    appendSegments(body, highlightSegments(hit.subject, opts.terms));
   } else {
     // Browse without a subject: nothing bounded to show — the metadata
     // row is the honest summary (bodies are a detail-view payload).
@@ -251,9 +278,17 @@ function resultRow(hit: MessageSummary, opts: FlatResultsOptions, at: number): H
   return li;
 }
 
-/** Render the flat, stable results list (no conversation regrouping). */
+/** Render the flat, stable results list (no conversation regrouping).
+ * The container becomes an ARIA grid (rows carry aria-selected), wears
+ * the density mode as data-density, and never renders more than
+ * `renderCap` (default MAX_RENDERED_ROWS) DOM rows — appended pages
+ * beyond the cap wait for the explicit Load more control. */
 export function renderFlatResults(el: HTMLElement, opts: FlatResultsOptions): void {
-  el.replaceChildren(...opts.hits.map((hit, at) => resultRow(hit, opts, at)));
+  el.setAttribute("role", "grid");
+  el.dataset.density = opts.density ?? "comfortable";
+  const cap = opts.renderCap ?? MAX_RENDERED_ROWS;
+  const hits = opts.hits.length > cap ? opts.hits.slice(0, cap) : opts.hits;
+  el.replaceChildren(...hits.map((hit, at) => resultRow(hit, opts, at)));
 }
 
 // ---------------------------------------------------------------------------
@@ -918,39 +953,69 @@ export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
 }
 
 // ---------------------------------------------------------------------------
-// Pagination
+// Results footer: count line, density toggle, sentinel / load-more
 // ---------------------------------------------------------------------------
 
-export interface PaginationHandlers {
-  onPrev: () => void;
-  onNext: () => void;
+/** The custom DOM event that activates the load sentinel — the test and
+ * no-observer seam (the real app relies on IntersectionObserver, wired
+ * by main.ts on the element this renderer produces). */
+export const SENTINEL_LOAD_EVENT = "mcv:load-more";
+
+export interface PaginationOptions {
+  /** Matching hits accumulated so far (all loaded pages). */
+  loaded: number;
+  /** Backend total for the current query. */
+  total: number;
+  density: DensityMode;
+  /** Rendered-row ceiling: at/beyond it auto-loading stops and the
+   * explicit Load more control takes over. */
+  renderCap: number;
+  onLoadMore: () => void;
+  onToggleDensity: () => void;
 }
 
-/** Render the "1–50 of 1,234" line plus prev/next controls. */
-export function renderPagination(
-  el: HTMLElement,
-  model: PageModel,
-  handlers: PaginationHandlers,
-): void {
+/**
+ * The results footer: the "1–N of T" count line (tabular numerals via
+ * app.css), the persisted Comfortable/Compact density toggle, and the
+ * list's growth affordance — a quiet sentinel element the moment more
+ * pages exist below the cap, an explicit Load more button once the cap
+ * is reached. No prev/next paging: the list only ever grows downward.
+ */
+export function renderPagination(el: HTMLElement, opts: PaginationOptions): void {
   const info = document.createElement("span");
   info.className = "page-info";
   info.textContent =
-    model.total === 0
-      ? "0 results"
-      : `${model.from}–${model.to} of ${model.total} · page ${model.page}/${model.pageCount}`;
-  const prev = document.createElement("button");
-  prev.type = "button";
-  prev.className = "page-btn";
-  prev.textContent = "‹ Prev";
-  prev.disabled = !model.hasPrev;
-  const next = document.createElement("button");
-  next.type = "button";
-  next.className = "page-btn";
-  next.textContent = "Next ›";
-  next.disabled = !model.hasNext;
-  prev.addEventListener("click", handlers.onPrev);
-  next.addEventListener("click", handlers.onNext);
-  el.replaceChildren(prev, info, next);
+    opts.total === 0 ? "0 results" : `1–${Math.min(opts.loaded, opts.total)} of ${opts.total}`;
+
+  const density = document.createElement("button");
+  density.type = "button";
+  density.className = "density-toggle";
+  density.textContent = "Compact";
+  density.setAttribute("aria-pressed", opts.density === "compact" ? "true" : "false");
+  density.title = "Compact result rows (remembered on this machine)";
+  density.addEventListener("click", opts.onToggleDensity);
+
+  const more = opts.total > opts.loaded;
+  if (more && opts.loaded < opts.renderCap) {
+    // Sentinel: an inert element to observe, never scroll-jacking chrome.
+    const sentinel = document.createElement("div");
+    sentinel.className = "load-sentinel";
+    sentinel.dataset.loading = "1";
+    sentinel.setAttribute("aria-hidden", "true");
+    el.replaceChildren(info, density, sentinel);
+    return;
+  }
+  if (more) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "page-btn load-more-btn";
+    button.textContent = "Load more";
+    button.title = `Show the next page (the list pauses at ${opts.renderCap} rows to stay smooth)`;
+    button.addEventListener("click", opts.onLoadMore);
+    el.replaceChildren(info, density, button);
+    return;
+  }
+  el.replaceChildren(info, density);
 }
 
 // ---------------------------------------------------------------------------

@@ -20,7 +20,7 @@ import {
 } from "./render2";
 import { contextEntries } from "./searchstate";
 import type { ArchiveStats } from "./types";
-import { HIGHLIGHT_MAX_MARKS, pageModel } from "./viewmodel";
+import { HIGHLIGHT_MAX_MARKS } from "./viewmodel";
 import type { ConversationContext, MessageSummary } from "./v2types";
 
 // Timestamps render timezone-independently (formatSentAt is covered by
@@ -90,11 +90,13 @@ describe("flat results", () => {
       onToggleSelect: () => {},
       onToggleFold: () => {},
     });
-    // The list item is a plain list item: the checkbox inside it is a
-    // sibling interactive control, not a control nested in a button
-    // (no double announcement, no Space-key ambiguity).
+    // The list item is the grid row — NOT the button: the checkbox
+    // inside it stays a sibling interactive control, not a control
+    // nested in a button (no double announcement, no Space-key
+    // ambiguity), and the row itself carries the selection state.
     const li = el.querySelector("li.hit-item") as HTMLElement;
-    expect(li.getAttribute("role")).toBeNull();
+    expect(li.getAttribute("role")).toBe("row");
+    expect(li.getAttribute("aria-selected")).toBe("false");
     expect(li.getAttribute("tabindex")).toBeNull();
     const main = li.querySelector(".hit-main") as HTMLElement;
     expect(main.getAttribute("role")).toBe("button");
@@ -464,8 +466,75 @@ describe("flat results", () => {
     for (const li of [...el.querySelectorAll("li.hit-item")] as HTMLElement[]) {
       expect(li.children.length).toBe(2);
       expect(li.children[0].className).toBe("row-select");
-      expect(li.children[1].className).toBe("hit-main");
+      expect(li.children[1].className).toBe("hit-main mv-press");
     }
+  });
+
+  it("applies the density mode as data-density on the list container", () => {
+    const el = document.createElement("div");
+    renderFlatResults(el, {
+      hits: [hit()],
+      activeIndex: -1,
+      selectedId: null,
+      selection: new Set(),
+      expandedFolds: new Set(),
+      terms: [],
+      density: "compact",
+      onOpen: () => {},
+      onToggleSelect: () => {},
+      onToggleFold: () => {},
+    });
+    expect(el.dataset.density).toBe("compact");
+  });
+
+  it("defaults to comfortable and an ARIA grid with selected rows", () => {
+    const el = document.createElement("div");
+    renderFlatResults(el, {
+      hits: [hit({ id: 1 }), hit({ id: 2 })],
+      activeIndex: 1,
+      selectedId: null,
+      selection: new Set(),
+      expandedFolds: new Set(),
+      terms: [],
+      onOpen: () => {},
+      onToggleSelect: () => {},
+      onToggleFold: () => {},
+    });
+    expect(el.dataset.density).toBe("comfortable");
+    expect(el.getAttribute("role")).toBe("grid");
+    const rows = [...el.querySelectorAll("li.hit-item")] as HTMLElement[];
+    expect(rows.map((r) => r.getAttribute("aria-selected"))).toEqual(["false", "true"]);
+  });
+
+  it("never renders more DOM rows than the cap", () => {
+    const el = document.createElement("div");
+    const many = Array.from({ length: 250 }, (_, i) => hit({ id: i + 1 }));
+    renderFlatResults(el, {
+      hits: many,
+      activeIndex: -1,
+      selectedId: null,
+      selection: new Set(),
+      expandedFolds: new Set(),
+      terms: [],
+      onOpen: () => {},
+      onToggleSelect: () => {},
+      onToggleFold: () => {},
+    });
+    expect(el.querySelectorAll("li.hit-item").length).toBe(200);
+    // The cap is the default; an explicit higher cap renders more.
+    renderFlatResults(el, {
+      hits: many,
+      activeIndex: -1,
+      selectedId: null,
+      selection: new Set(),
+      expandedFolds: new Set(),
+      terms: [],
+      renderCap: 220,
+      onOpen: () => {},
+      onToggleSelect: () => {},
+      onToggleFold: () => {},
+    });
+    expect(el.querySelectorAll("li.hit-item").length).toBe(220);
   });
 });
 
@@ -1026,41 +1095,85 @@ describe("reading pane", () => {
   });
 });
 
-describe("pagination", () => {
-  it("renders range info and enables the right buttons", () => {
+describe("results footer (count line, density, sentinel)", () => {
+  it("renders the accumulated count line and the density toggle", () => {
     const el = document.createElement("div");
-    renderPagination(el, pageModel(1234, 50, 50), { onPrev: () => {}, onNext: () => {} });
-    expect(el.innerHTML).toMatchSnapshot();
-    expect((el.querySelector(".page-btn") as HTMLButtonElement).disabled).toBe(false);
-    expect((el.querySelectorAll(".page-btn")[1] as HTMLButtonElement).disabled).toBe(false);
+    renderPagination(el, {
+      loaded: 60,
+      total: 120,
+      density: "comfortable",
+      renderCap: 200,
+      onLoadMore: () => {},
+      onToggleDensity: () => {},
+    });
+    expect(el.querySelector(".page-info")?.textContent).toBe("1–60 of 120");
+    const toggle = el.querySelector(".density-toggle") as HTMLButtonElement;
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    expect(el.querySelector(".load-sentinel")).toBeTruthy();
+    expect(el.querySelector(".load-more-btn")).toBeNull();
   });
 
-  it("empty results disable both buttons", () => {
+  it("empty results render the count line and toggle only", () => {
     const el = document.createElement("div");
-    renderPagination(el, pageModel(0, 0, 50), { onPrev: () => {}, onNext: () => {} });
+    renderPagination(el, {
+      loaded: 0,
+      total: 0,
+      density: "compact",
+      renderCap: 200,
+      onLoadMore: () => {},
+      onToggleDensity: () => {},
+    });
     expect(el.textContent).toContain("0 results");
-    expect(el.querySelectorAll(".page-btn:disabled").length).toBe(2);
+    expect(
+      (el.querySelector(".density-toggle") as HTMLButtonElement).getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(el.querySelector(".load-sentinel")).toBeNull();
+    expect(el.querySelector(".load-more-btn")).toBeNull();
   });
 
-  it("last page keeps prev enabled and disables next (snapshot)", () => {
+  it("beyond the render cap the sentinel becomes an explicit Load more", () => {
     const el = document.createElement("div");
-    renderPagination(el, pageModel(120, 100, 50), { onPrev: () => {}, onNext: () => {} });
-    expect(el.innerHTML).toMatchSnapshot();
-    const [prev, next] = [...el.querySelectorAll(".page-btn")] as HTMLButtonElement[];
-    expect(prev.disabled).toBe(false);
-    expect(next.disabled).toBe(true);
+    renderPagination(el, {
+      loaded: 200,
+      total: 320,
+      density: "comfortable",
+      renderCap: 200,
+      onLoadMore: () => {},
+      onToggleDensity: () => {},
+    });
+    expect(el.querySelector(".load-sentinel")).toBeNull();
+    expect((el.querySelector(".load-more-btn") as HTMLButtonElement).textContent).toBe("Load more");
   });
 
-  it("fires prev/next handlers", () => {
+  it("with everything loaded there is no growth control", () => {
+    const el = document.createElement("div");
+    renderPagination(el, {
+      loaded: 120,
+      total: 120,
+      density: "comfortable",
+      renderCap: 200,
+      onLoadMore: () => {},
+      onToggleDensity: () => {},
+    });
+    expect(el.querySelector(".page-info")?.textContent).toBe("1–120 of 120");
+    expect(el.querySelector(".load-sentinel")).toBeNull();
+    expect(el.querySelector(".load-more-btn")).toBeNull();
+  });
+
+  it("fires the load-more and density handlers", () => {
     const fired: string[] = [];
     const el = document.createElement("div");
-    renderPagination(el, pageModel(200, 50, 50), {
-      onPrev: () => fired.push("prev"),
-      onNext: () => fired.push("next"),
+    renderPagination(el, {
+      loaded: 200,
+      total: 320,
+      density: "compact",
+      renderCap: 200,
+      onLoadMore: () => fired.push("more"),
+      onToggleDensity: () => fired.push("density"),
     });
-    (el.querySelectorAll(".page-btn")[0] as HTMLButtonElement).click();
-    (el.querySelectorAll(".page-btn")[1] as HTMLButtonElement).click();
-    expect(fired).toEqual(["prev", "next"]);
+    (el.querySelector(".load-more-btn") as HTMLButtonElement).click();
+    (el.querySelector(".density-toggle") as HTMLButtonElement).click();
+    expect(fired).toEqual(["more", "density"]);
   });
 });
 

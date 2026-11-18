@@ -30,7 +30,11 @@ function token(name: string): string {
 /** Extract one app.css rule block by its exact selector text. */
 function rule(selector: string): string {
   const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return appCss.match(new RegExp(`${escaped}\\s*\\{[^}]*\\}`, "s"))?.[0] ?? "";
+  // Preceded by a line start, `}`, or a selector-list comma: a selector
+  // that merely *ends* with the text (e.g. an override like
+  // `#results[data-density="compact"] .hit-item`) must not shadow the
+  // base rule, but list members (`a, .b {`) still match.
+  return appCss.match(new RegExp(`(^|,|\\})\\s*${escaped}\\s*\\{[^}]*\\}`, "m"))?.[0] ?? "";
 }
 
 // ---------------------------------------------------------------------------

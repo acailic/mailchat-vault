@@ -645,6 +645,9 @@ summary:hover { background: var(--panel-2); }
   font-size: var(--text-meta);
   color: var(--muted);
   min-height: 1em;
+  /* The N–M of T ranges stop jittering as counts change (same
+   * tabular-numerals precedent as the chart axis labels). */
+  font-variant-numeric: tabular-nums;
 }
 #status.error, .error { color: var(--danger); }
 
@@ -894,6 +897,26 @@ button.link-btn:hover:not(:disabled) { background: none; color: var(--accent-hov
 
 /* Results list */
 #results { list-style: none; margin: 0; padding: 0; }
+/* The one sanctioned entrance: the empty→results paint fades the list
+ * in as a SINGLE element group (never per-row stagger — the frequency
+ * rule), once; JS removes the class right after. Reduced motion kills
+ * it outright (see the consolidated block at the end of this file). */
+#results.enter-results {
+  animation: results-enter var(--motion-standard) var(--ease-out);
+}
+@keyframes results-enter {
+  from { opacity: 0; }
+}
+/* Density modes (persisted choice): comfortable is the default pairing
+ * above; compact halves the vertical padding and tightens the two
+ * line-heights (meta + clamped body) one step. */
+#results[data-density="compact"] .hit-item {
+  padding: var(--sp-1) var(--sp-2);
+}
+#results[data-density="compact"] .hit-item .meta,
+#results[data-density="compact"] .hit-item .body {
+  line-height: 1.3;
+}
 .group { margin-bottom: 10px; }
 .group h3 {
   font-size: var(--text-xs);
@@ -961,7 +984,19 @@ mark.hit {
 
 /* Pagination + export */
 #pagination { display: flex; gap: 10px; align-items: center; margin-top: var(--sp-3); }
-.page-info { font-size: var(--text-meta); color: var(--muted); font-variant-numeric: tabular-nums; }
+/* The count line in the footer pairs with #status (both carry the
+ * N–M of T ranges) — tabular numerals there too. */
+.page-info {
+  font-size: var(--text-meta);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+/* The density toggle sits beside the count line: a plain pressed-style
+ * toggle (aria-pressed carries the state). */
+.density-toggle { font-size: var(--text-meta); }
+/* The load sentinel: an inert strip the observer watches — no visible
+ * chrome, no scroll-jacking; it only ever occupies a sliver of space. */
+.load-sentinel { height: 1px; width: 100%; }
 /* One Export… action: the picker folds behind the summary; the outcome
  * line stays readable below it once the picker is closed again. */
 #export-controls { margin-top: var(--sp-2); }
@@ -1843,6 +1878,14 @@ summary:active:not(:disabled),
   /* Empty-state entrance off: no fade, no rise — the identical
    * static group renders at once. */
   .empty-state > * {
+    animation: none;
+  }
+
+  /* The results entrance is OFF entirely for reduced-motion users — no
+   * entrance transition of any kind on the list. */
+  #results.enter-results {
+    animation: none;
+  }
     animation: none;
   }
 }

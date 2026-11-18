@@ -19,6 +19,23 @@ export function splitTerms(text: string): string[] {
 }
 
 /**
+ * The highlight terms for the results list: the free-text terms plus the
+ * applied author value (a `from:`/`to:` operator or the author filter)
+ * broken into its display-name and full forms — a row the parser matched
+ * through the author shows why it matched. Pure: derived from the same
+ * filter model the request builder reads, so it stays unit-testable
+ * beside splitTerms.
+ */
+export function highlightTerms(filters: { text: string; author: string | null }): string[] {
+  const terms = splitTerms(filters.text);
+  const author = (filters.author ?? "").trim();
+  if (!author) return terms;
+  const at = author.indexOf(" <");
+  const display = at > 0 ? author.slice(0, at).trim() : "";
+  return display && display !== author ? [...terms, author, display] : [...terms, author];
+}
+
+/**
  * Split a backend snippet on its match markers into highlight segments.
  * Stray markers (control chars inside a real message body) degrade
  * gracefully: they just produce extra segments.
