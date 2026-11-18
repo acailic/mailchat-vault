@@ -250,6 +250,8 @@ if [ -n "$PIN" ]; then
     *)  TAG="v$PIN" ;;
   esac
   case "$TAG" in
+    *[!A-Za-z0-9._-]*)
+      die "'$PIN' does not look like a version (expected vX.Y.Z, e.g. v0.2.0)" ;;
     v[0-9]*.[0-9]*.[0-9]*) ;;
     *) die "'$PIN' does not look like a version (expected vX.Y.Z, e.g. v0.2.0)" ;;
   esac
