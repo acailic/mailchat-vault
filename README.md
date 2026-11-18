@@ -77,6 +77,18 @@ Captured from the running app with synthetic demo data in the light theme by the
 
 ## Quickstart
 
+### Install in one line
+
+Skip the build toolchain entirely — on Linux or macOS, one command installs (or upgrades to) the latest published release, verifies every download against the release's `SHA256SUMS`, never touches your vault data, and prints how to uninstall:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/acailic/mailchat-vault/main/scripts/install.sh | sh
+```
+
+Read the script before piping it to a shell — piping is a trust decision (it is short): [scripts/install.sh](scripts/install.sh). What it does, its flags (`--version`, `--no-launch`, `--yes`, `--uninstall`), and the unsigned-artifacts trade-off it makes on macOS are on the [download page](docs/download.md#install-in-one-line). No Windows one-liner yet — Windows uses the `.msi`/`setup.exe` installers.
+
+### Run from a source build
+
 Prerequisites: [Node.js](https://nodejs.org) 22+ (older majors crash vitest workers mid-run; enforced by the engines field), [Rust](https://rustup.rs) stable, and on Ubuntu/Debian the Tauri system libraries (macOS/Windows need Xcode / MSVC):
 
 ```sh
