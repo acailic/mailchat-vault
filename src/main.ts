@@ -90,6 +90,10 @@ import {
   type SearchFilters,
 } from "./searchstate";
 import { applyQuery, type SourceLabel } from "./queryparser";
+import {
+  initCommandPalette,
+  registerCommand,
+} from "./commandpalette";
 import type {
   AppError,
   AttachmentSummary,
@@ -4157,6 +4161,70 @@ envClearKeysButton.addEventListener("click", async () => {
     settingsNote.textContent = `Could not clear keys: ${e}`;
   }
 });
+
+// ---------------------------------------------------------------------------
+// Command palette (Cmd/Ctrl+K): seed commands over the existing navigation
+// and theme seams; features register through registerCommand without the
+// palette knowing them (src/commandpalette.ts).
+// ---------------------------------------------------------------------------
+
+/** Run a query through the search flow the search box uses (operator
+ * parsing inside runSearch applies; recents are the palette's book to
+ * keep). */
+function paletteSearch(query: string): void {
+  searchInput.value = query;
+  workspace.store.setWorkspaceSection("search");
+  void runSearch(0);
+}
+
+/** Theme commands ride the existing theme select: the change flow applies
+ * the theme immediately and keeps the Settings form in sync; persisting
+ * stays on Save, exactly like picking the select by hand. */
+function selectTheme(theme: Theme): void {
+  if (themeSelect.value !== theme) {
+    themeSelect.value = theme;
+    themeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+}
+
+/** Open the repository documentation page with a real anchor (no
+ * external-opener plugin exists in the frontend); wherever the packaged
+ * webview cannot follow it, the click degrades safely. */
+function openDocs(): void {
+  const anchor = document.createElement("a");
+  anchor.href = "https://github.com/acailic/mailchat-vault/tree/main/docs";
+  anchor.target = "_blank";
+  anchor.rel = "noopener";
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
+registerCommand({ id: "view.search", title: "Go to: Search", section: "views", run: () => workspace.store.setWorkspaceSection("search") });
+registerCommand({ id: "view.accounts", title: "Go to: Accounts", section: "views", run: () => workspace.store.setView("sources") });
+registerCommand({ id: "view.import", title: "Go to: Import", section: "views", run: () => workspace.store.setSourcesSection("import") });
+registerCommand({ id: "view.jobs", title: "Go to: Jobs", section: "views", run: () => workspace.store.setView("activity") });
+registerCommand({ id: "view.backup", title: "Go to: Backup", section: "views", run: () => workspace.store.setSettingsSection("storage") });
+registerCommand({ id: "view.ai", title: "Go to: AI", section: "views", run: () => workspace.store.setSettingsSection("ai") });
+registerCommand({
+  id: "action.focus-search",
+  title: "Focus search box",
+  section: "actions",
+  shortcut: "/",
+  run: () => {
+    workspace.store.setWorkspaceSection("search");
+    searchInput.focus();
+    searchInput.select();
+  },
+});
+registerCommand({ id: "action.theme-light", title: "Set theme: Light", section: "actions", run: () => selectTheme("light") });
+registerCommand({ id: "action.theme-dark", title: "Set theme: Dark", section: "actions", run: () => selectTheme("dark") });
+registerCommand({ id: "action.theme-vesper", title: "Set theme: Vesper", section: "actions", run: () => selectTheme("vesper") });
+registerCommand({ id: "action.docs", title: "Open documentation", section: "actions", run: openDocs });
+
+/** The palette surface: owns the Cmd/Ctrl+K binding (the workspace shell
+ * keeps only `/` for the search box). */
+initCommandPalette({ onSearch: paletteSearch });
 
 /** Hide the inline first-paint splash (index.html #boot-splash) once
  * the shell has rendered its first frame — the identity-pass swap.

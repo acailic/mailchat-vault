@@ -174,18 +174,13 @@ export function initWorkspace(): WorkspaceController {
   backToResults.addEventListener("click", () => backHandler?.());
 
   // -----------------------------------------------------------------
-  // Global shortcuts: Ctrl/Cmd+K or `/` focus the search box (landing on
-  // the Search tab first — the box lives in that panel)
+  // Global shortcuts: `/` focuses the search box (landing on the Search
+  // tab first — the box lives in that panel). Cmd/Ctrl+K belongs to the
+  // command palette (src/commandpalette.ts), which registers its own
+  // document listener and offers "Focus search" as a command.
   // -----------------------------------------------------------------
 
   document.addEventListener("keydown", (event) => {
-    if ((event.ctrlKey || event.metaKey) && (event.key === "k" || event.key === "K")) {
-      event.preventDefault();
-      store.setWorkspaceSection("search");
-      searchInput.focus();
-      searchInput.select();
-      return;
-    }
     if (event.key === "/" && !isEditable(event.target)) {
       event.preventDefault();
       store.setWorkspaceSection("search");
