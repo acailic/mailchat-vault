@@ -16,6 +16,12 @@ Mailchat Vault is one private, searchable archive for your email and your chats,
 [![macOS download](https://img.shields.io/badge/macOS-download-blue)](https://github.com/acailic/mailchat-vault/releases/latest)
 [![Windows download](https://img.shields.io/badge/Windows-download-blue)](https://github.com/acailic/mailchat-vault/releases/latest)
 [![Linux download](https://img.shields.io/badge/Linux-download-blue)](https://github.com/acailic/mailchat-vault/releases/latest)
+<!-- OpenSSF Scorecard badge — uncomment when the repository is public
+     (owner action, docs/launch-checklist.md; Scorecard analysis only
+     scores public repos, so the badge would render "no analysis" while
+     private):
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/acailic/mailchat-vault/badge)](https://securityscorecards.dev/viewer/?uri=github.com/acailic/mailchat-vault)
+-->
 
 Installers for every platform, `SHA256SUMS` verification, and the version matrix: [download page](docs/download.md).
 
