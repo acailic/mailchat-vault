@@ -319,6 +319,10 @@ describe("uniform hover, press, disabled states (app.css)", () => {
     expect(disabled).toBeTruthy();
     expect(disabled!.body).toMatch(/color:\s*var\(--muted\)/);
     expect(disabled!.body).toMatch(/cursor:\s*not-allowed/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Results grid semantics (the keyboard-first selection surface)
 // ---------------------------------------------------------------------------
 
