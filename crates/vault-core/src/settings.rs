@@ -402,6 +402,14 @@ pub struct Options {
     /// settings files without the field default to **disabled**.
     #[serde(default)]
     pub semantic_draft: bool,
+    /// Transcribe audio attachments (voice notes) locally with an
+    /// optional whisper.cpp sidecar so archive search matches spoken
+    /// words ([`crate::transcription`]). Strictly opt-in — transcription
+    /// is offline CPU work that must never start on its own — so older
+    /// settings files without the field backfill to **disabled**, and
+    /// while it is off nothing is enqueued or transcribed.
+    #[serde(default)]
+    pub transcribe_audio: bool,
 }
 
 /// `Options::notifications` serde default (see the field docs).
@@ -418,6 +426,7 @@ impl Default for Options {
             keep_running_in_background: false,
             start_at_login: false,
             semantic_draft: false,
+            transcribe_audio: false,
         }
     }
 }
@@ -1085,6 +1094,8 @@ mod tests {
         // fresh install) never keep the process running or autostart it.
         assert!(!Settings::default().options.keep_running_in_background);
         assert!(!Settings::default().options.start_at_login);
+        // Local voice-note transcription is strictly opt-in too.
+        assert!(!Settings::default().options.transcribe_audio);
     }
 
     #[test]
@@ -1169,16 +1180,22 @@ mod tests {
         assert!(loaded.options.notifications);
         assert!(!loaded.options.keep_running_in_background);
         assert!(!loaded.options.start_at_login);
+        assert!(
+            !loaded.options.transcribe_audio,
+            "transcription must backfill off in older files"
+        );
         // An explicit opt-in survives a save/load round trip, on disk and
         // back, together with an explicit notifications opt-out.
         let mut s = loaded;
         s.options.keep_running_in_background = true;
         s.options.start_at_login = true;
+        s.options.transcribe_audio = true;
         s.options.notifications = false;
         s.save(&path).unwrap();
         let reloaded = Settings::load(&path).unwrap().unwrap();
         assert!(reloaded.options.keep_running_in_background);
         assert!(reloaded.options.start_at_login);
+        assert!(reloaded.options.transcribe_audio);
         assert!(!reloaded.options.notifications);
         assert_eq!(reloaded, s);
         fs::remove_dir_all(&dir).ok();

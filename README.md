@@ -56,6 +56,7 @@ Captured from the running app with synthetic demo data in the light theme by the
 - Incremental IMAP sync — Gmail (Google sign-in or app password) or any server
 - Opt-in folder watching, scheduled auto-sync, and new-mail desktop notifications
 - FTS5 full-text search with highlighting, filters, pagination, and conversation context
+- Optional local voice-note transcription (whisper.cpp sidecar): search matches the words *said* in WhatsApp/Telegram voice messages, fully offline
 - Optional natural-language Ask: consent-gated, hybrid FTS + local-embedding ranking, source-linked answers
 - Idempotent, deduplicating ingest — re-imports and re-syncs never duplicate
 - Snapshot-backed migrations; staged, journaled backup/restore
@@ -88,6 +89,16 @@ npm run tauri dev
 ```
 
 An empty archive opens on **Add your first source**: import any `.mbox` or chat export, or load the isolated sample archive. The vault database lives in the app data dir (e.g. `~/.local/share/com.acailic.mailchatvault/vault.db` on Linux), with extracted media under `media/` next to it. Full walkthrough: [first-run tour](docs/features.md#first-run-tour).
+
+### Voice-note transcription (optional, offline)
+
+Spoken words in voice notes are searchable when you turn the setting on and provide the sidecar tools — everything runs locally, nothing is uploaded:
+
+1. Build or download [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (MIT, CPU-capable) and a GGML model (e.g. `ggml-base.en.bin`).
+2. Point the app at the binary: set `WHISPER_BIN` to its path (a binary bundled next to the app or anywhere on disk — `whisper-cli` found on `PATH` also works), put the model at `WHISPER_MODEL` (default looked up at `<data_dir>/whisper/ggml-base.bin`), and have `ffmpeg` installed for 16 kHz mono WAV conversion.
+3. Enable transcription in Settings (strictly opt-in, default off).
+
+Imports then queue voice notes for transcription — never slowed by it — and a separate pass transcribes them; plain search matches the spoken words afterwards. With any tool missing, imports work exactly as before and the feature reports itself unavailable (Settings shows what is missing). No model is ever downloaded automatically.
 
 ## Development
 

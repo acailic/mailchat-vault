@@ -1099,6 +1099,84 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
         );
         "#,
     ),
+    (
+        28,
+        // Local voice-note transcription (see [`crate::transcription`]):
+        // one row per (message, digest) audio attachment whose
+        // transcription was enqueued — `pending` when the import or the
+        // attachment backfill recorded the work, `done` once the
+        // separate transcription pass wrote the text. Keyed like the
+        // digest-linked registries (`original_objects`) but anchored to
+        // the message, mirroring `attachment_refs`' deliberate no-FK-on-
+        // derived-data stance would fight the cascade a deleted message
+        // wants, so this table *does* cascade: a transcript is archive
+        // content, not a repairable projection. The companion
+        // `archive_messages.transcript` column holds the done texts
+        // concatenated for the FTS document below — the transcripts
+        // table stays the source of truth (language, model, timing),
+        // the column is exactly what search indexes.
+        //
+        // The FTS extension this migration performs is approved spec:
+        // `archive_fts` is recreated with a fourth `transcript` column
+        // (external content on `archive_messages`, so the backing
+        // column above is required) and its triggers are rewritten to
+        // index it; the one-time rebuild reindexes every existing row
+        // with `transcript = ''`, a no-op for ranking. Plain MATCH
+        // queries now span spoken words too — one search, written and
+        // said.
+        r#"
+        CREATE TABLE transcripts (
+            id             INTEGER PRIMARY KEY,
+            message_id     INTEGER NOT NULL REFERENCES archive_messages(id)
+                ON DELETE CASCADE,
+            sha256         TEXT NOT NULL,
+            -- 'pending' = enqueued, no text yet; 'done' = text present.
+            status         TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'done')),
+            language       TEXT NOT NULL DEFAULT '',
+            text           TEXT NOT NULL DEFAULT '',
+            model          TEXT NOT NULL DEFAULT '',
+            transcribed_at TEXT,
+            enqueued_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (message_id, sha256)
+        );
+        CREATE INDEX idx_transcripts_message ON transcripts (message_id);
+        CREATE INDEX idx_transcripts_pending ON transcripts (status)
+            WHERE status = 'pending';
+
+        ALTER TABLE archive_messages ADD COLUMN transcript
+            TEXT NOT NULL DEFAULT '';
+
+        DROP TRIGGER archive_fts_ai;
+        DROP TRIGGER archive_fts_ad;
+        DROP TRIGGER archive_fts_au;
+        DROP TABLE archive_fts;
+        CREATE VIRTUAL TABLE archive_fts USING fts5 (
+            body,
+            author,
+            subject,
+            transcript,
+            content = 'archive_messages',
+            content_rowid = 'id'
+        );
+        CREATE TRIGGER archive_fts_ai AFTER INSERT ON archive_messages BEGIN
+            INSERT INTO archive_fts (rowid, body, author, subject, transcript)
+            VALUES (new.id, new.body, new.author, new.subject, new.transcript);
+        END;
+        CREATE TRIGGER archive_fts_ad AFTER DELETE ON archive_messages BEGIN
+            INSERT INTO archive_fts (archive_fts, rowid, body, author, subject, transcript)
+            VALUES ('delete', old.id, old.body, old.author, old.subject, old.transcript);
+        END;
+        CREATE TRIGGER archive_fts_au AFTER UPDATE ON archive_messages BEGIN
+            INSERT INTO archive_fts (archive_fts, rowid, body, author, subject, transcript)
+            VALUES ('delete', old.id, old.body, old.author, old.subject, old.transcript);
+            INSERT INTO archive_fts (rowid, body, author, subject, transcript)
+            VALUES (new.id, new.body, new.author, new.subject, new.transcript);
+        END;
+
+        INSERT INTO archive_fts (archive_fts) VALUES ('rebuild');
+        "#,
+    ),
 ];
 
 /// Rust halves of migrations, for backfill logic that SQL alone cannot
@@ -1143,19 +1221,23 @@ pub struct Storage {
 /// author hit sits in between (BM25F; Robertson & Zaragoza 2009, "The
 /// Probabilistic Relevance Framework: BM25 and Beyond"). FTS5's `bm25()`
 /// auxiliary function takes one weight per column in declared order —
-/// `(body, author, subject)` here — and returns negative scores where
-/// more negative is more relevant, so ordering by it ascending keeps the
-/// exact direction of the old `ORDER BY rank`. The weights are formatted
-/// into the SQL text as literals: they are compile-time constants, never
-/// user input, and FTS5 auxiliary-function arguments cannot be bound
-/// parameters. Tuned against `tests/retrieval_eval.rs`; body stays the
-/// 1.0 anchor.
+/// `(body, author, subject, transcript)` here — and returns negative
+/// scores where more negative is more relevant, so ordering by it
+/// ascending keeps the exact direction of the old `ORDER BY rank`. The
+/// weights are formatted into the SQL text as literals: they are
+/// compile-time constants, never user input, and FTS5
+/// auxiliary-function arguments cannot be bound parameters. Tuned
+/// against `tests/retrieval_eval.rs`; body stays the 1.0 anchor.
 ///
 /// `pub(crate)`: shared with the v2 query module ([`crate::search2`]),
 /// which ranks the IPC search path with the same weights.
 pub(crate) const BM25_WEIGHT_BODY: f32 = 1.0;
 pub(crate) const BM25_WEIGHT_AUTHOR: f32 = 1.0;
 pub(crate) const BM25_WEIGHT_SUBJECT: f32 = 3.0;
+/// Spoken words (transcribed voice notes) rank like body text: the
+/// transcript *is* the body of a voice note, just captured by ear
+/// (migration 28's fourth FTS column).
+pub(crate) const BM25_WEIGHT_TRANSCRIPT: f32 = 1.0;
 
 impl Storage {
     /// Open (and migrate) a database file, creating it when missing.
@@ -2288,7 +2370,7 @@ impl Storage {
               AND (?4 IS NULL OR m.author LIKE '%' || ?4 || '%')
               AND (?5 = 0 OR m.body LIKE '%http%://%')
               {extra_sql}
-            ORDER BY bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, {BM25_WEIGHT_SUBJECT}), m.id
+            ORDER BY bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, {BM25_WEIGHT_SUBJECT}, {BM25_WEIGHT_TRANSCRIPT}), m.id
             LIMIT ?
             "#
         ))?;
@@ -2507,7 +2589,7 @@ impl Storage {
                  JOIN source_instances AS si ON si.id = m.source_instance_id \
                  WHERE archive_fts MATCH ?3 {} {} \
                  ORDER BY bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, \
-                               {BM25_WEIGHT_SUBJECT}), m.id {}",
+                               {BM25_WEIGHT_SUBJECT}, {BM25_WEIGHT_TRANSCRIPT}), m.id {}",
                 crate::search2::bm25_rank_expr(),
                 filters.sql,
                 keyset_sql,
@@ -2627,7 +2709,7 @@ impl Storage {
                       JOIN source_instances AS si ON si.id = m.source_instance_id \
                       WHERE archive_fts MATCH ?1 {} \
                       ORDER BY bm25(archive_fts, {BM25_WEIGHT_BODY}, {BM25_WEIGHT_AUTHOR}, \
-                                    {BM25_WEIGHT_SUBJECT}), m.id",
+                                    {BM25_WEIGHT_SUBJECT}, {BM25_WEIGHT_TRANSCRIPT}), m.id",
                     filters.sql
                 ),
                 bind,

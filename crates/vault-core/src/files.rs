@@ -143,7 +143,23 @@ struct BatchOutcome {
 /// completed ranges. A run that reaches the end verifies coverage and
 /// fails (leaving the committed work intact) when the projection does
 /// not match the raw reference count.
+///
+/// Transcription enqueue stays off (the `transcribe_audio` setting's
+/// default); pass `run_backfill_opt(.., true)` when it is enabled.
 pub fn run_backfill(storage: &Storage, batch_limit: Option<u64>) -> Result<FilesBackfillOutcome> {
+    run_backfill_opt(storage, batch_limit, false)
+}
+
+/// [`run_backfill`] with the transcription setting threaded in: with
+/// `enqueue_transcripts` set, every batch also records `pending`
+/// `transcripts` rows for preserved audio references
+/// ([`crate::transcription::enqueue_in_tx`]) — enqueue-only, never
+/// sidecar work, so the backfill stays exactly as fast.
+pub fn run_backfill_opt(
+    storage: &Storage,
+    batch_limit: Option<u64>,
+    enqueue_transcripts: bool,
+) -> Result<FilesBackfillOutcome> {
     let mut outcome = FilesBackfillOutcome::default();
     outcome.resumed_from = read_checkpoint(storage.connection())?;
     let mut after = outcome.resumed_from;
@@ -151,7 +167,7 @@ pub fn run_backfill(storage: &Storage, batch_limit: Option<u64>) -> Result<Files
         let Some(take) = next_batch_size(batch_limit, outcome.scanned_messages) else {
             break;
         };
-        let batch = backfill_one_batch(storage.connection(), after, take)?;
+        let batch = backfill_one_batch(storage.connection(), after, take, enqueue_transcripts)?;
         if batch.scanned == 0 {
             outcome.completed = true;
             break;
@@ -173,7 +189,7 @@ pub fn run_backfill(storage: &Storage, batch_limit: Option<u64>) -> Result<Files
 ///
 /// ```ignore
 /// pool.submit_job(files::FILES_BACKFILL_KIND, |ctx| {
-///     files::run_backfill_job(ctx, None)
+///     files::run_backfill_job(ctx, None, false)
 /// })
 /// ```
 ///
@@ -181,10 +197,13 @@ pub fn run_backfill(storage: &Storage, batch_limit: Option<u64>) -> Result<Files
 /// is held only for that batch's transaction); the checkpoint read,
 /// progress reporting, and the cancellation check happen between
 /// batches, on the runner thread. `batch_limit` and the outcome
-/// semantics match [`run_backfill`].
+/// semantics match [`run_backfill`]; `enqueue_transcripts` threads the
+/// `transcribe_audio` setting through (enqueue-only — see
+/// [`run_backfill_opt`]).
 pub fn run_backfill_job(
     ctx: &JobContext<'_>,
     batch_limit: Option<u64>,
+    enqueue_transcripts: bool,
 ) -> std::result::Result<Value, JobError> {
     let mut outcome = FilesBackfillOutcome::default();
     outcome.resumed_from = ctx.read(|s| read_checkpoint(s.connection()))?;
@@ -207,7 +226,8 @@ pub fn run_backfill_job(
         let Some(take) = next_batch_size(batch_limit, outcome.scanned_messages) else {
             break;
         };
-        let batch = ctx.write(move |s| backfill_one_batch(s.connection(), after, take))?;
+        let batch = ctx
+            .write(move |s| backfill_one_batch(s.connection(), after, take, enqueue_transcripts))?;
         if batch.scanned == 0 {
             outcome.completed = true;
             break;
@@ -288,8 +308,16 @@ pub fn read_checkpoint(conn: &Connection) -> Result<i64> {
 /// media-carrying messages after `after_id`, upsert their refs, and —
 /// when anything was scanned — advance the checkpoint to the last id
 /// committed. `scanned == 0` means the scan reached the end (nothing
-/// written, checkpoint unchanged).
-fn backfill_one_batch(conn: &Connection, after_id: i64, take: u64) -> Result<BatchOutcome> {
+/// written, checkpoint unchanged). With `enqueue_transcripts` the
+/// batch also enqueues pending transcript rows for preserved audio
+/// references (the opt-in setting's import/reconcile hook; the
+/// sidecar never runs here).
+fn backfill_one_batch(
+    conn: &Connection,
+    after_id: i64,
+    take: u64,
+    enqueue_transcripts: bool,
+) -> Result<BatchOutcome> {
     let tx = conn.unchecked_transaction()?;
     let mut scanned = 0u64;
     let mut refs_upserted = 0u64;
@@ -309,6 +337,9 @@ fn backfill_one_batch(conn: &Connection, after_id: i64, take: u64) -> Result<Bat
             last_id = id;
             scanned += 1;
         }
+    }
+    if enqueue_transcripts {
+        crate::transcription::enqueue_in_tx(&tx)?;
     }
     if scanned > 0 {
         tx.execute(

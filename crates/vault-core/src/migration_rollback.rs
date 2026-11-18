@@ -73,6 +73,41 @@ const HATCHES: &[(i64, &[&str])] = &[
         &["CREATE INDEX IF NOT EXISTS idx_archive_messages_source
                  ON archive_messages (source_instance_id)"],
     ),
+    // Migration 28 rebuilds `archive_fts` in place (drop the triggers
+    // and the external-content table, recreate both with the fourth
+    // `transcript` column, reindex). Like migration 4, the scanner sees
+    // only the new CREATEs — their drops leave nothing behind — and the
+    // pre-28 FTS shape lives in a migration at or below the rollback
+    // floor, so no walk ever recreates it. The hatch restores the
+    // three-column `archive_fts` and its triggers from their original
+    // definitions and reindexes, so a database rolled back below 28
+    // re-applies migration 28 exactly as it did over a real schema-v27
+    // database.
+    (
+        28,
+        &[
+            "CREATE VIRTUAL TABLE archive_fts USING fts5 (
+                 body, author, subject,
+                 content = 'archive_messages',
+                 content_rowid = 'id'
+             )",
+            "CREATE TRIGGER archive_fts_ai AFTER INSERT ON archive_messages BEGIN
+                 INSERT INTO archive_fts (rowid, body, author, subject)
+                 VALUES (new.id, new.body, new.author, new.subject);
+             END",
+            "CREATE TRIGGER archive_fts_ad AFTER DELETE ON archive_messages BEGIN
+                 INSERT INTO archive_fts (archive_fts, rowid, body, author, subject)
+                 VALUES ('delete', old.id, old.body, old.author, old.subject);
+             END",
+            "CREATE TRIGGER archive_fts_au AFTER UPDATE ON archive_messages BEGIN
+                 INSERT INTO archive_fts (archive_fts, rowid, body, author, subject)
+                 VALUES ('delete', old.id, old.body, old.author, old.subject);
+                 INSERT INTO archive_fts (rowid, body, author, subject)
+                 VALUES (new.id, new.body, new.author, new.subject);
+             END",
+            "INSERT INTO archive_fts (archive_fts) VALUES ('rebuild')",
+        ],
+    ),
 ];
 
 /// Test support (doc-hidden): SQL statements that undo the schema DDL of
