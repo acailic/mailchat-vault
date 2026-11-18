@@ -731,6 +731,35 @@ summary:hover { background: var(--panel-2); }
 }
 .empty-state-cta { margin-top: var(--sp-1); }
 
+/* P0·02: the drop zone IS the first-run call to action — one big
+ * target, the two fastest sources as cards beside it. */
+.first-run-hero {
+  margin-top: 0;
+  padding: var(--sp-4);
+  display: grid;
+  gap: var(--sp-1);
+}
+.first-run-hero-title {
+  font-size: var(--text-body);
+  color: var(--text);
+}
+.first-run-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--sp-2);
+}
+.first-run-card {
+  display: grid;
+  gap: 2px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-s);
+  background: var(--panel-2);
+}
+.first-run-card-name {
+  font-size: var(--text-body);
+}
+
 /* Drop zones (whole-window drag-drop import): static copy whose only
  * dynamic behavior is the highlight class the Tauri drag-drop events
  * toggle (src/main.ts) — dashed and quiet at rest, accent-tinted while
@@ -748,6 +777,14 @@ summary:hover { background: var(--panel-2); }
   border-color: var(--accent);
   color: var(--text);
   background: color-mix(in srgb, var(--accent) 10%, var(--canvas));
+}
+
+/* P0·02: while the completion card owns #import-followup, the section
+ * stacks (card first, then the follow-up buttons) instead of the
+ * follow-up row's inline layout. */
+#import-followup.with-completion {
+  display: grid;
+  gap: var(--sp-2);
 }
 
 button.link-btn {

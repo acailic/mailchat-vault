@@ -266,19 +266,41 @@
                 <div id="active-filter-chips" class="row" style="gap: 6px; margin-top: 6px"></div>
                 <div id="refresh-notice" class="row mt-s" hidden></div>
                 <div id="status" role="status" aria-live="polite"></div>
-                <!-- U02: the first-run state — an empty archive offers a
-                     guided first action instead of a dead search box.
+<!-- U02 + P0-02: the first-run state — an empty archive
+                     offers ONE obvious action: drop an archive. The two
+                     highest-volume sources get cards that say how to
+                     produce their exports; the drop itself auto-detects
+                     the format (no mode picker). The whole window is the
+                     drop target (Tauri drag-drop, src/main.ts).
                      Dismissible: the choice persists in localStorage
                      (mcv.firstRunDismissed), so the card never nags
                      across restarts. -->
                 <section id="first-run" aria-label="Get started" hidden>
-                  <div class="first-run-header">
-                    <h3 class="first-run-title">Add your first source</h3>
+<div class="first-run-header">
+                    <h3 class="first-run-title">Bring your archive in</h3>
                     <button id="first-run-dismiss-btn" class="icon-btn" type="button"
                             aria-label="Dismiss the getting-started card"
                             title="Hide this card — your choice is remembered on this machine">
                       <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-close"></use></svg>
                     </button>
+                  </div>
+                  <div id="first-run-drop" class="drop-zone first-run-hero">
+                    <span class="first-run-hero-title">Drop your archive here</span>
+                    <span class="meta">Anywhere in this window — the format is detected for you.</span>
+                  </div>
+                  <div class="row first-run-cards" aria-label="The two fastest sources to export">
+                    <div class="first-run-card">
+                      <span class="first-run-card-name">Gmail</span>
+                      <span class="meta">Google Takeout → Mail → Export (.mbox)</span>
+                    </div>
+                    <div class="first-run-card">
+                      <span class="first-run-card-name">WhatsApp</span>
+                      <span class="meta">chat → ⋮ → More → Export chat (.zip)</span>
+                    </div>
+                  </div>
+                  <div class="row">
+                    <button id="first-run-import-btn" type="button">Pick a file instead…</button>
+                    <button id="first-run-account-btn" type="button">Connect email…</button>
                   </div>
                   <p class="meta">
                     Mailchat Vault keeps a local, searchable archive of your email and
@@ -289,34 +311,24 @@
                     Anything uncertain (dates we had to infer, threads we could not
                     verify) is always marked as such.
                   </p>
-                  <div class="row">
-                    <button id="first-run-import-btn" class="primary" type="button">Import your first archive…</button>
-                    <button id="first-run-account-btn" type="button">Connect email…</button>
-                  </div>
-                  <!-- Whole-window drag-drop import: static copy whose only
-                       dynamic behavior is the highlight class the Tauri
-                       drag-drop events toggle (src/main.ts). -->
-              <div id="first-run-drop" class="drop-zone">
-                Drop archives here — .mbox · .eml · .json · .jsonl · .txt
-              </div>
-              <!-- GP03: supported-format help where a newcomer starts,
-                   not only inside the import section. -->
-              <details id="first-run-format-help" style="margin-top: 6px">
-                <summary class="meta">What can I import?</summary>
-                <ul class="meta" id="first-run-format-list" style="margin: 6px 0 0; padding-left: 18px">
-                  <li>Email archive (.mbox) — any mail app can export folders as .mbox (Thunderbird: ImportExportTools NG).</li>
-                  <li>Email messages (.eml) — drag messages out of Outlook (or any mail app); a folder of them imports together.</li>
-                  <li>WhatsApp export — WhatsApp → chat → ⋮ → More → Export chat (with or without media).</li>
-                  <li>Telegram export — Telegram Desktop → chat settings → Export chat history (JSON, machine-readable).</li>
-                  <li>Signal conversation export — sigtop export-messages -f json (Signal Desktop keeps no built-in JSON export).</li>
-                  <li>Discord Data Package — Discord → Settings → Privacy → Request Data (the package arrives by email).</li>
-                  <li>Messenger (Facebook) export — Download your information with Format set to JSON; import messages/ or the whole export.</li>
-                  <li>JSON Lines export (.jsonl) — from any vault's Export results… / Export chat…; re-imports never duplicate.</li>
-                </ul>
-                <p class="meta" style="margin: 6px 0 0">
-                  You will see a preview before anything is stored, and re-importing never duplicates.
-                </p>
-              </details>
+               <!-- GP03: supported-format help where a newcomer starts,
+                    not only inside the import section. -->
+               <details id="first-run-format-help" style="margin-top: 6px">
+                 <summary class="meta">What can I import?</summary>
+                 <ul class="meta" id="first-run-format-list" style="margin: 6px 0 0; padding-left: 18px">
+                   <li>Email archive (.mbox) — any mail app can export folders as .mbox (Thunderbird: ImportExportTools NG).</li>
+                   <li>Email messages (.eml) — drag messages out of Outlook (or any mail app); a folder of them imports together.</li>
+                   <li>WhatsApp export — WhatsApp → chat → ⋮ → More → Export chat (with or without media).</li>
+                   <li>Telegram export — Telegram Desktop → chat settings → Export chat history (JSON, machine-readable).</li>
+                   <li>Signal conversation export — sigtop export-messages -f json (Signal Desktop keeps no built-in JSON export).</li>
+                   <li>Discord Data Package — Discord → Settings → Privacy → Request Data (the package arrives by email).</li>
+                   <li>Messenger (Facebook) export — Download your information with Format set to JSON; import messages/ or the whole export.</li>
+                   <li>JSON Lines export (.jsonl) — from any vault's Export results… / Export chat…; re-imports never duplicate.</li>
+                 </ul>
+                 <p class="meta" style="margin: 6px 0 0">
+                   You will see a preview before anything is stored, and re-importing never duplicates.
+                 </p>
+               </details>
                   <p class="meta">
                     Not ready with your own data?
                     <button id="first-run-demo-btn" class="link-btn" type="button">Try a sample archive</button>

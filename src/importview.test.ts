@@ -8,6 +8,7 @@
 import { Window } from "happy-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  buildImportCompletion,
   formatHint,
   formatLabel,
   importActionLabel,
@@ -339,5 +340,124 @@ describe("renderImportProgress", () => {
     renderJob(job({ state: { state: "cancelled" } }));
     expect(el.hidden).toBe(true);
     expect(el.children.length).toBe(0);
+  });
+
+  it("a running job with counts and an ETA appends the ETA to the line", () => {
+    renderImportProgress(
+      el,
+      job({
+        state: { state: "running" },
+        progress: { done: 2, total: 4, message: "reading messages" },
+      }),
+      { onCancel: () => {}, onDismiss: () => {}, eta: "~2 minutes" },
+    );
+    expect(el.querySelector(".import-progress-line")!.textContent).toBe(
+      "2/4 (50%) · reading messages · ~2 minutes",
+    );
+  });
+
+  it("a running job whose ETA is honest 'estimating…' says so rather than hiding", () => {
+    renderImportProgress(
+      el,
+      job({
+        state: { state: "running" },
+        progress: { done: 1, total: 4, message: "reading messages" },
+      }),
+      { onCancel: () => {}, onDismiss: () => {}, eta: "estimating…" },
+    );
+    expect(el.querySelector(".import-progress-line")!.textContent).toBe(
+      "1/4 (25%) · reading messages · estimating…",
+    );
+  });
+
+  it("an unknown-total line never gains an ETA suffix (nothing to estimate against)", () => {
+    renderImportProgress(
+      el,
+      job({
+        state: { state: "running" },
+        progress: { done: 5, total: 0, message: "counting messages" },
+      }),
+      { onCancel: () => {}, onDismiss: () => {}, eta: "estimating…" },
+    );
+    expect(el.querySelector(".import-progress-line")!.textContent).toBe("counting messages");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Completion card (P0·02): real counts + the pre-focused search hand-off
+// ---------------------------------------------------------------------------
+
+describe("buildImportCompletion", () => {
+  const COMPLETION = {
+    source: "mbox",
+    seen: 120,
+    inserted: 118,
+    skipped: 2,
+    failed: 0,
+  };
+
+  function build(seed: string | null) {
+    const onSearch = vi.fn();
+    const card = buildImportCompletion(COMPLETION, { seed, onSearch });
+    el.append(card);
+    return { onSearch, card };
+  }
+
+  it("renders the run's inserted/skipped counts from the outcome summary", () => {
+    build(null);
+    expect(el.querySelector(".preview-title")!.textContent).toBe("Import complete");
+    expect(el.querySelectorAll(".meta")[0]!.textContent).toBe(
+      "Imported 118 new, 2 already present (of 120 in Mail import).",
+    );
+  });
+
+  it("names parse failures when the run had them", () => {
+    const card = buildImportCompletion(
+      { ...COMPLETION, failed: 3 },
+      { seed: null, onSearch: () => {} },
+    );
+    el.append(card);
+    expect(el.querySelectorAll(".meta")[0]!.textContent).toBe(
+      "Imported 118 new, 2 already present, 3 failed to parse (of 120 in Mail import).",
+    );
+  });
+
+  it("carries no receipt id — the outcome shape has none and none is invented", () => {
+    build("ana@example.com");
+    expect(el.textContent).not.toContain("receipt");
+    expect(el.querySelector("[data-receipt-id]")).toBeNull();
+  });
+
+  it("seeds the search box with the archive's most frequent sender", () => {
+    build("Ana Sender <ana@example.com>");
+    const input = el.querySelector<HTMLInputElement>("#import-done-search")!;
+    expect(input.value).toBe("Ana Sender <ana@example.com>");
+    expect(input.getAttribute("aria-label")).toBe("Search your archive");
+  });
+
+  it("an unseeded box renders empty and says search is ready anyway", () => {
+    build(null);
+    const input = el.querySelector<HTMLInputElement>("#import-done-search")!;
+    expect(input.value).toBe("");
+    expect(el.textContent).toContain("type anything and press Enter");
+  });
+
+  it("Enter in the search box hands the query to onSearch; empty never fires", () => {
+    const { onSearch } = build("marko");
+    const input = el.querySelector<HTMLInputElement>("#import-done-search")!;
+    input.value = "marko";
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(onSearch).toHaveBeenCalledWith("marko");
+    input.value = "   ";
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(onSearch).toHaveBeenCalledTimes(1);
+  });
+
+  it("the Search button submits the same hand-off for pointer users", () => {
+    const { onSearch } = build("jelena");
+    const input = el.querySelector<HTMLInputElement>("#import-done-search")!;
+    input.value = "jelena";
+    el.querySelector<HTMLButtonElement>("#import-done-search-btn")!.click();
+    expect(onSearch).toHaveBeenCalledWith("jelena");
   });
 });

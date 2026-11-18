@@ -1792,7 +1792,9 @@ describe("import picker → preview → confirm (U03)", () => {
       total: 4,
       message: "reading messages",
     });
-    expect($(".import-progress-line").textContent).toBe("2/4 (50%) · reading messages");
+    // A single progress sample gives no rate yet: the ETA suffix stays
+    // at the honest "estimating…" instead of inventing a number.
+    expect($(".import-progress-line").textContent).toBe("2/4 (50%) · reading messages · estimating…");
     expect(($(".progress-fill") as HTMLElement).style.width).toBe("50%");
 
     // Success hands off: the summary line lands, the card steps aside.
@@ -2134,7 +2136,7 @@ describe("import picker → preview → confirm (U03)", () => {
     });
     expect(($("#import-cancel-btn") as HTMLButtonElement).disabled).toBe(true);
     expect($("#import-cancel-btn").textContent).toBe("Cancelling…");
-    expect($(".import-progress-line").textContent).toBe("2/4 (50%) · messages");
+    expect($(".import-progress-line").textContent).toBe("2/4 (50%) · messages · estimating…");
 
     // Cooperative: the stop is requested, the engine confirms by event.
     emitJob({ seq: 3, at: "t", job: 35, type: "cancelled" });
@@ -2398,7 +2400,7 @@ describe("import picker → preview → confirm (U03)", () => {
     }));
     await boot();
     await vi.waitFor(() => expect($("#import-progress").getAttribute("hidden")).toBeNull());
-    expect($(".import-progress-line").textContent).toBe("10/40 (25%) · reading messages");
+    expect($(".import-progress-line").textContent).toBe("10/40 (25%) · reading messages · estimating…");
     expect(($(".progress-fill") as HTMLElement).style.width).toBe("25%");
     expect($("#import-cancel-btn")).toBeTruthy();
     // While it runs, this flow will not start a second import.
@@ -2473,11 +2475,21 @@ describe("drag-drop import", () => {
     await boot();
     const zones = [...win.document.querySelectorAll(".drop-zone")] as unknown as HTMLElement[];
     expect(zones.map((z) => z.id)).toEqual(["first-run-drop", "import-drop"]);
-    for (const zone of zones) {
-      expect(zone.textContent?.trim()).toBe(
-        "Drop archives here — .mbox · .eml · .json · .jsonl · .txt",
-      );
-    }
+    // P0·02: the first-run zone is the single call to action; the
+    // Sources zone keeps the full format advertisement.
+    expect($("#first-run-drop").textContent).toContain("Drop your archive here");
+    expect($("#first-run-drop").textContent).toContain("the format is detected for you");
+    expect($("#import-drop").textContent?.trim()).toBe(
+      "Drop archives here — .mbox · .eml · .json · .jsonl · .txt",
+    );
+    // The two fastest sources get their how-to cards beside the CTA.
+    const cards = [...win.document.querySelectorAll(".first-run-card")] as unknown as HTMLElement[];
+    expect(cards.map((c) => c.querySelector(".first-run-card-name")?.textContent)).toEqual([
+      "Gmail",
+      "WhatsApp",
+    ]);
+    expect(cards[0].textContent).toContain("Takeout");
+    expect(cards[1].textContent).toContain("Export chat (.zip)");
   });
 
   it("a dropped file routes through the same bounded preview as the picker", async () => {
@@ -2508,13 +2520,17 @@ describe("drag-drop import", () => {
     // The first path previews immediately; the rest queue behind it.
     await vi.waitFor(() => expect($(".preview-path").textContent).toBe("/tmp/a.mbox"));
     expect(previewedPaths()).toEqual(["/tmp/a.mbox"]);
-    expect($("#import-status").textContent).toBe("2 dropped archives waiting.");
+    expect($("#import-status").textContent).toBe(
+      "2 more archives waiting — imports run one at a time.",
+    );
 
     // Cancelling the first preview hands the flow to the second.
     $("#preview-cancel-btn").click();
     await vi.waitFor(() => expect($(".preview-path").textContent).toBe("/tmp/b.json"));
     expect(previewedPaths()).toEqual(["/tmp/a.mbox", "/tmp/b.json"]);
-    expect($("#import-status").textContent).toBe("1 dropped archive waiting.");
+    expect($("#import-status").textContent).toBe(
+      "1 more archive waiting — imports run one at a time.",
+    );
 
     // The third previews the same way; the drained queue goes quiet.
     $("#preview-cancel-btn").click();
@@ -2542,7 +2558,9 @@ describe("drag-drop import", () => {
     dropPaths(["/tmp/b.mbox"]);
     await flush();
     expect(previewedPaths()).toEqual(["/tmp/a.mbox"]);
-    expect($("#import-status").textContent).toBe("1 dropped archive waiting.");
+    expect($("#import-status").textContent).toBe(
+      "1 more archive waiting — imports run one at a time.",
+    );
 
     // The terminal event frees the flow — the next path previews.
     emitJob({ seq: 1, at: "t", job: 71, type: "submitted", kind: "import_chat_export" });
@@ -2605,6 +2623,165 @@ describe("drag-drop import", () => {
     dropPaths([]);
     expect(active()).toEqual([false, false]);
     expect(importCalls("preview_import")).toHaveLength(0);
+  });
+
+  // P0·02: the drop-to-search onboarding journey, driven end to end
+  // through the faked drag-drop events and the faked IPC layer with
+  // fixture payload shapes (an mbox Takeout pick and a WhatsApp .zip).
+  const MBOX_DROP = {
+    ...PREVIEW,
+    kind: "mbox",
+    source: "mbox",
+    messages_seen: 120,
+    media_referenced: 0,
+    media_missing: 0,
+    samples: [{ author: "Ana Sender <ana@example.com>", subject: "Welcome", sent_at: "2026-11-01T10:00:00Z", snippet: "hello" }],
+  };
+  const WHATSAPP_DROP = {
+    ...PREVIEW,
+    kind: "whatsapp",
+    source: "whatsapp:chat",
+    messages_seen: 40,
+  };
+
+  /** Drive one dropped path through detect → confirm → the job's
+   * terminal event, returning the emitJob helper bound to the job id. */
+  async function dropToCompletion(preview: unknown, path: string) {
+    tauri.handlers.set("preview_import", () => Promise.resolve(preview));
+    tauri.handlers.set("job_submit", () => ({ id: 91 }));
+    tauri.handlers.set("list_import_scopes_v2", () => []);
+    dropPaths([path]);
+    await vi.waitFor(() => expect($("#preview-import-btn")).toBeTruthy());
+    $("#preview-import-btn").click();
+    await vi.waitFor(() =>
+      expect(tauri.calls.filter((c) => c.cmd === "job_submit")).toHaveLength(1),
+    );
+    return { jobId: 91 };
+  }
+
+  it("a dropped Takeout mbox auto-detects, imports, and lands on the seeded completion search", async () => {
+    // An empty vault: the drop happens on the first-run card's CTA.
+    tauri.handlers.set("stats", () => ({ total: 0, by_source: [] }));
+    await boot();
+    await vi.waitFor(() => expect($("#first-run").getAttribute("hidden")).toBeNull());
+    // The fresh archive's stats after the import: one author on top.
+    let imported = false;
+    tauri.handlers.set("stats", () =>
+      imported ? { total: 120, by_source: [{ source: "mbox", count: 120 }] } : { total: 0, by_source: [] },
+    );
+    tauri.handlers.set("archive_stats", () =>
+      imported
+        ? {
+            ...ARCHIVE_STATS,
+            total: 120,
+            by_source: [{ source: "mbox", count: 120 }],
+            top_authors: [{ author: "Ana Sender <ana@example.com>", count: 80 }],
+          }
+        : ARCHIVE_STATS,
+    );
+    const { jobId } = await dropToCompletion(MBOX_DROP, "/tmp/takeout/mail.mbox");
+    // The drop landed on the workspace view: the flow is followed where
+    // its cards live.
+    await vi.waitFor(() =>
+      expect(win.document.querySelector("#app")!.getAttribute("data-view")).toBe("sources"),
+    );
+    expect(tauri.calls.filter((c) => c.cmd === "job_submit")[0].args).toMatchObject({
+      kind: "import_mbox",
+      params: { path: "/tmp/takeout/mail.mbox" },
+    });
+    imported = true;
+    emitJob({ seq: 1, at: "t", job: jobId, type: "submitted", kind: "import_mbox" });
+    emitJob({ seq: 2, at: "t", job: jobId, type: "started" });
+    emitJob({ seq: 3, at: "t", job: jobId, type: "progress", done: 60, total: 120, message: "reading messages" });
+    emitJob({
+      seq: 4,
+      at: "t",
+      job: jobId,
+      type: "succeeded",
+      result: {
+        summary: { source: "mbox", seen: 120, inserted: 118, skipped: 2, failed: 0 },
+        import_id: "mbox-run-1",
+        media: null,
+      },
+    });
+
+    // The completion card: the run's real counts, no receipt id.
+    await vi.waitFor(() => expect($("#import-done-search")).toBeTruthy());
+    const card = win.document.querySelector(".import-completion-card")!;
+    expect(card.textContent).toContain("Imported 118 new, 2 already present (of 120 in Mail import).");
+    expect(card.textContent).not.toContain("receipt");
+    expect(card.textContent).not.toContain("mbox-run-1"); // the import id is a filter value, not shown here
+    // The follow-up still offers the run's messages.
+    expect($("#view-imported-btn")).toBeTruthy();
+
+    // After the stats refresh lands, the search box is seeded with the
+    // archive's most frequent sender and focused — one Enter from wow.
+    const doneSearch = () =>
+      win.document.querySelector("#import-done-search") as unknown as HTMLInputElement;
+    await vi.waitFor(() =>
+      expect(doneSearch().value).toBe("Ana Sender <ana@example.com>"),
+    );
+    expect(win.document.activeElement).toBe(doneSearch());
+    // Enter runs the workspace search with exactly the seed.
+    searchRespondsWith(() => pageOf(HITS, 1));
+    const before = searchCalls().length;
+    pressKey(doneSearch(), "Enter");
+    await vi.waitFor(() => expect(searchCalls().length).toBe(before + 1));
+    expect(searchCalls().at(-1)!.args).toMatchObject({
+      request: { text: "Ana Sender <ana@example.com>" },
+    });
+    expect(input("#search").value).toBe("Ana Sender <ana@example.com>");
+    expect(win.document.querySelector("#app")!.getAttribute("data-view")).toBe("workspace");
+  });
+
+  it("a dropped WhatsApp export .zip drives the same completion machine", async () => {
+    await boot();
+    tauri.handlers.set("archive_stats", () => ARCHIVE_STATS);
+    const { jobId } = await dropToCompletion(WHATSAPP_DROP, "/tmp/whatsapp/chat.zip");
+    expect(tauri.calls.filter((c) => c.cmd === "job_submit")[0].args).toMatchObject({
+      kind: "import_chat_export",
+    });
+    emitJob({ seq: 1, at: "t", job: jobId, type: "submitted", kind: "import_chat_export" });
+    emitJob({
+      seq: 2,
+      at: "t",
+      job: jobId,
+      type: "succeeded",
+      result: {
+        summary: { source: "whatsapp:chat", seen: 40, inserted: 39, skipped: 0, failed: 1 },
+        import_id: "wa-run-1",
+        media: null,
+      },
+    });
+    await vi.waitFor(() => expect($("#import-done-search")).toBeTruthy());
+    const card = win.document.querySelector(".import-completion-card")!;
+    expect(card.textContent).toContain(
+      "Imported 39 new, 0 already present, 1 failed to parse (of 40 in whatsapp:chat).",
+    );
+    expect(card.textContent).not.toContain("receipt");
+    expect($("#import-status").textContent).toContain("1 failed to parse");
+  });
+
+  it("an unavailable stats round trip still focuses the completion search, unseeded", async () => {
+    await boot();
+    tauri.handlers.set("archive_stats", () => Promise.reject("busy"));
+    const { jobId } = await dropToCompletion(MBOX_DROP, "/tmp/mail.mbox");
+    emitJob({
+      seq: 1,
+      at: "t",
+      job: jobId,
+      type: "succeeded",
+      result: {
+        summary: { source: "mbox", seen: 2, inserted: 2, skipped: 0, failed: 0 },
+        import_id: "mbox-run-2",
+        media: null,
+      },
+    });
+    const doneSearch = () =>
+      win.document.querySelector("#import-done-search") as unknown as HTMLInputElement;
+    await vi.waitFor(() => expect(win.document.activeElement).toBe(doneSearch()));
+    expect(doneSearch().value).toBe(""); // nothing invented
+    expect(doneSearch().getAttribute("aria-label")).toBe("Search your archive");
   });
 });
 
@@ -2701,11 +2878,14 @@ describe("first-run state and the isolated sample archive (U02)", () => {
     await vi.waitFor(() => expect($("#first-run").getAttribute("hidden")).not.toBeNull());
   });
 
-  it("the guided CTA leads with importing the first archive", async () => {
+  it("the guided CTA leads with the drop zone and a secondary file picker", async () => {
     tauri.handlers.set("stats", () => ({ total: 0, by_source: [] }));
     await boot();
     await vi.waitFor(() => expect($("#first-run").getAttribute("hidden")).toBeNull());
-    expect($("#first-run-import-btn").textContent).toBe("Import your first archive…");
+    // The hero drop zone is the single call to action; the button is the
+    // secondary route (P0·02) — same destination either way.
+    expect($("#first-run-drop").className).toContain("first-run-hero");
+    expect($("#first-run-import-btn").textContent).toBe("Pick a file instead…");
     // The CTA routes to the import section and focuses its picker.
     ($("#first-run-import-btn") as HTMLElement).click();
     await vi.waitFor(() =>

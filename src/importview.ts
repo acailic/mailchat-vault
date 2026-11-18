@@ -8,7 +8,7 @@
 // when the backend knows a total, and Cancel. Unit-tested via happy-dom
 // in importview.test.ts.
 
-import { humanSize } from "./format";
+import { humanSize, friendlySourceLabel } from "./format";
 import {
   describeJobError,
   jobKindLabel,
@@ -18,6 +18,7 @@ import {
 import { iconEl } from "./icons";
 import type { JobRecord } from "./types";
 import type { ImportPreview } from "./types";
+import type { ImportCompletion } from "./onboarding";
 
 /** How the confirm button labels itself for each detected format. */
 export function importActionLabel(preview: ImportPreview): string {
@@ -325,6 +326,10 @@ export interface ImportProgressOptions {
   /** Retry the failed import with the same path and options (GP03):
    * interrupted imports resume without duplicating. */
   onRetry?: () => void;
+  /** The rolling-rate ETA text ("~2 minutes", or "estimating…" while
+   * the rate is unknown) for a running job with known counts; appended
+   * to the determinate progress line (P0·02). */
+  eta?: string;
 }
 
 /**
@@ -397,7 +402,10 @@ export function renderImportProgress(
   } else {
     const progress = record.progress;
     const counts = progress ? jobProgressText(progress) : null;
-    line.textContent = counts ?? progress?.message ?? "Importing…";
+    line.textContent =
+      counts !== null && opts.eta !== undefined
+        ? `${counts} · ${opts.eta}`
+        : (counts ?? progress?.message ?? "Importing…");
   }
   card.append(line);
 
@@ -448,4 +456,81 @@ export function renderImportProgress(
 export function hideImportProgress(el: HTMLElement): void {
   el.hidden = true;
   el.replaceChildren();
+}
+
+// ---------------------------------------------------------------------------
+// Completion card (P0·02): the run's real counts plus the wow beat — a
+// pre-focused search box seeded with the archive's most frequent
+// sender, so the first thing the user does with the fresh archive is
+// search it. No receipt id: the serialized job result carries none (see
+// importOutcomeOf in src/main.ts) and none is invented here.
+// ---------------------------------------------------------------------------
+
+export interface ImportCompletionOptions {
+  /** The most frequent sender of the imported data (null when stats
+   * carry none — the box still renders and focuses, just unseeded). */
+  seed: string | null;
+  /** Run the search: the box's Enter/button hand-off. */
+  onSearch: (query: string) => void;
+}
+
+/** Build the completion card. The caller owns placement (#import-followup)
+ * and the focus hand-off timing (after the stats refresh lands). */
+export function buildImportCompletion(
+  completion: ImportCompletion,
+  opts: ImportCompletionOptions,
+): HTMLElement {
+  const card = document.createElement("div");
+  card.className = "import-completion-card";
+
+  const title = document.createElement("h3");
+  title.className = "preview-title";
+  title.textContent = "Import complete";
+  card.append(title);
+
+  const counts = document.createElement("p");
+  counts.className = "meta";
+  const failedPart = completion.failed > 0 ? `, ${completion.failed} failed to parse` : "";
+  counts.textContent =
+    `Imported ${completion.inserted} new, ${completion.skipped} already present` +
+    `${failedPart} (of ${completion.seen} in ${friendlySourceLabel(completion.source)}).`;
+  card.append(counts);
+
+  const searchRow = document.createElement("div");
+  searchRow.className = "row";
+  const label = document.createElement("label");
+  label.className = "visually-hidden";
+  label.setAttribute("for", "import-done-search");
+  label.textContent = "Search your archive";
+  const input = document.createElement("input");
+  input.id = "import-done-search";
+  input.type = "text";
+  input.placeholder = "Search your archive…";
+  input.setAttribute("aria-label", "Search your archive");
+  const seed = opts.seed?.trim();
+  if (seed) input.value = seed;
+  const submit = () => {
+    const query = input.value.trim();
+    if (query !== "") opts.onSearch(query);
+  };
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") submit();
+  });
+  const button = document.createElement("button");
+  button.type = "button";
+  button.id = "import-done-search-btn";
+  button.className = "primary";
+  button.textContent = "Search";
+  button.addEventListener("click", submit);
+  searchRow.append(label, input, button);
+  card.append(searchRow);
+
+  const hint = document.createElement("p");
+  hint.className = "meta";
+  hint.textContent = seed
+    ? `Search is ready — “${seed}” is your archive's most frequent sender; press Enter to see their messages.`
+    : "Search is ready — type anything and press Enter.";
+  card.append(hint);
+
+  return card;
 }
