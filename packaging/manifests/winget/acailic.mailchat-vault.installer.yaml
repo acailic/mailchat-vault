@@ -14,7 +14,7 @@ Installers:
   - Architecture: x64
     InstallerType: wix
     InstallerUrl: https://github.com/acailic/mailchat-vault/releases/download/v0.0.0/mailchat-vault_0.0.0_x64_en-US.msi
-    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    InstallerSha256: "0000000000000000000000000000000000000000000000000000000000000000"
     InstallerLocale: en-US
     Scope: machine
     InstallationMetadata:
