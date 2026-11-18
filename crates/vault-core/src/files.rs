@@ -160,13 +160,12 @@ pub fn run_backfill_opt(
     batch_limit: Option<u64>,
     enqueue_transcripts: bool,
 ) -> Result<FilesBackfillOutcome> {
-    let mut outcome = FilesBackfillOutcome::default();
-    outcome.resumed_from = read_checkpoint(storage.connection())?;
+    let mut outcome = FilesBackfillOutcome {
+        resumed_from: read_checkpoint(storage.connection())?,
+        ..Default::default()
+    };
     let mut after = outcome.resumed_from;
-    loop {
-        let Some(take) = next_batch_size(batch_limit, outcome.scanned_messages) else {
-            break;
-        };
+    while let Some(take) = next_batch_size(batch_limit, outcome.scanned_messages) {
         let batch = backfill_one_batch(storage.connection(), after, take, enqueue_transcripts)?;
         if batch.scanned == 0 {
             outcome.completed = true;
@@ -205,8 +204,10 @@ pub fn run_backfill_job(
     batch_limit: Option<u64>,
     enqueue_transcripts: bool,
 ) -> std::result::Result<Value, JobError> {
-    let mut outcome = FilesBackfillOutcome::default();
-    outcome.resumed_from = ctx.read(|s| read_checkpoint(s.connection()))?;
+    let mut outcome = FilesBackfillOutcome {
+        resumed_from: ctx.read(|s| read_checkpoint(s.connection()))?,
+        ..Default::default()
+    };
     // Progress positions are message ids (checkpoint vs the newest id):
     // monotone, and the denominator stays true while imports run.
     let total = ctx.read(|s| {

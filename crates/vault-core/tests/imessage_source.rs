@@ -94,8 +94,9 @@ fn fixture_db(dir: &std::path::Path) -> std::path::PathBuf {
 
     // 815220000 Apple-epoch seconds = 2026-11-01T10:00:00Z exactly.
     let apple = |unix: i64| unix_seconds_to_apple_epoch(unix);
-    let messages: &[(Option<&str>, &str, i64, i64, Option<i64>)] = &[
-        // (text, service, is_from_me, unix date, handle)
+    // (text, service, is_from_me, unix date, handle)
+    type FixtureRow<'a> = (Option<&'a str>, &'a str, i64, i64, Option<i64>);
+    let messages: &[FixtureRow<'_>] = &[
         (
             Some("Zdravo iz iMessage! 👋"),
             "iMessage",

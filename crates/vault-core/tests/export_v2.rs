@@ -762,10 +762,9 @@ fn honesty_filters_export_parity_matches_search_hits_and_totals() {
 // ----------------------------------------------------------------------
 
 use vault_core::export_html::{
-    export_html, BatesOptions, HtmlExportOutcome, HtmlExportScope, DIGEST_COMMITMENT_LABEL,
-    FIDELITY_LABEL, PENDING_PROOF_LINE,
+    BatesOptions, DIGEST_COMMITMENT_LABEL, FIDELITY_LABEL, PENDING_PROOF_LINE,
 };
-use vault_core::object_store::{Capacity, ObjectStore};
+use vault_core::object_store::Capacity;
 use vault_core::storage::{SourceReceiptKind, SourceReceiptRecord};
 
 /// One stored media object in `data_dir` and the `raw_json` media

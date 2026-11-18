@@ -830,7 +830,7 @@ fn honesty_seeded() -> (Storage, std::collections::BTreeMap<&'static str, i64>) 
             "demo",
             key,
             "Ana",
-            &format!("2026-01-{day:02}T10:00:00Z"),
+            format!("2026-01-{day:02}T10:00:00Z"),
             format!("needle body {key}"),
         );
         m.time_confidence = "explicit_offset".into();

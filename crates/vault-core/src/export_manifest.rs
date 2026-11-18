@@ -282,6 +282,11 @@ impl<'a> VerificationCollector<'a> {
     /// write `manifest.json` and the `README.md` into the staging
     /// directory — before the completeness rename, so an incomplete
     /// bundle never carries either.
+    // manifest assembly is a single cohesive pipeline: staging, pages,
+    // and the four digest dimensions all close over the same bundle;
+    // splitting the signature would just hide which parts of the
+    // manifest finish() seals.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn finish(
         mut self,
         staging: &Path,

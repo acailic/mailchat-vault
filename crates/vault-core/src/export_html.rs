@@ -703,9 +703,9 @@ impl PageWriter {
             );
         }
         if let Some(e) = self.evidence.as_ref() {
-            let _ = write!(
+            let _ = writeln!(
                 self.buf,
-                "<footer class=\"bates\">{number}</footer>\n",
+                "<footer class=\"bates\">{number}</footer>",
                 number = escape(&bates_number(&e.prefix, e.last)),
             );
         }
@@ -764,9 +764,9 @@ impl PageWriter {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 manifest.file_missing(m.id, name, &format!("not preserved at import ({reason})"));
-                let _ = write!(
+                let _ = writeln!(
                     self.buf,
-                    "<li>{name} ({kind}) — not preserved at import</li>\n",
+                    "<li>{name} ({kind}) — not preserved at import</li>",
                     name = escape(name),
                     kind = escape(kind),
                 );
@@ -774,9 +774,9 @@ impl PageWriter {
             }
             let Some(sha256) = entry.get("sha256").and_then(|v| v.as_str()) else {
                 manifest.file_missing(m.id, name, "media entry carries no digest");
-                let _ = write!(
+                let _ = writeln!(
                     self.buf,
-                    "<li>{name} ({kind}) — no digest recorded</li>\n",
+                    "<li>{name} ({kind}) — no digest recorded</li>",
                     name = escape(name),
                     kind = escape(kind),
                 );
@@ -784,9 +784,9 @@ impl PageWriter {
             };
             let Some(store_name) = objects.object_name(sha256) else {
                 manifest.file_missing(m.id, name, "referenced object missing from the media store");
-                let _ = write!(
+                let _ = writeln!(
                     self.buf,
-                    "<li>{name} ({kind}) — object missing from the archive</li>\n",
+                    "<li>{name} ({kind}) — object missing from the archive</li>",
                     name = escape(name),
                     kind = escape(kind),
                 );
@@ -799,9 +799,9 @@ impl PageWriter {
                 if let Err(e) = fs::copy(&from, &to) {
                     copied.remove(&asset);
                     manifest.file_missing(m.id, name, &format!("copy failed: {e}"));
-                    let _ = write!(
+                    let _ = writeln!(
                         self.buf,
-                        "<li>{name} ({kind}) — could not be copied</li>\n",
+                        "<li>{name} ({kind}) — could not be copied</li>",
                         name = escape(name),
                         kind = escape(kind),
                     );
@@ -809,18 +809,18 @@ impl PageWriter {
                 }
             }
             if evidence {
-                let _ = write!(
+                let _ = writeln!(
                     self.buf,
-                    "<li><a href=\"assets/{asset}\">{name}</a> ({kind}, sha256 {sha256})</li>\n",
+                    "<li><a href=\"assets/{asset}\">{name}</a> ({kind}, sha256 {sha256})</li>",
                     asset = escape(&asset),
                     name = escape(name),
                     kind = escape(kind),
                     sha256 = escape(sha256),
                 );
             } else {
-                let _ = write!(
+                let _ = writeln!(
                     self.buf,
-                    "<li><a href=\"assets/{asset}\">{name}</a> ({kind})</li>\n",
+                    "<li><a href=\"assets/{asset}\">{name}</a> ({kind})</li>",
                     asset = escape(&asset),
                     name = escape(name),
                     kind = escape(kind),
@@ -1008,7 +1008,7 @@ impl ManifestWriter {
         let digest = message_digest(m);
         let digest_hex = crate::merkle::hex(&digest);
         if let Some(h) = &mut self.commitment {
-            h.update(&digest);
+            h.update(digest);
             h.update(b"\n");
         }
         self.leaves.push((m.external_id.clone(), digest));
@@ -1361,14 +1361,10 @@ fn write_index(
                 written = summary.written,
             );
             if let Some(attachments) = summary.attachment_refs {
-                let _ = write!(html, "<p>attachment references: {attachments}</p>\n");
+                let _ = writeln!(html, "<p>attachment references: {attachments}</p>");
             }
             if let Some(range) = &summary.bates_range {
-                let _ = write!(
-                    html,
-                    "<p>Bates numbers: {range}</p>\n",
-                    range = escape(range)
-                );
+                let _ = writeln!(html, "<p>Bates numbers: {range}</p>", range = escape(range));
             }
             if let Some(hex) = &summary.digest_commitment {
                 let _ = write!(
@@ -1379,9 +1375,9 @@ fn write_index(
                     hex = escape(hex),
                 );
             }
-            let _ = write!(
+            let _ = writeln!(
                 html,
-                "<p>fidelity: {fidelity}</p>\n",
+                "<p>fidelity: {fidelity}</p>",
                 fidelity = escape(&summary.fidelity),
             );
         }
@@ -1401,9 +1397,9 @@ fn write_index(
     }
     html.push_str("<nav>\n<ul>\n");
     for page in 1..=summary.pages {
-        let _ = write!(
+        let _ = writeln!(
             html,
-            "<li><a href=\"{name}\">{name}</a></li>\n",
+            "<li><a href=\"{name}\">{name}</a></li>",
             name = escape(&page_name(page)),
         );
     }
@@ -1516,11 +1512,11 @@ fn write_custody(
                 (None, Some(max)) => format!("up to {max}"),
                 (None, None) => "—".to_string(),
             };
-            let _ = write!(
+            let _ = writeln!(
                 html,
                 "<tr><td>{label}</td><td>{kind}</td><td>{completed}</td><td>{range}</td>\
                  <td>{new}</td><td>{present}</td><td>{failed}</td>\
-                 <td>{kept}</td><td>{missing}</td></tr>\n",
+                 <td>{kept}</td><td>{missing}</td></tr>",
                 label = escape(&instance.label),
                 kind = r.kind.as_str(),
                 completed = escape(&r.completed_at),
@@ -1683,14 +1679,18 @@ mod tests {
             body: "body".into(),
             raw_json: "{}".into(),
         };
-        let first = message_digest(&m);
-        assert_eq!(first, message_digest(&m), "same row, same digest");
+        let first = hex_encode(&message_digest(&m));
+        assert_eq!(
+            first,
+            hex_encode(&message_digest(&m)),
+            "same row, same digest"
+        );
         assert_eq!(first.len(), 64, "hex SHA-256");
         let mut changed = m.clone();
         changed.body.push('!');
-        assert_ne!(first, message_digest(&changed));
+        assert_ne!(first, hex_encode(&message_digest(&changed)));
         // The canonical join is unambiguous: field separators cannot
         // be forged by content.
-        assert!(format!("{first}").chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(first.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }

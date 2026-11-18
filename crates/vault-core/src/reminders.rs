@@ -122,7 +122,7 @@ impl ManualWallClock {
     /// Jump the clock forward by `by` (monotonic: only forward).
     pub fn advance(&self, by: Duration) {
         let mut now = self.now.lock().unwrap_or_else(|p| p.into_inner());
-        *now = *now + by;
+        *now += by;
     }
 
     /// The injectable [`WallClock`] view of this manual clock.

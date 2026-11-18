@@ -6003,15 +6003,13 @@ fn apply_person_link(
         )
         .optional()?;
     match owner {
-        Some((owner_id, owner_name)) if owner_id != person_id => {
-            return Err(Error::IdentityLinkConflict {
-                source_instance_id: link.source_instance_id.to_string(),
-                anchor_kind: link.anchor_kind.as_str().to_string(),
-                anchor_value,
-                owner_id,
-                owner_name,
-            });
-        }
+        Some((owner_id, owner_name)) if owner_id != person_id => Err(Error::IdentityLinkConflict {
+            source_instance_id: link.source_instance_id.to_string(),
+            anchor_kind: link.anchor_kind.as_str().to_string(),
+            anchor_value,
+            owner_id,
+            owner_name,
+        }),
         // Already linked to this person: idempotent no-op.
         Some(_) => Ok(false),
         None => {

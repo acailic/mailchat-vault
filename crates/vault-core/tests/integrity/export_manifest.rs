@@ -84,7 +84,7 @@ fn email(id: &str, day: u8, body: &str) -> NewMessage {
         "mbox",
         id,
         "ana <ana@example.com>",
-        &format!("2026-11-{day:02}T09:00:00Z"),
+        format!("2026-11-{day:02}T09:00:00Z"),
         body,
     )
 }

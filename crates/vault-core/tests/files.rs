@@ -249,7 +249,7 @@ fn identical_bytes_attached_twice_group_as_one_unique_file() {
     let sb = Sandbox::new("files-group");
     let mut storage = Storage::open_in_memory().unwrap();
     let photo_sha = fixture_vault(&sb, &mut storage);
-    let outcome = files::run_backfill(&mut storage, None).unwrap();
+    let outcome = files::run_backfill(&storage, None).unwrap();
     assert!(outcome.completed, "{outcome:?}");
 
     // One unique file for the shared bytes, occurrence count 2 — the
@@ -333,7 +333,7 @@ fn unlinked_objects_appear_without_message_association() {
     let sb = Sandbox::new("files-unlinked");
     let mut storage = Storage::open_in_memory().unwrap();
     fixture_vault(&sb, &mut storage);
-    files::run_backfill(&mut storage, None).unwrap();
+    files::run_backfill(&storage, None).unwrap();
 
     let stray_sha = {
         let row = &storage.unlinked_media_objects().unwrap()[0];
@@ -379,7 +379,7 @@ fn missing_references_surface_through_the_availability_filter() {
     let sb = Sandbox::new("files-missing");
     let mut storage = Storage::open_in_memory().unwrap();
     fixture_vault(&sb, &mut storage);
-    files::run_backfill(&mut storage, None).unwrap();
+    files::run_backfill(&storage, None).unwrap();
 
     // Default view: every group — preserved digests, the unlinked
     // object, and the missing reference — each stamped with its own
@@ -460,7 +460,7 @@ fn files_search_pages_stably_through_the_cursor() {
     let sb = Sandbox::new("files-cursor");
     let mut storage = Storage::open_in_memory().unwrap();
     fixture_vault(&sb, &mut storage);
-    files::run_backfill(&mut storage, None).unwrap();
+    files::run_backfill(&storage, None).unwrap();
 
     // Page through everything two groups at a time: no duplicates, no
     // losses, stable order, and the last page carries no cursor.
@@ -521,7 +521,7 @@ fn backfill_never_mutates_raw_records() {
     };
     let revision_before = storage.archive_revision().unwrap();
 
-    files::run_backfill(&mut storage, None).unwrap();
+    files::run_backfill(&storage, None).unwrap();
 
     let after: Vec<(i64, String)> = {
         let conn = storage.connection();
