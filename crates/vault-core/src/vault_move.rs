@@ -287,9 +287,10 @@ pub fn filesystem_kind(canonical_path: &Path, mounts: &str) -> FilesystemKind {
         }
     }
     match best {
-        Some((_, fstype)) if NETWORK_FILESYSTEMS
-            .iter()
-            .any(|n| n.eq_ignore_ascii_case(&fstype)) =>
+        Some((_, fstype))
+            if NETWORK_FILESYSTEMS
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(&fstype)) =>
         {
             FilesystemKind::Network(fstype)
         }
@@ -699,9 +700,10 @@ pub fn vault_move_preview(
     // Capacity preflight: the copy needs the estimate plus slack on
     // the destination volume. A refusal leaves nothing behind — the
     // snapshot was already discarded and the destination untouched.
-    let needed = opts
-        .min_free_bytes
-        .map_or_else(|| estimate.with_slack(), |floor| estimate.with_slack().max(floor));
+    let needed = opts.min_free_bytes.map_or_else(
+        || estimate.with_slack(),
+        |floor| estimate.with_slack().max(floor),
+    );
     if inspection.free_bytes < needed {
         return Err(MoveError::InsufficientSpace {
             needed,
@@ -962,9 +964,7 @@ impl MoveRecovery {
     pub fn writable_vault(&self) -> Option<&Path> {
         match self {
             MoveRecovery::None => None,
-            MoveRecovery::AlreadyCompleted { journal } => {
-                Some(journal.destination.path.as_path())
-            }
+            MoveRecovery::AlreadyCompleted { journal } => Some(journal.destination.path.as_path()),
             MoveRecovery::Cancelled { journal }
             | MoveRecovery::ResumedOrigin { journal, .. }
             | MoveRecovery::RolledBackToOrigin { journal, .. } => {

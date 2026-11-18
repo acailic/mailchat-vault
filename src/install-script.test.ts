@@ -350,7 +350,16 @@ function buildWorld(opts: WorldOpts): World {
   // The runner may export XDG_DATA_HOME (it would redirect the
   // .desktop/icon installs out of the sandbox's HOME).
   delete env.XDG_DATA_HOME;
-  if (opts.haveFuse) env.MAILCHAT_FUSE_DEVICE = fuseDev;
+  if (opts.haveFuse) {
+    env.MAILCHAT_FUSE_DEVICE = fuseDev;
+  } else {
+    // The probe falls back to /dev/fuse when the override is unset, and
+    // hosts WITH /dev/fuse (CI runners, dev machines) would then detect
+    // FUSE in a no-FUSE world — the plain launcher would be written and
+    // the extract-and-run contract would fail. Point the probe at a
+    // path that never exists instead.
+    env.MAILCHAT_FUSE_DEVICE = join(work, "no-fuse-device");
+  }
 
   const run = (args: string[] = [], extraEnv: Record<string, string> = {}) =>
     spawnSync("sh", [installSh, ...args], {

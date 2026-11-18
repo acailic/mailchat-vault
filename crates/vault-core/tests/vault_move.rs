@@ -832,7 +832,12 @@ fn recovery_without_a_journal_does_nothing() {
         recover_interrupted_move(&sb.data_dir()).unwrap(),
         MoveRecovery::None
     );
-    assert_eq!(recover_interrupted_move(&sb.data_dir()).unwrap().writable_vault(), None);
+    assert_eq!(
+        recover_interrupted_move(&sb.data_dir())
+            .unwrap()
+            .writable_vault(),
+        None
+    );
 }
 
 /// A destination without room for the estimate plus slack refuses the
@@ -863,10 +868,7 @@ fn preview_refuses_insufficient_space() {
     // The same destination previews cleanly once the floor is gone:
     // the refusal is the capacity preflight, nothing else.
     assert!(sb
-        .preview_with(
-            &destination,
-            &vault_move::MovePreviewOptions::default()
-        )
+        .preview_with(&destination, &vault_move::MovePreviewOptions::default())
         .is_ok());
 }
 
@@ -907,13 +909,19 @@ fn recovery_names_exactly_one_writable_vault() {
     let journal = journal_in_phase(&sb.data_dir(), &destination, MovePhase::PointerSwitched);
     stage_finalized_destination(&journal);
     let recovery = recover_interrupted_move(&sb.data_dir()).unwrap();
-    assert_eq!(recovery.writable_vault(), Some(journal.destination.path.as_path()));
+    assert_eq!(
+        recovery.writable_vault(),
+        Some(journal.destination.path.as_path())
+    );
 
     // A completed journal (a finished move) keeps naming exactly the
     // destination.
     let read = read_move_journal(&sb.data_dir()).unwrap().unwrap();
     let completed = MoveRecovery::AlreadyCompleted { journal: read };
-    assert_eq!(completed.writable_vault(), Some(journal.destination.path.as_path()));
+    assert_eq!(
+        completed.writable_vault(),
+        Some(journal.destination.path.as_path())
+    );
 }
 
 /// An unreadable mount table is an unknown filesystem, never a guess
@@ -926,8 +934,8 @@ fn inspect_with_an_unreadable_mount_table_reports_unknown_and_proceeds() {
     fs::create_dir(&destination).unwrap();
     let erroring: fn() -> std::io::Result<String> =
         || Err(std::io::Error::other("no mount table on this platform"));
-    let inspection =
-        vault_location_inspect(&destination, None, &erroring, None).expect("unknown is not a refusal");
+    let inspection = vault_location_inspect(&destination, None, &erroring, None)
+        .expect("unknown is not a refusal");
     assert_eq!(inspection.filesystem, FilesystemKind::Unknown);
     assert!(inspection.writable);
 }
