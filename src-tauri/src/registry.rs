@@ -513,6 +513,15 @@ pub struct SaveSettingsPayload {
     /// payloads → disabled.
     #[serde(default)]
     pub start_at_login: bool,
+    /// Ask semantic-draft pass. Absent → keep the currently stored
+    /// value (the settings pane may predate the option and not send it;
+    /// a missing field must not silently reset a user's choice).
+    #[serde(default)]
+    pub semantic_draft: Option<bool>,
+    /// Voice-note transcription. Absent → keep the currently stored
+    /// value, for the same reason as `semantic_draft`.
+    #[serde(default)]
+    pub transcribe_audio: Option<bool>,
     pub api_keys: Vec<ApiKeyUpdate>,
     /// Environment-variable overrides (ANTHROPIC_BASE_URL / MAILCHAT_LLM_MODEL).
     #[serde(default)]

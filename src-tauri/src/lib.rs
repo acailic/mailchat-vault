@@ -174,7 +174,7 @@ use vault_core::search2::{
     self, AppError, ConversationContext, ImportScope, MessageDetail, SearchArchivePage,
     SearchArchiveRequest, SelectionExportSummary, SelectionFormat,
 };
-use vault_core::settings::{self, Options, Settings, SETTINGS_VERSION};
+use vault_core::settings::{Options, Settings, SETTINGS_VERSION};
 use vault_core::staged_write::{staged_write, staged_write_opt};
 use vault_core::stats::{ArchiveStats, WhatsNewDigest, DEFAULT_TOP};
 use vault_core::storage::{
@@ -1681,6 +1681,14 @@ fn settings_save(
     secrets: State<'_, Arc<secrets::Secrets>>,
     payload: SaveSettingsPayload,
 ) -> Result<SettingsView, String> {
+    // Options the settings pane does not (yet) surface are preserved
+    // on save: an absent payload field keeps the stored value instead
+    // of resetting it to the default. A missing or unreadable file
+    // degrades to the defaults, exactly like startup does.
+    let stored = Settings::load(&state.settings_path)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
     let mut settings = Settings {
         version: SETTINGS_VERSION,
         providers: payload.providers,
@@ -1691,6 +1699,15 @@ fn settings_save(
             notifications: payload.notifications,
             keep_running_in_background: payload.keep_running_in_background,
             start_at_login: payload.start_at_login,
+            // Options the settings pane does not (yet) surface are
+            // preserved on save: an absent field keeps the stored value
+            // instead of resetting it to the default.
+            semantic_draft: payload
+                .semantic_draft
+                .unwrap_or(stored.options.semantic_draft),
+            transcribe_audio: payload
+                .transcribe_audio
+                .unwrap_or(stored.options.transcribe_audio),
         },
         env_overrides: vault_core::settings::EnvOverrides {
             anthropic_base_url: payload.env_overrides.base_url.clone(),

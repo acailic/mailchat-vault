@@ -57,10 +57,20 @@ async function drawerShown(browser) {
 }
 
 export async function run(ctx) {
-  const { withSession, assert, ui } = ctx;
+  const { withSession, assert, ui, log } = ctx;
 
   await withSession({}, async (browser) => {
     await ui.waitForApp(browser);
+
+    // Pin the light palette for the fixture contract: a fresh vault's
+    // theme is System, and headless WebKit resolves prefers-color-scheme
+    // to dark — the fixture recipes in docs/screenshots document light.
+    // This mirrors applyTheme("light") (src/settings.ts): dataset.theme
+    // pins the token palette, colorScheme pins the engine's native parts.
+    await browser.execute(() => {
+      document.documentElement.dataset.theme = "light";
+      document.documentElement.style.colorScheme = "light";
+    });
 
     // --- semantic landmarks, labels, live regions -------------------------
     const semantics = await browser.execute(() => {
@@ -250,10 +260,19 @@ export async function run(ctx) {
     // hidden #nav) after the collapse, so the restore click lands against a
     // stale view and the column never comes back. Same settle pattern as
     // the compact relayout below.
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await new Promise((resolve) => setTimeout(resolve, 3000));
     await (await browser.$("#nav-toggle")).click();
+    // Verify the restore through a live-DOM read (data attribute + computed
+    // display): under software rendering the driver's isDisplayed() keeps
+    // serving the collapsed element state long after the DOM is restored,
+    // so the element query would fail a restore that actually happened.
     await browser.waitUntil(
-      async () => (await (await browser.$("#nav"))).isDisplayed() === true,
+      async () =>
+        (await browser.execute(
+          () =>
+            document.querySelector("#app").getAttribute("data-nav-collapsed") === "false" &&
+            getComputedStyle(document.querySelector("#nav")).display !== "none",
+        )) === true,
       { timeout: 5_000, timeoutMsg: "the hamburger never restored the nav column" },
     );
 
@@ -347,16 +366,16 @@ export async function run(ctx) {
     await ui.importMbox(browser, ui.archiveMbox);
     await ui.search(browser, "vault");
 
-    // Result rows announce as activatable buttons for screen readers:
-    // the row's main area carries role=button, and the list item itself
-    // does not (the selection checkbox is a sibling interactive control,
-    // never a control nested inside a button).
+    // Result rows live in a results grid: the list item carries role=row
+    // (with aria-selected for the keyboard selection surface), and the
+    // row's main area carries role=button — the selection checkbox stays
+    // a sibling interactive control, never nested inside a button.
     const rowRole = await browser.execute(() => ({
       li: document.querySelector("#results li.hit-item")?.getAttribute("role"),
       main: document.querySelector("#results li.hit-item .hit-main")?.getAttribute("role"),
     }));
     assert.equal(rowRole.main, "button", "the row's main area announces as a button");
-    assert.equal(rowRole.li, null, "the list item itself is not a button");
+    assert.equal(rowRole.li, "row", "the list item is a grid row");
 
     // Enter on a focused row opens THAT row's message, not whatever the
     // global selection points at (the row-level handler wins).
