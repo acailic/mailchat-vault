@@ -26,7 +26,6 @@ import {
   backupDoneLine,
   canCommit,
   lastBackupLine,
-  noBackupLine,
   previewLine,
   recoveryLine,
   renderRecoverySlots,
@@ -39,6 +38,7 @@ import {
   type RestoreFlow,
   type RestorePreviewView,
 } from "./backupview";
+import { emptyStateEl } from "./emptystate";
 import {
   collectedCountLine,
   consentPromptText,
@@ -238,6 +238,9 @@ const firstRunCard = document.querySelector<HTMLElement>("#first-run")!;
 const firstRunImportButton = document.querySelector<HTMLButtonElement>("#first-run-import-btn")!;
 const firstRunAccountButton = document.querySelector<HTMLButtonElement>("#first-run-account-btn")!;
 const firstRunDemoButton = document.querySelector<HTMLButtonElement>("#first-run-demo-btn")!;
+const firstRunDismissButton = document.querySelector<HTMLButtonElement>("#first-run-dismiss-btn")!;
+const importEmpty = document.querySelector<HTMLElement>("#import-empty")!;
+const backupEmpty = document.querySelector<HTMLElement>("#backup-empty")!;
 const exportControls = document.querySelector<HTMLElement>("#export-controls")!;
 const askInput = document.querySelector<HTMLInputElement>("#ask")!;
 const askButton = document.querySelector<HTMLButtonElement>("#ask-btn")!;
@@ -719,6 +722,34 @@ function renderAll(): void {
   });
   renderFiltersSummary(chips.length);
   renderRefreshNotice(refreshNotice, state.refreshNeeded, () => void runSearch(0));
+  // Empty search results (a query or filter over a non-empty archive
+  // that found nothing): the illustrated state replaces the bare empty
+  // list, while the #status line above keeps announcing "0 results" for
+  // assistive tech. An empty-text browse and an empty archive stay with
+  // the newest-first list / first-run card respectively.
+  if (
+    state.total === 0 &&
+    archiveTotal > 0 &&
+    state.pageRevision !== null &&
+    (state.filters.text !== "" || chips.length > 0)
+  ) {
+    resultsList.append(
+      emptyStateEl({
+        icon: "empty-search",
+        headline: "No messages match",
+        copy:
+          "Your search ran against the whole archive and found nothing. " +
+          "Try fewer words, or clear the search and filters and start again.",
+        ctaLabel: "Clear search",
+        ctaTitle: "Clear the search text and every filter, then browse the newest messages",
+        onCta: () => {
+          searchInput.value = "";
+          clearFilters();
+        },
+        live: false, // the #status line already announces the count
+      }),
+    );
+  }
   if (state.detail) {
     renderDetail2(detailPanel, {
       ctx: state.detail,
@@ -1231,7 +1262,9 @@ function refreshKindChrome(row: HTMLElement): void {
       ? "Your Azure resource endpoint, e.g. https://<resource>.openai.azure.com"
       : kind === "ollama"
         ? `The local Ollama server (${defaults.base_url} by default)`
-        : "Any OpenAI-compatible /chat/completions endpoint (base URL without the path)"
+        : kind === "lmstudio"
+          ? `The local LM Studio server (${defaults.base_url} by default)`
+          : "Any OpenAI-compatible /chat/completions endpoint (base URL without the path)"
     : `Endpoint fixed by the kind: ${defaults.base_url || "derived from the region"}`;
 
   inputs.model.placeholder = placeholderForKind(kind, "model");
@@ -1253,9 +1286,9 @@ function refreshKindChrome(row: HTMLElement): void {
   );
 
   const keyNote = row.querySelector<HTMLElement>(".prov-key-note")!;
-  if (kind === "ollama") {
+  if (kind === "ollama" || kind === "lmstudio") {
     keyNote.hidden = false;
-    keyNote.textContent = "Ollama runs locally — no API key needed";
+    keyNote.textContent = `${kindLabel(kind)} runs locally — no API key needed`;
   } else {
     // refreshed by refreshRowValidation (a key is required to *use* the
     // provider, but a keyless row may still be saved)
@@ -1289,7 +1322,7 @@ function refreshRowValidation(row: HTMLElement): void {
     error.hidden = !message;
   }
   const keyNote = row.querySelector<HTMLElement>(".prov-key-note")!;
-  if (kind !== "ollama") {
+  if (kind !== "ollama" && kind !== "lmstudio") {
     keyNote.hidden = !(
       rowInputs(row).key.value.trim() === "" && row.dataset.hasKey !== "true"
     );
@@ -1375,6 +1408,29 @@ function readThemeVesper(): boolean | null {
 function persistThemeVesper(vesper: boolean): void {
   try {
     window.localStorage.setItem(THEME_VESPER_KEY, vesper ? "1" : "0");
+  } catch {
+    // best effort only
+  }
+}
+
+/** The first-run card's dismissal persists across launches
+ * (machine-local): dismissing the guided CTA is a choice, so it must
+ * survive restarts instead of resurfacing on every boot. Guarded like
+ * mcv.themeVesper — storage is absent in some test/restricted-webview
+ * environments. */
+const FIRST_RUN_DISMISSED_KEY = "mcv.firstRunDismissed";
+
+function firstRunDismissed(): boolean {
+  try {
+    return window.localStorage.getItem(FIRST_RUN_DISMISSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function persistFirstRunDismissed(): void {
+  try {
+    window.localStorage.setItem(FIRST_RUN_DISMISSED_KEY, "1");
   } catch {
     // best effort only
   }
@@ -2705,10 +2761,11 @@ async function leaveDemo(): Promise<void> {
 }
 
 /** Toggle the vault-dependent chrome: the demo banner, the first-run
- * card (an empty personal archive), and the source controls' demo
- * lockout (the backend refuses writes under the demo regardless). */
+ * card (an empty personal archive the user has not dismissed), and the
+ * source controls' demo lockout (the backend refuses writes under the
+ * demo regardless). */
 function updateVaultChrome(): void {
-  const firstRun = !demoActive && archiveTotal === 0;
+  const firstRun = !demoActive && archiveTotal === 0 && !firstRunDismissed();
   firstRunCard.hidden = !firstRun;
   demoBanner.hidden = !demoActive;
   exportControls.hidden = firstRun;
@@ -2965,6 +3022,8 @@ function renderAccountsPanel(accounts: AccountView[]): void {
     onUpdateCredentials: (account) => updateAccountCredentials(account),
     onForget: (account) => void forgetAccountCredentials(account),
     onDisconnect: (account) => void disconnectAccount(account),
+    // The empty state's CTA mirrors the Sources toolbar's Add source….
+    onAddSource: () => workspace.store.setSourcesSection("add"),
   });
   sourcesStatus.textContent = describeAccountsStatus(accounts);
 }
@@ -3656,10 +3715,11 @@ async function refreshRecovery(): Promise<void> {
 }
 
 /** Load the persisted "last verified backup" into the panel's status
- *  line (U05): the record survives restarts, so a fresh session still
- *  shows the vault's safety state. Skipped while a backup job's live
- *  message owns the line, and never clobbers the restart-required
- *  messages a committed switch left. */
+ * line (U05): the record survives restarts, so a fresh session still
+ * shows the vault's safety state. No record yet renders the illustrated
+ * never-run state (one CTA) instead of a quiet line. Skipped while a
+ * backup job's live message owns the line, and never clobbers the
+ * restart-required messages a committed switch left. */
 async function refreshLastBackup(): Promise<void> {
   if (pendingBackupJob !== null || vaultSwitched) return;
   try {
@@ -3668,7 +3728,26 @@ async function refreshLastBackup(): Promise<void> {
     // backup job may have started (or a switch committed) in between,
     // and the persisted record must not clobber the live line.
     if (pendingBackupJob !== null || vaultSwitched) return;
-    backupStatus.textContent = record ? lastBackupLine(record) : noBackupLine();
+    if (record) {
+      backupEmpty.hidden = true;
+      backupEmpty.replaceChildren();
+      backupStatus.textContent = lastBackupLine(record);
+    } else {
+      backupStatus.textContent = "";
+      backupEmpty.replaceChildren(
+        emptyStateEl({
+          icon: "empty-backup",
+          headline: "No backup yet",
+          copy:
+            "A backup writes your whole vault to one versioned file that you keep. " +
+            "The first one you create is recorded here and survives restarts.",
+          ctaLabel: "Create backup…",
+          ctaTitle: "Write a versioned backup of the whole vault to a file you pick",
+          onCta: () => void createBackup(),
+        }),
+      );
+      backupEmpty.hidden = false;
+    }
   } catch {
     // The pool is drained (a switch just ran) or the backend is busy:
     // leave whatever the flow already rendered there.
@@ -3902,6 +3981,29 @@ firstRunAccountButton.addEventListener("click", () => {
   imapUserInput.focus();
 });
 firstRunDemoButton.addEventListener("click", () => void enterDemo());
+// Dismissing the guided card is permanent on this machine: the choice
+// persists, so an empty archive never re-offers it after a restart.
+firstRunDismissButton.addEventListener("click", () => {
+  persistFirstRunDismissed();
+  firstRunCard.hidden = true;
+});
+// Import idle (the section the first-run CTA lands on): one illustrated
+// group where the static help paragraph was — what lands here, and the
+// first action. Built once; the preview/progress cards render below it.
+importEmpty.append(
+  emptyStateEl({
+    icon: "empty-import",
+    headline: "Import an archive",
+    copy:
+      "Pick an export file — .mbox, .eml, WhatsApp, Telegram, Signal, Discord, " +
+      "Messenger, or JSON Lines. You see a preview before anything is stored, " +
+      "and re-importing never duplicates.",
+    ctaLabel: "Choose a file…",
+    ctaTitle: "Pick the export file to import (a folder picker sits beside it)",
+    onCta: () => void pickImportInput(false),
+    live: false, // the section's own #import-status line speaks for the flow
+  }),
+);
 imapAuthSelect.addEventListener("change", applyImapAuthMode);
 imapUserInput.addEventListener("change", () => {
   if (imapAuthMode() === "oauth") void refreshOauthHint();
@@ -4124,11 +4226,32 @@ registerCommand({ id: "action.docs", title: "Open documentation", section: "acti
  * keeps only `/` for the search box). */
 initCommandPalette({ onSearch: paletteSearch });
 
+/** Hide the inline first-paint splash (index.html #boot-splash) once
+ * the shell has rendered its first frame — the identity-pass swap.
+ * Opacity-only fade (the .hide class in the inline head style) unless
+ * the user asked for reduced movement, which removes it instantly;
+ * then the element leaves the DOM so nothing strands in the a11y
+ * tree. The inline head script carries its own window-load listener
+ * and 2s timeout for the failed-module-load path. */
+function hideBootSplash(): void {
+  const splash = document.getElementById("boot-splash");
+  if (!splash) return;
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    splash.remove();
+    return;
+  }
+  splash.classList.add("hide");
+  splash.addEventListener("transitionend", () => splash.remove(), { once: true });
+  // Hard fallback if the transition never fires (e.g. hidden window).
+  window.setTimeout(() => splash.remove(), 300);
+}
+
 // Boot. The status line and the first-run/browse choice follow the
 // first stats + demo-status responses; until then a neutral loading
 // line (the e2e waitForApp settles on the stats label, not this).
 setStatus("Loading…");
 renderAll();
+hideBootSplash();
 updateVaultChrome();
 // The demo lives in the app process: a webview reload while the sample
 // archive is open restores the banner instead of silently browsing the

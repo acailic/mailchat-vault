@@ -295,7 +295,9 @@ async function runQuery(text: string): Promise<void> {
   await vi.waitFor(() => expect(searchCalls().length).toBeGreaterThan(0));
 }
 
-async function boot(opts: { themeVesper?: string } = {}): Promise<void> {
+async function boot(
+  opts: { themeVesper?: string; firstRunDismissed?: boolean } = {},
+): Promise<void> {
   win = new Window();
   vi.stubGlobal("window", win);
   vi.stubGlobal("document", win.document);
@@ -304,6 +306,9 @@ async function boot(opts: { themeVesper?: string } = {}): Promise<void> {
   // prior explicit choice; without one the fresh-machine default applies.
   if (opts.themeVesper !== undefined)
     win.localStorage.setItem("mcv.themeVesper", opts.themeVesper);
+  // A pre-seeded dismissal record stands in for a prior session that
+  // dismissed the getting-started card (it persists in localStorage).
+  if (opts.firstRunDismissed) win.localStorage.setItem("mcv.firstRunDismissed", "1");
   // Note: the happy-dom environment replaces the global URL class, so the
   // index.html path is resolved through node:url instead of new URL().
   const indexHtml = join(dirname(fileURLToPath(import.meta.url)), "..", "index.html");
@@ -501,6 +506,20 @@ describe("search box", () => {
     const buttons = pageButtons();
     expect(buttons.map((b) => b.disabled)).toEqual([true, true]);
     expect(win.document.querySelectorAll("#results .group, #results .hit-item").length).toBe(0);
+    // The illustrated group replaces the bare empty list: art, headline,
+    // copy, one CTA — while the status line keeps the count above.
+    const group = $("#results .empty-state");
+    expect(group.querySelector(".empty-state-art use")?.getAttribute("href")).toBe(
+      "#i-empty-search",
+    );
+    expect(group.querySelector(".empty-state-headline")!.textContent).toBe("No messages match");
+    expect(group.querySelector(".empty-state-copy")!.textContent).toContain("whole archive");
+    // One CTA: clearing runs a fresh, unfiltered browse (the group goes
+    // away with the query).
+    (group.querySelector(".empty-state-cta button") as HTMLElement).click();
+    await vi.waitFor(() => expect(input("#search").value).toBe(""));
+    await vi.waitFor(() => expect($("#status").textContent).toBe("0 results"));
+    expect(win.document.querySelector("#results .empty-state")).toBeNull();
   });
 });
 
@@ -2681,6 +2700,51 @@ describe("first-run state and the isolated sample archive (U02)", () => {
     // The demo vault's stats browse, not the empty personal vault.
     await vi.waitFor(() => expect($("#first-run").getAttribute("hidden")).not.toBeNull());
   });
+
+  it("the guided CTA leads with importing the first archive", async () => {
+    tauri.handlers.set("stats", () => ({ total: 0, by_source: [] }));
+    await boot();
+    await vi.waitFor(() => expect($("#first-run").getAttribute("hidden")).toBeNull());
+    expect($("#first-run-import-btn").textContent).toBe("Import your first archive…");
+    // The CTA routes to the import section and focuses its picker.
+    ($("#first-run-import-btn") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("import"),
+    );
+    expect(document.activeElement?.id).toBe("import-pick-btn");
+  });
+
+  it("dismissing the card hides it and records the choice in localStorage", async () => {
+    tauri.handlers.set("stats", () => ({ total: 0, by_source: [] }));
+    await boot();
+    await vi.waitFor(() => expect($("#first-run").getAttribute("hidden")).toBeNull());
+    ($("#first-run-dismiss-btn") as HTMLElement).click();
+    expect($("#first-run").getAttribute("hidden")).not.toBeNull();
+    expect(win.localStorage.getItem("mcv.firstRunDismissed")).toBe("1");
+    // A stats refresh re-runs the vault chrome (Clear → refreshStats →
+    // updateVaultChrome) and must not resurrect the dismissed card: the
+    // flag is read back from localStorage, not held in memory alone.
+    ($("#clear-filters") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(tauri.calls.filter((c) => c.cmd === "stats").length).toBeGreaterThan(0),
+    );
+    await flush();
+    expect($("#first-run").getAttribute("hidden")).not.toBeNull();
+  });
+
+  it("a recorded dismissal keeps the card hidden on a fresh session (reload)", async () => {
+    tauri.handlers.set("stats", () => ({ total: 0, by_source: [] }));
+    // The pre-seeded record stands in for the localStorage a restart
+    // re-reads: the empty archive stays, the card does not return.
+    await boot({ firstRunDismissed: true });
+    await vi.waitFor(() => expect($("#stats").textContent).not.toBe("…"));
+    await vi.waitFor(() =>
+      expect($("#status").textContent).toBe("Your archive is empty — add a source to get started."),
+    );
+    expect($("#first-run").getAttribute("hidden")).not.toBeNull();
+    // The dismissal itself is untouched by the boot.
+    expect(win.localStorage.getItem("mcv.firstRunDismissed")).toBe("1");
+  });
 });
 
 // Export
@@ -3875,6 +3939,62 @@ describe("ask provider menu", () => {
     expect(input("#ask-provider").value).toBe("local");
     expect($("#llm-note").textContent).toContain("LLM assist is off");
   });
+
+  it("keyless local providers are selectable and askable via the menu", async () => {
+    // The backend marks keyless kinds (ollama, lmstudio) available with
+    // no stored key; the menu wiring must follow that flag end to end.
+    const OLLAMA_ITEM = {
+      id: "ollama-local",
+      name: "Local Ollama",
+      kind: "ollama",
+      model: "llama3.2",
+      host: "127.0.0.1",
+      available: true,
+    };
+    const LMSTUDIO_ITEM = {
+      id: "studio",
+      name: "LM Studio",
+      kind: "lmstudio",
+      model: "",
+      host: "127.0.0.1",
+      available: true,
+    };
+    tauri.handlers.set("llm_status", () => ({
+      enabled: true,
+      model: "llama3.2",
+      host: "127.0.0.1",
+      summarize_top: 8,
+      providers: [LOCAL_ITEM, OLLAMA_ITEM, LMSTUDIO_ITEM],
+      default_provider: "ollama-local",
+    }));
+    tauri.handlers.set("llm_ask", () => emptyOutcome());
+    await boot();
+    await vi.waitFor(() => expect(input("#ask-provider").value).toBe("ollama-local"));
+    const options = menuOptions();
+    expect(options.find((o) => o.value === "ollama-local")).toMatchObject({
+      disabled: false,
+      text: "Local Ollama (llama3.2 · 127.0.0.1)",
+    });
+    expect(options.find((o) => o.value === "studio")).toMatchObject({
+      disabled: false,
+      text: "LM Studio (default model · 127.0.0.1)",
+    });
+    expect(options.find((o) => o.value === "studio")!.disabled).toBe(false);
+
+    // Selecting the keyless lmstudio provider sends its id with the ask.
+    input("#ask-provider").value = "studio";
+    fireChange(input("#ask-provider"));
+    expect($("#llm-note").textContent).toContain("LLM assist is on");
+    input("#ask").value = "local?";
+    pressKey(input("#ask"), "Enter");
+    await vi.waitFor(() =>
+      expect(tauri.calls.find((c) => c.cmd === "llm_ask")).toBeTruthy(),
+    );
+    expect(tauri.calls.find((c) => c.cmd === "llm_ask")!.args).toMatchObject({
+      provider: "studio",
+      consent: false,
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -4346,6 +4466,52 @@ describe("settings screen", () => {
     expect(rowInput("anthropic", "prov-url").value).toBe("https://api.anthropic.com");
     expect(rowInput("anthropic", "prov-model").value).not.toBe("");
     expect(rowInput("custom", "prov-url").value).toBe("");
+  });
+
+  it("an lmstudio row needs no key: prefilled endpoint, keyless note, keyless save", async () => {
+    tauri.handlers.set("settings_get", () =>
+      viewWith((v) => {
+        v.providers = [];
+        v.default_provider = null;
+      }),
+    );
+    tauri.handlers.set("settings_save", (args: unknown) => {
+      const payload = (args as { payload: { providers: Array<Record<string, unknown>> } })
+        .payload;
+      return viewWith((v) => {
+        v.providers = [{ ...payload.providers[0], has_key: false }];
+        v.default_provider = "lmstudio";
+      });
+    });
+    await boot();
+    input("#add-kind").value = "lmstudio";
+    $("#add-provider-btn").click();
+    await vi.waitFor(() => expect(rowIds()).toEqual(["lmstudio"]));
+    // The local endpoint prefills; the model stays empty (user-loaded).
+    expect(rowInput("lmstudio", "prov-url").value).toBe("http://127.0.0.1:1234/v1");
+    expect(rowInput("lmstudio", "prov-model").value).toBe("");
+    expect(rowInput("lmstudio", "prov-model").placeholder).toBe("model name");
+    expect(fieldHidden("lmstudio", "prov-deployment")).toBe(true);
+    // The keyless note shows and never turns into a missing-key problem.
+    const note = rowEl("lmstudio").querySelector<HTMLElement>(".prov-key-note")!;
+    expect(note.hidden).toBe(false);
+    expect(note.textContent).toContain("LM Studio runs locally — no API key needed");
+    // Saving without typing any key round-trips the profile keyless.
+    $("#settings-save-ai").click();
+    await vi.waitFor(() => expect($("#settings-note").textContent).toContain("Saved."));
+    const save = tauri.calls.find((c) => c.cmd === "settings_save");
+    expect((save!.args as { payload: { providers: unknown[]; api_keys: unknown[] } }).payload)
+      .toMatchObject({
+        providers: [
+          {
+            id: "lmstudio",
+            kind: "lmstudio",
+            base_url: "http://127.0.0.1:1234/v1",
+            model: "",
+          },
+        ],
+        api_keys: [],
+      });
   });
 
   it("saving sends the collected form plus non-empty key updates, and re-renders", async () => {
@@ -5955,6 +6121,21 @@ describe("sources view sub-sections", () => {
       expect(($("#app") as HTMLElement).dataset.sourcesSection).toBe("email"),
     );
   });
+
+  it("the import section's idle state is the illustrated group with one CTA", async () => {
+    await boot();
+    const group = $("#import-empty .empty-state");
+    expect(group.querySelector(".empty-state-art use")?.getAttribute("href")).toBe(
+      "#i-empty-import",
+    );
+    expect(group.querySelector(".empty-state-headline")!.textContent).toBe("Import an archive");
+    expect(group.querySelector(".empty-state-copy")!.textContent).toContain("preview");
+    // One CTA, wired to the same file picker the section's own button
+    // uses (a cancelled picker is a no-op).
+    dialog.open.mockReturnValue(Promise.resolve(null));
+    (group.querySelector(".empty-state-cta button") as HTMLElement).click();
+    await vi.waitFor(() => expect(dialog.open).toHaveBeenCalled());
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -6795,14 +6976,31 @@ describe("storage & backup panel (U05)", () => {
     expect($("#backup-status").textContent).toContain("/media/vault-2026-11-27.mcbackup");
   });
 
-  it("the empty state explains what the last-backup line means", async () => {
+  it("backup never-run renders the illustrated empty state with one CTA", async () => {
     tauri.handlers.set("last_backup", () => null);
     await boot();
     $(".nav-view-btn[data-view-target='settings']").click();
     $('.settings-nav-btn[data-settings-target="storage"]').click();
-    await vi.waitFor(() =>
-      expect($("#backup-status").textContent).toContain("No verified backup yet"),
+    // The quiet line is gone; the illustrated group owns the state.
+    await vi.waitFor(() => expect($("#backup-empty .empty-state")).toBeTruthy());
+    expect($("#backup-status").textContent).toBe("");
+    const group = $("#backup-empty .empty-state");
+    expect(group.querySelector(".empty-state-art use")?.getAttribute("href")).toBe(
+      "#i-empty-backup",
     );
+    expect(group.querySelector(".empty-state-headline")!.textContent).toBe("No backup yet");
+    expect(group.querySelector(".empty-state-copy")!.textContent).toContain(
+      "one versioned file",
+    );
+    // The single CTA starts the same backup flow as the panel button:
+    // pick a destination, then the backup_create job is submitted.
+    dialog.savedPath = "/tmp/vault-2026-11-17.mcbackup";
+    tauri.handlers.set("job_submit", () => ({ id: 7, title: "backup" }));
+    (group.querySelector(".empty-state-cta button") as HTMLElement).click();
+    await vi.waitFor(() =>
+      expect(tauri.calls.some((c) => c.cmd === "job_submit")).toBe(true),
+    );
+    expect($("#backup-status").textContent).toContain("Backing up to");
   });
 
   it("a flag is raised when the recorded container is no longer on disk", async () => {

@@ -119,6 +119,7 @@ pub mod discord;
 pub mod encryption;
 pub mod export;
 pub mod export_html;
+pub mod export_manifest;
 pub mod extract;
 pub mod files;
 pub mod health;
@@ -135,6 +136,10 @@ pub mod mbox;
 pub mod media;
 pub mod message;
 pub mod messenger;
+// Test support only (doc-hidden, like `Storage::wipe_fts_for_tests`):
+// derives migration rollback SQL from the storage ledger for fixtures.
+#[doc(hidden)]
+pub mod migration_rollback;
 pub mod oauth;
 pub mod object_store;
 pub mod pdf_text;

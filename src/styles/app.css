@@ -64,6 +64,14 @@
   margin: 0;
 }
 
+/* Tabular numerals: counts, timestamps, sizes and durations render in
+ * fixed-width digits so live values never jitter as they change. The
+ * numeric selectors below apply it wholesale; the class covers any
+ * future numeric node. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
 html, body {
   height: 100%;
   /* The document never scrolls — every pane scrolls on its own. This
@@ -79,14 +87,18 @@ body {
   margin: 0;
   font-family: var(--font-ui);
   font-size: var(--text-body);
-  line-height: var(--text-body-lh);
+  line-height: var(--lh-comfortable);
   background: var(--canvas);
   color: var(--text);
 }
 
-/* Focus visibility for keyboard users everywhere. */
+/* Focus visibility for keyboard users everywhere: one global rule on
+ * the accent (the identity contract — selected/interactive color), the
+ * same ring in every theme and on every control. No per-control
+ * outline overrides; the two .ask-source:focus-visible rules set
+ * background only. */
 :focus-visible {
-  outline: 2px solid var(--focus-ring);
+  outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 
@@ -172,6 +184,7 @@ body {
 #stats {
   color: var(--muted);
   font-size: var(--text-meta);
+  font-variant-numeric: tabular-nums;
   margin: 0;
 }
 
@@ -237,18 +250,19 @@ body {
   border-radius: var(--radius-pill);
   background: var(--accent);
   color: var(--accent-fg);
-  font-size: 12px;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
   text-align: center;
 }
 .nav-attention {
   margin-left: 6px;
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--danger);
 }
 #nav-foot {
   margin-top: var(--sp-2);
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-xs);
 }
 
 /* Desktop sidebar hiding (wide/medium): the nav column leaves the grid
@@ -412,7 +426,8 @@ body {
 
 .view-heading {
   font-size: var(--text-page);
-  font-weight: 600;
+  font-weight: var(--text-display-weight);
+  letter-spacing: var(--text-display-tracking);
   margin: 0 0 var(--sp-3);
 }
 
@@ -427,12 +442,14 @@ body {
   margin: var(--sp-4) 0 var(--sp-2);
 }
 
-/* Results column scrolls independently. */
+/* Results column scrolls independently. The horizontal padding is the
+ * shared pane-edge step: with the row padding below, hit text lands on
+ * the same left edge as the reading pane's text (8px grid). */
 #results-col {
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--sp-3) var(--sp-4) var(--sp-5);
+  padding: var(--sp-3) var(--pane-pad-x) var(--sp-5);
   border-right: 1px solid var(--border);
   background: var(--canvas);
 }
@@ -516,7 +533,7 @@ select {
 }
 
 kbd {
-  font: 600 11px var(--font-mono);
+  font: 600 var(--text-xs) var(--font-mono);
   padding: 0 4px;
   border: 1px solid var(--border);
   border-bottom-width: 2px;
@@ -546,9 +563,12 @@ kbd {
   color: inherit;
   width: fit-content;
 }
-#filters > summary:hover,
-#export-menu > summary:hover,
-#ask-fold > summary:hover { background: var(--panel-2); }
+/* Every disclosure summary is a clickable control: the shared cursor
+ * and the same quiet hover as the other clickable families (fills the
+ * gap the three grouped ids used to leave — bare summaries like the
+ * Technical-details fold and the ask-collected URLs now match). */
+summary { cursor: pointer; }
+summary:hover { background: var(--panel-2); }
 #filters > summary.on,
 #ask-fold > summary.on {
   background: var(--selection);
@@ -651,12 +671,65 @@ kbd {
   background: var(--panel);
 }
 
+.first-run-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
 .first-run-title {
   font-size: var(--text-section);
+  font-weight: var(--text-display-weight);
+  letter-spacing: var(--text-display-tracking);
   margin: 0 0 var(--sp-2);
 }
 
 #first-run .row { margin-top: var(--sp-3); }
+
+/* --- Empty states (src/emptystate.ts) ---------------------------------
+ * One group per named state: illustration → display headline →
+ * two-sentence copy → one CTA. The illustration is line art on the
+ * sprite's 48-grid, colored by the accent token; the headline rides
+ * the display step of the type ramp. The staggered entrance lives
+ * with the motion vocabulary (see `.empty-state > *` below). */
+.empty-state {
+  display: grid;
+  justify-items: start;
+  gap: var(--sp-2);
+  margin: var(--sp-4) 0;
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  background: var(--panel);
+}
+#results .empty-state {
+  /* The search empty state sits inside the results column, not on a
+   * card of its own — the panel tint would double the surface. */
+  border: none;
+  background: none;
+  padding: var(--sp-4) var(--pane-pad-x);
+}
+.empty-state-art {
+  width: 64px;
+  height: 64px;
+  /* decorative, not interactive: accent text color is reserved for
+     affordances by the accent-usage invariant */
+  color: var(--text-muted);
+}
+.empty-state-headline {
+  font-size: var(--text-2xl);
+  font-weight: var(--text-display-weight);
+  letter-spacing: var(--text-display-tracking);
+  line-height: var(--lh-compact);
+  margin: 0;
+}
+.empty-state-copy {
+  margin: 0;
+  max-width: 44ch;
+  color: var(--muted); /* recorded AA on panel/panel-2 (tokens.css) */
+}
+.empty-state-cta { margin-top: var(--sp-1); }
 
 /* Drop zones (whole-window drag-drop import): static copy whose only
  * dynamic behavior is the highlight class the Tauri drag-drop events
@@ -786,7 +859,7 @@ button.link-btn:hover:not(:disabled) { background: none; color: var(--accent-hov
 #results { list-style: none; margin: 0; padding: 0; }
 .group { margin-bottom: 10px; }
 .group h3 {
-  font-size: 12px;
+  font-size: var(--text-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -795,7 +868,8 @@ button.link-btn:hover:not(:disabled) { background: none; color: var(--accent-hov
 }
 .group-hits { list-style: none; margin: 0; padding: 0; }
 .hit-item {
-  padding: var(--sp-2);
+  padding: var(--sp-2) var(--pane-pad-x);
+  line-height: var(--lh-comfortable);
   border-radius: var(--radius-m);
   cursor: pointer;
   border-bottom: 1px solid var(--border);
@@ -805,7 +879,10 @@ button.link-btn:hover:not(:disabled) { background: none; color: var(--accent-hov
   background: var(--selection);
   outline: 1px solid var(--accent);
 }
-.meta { color: var(--muted); font-size: var(--text-meta); }
+/* Meta lines carry the numeric UI (timestamps, counts, sizes,
+ * durations in search hits, import/backup stats, job lines) —
+ * tabular digits keep them steady as values change. */
+.meta { color: var(--muted); font-size: var(--text-meta); font-variant-numeric: tabular-nums; }
 .body { margin-top: 2px; white-space: pre-wrap; word-break: break-word; max-width: 72ch; }
 /* Result-row snippets are summaries: two lines, then an ellipsis — a
  * raw-HTML body (now stripped to text by the backend) or a long match
@@ -847,7 +924,7 @@ mark.hit {
 
 /* Pagination + export */
 #pagination { display: flex; gap: 10px; align-items: center; margin-top: var(--sp-3); }
-.page-info { font-size: var(--text-meta); color: var(--muted); }
+.page-info { font-size: var(--text-meta); color: var(--muted); font-variant-numeric: tabular-nums; }
 /* One Export… action: the picker folds behind the summary; the outcome
  * line stays readable below it once the picker is closed again. */
 #export-controls { margin-top: var(--sp-2); }
@@ -860,7 +937,7 @@ mark.hit {
 }
 #export-status, #selection-status { font-size: var(--text-meta); color: var(--muted); }
 
-#keyboard-hint { margin-top: var(--sp-2); font-size: 12px; color: var(--muted); }
+#keyboard-hint { margin-top: var(--sp-2); font-size: var(--text-xs); color: var(--muted); }
 
 /* Ask section (secondary mode beside Search in the results area): a
  * quiet fold like Filters; the heading weight moves to the summary. */
@@ -883,8 +960,10 @@ mark.hit {
   border-radius: var(--radius-m);
   background: var(--panel);
 }
-/* M5: clickable citations inside the answer jump to the source message. */
-#answer .citation {
+/* M5: clickable citations inside the answer jump to the source message.
+ * Selected as button.citation so the accent color sits on an explicitly
+ * interactive selector (the accent-usage rule in tokens.css). */
+#answer button.citation {
   font: inherit;
   color: var(--accent);
   background: none;
@@ -926,7 +1005,9 @@ mark.hit {
 }
 #ask-results li .ask-source .meta::first-line { color: var(--accent); }
 #ask-notes { margin-top: var(--sp-1); font-size: var(--text-meta); color: var(--warning); }
-#ask-results, .watch-list, .jobs-list { list-style: none; margin: var(--sp-1) 0 0; padding: 0; font-size: var(--text-meta); }
+/* Tabular-nums covers the numeric lines in these lists (job progress
+ * counts, watch timestamps, Ask source meta). */
+#ask-results, .watch-list, .jobs-list { list-style: none; margin: var(--sp-1) 0 0; padding: 0; font-size: var(--text-meta); font-variant-numeric: tabular-nums; }
 #ask-results li, .watch-list li, .jobs-list li { padding: 3px 0; }
 /* ask-collect-links: one details/summary per URL, one .ask-source row per hit. */
 #ask-collected-list { list-style: none; margin: var(--sp-1) 0 0; padding: 0; font-size: var(--text-meta); }
@@ -976,6 +1057,9 @@ mark.hit {
   color: var(--muted);
   max-width: 40ch;
   text-align: center;
+  font-size: var(--text-section);
+  font-weight: var(--text-display-weight);
+  letter-spacing: var(--text-display-tracking);
 }
 
 /* Wide: the reading column is always present; placeholder when closed. */
@@ -985,7 +1069,9 @@ mark.hit {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--sp-4);
+  /* Two pane-edge steps (16px): reader text shares the left edge of
+   * the results rows (column step + row step). */
+  padding: var(--sp-4) calc(var(--pane-pad-x) * 2);
 }
 #detail:not(.open) { display: none; }
 
@@ -1000,7 +1086,7 @@ mark.hit {
   gap: var(--sp-1);
   margin: 0 0 var(--sp-2);
 }
-.detail-card .mode-btn { font-size: 12px; padding: 3px 10px; }
+.detail-card .mode-btn { font-size: var(--text-xs); padding: 3px 10px; }
 .detail-card .mode-btn[aria-pressed="true"] {
   background: var(--panel-2);
   border-color: var(--text);
@@ -1099,7 +1185,7 @@ summary.icon-btn::-webkit-details-marker { display: none; }
 .thread-row.link { cursor: pointer; }
 .thread-row.link:hover { background: var(--selection); }
 .detail-media h3 {
-  font-size: 12px;
+  font-size: var(--text-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -1123,7 +1209,7 @@ summary.icon-btn::-webkit-details-marker { display: none; }
   flex-wrap: wrap;
 }
 .media-kind {
-  font-size: 11px;
+  font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   padding: 1px 6px;
@@ -1154,8 +1240,8 @@ summary.icon-btn::-webkit-details-marker { display: none; }
 .media-video { display: block; width: 100%; max-height: 60vh; }
 .media-audio { display: block; width: 100%; }
 
-/* Media-store usage report (Settings). */
-.media-usage-table { width: 100%; border-collapse: collapse; margin: var(--sp-1) 0; }
+/* Media-store usage report (Settings): sizes and counts — tabular. */
+.media-usage-table { width: 100%; border-collapse: collapse; margin: var(--sp-1) 0; font-variant-numeric: tabular-nums; }
 .media-usage-table td { padding: 3px var(--sp-2) 3px 0; vertical-align: middle; }
 .media-usage-table td:first-child { white-space: nowrap; }
 .usage-bar {
@@ -1174,7 +1260,7 @@ summary.icon-btn::-webkit-details-marker { display: none; }
 #view-sources section { margin-bottom: var(--sp-4); }
 .watch-folder { display: flex; gap: var(--sp-2); align-items: center; }
 .watch-folder .path { word-break: break-all; }
-.watch-remove { font-size: 12px; padding: 2px 8px; }
+.watch-remove { font-size: var(--text-xs); padding: 2px 8px; }
 .watch-event { color: var(--muted); word-break: break-all; }
 .watch-event.failed { color: var(--danger); }
 .watch-event.imported { color: inherit; }
@@ -1209,7 +1295,7 @@ summary.icon-btn::-webkit-details-marker { display: none; }
 .account-row .account-label { font-weight: 600; word-break: break-all; }
 .account-row .account-kind { color: var(--muted); }
 .account-row .account-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
-.account-row .account-actions button { font-size: 12px; padding: 3px 10px; }
+.account-row .account-actions button { font-size: var(--text-xs); padding: 3px 10px; }
 
 /* --- Activity view (jobs + statistics) ----------------------------------- */
 
@@ -1243,6 +1329,7 @@ summary.icon-btn::-webkit-details-marker { display: none; }
   line-height: 1.2;
   color: var(--muted);
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 /* One bucket is not a distribution: the count renders as plain text,
  * never one misleading full-width bar. */
@@ -1291,7 +1378,7 @@ summary.icon-btn::-webkit-details-marker { display: none; }
 .stat-grid .stat-table:nth-child(2) { --stat-fill: var(--chart-2); }
 .stat-grid .stat-table:nth-child(3) { --stat-fill: var(--chart-3); }
 .stat-table h3 {
-  font-size: 12px;
+  font-size: var(--text-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -1315,7 +1402,7 @@ summary.icon-btn::-webkit-details-marker { display: none; }
 }
 /* Label cells wrap within the column (the raw value is always in the
  * title tooltip); the bar column keeps the table's shape. */
-.stat-table td.num { text-align: right; white-space: nowrap; color: var(--muted); }
+.stat-table td.num { text-align: right; white-space: nowrap; color: var(--muted); font-variant-numeric: tabular-nums; }
 .stat-table td.bar { width: 30%; }
 .stat-table td.bar > div {
   height: 6px;
@@ -1372,7 +1459,7 @@ label.field-check input { margin: 0; }
 }
 .provider-row input[type="text"] { min-width: 6em; }
 .provider-row input[type="password"] { min-width: 8em; }
-.provider-row .small-btn, .row .small-btn { padding: 4px 8px; font-size: 12px; }
+.provider-row .small-btn, .row .small-btn { padding: 4px 8px; font-size: var(--text-xs); }
 /* Inline validation and the missing-key note sit under their field. */
 .field-error { font-weight: 400; color: var(--danger); }
 .prov-key-note { color: var(--warning); }
@@ -1571,6 +1658,40 @@ button,
   transform: scale(0.96);
 }
 
+/* The .mv-press contract applied by selector to every clickable
+ * family, so markup stays unchanged: buttons (incl. .chip,
+ * .nav-view-btn, .settings-nav-btn, .workspace-tab-btn, .ask-source —
+ * all <button>-based), native summary disclosures, result rows
+ * (.hit-item), thread rows (.thread-row.link) and ask-source rows.
+ * The transition carries the color feedback too, so this one rule —
+ * not a per-family override — owns hover/press feedback for the set.
+ * Disabled controls are muted and not-allowed via button:disabled and
+ * never press (:not(:disabled) below). */
+button,
+.chip,
+.nav-view-btn,
+.settings-nav-btn,
+.workspace-tab-btn,
+summary,
+.hit-item,
+.thread-row.link,
+.ask-source {
+  transition:
+    background-color var(--motion-fast) var(--ease-out),
+    transform var(--motion-fast) var(--ease-press);
+}
+button:active:not(:disabled),
+.chip:active:not(:disabled),
+.nav-view-btn:active:not(:disabled),
+.settings-nav-btn:active:not(:disabled),
+.workspace-tab-btn:active:not(:disabled),
+summary:active:not(:disabled),
+.hit-item:active:not(:disabled),
+.thread-row.link:active:not(:disabled),
+.ask-source:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
 /* Dialog / large-surface entry: fade plus a gentle 0.98 settle (from
  * the pre-state opacity 0, scale(0.98)) over the slow token — the only
  * sanctioned --motion-slow movement use. */
@@ -1590,6 +1711,25 @@ button,
     color var(--motion-fast) var(--ease-out);
 }
 
+/* Empty-state entrances: the one sanctioned staggered group (rare,
+ * once — illustration → headline → copy → CTA). Children fade and
+ * rise 4px over the slow token, each step delayed by half a slow
+ * token. The animation runs once per view-mount (elements are built
+ * fresh by the empty-state builder); it is NOT a transition, so the
+ * tokenized-transition contract above is untouched. Reduced motion
+ * disables it in the consolidated block below — the group then shows
+ * identical content instantly. */
+@keyframes empty-state-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+.empty-state > * {
+  animation: empty-state-in var(--motion-slow) var(--ease-out) both;
+}
+.empty-state > *:nth-child(2) { animation-delay: calc(var(--motion-slow) / 2); }
+.empty-state > *:nth-child(3) { animation-delay: var(--motion-slow); }
+.empty-state > *:nth-child(4) { animation-delay: calc(var(--motion-slow) * 1.5); }
+
 /* Reduced motion: the one consolidated block. All movement (transform
  * transitions, ambient keyframe animation) is removed; the opacity and
  * color transitions above keep their token durations. The tokens
@@ -1608,6 +1748,32 @@ button,
     transition: none;
   }
   .mv-press:active:not(:disabled) {
+    transform: none;
+  }
+
+  /* The clickable-family press list above keeps only its color
+   * feedback here — the transform transition and the active scale
+   * are removed, so press feedback is instant, never movement. */
+  button,
+  .chip,
+  .nav-view-btn,
+  .settings-nav-btn,
+  .workspace-tab-btn,
+  summary,
+  .hit-item,
+  .thread-row.link,
+  .ask-source {
+    transition: background-color var(--motion-fast) var(--ease-out);
+  }
+  button:active:not(:disabled),
+  .chip:active:not(:disabled),
+  .nav-view-btn:active:not(:disabled),
+  .settings-nav-btn:active:not(:disabled),
+  .workspace-tab-btn:active:not(:disabled),
+  summary:active:not(:disabled),
+  .hit-item:active:not(:disabled),
+  .thread-row.link:active:not(:disabled),
+  .ask-source:active:not(:disabled) {
     transform: none;
   }
 
@@ -1635,5 +1801,11 @@ button,
    * keyboard path never transitioned in the first place). */
   .command-palette-overlay.palette-enter {
     transition: none;
+  }
+
+  /* Empty-state entrance off: no fade, no rise — the identical
+   * static group renders at once. */
+  .empty-state > * {
+    animation: none;
   }
 }

@@ -12,7 +12,8 @@
 //!   `unicode61` semantics — unicode (case folding, Latin diacritics,
 //!   Cyrillic, CJK runs), prefixes, phrases, and implicit AND.
 //! - [`migrations`]: reopening an existing database applies migrations as a
-//!   no-op and preserves every stored row.
+//!   no-op and preserves every stored row; the derived rollback guard
+//!   rebuilds and reopens every historical schema version.
 //! - [`integrity`]: the FTS index stays consistent with the
 //!   `archive_messages` table under arbitrary operation sequences, and
 //!   recovers via `rebuild_fts`.

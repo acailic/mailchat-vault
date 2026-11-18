@@ -1,6 +1,7 @@
 //! LLM-assisted search: natural-language question → FTS5 plan → RAG answer.
 //!
-//! Three local steps plus two optional LLM round trips per [`ask`]:
+//! Three local steps plus two optional LLM round trips per [`ask`]
+//! (three with the opt-in HyDE draft, [`ask_with_semantic_draft`]):
 //! 1. **Translate**: the question becomes a [`QueryPlan`] — an FTS5 MATCH
 //!    expression plus an optional sent-date range. The expression is vetted
 //!    against the index ([`Storage::is_valid_match`]) and replaced by a plain
@@ -762,6 +763,40 @@ pub struct HybridRanking {
     pub ranking: RankingMode,
 }
 
+/// The text the dense (vector) leg embeds as its query vector.
+///
+/// The default is [`DenseQuery::Raw`]: the question itself. With the
+/// optional HyDE setting on, the pipeline embeds a generated
+/// hypothetical answer instead ([`DenseQuery::Draft`]) — questions and
+/// archived messages live in different registers ("what did the
+/// accountant say?" vs statements), and a hypothetical answer speaks
+/// the archive's register, so its vector lands nearer real relevant
+/// messages than the raw question's does (Gao, Ma, Lin & Callan,
+/// "Precise Zero-Shot Dense Retrieval without Relevance Labels", ACL
+/// 2023). The FTS leg always keeps the raw question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DenseQuery {
+    /// Embed the question text as-is (the pre-HyDE behavior).
+    Raw(String),
+    /// Embed a generated hypothetical answer ("draft") in the
+    /// question's place.
+    Draft(String),
+}
+
+impl DenseQuery {
+    /// [`DenseQuery::Raw`] for a borrowed question.
+    pub fn raw(question: &str) -> Self {
+        Self::Raw(question.to_string())
+    }
+
+    /// The text the dense leg embeds.
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Raw(text) | Self::Draft(text) => text,
+        }
+    }
+}
+
 /// Rank the FTS leg against the local vector leg and fuse the two lists.
 ///
 /// The question is embedded with `embedder` and scanned against the
@@ -782,7 +817,7 @@ pub fn rank_hybrid(
     rank_hybrid_scoped(
         storage,
         embedder,
-        question,
+        DenseQuery::raw(question),
         planned,
         fts_results,
         None,
@@ -794,11 +829,13 @@ pub fn rank_hybrid(
 /// vector leg applies exactly the filters the FTS leg applied (including
 /// the plan/scope date intersection), so both legs filter identically
 /// and only in-scope messages can reach the fused ranking — and from
-/// there citations and any consented summary.
+/// there citations and any consented summary. `dense` is the text the
+/// vector leg embeds: the raw question, or a generated HyDE draft when
+/// the caller resolved one ([`ask_with_semantic_draft`]).
 pub fn rank_hybrid_scoped(
     storage: &Storage,
     embedder: &dyn Embedder,
-    question: &str,
+    dense: DenseQuery,
     planned: &PlannedQuery,
     fts_results: &[Message],
     scope: Option<&crate::search2::ResolvedAskScope>,
@@ -812,7 +849,7 @@ pub fn rank_hybrid_scoped(
             .vector_scan_scoped(
                 embedder.id(),
                 embedder.dim(),
-                &embedder.embed(question),
+                &embedder.embed(dense.text()),
                 planned.plan.date_from.as_deref(),
                 planned.plan.date_to.as_deref(),
                 planned.plan.from.as_deref(),
@@ -840,6 +877,102 @@ pub fn rank_hybrid_scoped(
     };
     let results = storage.get_many(&ids)?;
     Ok(HybridRanking { results, ranking })
+}
+
+// ---------------------------------------------------------------------------
+// Semantic draft (optional HyDE query expansion for the dense leg)
+// ---------------------------------------------------------------------------
+
+/// The fixed draft instruction: the user prompt of the HyDE call is
+/// exactly this prefix followed by the question. Pinned as a constant so
+/// call-count tests can recognize the draft round trip by its prompt.
+pub const SEMANTIC_DRAFT_INSTRUCTION: &str = "Write 2-3 sentences that would answer: ";
+
+/// System prompt for the HyDE draft call: the reply is a hypothetical
+/// answer, never a claim about the real archive.
+const SEMANTIC_DRAFT_SYSTEM_PROMPT: &str =
+    "You draft a short hypothetical answer to a question about a personal message archive.\n\
+     Rules:\n\
+     - Answer in the same language as the question.\n\
+     - Exactly 2-3 sentences of plain statement-register prose (no preamble, no citations,\n\
+       no follow-up questions) — the draft is used only as a search vector, never shown or\n\
+       stored.";
+
+/// Generate the hypothetical answer whose embedding becomes the dense
+/// query vector (HyDE): one [`Llm::complete`] round trip whose user
+/// prompt is [`SEMANTIC_DRAFT_INSTRUCTION`] plus the question. The
+/// caller owns every policy — consent, the on/off setting, caching, and
+/// the honest fallback on error.
+pub fn generate_semantic_draft(llm: &dyn Llm, question: &str) -> Result<String> {
+    llm.complete(
+        SEMANTIC_DRAFT_SYSTEM_PROMPT,
+        &format!("{SEMANTIC_DRAFT_INSTRUCTION}{question}"),
+    )
+}
+
+/// Bounded capacity of [`DraftCache`] (repeated searches cost no extra
+/// provider calls; a bound keeps memory finite).
+pub const DRAFT_CACHE_CAPACITY: usize = 64;
+
+/// Bounded in-memory LRU cache of semantic drafts keyed by the exact
+/// query string. Owned by the caller (one per app session) and passed
+/// in per ask, so core holds no global state and tests stay hermetic.
+#[derive(Debug)]
+pub struct DraftCache {
+    capacity: usize,
+    /// `(query, draft)` pairs, least-recently-used first.
+    entries: Vec<(String, String)>,
+}
+
+impl Default for DraftCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DraftCache {
+    /// New cache with the default capacity ([`DRAFT_CACHE_CAPACITY`]).
+    pub fn new() -> Self {
+        Self::with_capacity(DRAFT_CACHE_CAPACITY)
+    }
+
+    /// New cache with an explicit capacity (clamped to at least one
+    /// entry) — the test seam for eviction.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            entries: Vec::new(),
+        }
+    }
+
+    /// Number of cached drafts.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether no draft is cached.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The cached draft for `query`, promoting it to most recently used.
+    fn get(&mut self, query: &str) -> Option<String> {
+        let index = self.entries.iter().position(|(q, _)| q == query)?;
+        let (q, draft) = self.entries.remove(index);
+        self.entries.push((q, draft.clone()));
+        Some(draft)
+    }
+
+    /// Cache `draft` for `query` as most recently used, evicting the
+    /// least-recently-used entries over capacity. Failed drafts are
+    /// never cached — the next ask retries the provider.
+    fn put(&mut self, query: &str, draft: String) {
+        self.entries.retain(|(q, _)| q != query);
+        self.entries.push((query.to_string(), draft));
+        while self.entries.len() > self.capacity {
+            self.entries.remove(0);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1049,6 +1182,43 @@ pub fn ask(
     summarize_top: usize,
     today: NaiveDate,
 ) -> Result<AskOutcome> {
+    ask_with_semantic_draft(
+        storage,
+        llm,
+        embedder,
+        question,
+        limit,
+        summarize_top,
+        today,
+        false,
+        &mut DraftCache::new(),
+    )
+}
+
+/// [`ask`] with the optional HyDE semantic-draft expansion
+/// (`semantic_draft` in `crate::settings::Options`): when the setting
+/// is on, a consented provider backend (`llm`) exists, and the archive
+/// has embedded messages, exactly one extra provider call generates a
+/// short hypothetical answer and **that** text — not the raw question —
+/// is embedded as the dense query vector ([`DenseQuery::Draft`]). The
+/// raw question still drives the FTS leg and the plan, so everything
+/// except the dense vector is unchanged. Any provider error or timeout
+/// falls back honestly to the plain question embedding and appends a
+/// "semantic draft unavailable" note. `draft_cache` (caller-owned)
+/// makes repeated searches with the same question cost no extra
+/// provider call.
+#[allow(clippy::too_many_arguments)]
+pub fn ask_with_semantic_draft(
+    storage: &Storage,
+    llm: Option<&dyn Llm>,
+    embedder: &dyn Embedder,
+    question: &str,
+    limit: u32,
+    summarize_top: usize,
+    today: NaiveDate,
+    semantic_draft: bool,
+    draft_cache: &mut DraftCache,
+) -> Result<AskOutcome> {
     let planned = match llm {
         Some(llm) => validate(storage, question, translate(llm, question, today)),
         None => PlannedQuery {
@@ -1058,7 +1228,42 @@ pub fn ask(
         },
     };
     let fts_results = run_plan(storage, &planned, limit)?;
-    let hybrid = rank_hybrid(storage, embedder, question, &planned, &fts_results, limit)?;
+    // HyDE seam: resolve the dense query text between plan validation
+    // and hybrid ranking. The draft call only happens when the setting
+    // is on, a consented backend exists, and the vector leg has
+    // embedded messages to improve — otherwise this is exactly the raw
+    // question [`ask`] always embedded.
+    let mut draft_notes = Vec::new();
+    let dense = match llm.filter(|_| semantic_draft) {
+        Some(llm) if storage.embedding_counts(embedder.id())?.embedded > 0 => {
+            match draft_cache.get(question) {
+                Some(draft) => DenseQuery::Draft(draft),
+                None => match generate_semantic_draft(llm, question) {
+                    Ok(draft) => {
+                        draft_cache.put(question, draft.clone());
+                        DenseQuery::Draft(draft)
+                    }
+                    Err(e) => {
+                        draft_notes.push(format!(
+                            "semantic draft unavailable ({e}); ranked with the plain \
+                             question embedding"
+                        ));
+                        DenseQuery::raw(question)
+                    }
+                },
+            }
+        }
+        _ => DenseQuery::raw(question),
+    };
+    let hybrid = rank_hybrid_scoped(
+        storage,
+        embedder,
+        dense,
+        &planned,
+        &fts_results,
+        None,
+        limit,
+    )?;
     let results = hybrid.results;
     let collected = if planned.plan.extract_links {
         crate::extract::extract_links(&results)
@@ -1073,6 +1278,7 @@ pub fn ask(
         None => (None, Vec::new()),
     };
     let mut notes = planned.notes;
+    notes.extend(draft_notes);
     notes.extend(summary_notes);
     Ok(AskOutcome {
         plan: planned.plan,
@@ -1379,10 +1585,13 @@ pub fn prepare_scoped_ask(
         return Err(AskV2Error::Cancelled);
     }
     progress(2, 4, "ranking results");
+    // v2 stays raw-question: the draft call would be an unapproved
+    // outbound byte, exactly like translate (no round trip precedes the
+    // approval in this flow).
     let hybrid = rank_hybrid_scoped(
         storage,
         embedder,
-        question,
+        DenseQuery::raw(question),
         &planned,
         &fts_results,
         resolved.as_ref(),
@@ -1586,6 +1795,47 @@ mod tests {
 
     fn today() -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 11, 1).unwrap()
+    }
+
+    #[test]
+    fn semantic_draft_prompt_is_the_fixed_instruction_plus_question() {
+        let llm = MockLlm::with_replies(["a plausible draft."]);
+        let draft = generate_semantic_draft(&llm, "what did the accountant say?").unwrap();
+        assert_eq!(draft, "a plausible draft.");
+        let [(system, user)] = llm.prompts().try_into().unwrap();
+        assert!(
+            user.starts_with(SEMANTIC_DRAFT_INSTRUCTION),
+            "the draft user prompt must start with the fixed instruction: {user}"
+        );
+        assert!(
+            user.ends_with("what did the accountant say?"),
+            "the instruction is followed by the bare question: {user}"
+        );
+        assert!(
+            system.contains("hypothetical answer"),
+            "the system prompt must say the reply is hypothetical: {system}"
+        );
+    }
+
+    #[test]
+    fn draft_cache_is_a_bounded_lru() {
+        let mut cache = DraftCache::with_capacity(2);
+        assert!(cache.is_empty());
+        cache.put("q1", "d1".into());
+        cache.put("q2", "d2".into());
+        assert_eq!(cache.len(), 2);
+        // A hit promotes q1 to most recently used...
+        assert_eq!(cache.get("q1").as_deref(), Some("d1"));
+        // ...so the next insert evicts q2 (least recently used), not q1.
+        cache.put("q3", "d3".into());
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get("q2").is_none());
+        assert_eq!(cache.get("q1").as_deref(), Some("d1"));
+        assert_eq!(cache.get("q3").as_deref(), Some("d3"));
+        // Re-putting an existing key refreshes it instead of duplicating.
+        cache.put("q3", "d3b".into());
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.get("q3").as_deref(), Some("d3b"));
     }
 
     #[test]
@@ -2423,7 +2673,7 @@ mod tests {
         let hybrid = rank_hybrid_scoped(
             &storage,
             &embedder,
-            SCOPE_QUESTION,
+            DenseQuery::raw(SCOPE_QUESTION),
             &planned,
             &fts,
             Some(&scope),
@@ -2466,7 +2716,7 @@ mod tests {
         let hybrid = rank_hybrid_scoped(
             &storage,
             &embedder,
-            SCOPE_QUESTION,
+            DenseQuery::raw(SCOPE_QUESTION),
             &planned,
             &fts,
             Some(&scope),
@@ -2500,7 +2750,7 @@ mod tests {
         let hybrid = rank_hybrid_scoped(
             &storage,
             &embedder,
-            SCOPE_QUESTION,
+            DenseQuery::raw(SCOPE_QUESTION),
             &planned,
             &fts,
             Some(&scope),
@@ -2568,7 +2818,7 @@ mod tests {
         let hybrid = rank_hybrid_scoped(
             &storage,
             &embedder,
-            SCOPE_QUESTION,
+            DenseQuery::raw(SCOPE_QUESTION),
             &planned,
             &fts,
             Some(&scope),

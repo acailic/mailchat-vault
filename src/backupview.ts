@@ -220,12 +220,6 @@ export function lastBackupLine(view: LastBackupView): string {
   return `Last verified backup: ${view.created_at} · ${countsLine(view.counts)} · ${view.path} (${humanBytes(view.size)})${missing}.`;
 }
 
-/** The honest empty state for the last-backup line: says what the
- *  line means, not just "nothing here". */
-export function noBackupLine(): string {
-  return "No verified backup yet — the first backup you create is recorded here and survives restarts.";
-}
-
 /** The restart-after-switch line (U05): what vault is active now,
  * since when, and from where — including what this session's startup
  * recovery did to an interrupted switch. Empty on a never-switched

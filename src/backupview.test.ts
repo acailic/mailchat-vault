@@ -13,7 +13,6 @@ import {
   humanBytes,
   lastBackupLine,
   manifestLine,
-  noBackupLine,
   previewLine,
   recoveryLine,
   restoreDoneLine,
@@ -232,11 +231,6 @@ describe("lastBackupLine (U05: persisted last verified backup)", () => {
     expect(lastBackupLine({ ...record, still_present: false })).toContain(
       "the file is no longer at that path",
     );
-  });
-
-  it("the empty state explains what the line means", () => {
-    expect(noBackupLine()).toContain("No verified backup yet");
-    expect(noBackupLine()).toContain("survives restarts");
   });
 });
 

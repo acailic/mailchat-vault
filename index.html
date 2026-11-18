@@ -8,9 +8,110 @@
     <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32" />
     <!-- Styles and the bundled Source Sans 3 font are imported from
          src/main.ts so Vite bundles (and hashes) them into the app. -->
+    <!-- First paint (identity pass): the theme must resolve BEFORE the
+         module bundle — and tokens.css with it — loads, so the very
+         first frame is branded instead of the webview default. The
+         inline script mirrors resolveTheme in src/main.ts: localStorage
+         mcv.themeVesper "1" → vesper, "0" → follow prefers-color-scheme,
+         absent → vesper (the product default); it sets data-theme so
+         splash and shell paint themed, and applyTheme corrects any
+         drift once backend settings arrive. The token hex values are
+         mirrored below (they ship too late for this paint) — keep in
+         sync with the theme blocks in src/styles/tokens.css. The
+         module hides the splash at first render (hideBootSplash in
+         src/main.ts); the load listener and 2s timeout in the script
+         are backstops so a failed module load can never strand it. -->
+    <style>
+      #boot-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 90;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #1f1d1b; /* vesper --canvas (the default) */
+      }
+      :root[data-theme="dark"] #boot-splash { background: #191d1b; }
+      :root[data-theme="light"] #boot-splash { background: #faf8f4; }
+      #boot-splash svg {
+        width: 64px;
+        height: 64px;
+        color: #d9d2c7; /* vesper --text */
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.5;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+      :root[data-theme="dark"] #boot-splash svg { color: #e7ece8; }
+      :root[data-theme="light"] #boot-splash svg { color: #1f2a24; }
+      #boot-splash .logo-bubble {
+        fill: #e08e45; /* vesper --accent */
+        stroke: none;
+      }
+      #boot-splash .logo-dots {
+        fill: none;
+        stroke: #241505; /* vesper --accent-fg */
+        stroke-width: 2;
+        stroke-linecap: round;
+      }
+      :root[data-theme="dark"] #boot-splash .logo-bubble { fill: #7fb99a; }
+      :root[data-theme="dark"] #boot-splash .logo-dots { stroke: #10241a; }
+      :root[data-theme="light"] #boot-splash .logo-bubble { fill: #2d6a4f; }
+      :root[data-theme="light"] #boot-splash .logo-dots { stroke: #ffffff; }
+      /* The swap to the app shell: an opacity-only fade — never
+         movement, no progress theater — and only when the user has
+         not asked for reduced movement (mirrored --motion-standard /
+         --ease-out). Removal is instant under reduce. */
+      #boot-splash.hide {
+        opacity: 0;
+        transition: opacity 180ms cubic-bezier(0.23, 1, 0.32, 1);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #boot-splash.hide { transition: none; }
+      }
+    </style>
+    <script>
+      (function () {
+        var root = document.documentElement;
+        try {
+          var vesper = localStorage.getItem("mcv.themeVesper");
+          root.dataset.theme =
+            vesper === "0"
+              ? window.matchMedia("(prefers-color-scheme: dark)").matches
+                ? "dark"
+                : "light"
+              : "vesper";
+        } catch (e) {
+          root.dataset.theme = "vesper";
+        }
+        // Backstops: the module's first-render hide is the normal
+        // path; window load and a hard 2s timeout guarantee the
+        // splash can never strand on a failed module load.
+        function drop() {
+          var el = document.getElementById("boot-splash");
+          if (el) el.remove();
+        }
+        window.addEventListener("load", drop);
+        window.setTimeout(drop, 2000);
+      })();
+    </script>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
+
+    <!-- First-paint splash (see the head comment): the logo mark — the
+         same envelope + bubble as #app-title — centered on the theme
+         canvas. Direct body child, outside #app, aria-hidden: it never
+         joins the tab order and leaves no accessibility residue. -->
+    <div id="boot-splash" aria-hidden="true">
+      <svg viewBox="0 0 24 24" focusable="false">
+        <rect x="3" y="4.5" width="13" height="9.5" rx="1.5"/>
+        <path d="M3.8 5.9 9.5 10l5.7-4.1"/>
+        <path class="logo-bubble" d="M14.6 12h4.1a2 2 0 0 1 2 2v3.2a2 2 0 0 1-2 2h-2.3l-2.1 1.8v-1.8h-.6a2 2 0 0 1-2-2V14a2 2 0 0 1 2-2Z"/>
+        <path class="logo-dots" d="M16.3 15.3h.01M18.6 15.3h.01M17.45 17.2h.01"/>
+      </svg>
+    </div>
 
     <div id="app" data-view="workspace" data-layout="wide" data-nav="closed" data-reading="closed">
       <nav id="nav" aria-label="Workspace">
@@ -165,10 +266,20 @@
                 <div id="active-filter-chips" class="row" style="gap: 6px; margin-top: 6px"></div>
                 <div id="refresh-notice" class="row mt-s" hidden></div>
                 <div id="status" role="status" aria-live="polite"></div>
-                <!-- U02: the first-run state — an empty archive offers the
-                     first source instead of a dead search box. -->
+                <!-- U02: the first-run state — an empty archive offers a
+                     guided first action instead of a dead search box.
+                     Dismissible: the choice persists in localStorage
+                     (mcv.firstRunDismissed), so the card never nags
+                     across restarts. -->
                 <section id="first-run" aria-label="Get started" hidden>
-                  <h3 class="first-run-title">Add your first source</h3>
+                  <div class="first-run-header">
+                    <h3 class="first-run-title">Add your first source</h3>
+                    <button id="first-run-dismiss-btn" class="icon-btn" type="button"
+                            aria-label="Dismiss the getting-started card"
+                            title="Hide this card — your choice is remembered on this machine">
+                      <svg class="icon" aria-hidden="true" focusable="false"><use href="#i-close"></use></svg>
+                    </button>
+                  </div>
                   <p class="meta">
                     Mailchat Vault keeps a local, searchable archive of your email and
                     chats on this machine. Import an export file or connect an email
@@ -179,7 +290,7 @@
                     verify) is always marked as such.
                   </p>
                   <div class="row">
-                    <button id="first-run-import-btn" class="primary" type="button">Import files…</button>
+                    <button id="first-run-import-btn" class="primary" type="button">Import your first archive…</button>
                     <button id="first-run-account-btn" type="button">Connect email…</button>
                   </div>
                   <!-- Whole-window drag-drop import: static copy whose only
@@ -393,16 +504,14 @@
                   <input id="chat-media" type="checkbox" checked /> extract media
                 </label>
               </div>
-              <p class="meta" id="import-help" style="margin: 6px 0 0">
-                An .mbox email archive, a bare .eml (or a folder of them), a WhatsApp .txt,
-                a Telegram result.json, a Signal conversation .json, a Discord messages.json,
-                a Facebook Messenger message_*.json (or its export folder),
-                or a .zip of any of these. You will see a preview before anything is stored;
-                re-importing never duplicates.
-              </p>
+              <!-- Import idle (src/emptystate.ts): the illustrated
+                   group — headline, what lands here, one CTA. The
+                   detailed format list lives on the two choosers
+                   (first-run card and Add source) that route here. -->
+              <div id="import-empty"></div>
               <!-- The same drop surface as the first-run card: dropping on
-                   any part of the window routes through this section's
-                   preview → confirm flow. -->
+                    any part of the window routes through this section's
+                    preview → confirm flow. -->
               <div id="import-drop" class="drop-zone">
                 Drop archives here — .mbox · .eml · .json · .jsonl · .txt
               </div>
@@ -637,6 +746,10 @@
                   <button id="backup-create-btn" type="button" title="Write a versioned backup of the whole vault to a file you pick">Create backup…</button>
                   <button id="restore-pick-btn" type="button" title="Validate a backup file and offer a staged, journaled restore">Restore from backup…</button>
                 </div>
+                <!-- Backup never-run (src/emptystate.ts): replaces the
+                     quiet "no backup yet" line while no verified record
+                     exists; the record itself renders above. -->
+                <div id="backup-empty" hidden></div>
                 <div id="restore-flow"></div>
                 <h3 class="meta" style="margin-top: 12px">Previous vaults</h3>
                 <div class="row">
@@ -714,6 +827,7 @@
                     <option value="groq">Groq</option>
                     <option value="openrouter">OpenRouter</option>
                     <option value="ollama">Ollama (local)</option>
+                    <option value="lmstudio">LM Studio (local)</option>
                     <option value="custom">Custom endpoint</option>
                   </select>
                 </label>
@@ -852,6 +966,47 @@
         <rect x="4" y="4.5" width="16" height="6" rx="1.5"/>
         <rect x="4" y="13.5" width="16" height="6" rx="1.5"/>
         <path d="M7.5 7.5h.01"/><path d="M7.5 16.5h.01"/>
+      </symbol>
+      <!-- Empty-state illustrations (src/emptystate.ts): hand-drawn line
+           scenes on a 48-grid, same rules as the glyphs above — stroke
+           only, no fill/stroke attributes, currentColor via app.css
+           (.empty-state-art). Decorative by contract; the headline and
+           copy beside each one are the accessible content. -->
+      <symbol id="i-empty-search" viewBox="0 0 24 24">
+        <g transform="scale(0.5)">
+            <!-- a sheet with text lines, under a magnifier that finds nothing -->
+          <rect x="11" y="7" width="21" height="27" rx="2"/>
+          <path d="M16.5 14h10"/><path d="M16.5 19.5h10"/><path d="M16.5 25h6"/>
+          <circle cx="30.5" cy="30.5" r="7.5"/>
+          <path d="m36 36 6.5 6.5"/>
+        </g>
+      </symbol>
+      <symbol id="i-empty-sources" viewBox="0 0 24 24">
+        <g transform="scale(0.5)">
+            <!-- the sources tray, empty, with a plus offering the first one -->
+          <path d="M10 14h28"/>
+          <path d="M10 14 6.5 27.5v8a2.5 2.5 0 0 0 2.5 2.5h30a2.5 2.5 0 0 0 2.5-2.5v-8L38 14"/>
+          <path d="M6.5 27.5h9.5l2.5 4h11l2.5-4h9.5"/>
+          <circle cx="38" cy="10" r="6"/>
+          <path d="M38 7.5v5"/><path d="M35.5 10h5"/>
+        </g>
+      </symbol>
+      <symbol id="i-empty-import" viewBox="0 0 24 24">
+        <g transform="scale(0.5)">
+            <!-- an arrow dropping the first file into the vault's tray -->
+          <path d="M8 32h32"/>
+          <path d="M13 32v6.5a3.5 3.5 0 0 0 3.5 3.5h15a3.5 3.5 0 0 0 3.5-3.5V32"/>
+          <path d="M24 6.5V25"/>
+          <path d="m17 18.5 7 7 7-7"/>
+        </g>
+      </symbol>
+      <symbol id="i-empty-backup" viewBox="0 0 24 24">
+        <g transform="scale(0.5)">
+            <!-- the vault shield, at rest, with the first backup pending -->
+          <path d="M24 5.5 36.5 10v10.5c0 8.4-5.3 14.9-12.5 18.4C16.8 35.4 11.5 28.9 11.5 20.5V10Z"/>
+          <circle cx="24" cy="20.5" r="5.5"/>
+          <path d="M24 17.5v3.2l2.2 1.6"/>
+        </g>
       </symbol>
     </svg>
   </body>

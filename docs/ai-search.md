@@ -34,6 +34,12 @@ Privacy: when extraction is active, the summary prompt additionally contains
 the collected link list (`URL · sender · date`, capped at 50 lines). The
 consent prompt says exactly this before anything is sent.
 
+## Optional semantic draft (HyDE)
+
+Ask queries are questions; archived messages are statements. Embedding the raw question therefore hands the local vector leg a weak query vector. The opt-in setting **Improve semantic search with a generated draft** (default off) closes that register gap with one extra provider call per ask: the provider writes 2–3 hypothetical sentences answering the question, and that text — not the question — is embedded as the dense query vector (HyDE; Gao, Ma, Lin & Callan, *"Precise Zero-Shot Dense Retrieval without Relevance Labels"*, ACL 2023). The FTS leg, the plan, fusion, and all existing fallback behavior stay unchanged; drafts are cached in memory per question (bounded, 64 entries), so repeated searches cost no extra provider calls.
+
+Privacy and consent: the draft call sends exactly the question — the same data the translate step already sends — and nothing else (no archive rows; those ride only the summary step, as before). It runs only behind the same AI-consent gate as every network path, never in local-only asks, and is skipped entirely when no local embeddings exist (there is no vector leg to improve). If the provider errors or times out, the ask falls back honestly to embedding the plain question and the provenance footer notes “semantic draft unavailable”.
+
 ## Configuration (Settings UI, or environment variables)
 
 Providers are configured on the **Settings screen**; the key is stored in the OS keyring when one is available (session memory otherwise) — never in the database or the repo, and never in the settings file. The environment variables below keep working as a fallback for headless use — and are themselves editable in Settings (see *Environment fallback overrides* below):
@@ -53,7 +59,7 @@ A mismatched key/endpoint pairing (for example `ANTHROPIC_API_KEY` without `ANTH
 
 ## Privacy
 
-Nothing leaves the machine without the explicit AI consent above; LLM mode is opt-in and strictly scoped: only your question (for translation) and the top-8 matching messages, truncated (for the summary), are sent to the configured provider. No other rows, no database dumps, no embeddings, no key at rest. The summary step is skipped entirely when there are no results.
+Nothing leaves the machine without the explicit AI consent above; LLM mode is opt-in and strictly scoped: only your question (for translation — and, with the optional draft setting on, for the [HyDE draft](#optional-semantic-draft-hyde); the same question, nothing more) and the top-8 matching messages, truncated (for the summary), are sent to the configured provider. No other rows, no database dumps, no embeddings, no key at rest. The summary step is skipped entirely when there are no results.
 
 ## Fallback
 
@@ -101,12 +107,13 @@ FTS5 relevance and cosine similarity have incomparable scales, so the two ranked
 
 The **Settings screen** is where LLM providers are configured — one place, no environment variables needed:
 
-- **Providers**: add any number of named provider profiles. Each row is sectioned into **Provider, Model, Credentials, and Advanced**, shows only the fields its kind uses, and carries its own **Test connection** button; the active provider and model show at the top of the page. A profile has a *kind* that fixes the key/endpoint pairing rules and carries per-kind defaults (model, endpoint, temperature 0.2, max tokens 1024, timeout 30 s — 120 s for local Ollama); selecting a kind auto-fills its defaults, every value stays overridable, per-kind edits survive switching, and **Reset to defaults** restores them:
+- **Providers**: add any number of named provider profiles. Each row is sectioned into **Provider, Model, Credentials, and Advanced**, shows only the fields its kind uses, and carries its own **Test connection** button; the active provider and model show at the top of the page. A profile has a *kind* that fixes the key/endpoint pairing rules and carries per-kind defaults (model, endpoint, temperature 0.2, max tokens 1024, timeout 30 s — 120 s for the local kinds Ollama and LM Studio); selecting a kind auto-fills its defaults, every value stays overridable, per-kind edits survive switching, and **Reset to defaults** restores them:
   - **z.ai GLM** (the default) — key for `https://api.z.ai/api/anthropic`; the base URL may be left empty (defaults apply, model defaults to `glm-5`) or must point at the z.ai host;
   - **Anthropic** — the key is only ever sent to an explicitly configured endpoint (never the z.ai host), so base URL and model are explicit (prefilled with `https://api.anthropic.com`);
   - **OpenAI, Google Gemini, Mistral, Groq, OpenRouter** — OpenAI-compatible chat-completions providers with a fixed default endpoint (the base URL field hides behind a hint) and a default model offered in the dropdown;
   - **Azure OpenAI** — deployment name + api-version (default `2024-10-21`); the deployment name is the model id, and the resource base URL is user-supplied;
   - **Ollama** — a local server (`http://127.0.0.1:11434/v1` by default), no API key needed;
+  - **LM Studio** — a local server (`http://127.0.0.1:1234/v1` by default), no API key needed; the model field starts empty because the served model is whatever you loaded in LM Studio (type its id by hand);
   - **Custom** — any OpenAI-compatible `/chat/completions` endpoint, base URL and model fully explicit. (AWS Bedrock profiles load and save unchanged; their configuration UI is a follow-up.)
   The model field offers the kind default in a dropdown with free text allowed; the Advanced section holds the sampling overrides (temperature, max tokens, timeout — empty means the kind default). A profile that violates its pairing rule is **flagged inline and refused before anything is saved** — the same policy the environment configuration enforces.
 - **Default provider**: which backend an Ask uses. None selected = automatic (the environment fallback when valid, else local-only mode).
@@ -117,4 +124,15 @@ The **Settings screen** is where LLM providers are configured — one place, no 
 
 - Non-secret settings — provider profiles (kind, base URL, model, name, id), the default provider, the environment-fallback overrides (`env_overrides`: `ANTHROPIC_BASE_URL`, `MAILCHAT_LLM_MODEL`), and options — live in `settings.json` in the app data dir (e.g. `~/.local/share/com.acailic.mailchatvault/settings.json` on Linux). The file is written atomically and versioned; nothing is ever stored in the vault database.
 - **API keys never touch the settings file**: they are stored in the OS keyring (service `mailchat-vault`, entry `llm:<provider-id>`, and `llm:env:ZAI_API_KEY` / `llm:env:ANTHROPIC_API_KEY` for the environment-fallback overrides; Secret Service/GNOME Keyring or KWallet on Linux, Keychain on macOS, Credential Manager on Windows). With no keyring reachable, a key is kept only in process memory for the current session and asked for again after a restart — the UI says so.
-- **Ask provider menu**: every ask picks its backend — a configured profile (shown with model and host, disabled until it has a key), the environment fallback (labeled *Environment variables*, editable in Settings), or **local full-text**, which sends nothing anywhere. The privacy note under the question always describes exactly what the current selection sends.
+- **Ask provider menu**: every ask picks its backend — a configured profile (shown with model and host; keyed kinds are disabled until they have a key, the keyless local kinds Ollama and LM Studio are always selectable), the environment fallback (labeled *Environment variables*, editable in Settings), or **local full-text**, which sends nothing anywhere. The privacy note under the question always describes exactly what the current selection sends.
+
+## Fully offline Ask with a local model (Ollama / LM Studio)
+
+Both Ollama and LM Studio run an OpenAI-compatible server on your machine, so Ask works with **no API key and nothing ever leaving it**:
+
+- **Ollama** — install from <https://ollama.com>, then `ollama pull llama3.1:8b` and `ollama serve` (the desktop app starts the server for you). It listens on `http://127.0.0.1:11434/v1`.
+- **LM Studio** — load a model in the app, start the local server (Developer tab → *Start Server*). It listens on `http://127.0.0.1:1234/v1`.
+
+In Settings → AI assistance, add an **Ollama** or **LM Studio** provider: the base URL is prefilled, the key field stays empty (local servers need no auth — the row says so), and the profile is immediately selectable in the Ask provider menu. For the model, type the id of the model you loaded. A llama3.1:8b-class model is a good default for question answering over mail and chat archives: it follows the JSON plan and strict-citation prompt reliably, while staying in the ~6–8 GB range that runs on a typical laptop (Ollama's default `llama3.2` is lighter still if you have less RAM; larger models improve answer quality at the cost of speed). Local inference is slower than a hosted API — the 120-second timeout the local kinds ship with reflects that.
+
+Model discovery (a dropdown fed by `GET /v1/models`) and a save-time reachability preflight are planned follow-ups; for now the model id is typed by hand. The consent prompt still appears once per session before the first ask names the local model and host — answering it sends the question and the top results to **localhost only**.

@@ -19,11 +19,13 @@
 //!   configured endpoint, never the z.ai host; both base URL and model are
 //!   explicit. Native `/v1/messages` wire.
 //! - `openai`, `gemini`, `azure_openai`, `bedrock`, `mistral`, `groq`,
-//!   `openrouter`, `ollama` — the catalog kinds, each with versioned
-//!   defaults (model, base URL, temperature, max tokens, timeout) in this
-//!   module. All except `anthropic`/`zai` speak an OpenAI-compatible
-//!   chat-completions wire ([`crate::llm::OpenAiLlm`]). `azure_openai`
-//!   adds a deployment name + api-version; `bedrock` adds a region.
+//!   `openrouter`, `ollama`, `lmstudio` — the catalog kinds, each with
+//!   versioned defaults (model, base URL, temperature, max tokens,
+//!   timeout) in this module. All except `anthropic`/`zai` speak an
+//!   OpenAI-compatible chat-completions wire ([`crate::llm::OpenAiLlm`]).
+//!   `azure_openai` adds a deployment name + api-version; `bedrock` adds
+//!   a region. `ollama` and `lmstudio` are the keyless local kinds
+//!   ([`AuthStyle::None`]).
 //! - `custom` — any OpenAI-compatible `/chat/completions` endpoint, with
 //!   an explicit base URL and model.
 //!
@@ -76,13 +78,15 @@ pub enum ProviderKind {
     Openrouter,
     /// A local Ollama server (chat completions, no key required).
     Ollama,
+    /// A local LM Studio server (chat completions, no key required).
+    Lmstudio,
     /// Any OpenAI-compatible endpoint, fully explicit.
     Custom,
 }
 
 /// Every provider kind, in menu order (see [`ProviderKind::defaults`]
 /// for the per-kind data).
-pub const ALL_KINDS: [ProviderKind; 11] = [
+pub const ALL_KINDS: [ProviderKind; 12] = [
     ProviderKind::Zai,
     ProviderKind::Anthropic,
     ProviderKind::Openai,
@@ -93,6 +97,7 @@ pub const ALL_KINDS: [ProviderKind; 11] = [
     ProviderKind::Groq,
     ProviderKind::Openrouter,
     ProviderKind::Ollama,
+    ProviderKind::Lmstudio,
     ProviderKind::Custom,
 ];
 
@@ -134,7 +139,7 @@ pub enum AuthStyle {
     Bearer,
     /// `x-api-key` + `anthropic-version` headers (native Anthropic wire).
     XApiKey,
-    /// No key (local Ollama; a key may still be configured).
+    /// No key (local Ollama / LM Studio; a key may still be configured).
     None,
     /// AWS SigV4 (Bedrock; region + keyring credentials).
     AwsSigV4,
@@ -159,10 +164,11 @@ pub enum Wire {
 /// strings): what a profile of the kind uses when a field is left empty.
 /// `azure_openai` and `custom` carry no default model/base URL — a
 /// deployment/resource URL (azure) or an explicit endpoint (custom) is
-/// definitionally user-supplied.
+/// definitionally user-supplied. `lmstudio` has the default endpoint but
+/// no default model (the served model is user-loaded).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProviderDefaults {
-    /// Default model id (empty = user-supplied; azure/custom).
+    /// Default model id (empty = user-supplied; azure/custom/lmstudio).
     pub model: &'static str,
     /// Default endpoint base URL (empty = user-supplied; azure/custom).
     pub base_url: &'static str,
@@ -188,6 +194,7 @@ impl ProviderKind {
             Self::Groq => "groq",
             Self::Openrouter => "openrouter",
             Self::Ollama => "ollama",
+            Self::Lmstudio => "lmstudio",
             Self::Custom => "custom",
         }
     }
@@ -205,6 +212,7 @@ impl ProviderKind {
             Self::Groq => "Groq",
             Self::Openrouter => "OpenRouter",
             Self::Ollama => "Ollama",
+            Self::Lmstudio => "LM Studio",
             Self::Custom => "Custom",
         }
     }
@@ -213,7 +221,7 @@ impl ProviderKind {
     pub fn auth(self) -> AuthStyle {
         match self {
             Self::Zai | Self::Anthropic => AuthStyle::XApiKey,
-            Self::Ollama => AuthStyle::None,
+            Self::Ollama | Self::Lmstudio => AuthStyle::None,
             Self::Bedrock => AuthStyle::AwsSigV4,
             Self::Openai
             | Self::Gemini
@@ -237,6 +245,7 @@ impl ProviderKind {
             | Self::Groq
             | Self::Openrouter
             | Self::Ollama
+            | Self::Lmstudio
             | Self::Custom => Wire::OpenAiChat,
         }
     }
@@ -323,6 +332,15 @@ impl ProviderKind {
                 max_tokens: MAX_TOKENS,
                 timeout_secs: 120,
             },
+            Self::Lmstudio => ProviderDefaults {
+                // The served model is user-loaded in LM Studio, so there
+                // is no sensible default model id — only the endpoint.
+                model: "",
+                base_url: "http://127.0.0.1:1234/v1",
+                temperature: T,
+                max_tokens: MAX_TOKENS,
+                timeout_secs: 120,
+            },
             Self::Custom => ProviderDefaults {
                 // A custom endpoint is fully explicit by definition.
                 model: "",
@@ -375,6 +393,15 @@ pub struct Options {
     /// Strictly opt-in; older files default to disabled.
     #[serde(default)]
     pub start_at_login: bool,
+    /// Improve semantic search with a generated draft (HyDE, Gao et
+    /// al. ACL 2023): when a consented provider backend exists, one
+    /// extra provider call writes a short hypothetical answer to the
+    /// question and that text — not the raw question — is embedded as
+    /// the dense query vector. Strictly opt-in (it sends the question
+    /// to the provider, the same data translate already sends); older
+    /// settings files without the field default to **disabled**.
+    #[serde(default)]
+    pub semantic_draft: bool,
 }
 
 /// `Options::notifications` serde default (see the field docs).
@@ -390,6 +417,7 @@ impl Default for Options {
             notifications: default_notifications(),
             keep_running_in_background: false,
             start_at_login: false,
+            semantic_draft: false,
         }
     }
 }
@@ -695,7 +723,8 @@ pub fn check_profile_pairing(profile: &ProviderProfile) -> crate::Result<()> {
         | ProviderKind::Mistral
         | ProviderKind::Groq
         | ProviderKind::Openrouter
-        | ProviderKind::Ollama => {
+        | ProviderKind::Ollama
+        | ProviderKind::Lmstudio => {
             if !profile.base_url.is_empty() {
                 if !is_http_url(&profile.base_url) {
                     return Err(settings_error(format!(
@@ -965,14 +994,16 @@ pub struct ProviderMenuItem {
     pub model: String,
     /// Endpoint host (empty for `local`).
     pub host: String,
-    /// Whether this entry can be selected right now (profile has a key).
+    /// Whether this entry can be selected right now (a keyless kind is
+    /// always usable; keyed kinds need a stored API key).
     pub available: bool,
 }
 
 /// Build the provider menu: local-only mode first, then the configured
 /// profiles (in settings order), then the environment fallback. `has_key`
-/// reports whether a profile's API key is stored; `env` is the validly
-/// configured env fallback (if any).
+/// reports whether a profile's API key is stored — keyless kinds
+/// (`AuthStyle::None`: local Ollama / LM Studio) are available without
+/// one; `env` is the validly configured env fallback (if any).
 pub fn build_menu(
     settings: &Settings,
     has_key: impl Fn(&str) -> bool,
@@ -993,7 +1024,7 @@ pub fn build_menu(
             kind: p.kind.id().to_string(),
             model: p.effective_model(),
             host: p.host(),
-            available: has_key(&p.id),
+            available: p.kind.auth() == AuthStyle::None || has_key(&p.id),
         });
     }
     if let Some(env) = env {
@@ -1150,6 +1181,40 @@ mod tests {
         assert!(reloaded.options.start_at_login);
         assert!(!reloaded.options.notifications);
         assert_eq!(reloaded, s);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn semantic_draft_option_round_trips_and_backfills_off() {
+        assert!(
+            !Settings::default().options.semantic_draft,
+            "the HyDE draft is strictly opt-in: a fresh install never drafts"
+        );
+        let dir = std::env::temp_dir().join(format!("mcv-settings-hyde-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        // A file written before the option existed: the field is absent
+        // and must backfill to OFF, not refuse to load.
+        let older = serde_json::json!({
+            "version": SETTINGS_VERSION,
+            "providers": [],
+            "default_provider": null,
+            "options": {"theme": "system", "summarize_top": 8}
+        });
+        fs::write(&path, serde_json::to_vec(&older).unwrap()).unwrap();
+        let loaded = Settings::load(&path).unwrap().expect("file exists");
+        assert!(!loaded.options.semantic_draft);
+        // An explicit opt-in survives a save/load round trip.
+        let mut s = loaded;
+        s.options.semantic_draft = true;
+        s.save(&path).unwrap();
+        assert!(
+            Settings::load(&path)
+                .unwrap()
+                .unwrap()
+                .options
+                .semantic_draft
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -1423,6 +1488,81 @@ mod tests {
     }
 
     #[test]
+    fn menu_marks_keyless_kinds_available_without_a_key() {
+        // A keyless local kind (ollama / lmstudio) is selectable with no
+        // stored key — the server needs no auth; a keyed kind without a
+        // key stays unavailable exactly as before.
+        let s = settings_with(vec![
+            profile("loc", ProviderKind::Ollama, "", ""),
+            profile("studio", ProviderKind::Lmstudio, "", ""),
+            profile("glm", ProviderKind::Zai, "", ""),
+        ]);
+        let menu = build_menu(&s, |_| false, None);
+        assert!(menu[1].available, "ollama is keyless");
+        assert!(menu[2].available, "lmstudio is keyless");
+        assert!(!menu[3].available, "zai without a key is not");
+        assert_eq!(menu[1].kind, "ollama");
+        assert_eq!(menu[2].kind, "lmstudio");
+        assert_eq!(menu[2].model, "", "lmstudio has no default model");
+        // A stored key on a keyless kind changes nothing (still usable).
+        let menu = build_menu(&s, |id| id == "studio", None);
+        assert!(menu[1].available);
+        assert!(menu[2].available);
+    }
+
+    #[test]
+    fn lmstudio_round_trips_keyless_with_empty_model() {
+        // The fully local preset: no key anywhere, no model id (the
+        // served model is user-loaded in LM Studio) — the profile is
+        // valid as-is and survives a save/load round trip unchanged.
+        let dir = std::env::temp_dir().join(format!("mcv-settings-lms-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let mut s = settings_with(vec![profile("studio", ProviderKind::Lmstudio, "", "")]);
+        s.default_provider = Some("studio".into());
+        s.normalize();
+        s.validate().unwrap();
+        let p = &s.providers[0];
+        assert_eq!(p.effective_base_url(), "http://127.0.0.1:1234/v1");
+        assert_eq!(p.effective_model(), "");
+        assert_eq!(p.effective_timeout(), std::time::Duration::from_secs(120));
+        assert_eq!(p.kind.auth(), AuthStyle::None);
+        s.save(&path).unwrap();
+        let loaded = Settings::load(&path).unwrap().expect("file exists");
+        assert_eq!(loaded, s, "the keyless lmstudio profile round-trips");
+        // The file stays key-free.
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("api_key"));
+        fs::remove_dir_all(&dir).ok();
+
+        // An explicit non-loopback http override is still refused (the
+        // plaintext-http guard applies to lmstudio too), and a malformed
+        // URL is refused as a URL shape problem.
+        let s = settings_with(vec![profile(
+            "studio",
+            ProviderKind::Lmstudio,
+            "http://lm.example.com:1234/v1",
+            "m",
+        )]);
+        assert!(s
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("plaintext http"));
+        let s = settings_with(vec![profile(
+            "studio",
+            ProviderKind::Lmstudio,
+            "not a url",
+            "",
+        )]);
+        assert!(s
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("http(s) URL"));
+    }
+
+    #[test]
     fn env_overrides_backfill_when_absent_and_round_trip() {
         let dir = std::env::temp_dir().join(format!("mcv-settings-env-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
@@ -1494,9 +1634,10 @@ mod tests {
         // data (id, label, auth style, wire), and has defaults with a
         // model, base URL, and timeout — except azure_openai and custom,
         // whose endpoint and model are definitionally user-supplied (a
-        // resource/deployment URL and an explicit endpoint), and bedrock,
-        // whose base URL is derived from the region.
-        assert_eq!(ALL_KINDS.len(), 11);
+        // resource/deployment URL and an explicit endpoint), bedrock,
+        // whose base URL is derived from the region, and lmstudio,
+        // whose model is user-loaded but whose endpoint is defaulted.
+        assert_eq!(ALL_KINDS.len(), 12);
         let mut seen = std::collections::HashSet::new();
         for kind in ALL_KINDS {
             assert!(seen.insert(kind.id()), "duplicate kind id {}", kind.id());
@@ -1525,6 +1666,16 @@ mod tests {
                         "",
                         "{} base URL is user-supplied",
                         kind.id()
+                    );
+                }
+                ProviderKind::Lmstudio => {
+                    // The served model is user-loaded in LM Studio: no
+                    // default model id, but the endpoint is defaulted.
+                    assert_eq!(defaults.model, "", "lmstudio model is user-supplied");
+                    assert!(
+                        Url::parse(defaults.base_url).is_ok(),
+                        "lmstudio needs a parseable default base URL, got {:?}",
+                        defaults.base_url
                     );
                 }
                 ProviderKind::Bedrock => {
@@ -1570,6 +1721,7 @@ mod tests {
             ProviderKind::Groq,
             ProviderKind::Openrouter,
             ProviderKind::Ollama,
+            ProviderKind::Lmstudio,
             ProviderKind::Custom,
         ] {
             assert_eq!(kind.wire(), Wire::OpenAiChat, "{kind:?}");
@@ -1577,6 +1729,7 @@ mod tests {
         assert_eq!(ProviderKind::Bedrock.wire(), Wire::AwsBedrock);
         assert_eq!(ProviderKind::Openai.auth(), AuthStyle::Bearer);
         assert_eq!(ProviderKind::Ollama.auth(), AuthStyle::None);
+        assert_eq!(ProviderKind::Lmstudio.auth(), AuthStyle::None);
         assert_eq!(ProviderKind::Bedrock.auth(), AuthStyle::AwsSigV4);
         // Kind ids round-trip through serde (the settings file stores
         // them as the snake_case tag).

@@ -16,20 +16,30 @@
 //!    machine.
 //!
 //! Plus parity contracts: without a key the app degrades to exactly the
-//! plain FTS5 search, and search results never depend on the LLM succeeding.
+//! plain FTS5 search, and search results never depend on the LLM
+//! succeeding.
+//!
+//! 4. **Optional HyDE semantic draft** — off by default (exactly
+//!    translate + summarize calls), on = exactly one extra call whose
+//!    user prompt is the fixed draft instruction + question and whose
+//!    reply is what the dense leg embeds; repeats hit the caller-owned
+//!    cache (no extra call); provider failure falls back honestly to
+//!    the plain question embedding with a visible note; and the draft
+//!    is skipped entirely without embeddings or a backend.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
 use chrono::NaiveDate;
 use vault_core::llm::{
-    ask, summarize_results, translate, validate, AnthropicLlm, Llm, LlmConfig, MockLlm, OpenAiLlm,
-    PlanSource, QueryPlan, DEFAULT_SUMMARIZE_TOP,
+    ask, ask_with_semantic_draft, summarize_results, translate, validate, AnthropicLlm, DraftCache,
+    Llm, LlmConfig, MockLlm, OpenAiLlm, PlanSource, QueryPlan, RankingMode, DEFAULT_SUMMARIZE_TOP,
+    SEMANTIC_DRAFT_INSTRUCTION,
 };
 use vault_core::message::NewMessage;
 use vault_core::search::build_match_query;
 use vault_core::storage::Storage;
-use vault_core::vector::HashEmbedder;
+use vault_core::vector::{run_embedding_job, Embedder, HashEmbedder};
 
 fn today() -> NaiveDate {
     NaiveDate::from_ymd_opt(2026, 11, 1).unwrap()
@@ -879,4 +889,305 @@ fn openai_compatible_ollama_base_url_override_without_key() {
         req.headers
     );
     assert!(req.body.contains("llama3.2"));
+}
+
+// ---------------------------------------------------------------------------
+// 4. Optional HyDE semantic draft (dense-leg query expansion)
+// ---------------------------------------------------------------------------
+
+/// The canonical draft-mode fixture: an embedded archive plus the three
+/// replies a draft-mode ask consumes (translate, draft, summary).
+const HYDE_TRANSLATE: &str =
+    "{\"match\": \"\\\"vault\\\"\", \"date_from\": null, \"date_to\": null}";
+const HYDE_QUESTION: &str = "what do the vault topics say?";
+const HYDE_DRAFT: &str = "The vault topics were discussed across the October messages. \
+                           The authors reported on vault planning and syncing. Several \
+                           messages recorded problems and their resolutions.";
+
+/// [`HashEmbedder`] stand-in that records every text it is asked to embed
+/// (same model id and vectors, so the vector leg behaves identically).
+/// The dense query text is otherwise unobservable from outside the crate.
+#[derive(Default)]
+struct RecordingEmbedder {
+    texts: std::sync::Mutex<Vec<String>>,
+}
+
+impl RecordingEmbedder {
+    fn embedded_texts(&self) -> Vec<String> {
+        self.texts.lock().unwrap().clone()
+    }
+}
+
+impl Embedder for RecordingEmbedder {
+    fn id(&self) -> &str {
+        HashEmbedder::MODEL_ID
+    }
+
+    fn dim(&self) -> u16 {
+        HashEmbedder::DIM
+    }
+
+    fn embed(&self, text: &str) -> Vec<f32> {
+        self.texts.lock().unwrap().push(text.to_string());
+        HashEmbedder::new().embed(text)
+    }
+}
+
+/// Answers translate and summarize but fails every HyDE draft call
+/// (recognized by the fixed instruction) — the exact "provider error →
+/// honest fallback" shape, without failing the whole provider.
+struct DraftFailingLlm {
+    draft_calls: std::sync::atomic::AtomicU32,
+}
+
+impl DraftFailingLlm {
+    fn new() -> Self {
+        Self {
+            draft_calls: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+}
+
+impl Llm for DraftFailingLlm {
+    fn complete(&self, _system: &str, user: &str) -> vault_core::Result<String> {
+        if user.starts_with(SEMANTIC_DRAFT_INSTRUCTION) {
+            self.draft_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return Err(vault_core::Error::Llm("draft endpoint timed out".into()));
+        }
+        // Translate and summarize are told apart by their user prompts:
+        // only the summary prompt carries the numbered message list.
+        if user.contains("Messages (numbered by relevance):") {
+            Ok("draftless summary [1].".into())
+        } else {
+            Ok(HYDE_TRANSLATE.into())
+        }
+    }
+}
+
+/// Archive with local embeddings so the dense (vector) leg is live.
+fn hyde_seeded(rows: usize) -> Storage {
+    let s = seeded(rows, "hyde marker");
+    run_embedding_job(&s, &HashEmbedder::new(), None).unwrap();
+    s
+}
+
+#[test]
+fn semantic_draft_off_makes_no_extra_provider_calls() {
+    let s = hyde_seeded(6);
+    let llm = MockLlm::with_replies([HYDE_TRANSLATE, "summary [1]."]);
+    let mut cache = DraftCache::new();
+
+    let outcome = ask_with_semantic_draft(
+        &s,
+        Some(&llm),
+        &HashEmbedder::new(),
+        HYDE_QUESTION,
+        50,
+        DEFAULT_SUMMARIZE_TOP,
+        today(),
+        false,
+        &mut cache,
+    )
+    .unwrap();
+
+    // Exactly translate + summarize, and the dense leg embedded the raw
+    // question (hybrid over an embedded archive, no notes, no drafts).
+    assert_eq!(llm.prompts().len(), 2, "OFF must cost zero extra calls");
+    assert!(llm
+        .prompts()
+        .iter()
+        .all(|(_, user)| !user.starts_with(SEMANTIC_DRAFT_INSTRUCTION)));
+    assert_eq!(outcome.plan_source, PlanSource::Llm);
+    assert_eq!(outcome.ranking, RankingMode::HybridFtsVector);
+    assert!(outcome.notes.is_empty());
+    assert!(cache.is_empty());
+}
+
+#[test]
+fn semantic_draft_on_embeds_one_generated_draft_and_caches_repeats() {
+    let s = hyde_seeded(6);
+    let embedder = RecordingEmbedder::default();
+    // Reply order across both asks: translate, draft, summary; then
+    // (cache hit) translate, summary.
+    let llm = MockLlm::with_replies([
+        HYDE_TRANSLATE,
+        HYDE_DRAFT,
+        "summary [1].",
+        HYDE_TRANSLATE,
+        "summary [1].",
+    ]);
+    let mut cache = DraftCache::new();
+
+    let first = ask_with_semantic_draft(
+        &s,
+        Some(&llm),
+        &embedder,
+        HYDE_QUESTION,
+        50,
+        DEFAULT_SUMMARIZE_TOP,
+        today(),
+        true,
+        &mut cache,
+    )
+    .unwrap();
+
+    // Exactly one additional call, whose user prompt is the fixed
+    // instruction followed by the bare question.
+    assert_eq!(llm.prompts().len(), 3, "translate + draft + summary");
+    let (_, draft_user) = &llm.prompts()[1];
+    assert!(
+        draft_user.starts_with(SEMANTIC_DRAFT_INSTRUCTION),
+        "the draft call must lead with the fixed instruction: {draft_user}"
+    );
+    assert!(
+        draft_user.ends_with(HYDE_QUESTION),
+        "the instruction is followed by the question: {draft_user}"
+    );
+    // The dense leg embedded the GENERATED DRAFT, not the question.
+    assert_eq!(
+        embedder.embedded_texts(),
+        vec![HYDE_DRAFT.to_string()],
+        "the draft text must be the dense query vector"
+    );
+    assert_eq!(first.ranking, RankingMode::HybridFtsVector);
+    assert!(first.notes.is_empty(), "no degradation when drafting works");
+
+    // A second identical ask through the same cache: no draft call, the
+    // cached draft is re-embedded, and the outcome is identical.
+    let second = ask_with_semantic_draft(
+        &s,
+        Some(&llm),
+        &embedder,
+        HYDE_QUESTION,
+        50,
+        DEFAULT_SUMMARIZE_TOP,
+        today(),
+        true,
+        &mut cache,
+    )
+    .unwrap();
+    assert_eq!(
+        llm.prompts().len(),
+        5,
+        "the cached draft must cost no provider call"
+    );
+    assert_eq!(
+        llm.prompts()
+            .iter()
+            .filter(|(_, user)| user.starts_with(SEMANTIC_DRAFT_INSTRUCTION))
+            .count(),
+        1,
+        "exactly one draft call across both asks"
+    );
+    assert_eq!(
+        embedder.embedded_texts(),
+        vec![HYDE_DRAFT.to_string(), HYDE_DRAFT.to_string()]
+    );
+    assert_eq!(second.results, first.results);
+    assert_eq!(second.ranking, first.ranking);
+}
+
+#[test]
+fn semantic_draft_failure_falls_back_to_plain_question_embedding() {
+    let s = hyde_seeded(6);
+    let draft_failing = DraftFailingLlm::new();
+    let mut cache = DraftCache::new();
+
+    let outcome = ask_with_semantic_draft(
+        &s,
+        Some(&draft_failing),
+        &HashEmbedder::new(),
+        HYDE_QUESTION,
+        50,
+        DEFAULT_SUMMARIZE_TOP,
+        today(),
+        true,
+        &mut cache,
+    )
+    .unwrap();
+
+    // Honest fallback: exactly one failed draft attempt, a visible note,
+    // and the ask still completes (translate + summarize served).
+    assert_eq!(
+        draft_failing
+            .draft_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert_eq!(outcome.plan_source, PlanSource::Llm);
+    assert_eq!(outcome.answer.as_deref(), Some("draftless summary [1]."));
+    assert_eq!(
+        outcome
+            .notes
+            .iter()
+            .filter(|n| n.contains("semantic draft unavailable"))
+            .count(),
+        1,
+        "the provenance footer must say the draft was unavailable: {:?}",
+        outcome.notes
+    );
+    // Failures are never cached — the next ask retries the provider.
+    assert!(cache.is_empty());
+
+    // Results equal a plain-question ask bit for bit: the fallback is
+    // the pre-HyDE behavior, not a different ranking.
+    let plain = MockLlm::with_replies([HYDE_TRANSLATE, "summary [1]."]);
+    let plain_outcome = ask(
+        &s,
+        Some(&plain),
+        &HashEmbedder::new(),
+        HYDE_QUESTION,
+        50,
+        DEFAULT_SUMMARIZE_TOP,
+        today(),
+    )
+    .unwrap();
+    assert_eq!(outcome.results, plain_outcome.results);
+    assert_eq!(outcome.ranking, plain_outcome.ranking);
+    assert_eq!(outcome.plan, plain_outcome.plan);
+}
+
+#[test]
+fn semantic_draft_skipped_without_embeddings_or_backend() {
+    // No embedded messages: there is no vector leg to improve, so the
+    // setting must not buy an extra provider call.
+    let s = seeded(6, "hyde marker");
+    assert_eq!(
+        s.embedding_counts(HashEmbedder::MODEL_ID).unwrap().embedded,
+        0
+    );
+    let llm = MockLlm::with_replies([HYDE_TRANSLATE, "summary [1]."]);
+    let mut cache = DraftCache::new();
+    let outcome = ask_with_semantic_draft(
+        &s,
+        Some(&llm),
+        &HashEmbedder::new(),
+        HYDE_QUESTION,
+        50,
+        DEFAULT_SUMMARIZE_TOP,
+        today(),
+        true,
+        &mut cache,
+    )
+    .unwrap();
+    assert_eq!(llm.prompts().len(), 2, "no vector leg, no draft call");
+    assert_eq!(outcome.ranking, RankingMode::FtsOnly);
+    assert!(outcome.notes.is_empty());
+
+    // No backend (local-only ask): nothing can be drafted or sent.
+    let outcome = ask_with_semantic_draft(
+        &s,
+        None,
+        &HashEmbedder::new(),
+        HYDE_QUESTION,
+        50,
+        DEFAULT_SUMMARIZE_TOP,
+        today(),
+        true,
+        &mut cache,
+    )
+    .unwrap();
+    assert_eq!(outcome.plan_source, PlanSource::NoLlm);
+    assert!(outcome.notes.is_empty());
 }
