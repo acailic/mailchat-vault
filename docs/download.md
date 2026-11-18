@@ -7,6 +7,52 @@ agrees with the [README](../README.md), the [CHANGELOG](../CHANGELOG.md),
 and each release page. The maintainer-side build, smoke, and publish
 procedure lives in [release.md](release.md).
 
+## Install in one line
+
+On Linux or macOS, one command installs or upgrades the latest **published**
+release — no download matrix to read, no checksums to verify by hand:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/acailic/mailchat-vault/main/scripts/install.sh | sh
+```
+
+**Read the script before piping it to a shell** — piping a remote script to
+a shell is a trust decision, and the script is short:
+[scripts/install.sh](../scripts/install.sh). In short, it:
+
+1. checks its own needs (`curl` or `wget`, `sha256sum` or `shasum`, `tar` —
+   no gh, Node, or Rust),
+2. resolves the latest published release from the GitHub API
+   (unauthenticated; nothing is hardwired),
+3. picks the asset for your OS — the `.deb` through apt on Debian/Ubuntu
+   (so WebKitGTK and other dependencies resolve themselves), the AppImage
+   into `~/.local/bin` with a launcher, `.desktop` entry, and icon on other
+   Linux (with a `--appimage-extract-and-run` launcher when FUSE is
+   missing), and the universal `mailchat-vault.app.tar.gz` into
+   `/Applications` on macOS (`~/Applications` when that is not writable),
+4. verifies every download against the release's `SHA256SUMS` **before**
+   installing anything — on a mismatch it aborts, installs nothing, and
+   removes its temp files,
+5. installs over any previous version and **never touches the vault data
+   dir** (`~/.local/share/com.acailic.mailchatvault/` on Linux,
+   `~/Library/Application Support/com.acailic.mailchatvault/` on macOS),
+6. prints where it landed, the version, and the uninstall command, then
+   launches the app.
+
+Flags: `--version vX.Y.Z` (or `MAILCHAT_VERSION`) pins a version,
+`--no-launch` skips the launch, `--yes` is the non-interactive mode for CI,
+and `--uninstall` removes the app while keeping all user data:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/acailic/mailchat-vault/main/scripts/install.sh | sh -s -- --uninstall
+```
+
+Honest trade-off: artifacts are unsigned (see [limitations](#limitations)).
+On macOS the script runs `xattr -cr` on the installed app so the first
+launch skips the Gatekeeper block — that means you are trusting this script
+instead of clicking through Gatekeeper once. On Windows there is no
+one-liner yet; use the `.msi` or `setup.exe` from the matrix below.
+
 ## Downloads
 
 Releases are published at
@@ -14,30 +60,25 @@ Releases are published at
 
 ### Version × OS × architecture matrix
 
-The current published release is **v0.1.0**. Every release ships the same
+The current published release is **v0.2.0**. Every release ships the same
 asset set on all three platforms, and every release carries a `SHA256SUMS`
 asset (see [verify your download](#verify-your-download)):
 
 | Version | OS | Architecture | Assets |
 | --- | --- | --- | --- |
-| v0.1.0 | Linux | x86_64 | `mailchat-vault_0.1.0_amd64.deb` — apt package, resolves its own runtime dependencies; `mailchat-vault_0.1.0_amd64.AppImage` — self-contained, bundles the app and its runtime (incl. WebKitGTK) |
-| v0.1.0 | macOS | universal — Apple Silicon (arm64) + Intel (x86_64) | `mailchat-vault_0.1.0_universal.dmg` — one dmg runs on both Mac kinds (the build is verified to contain both slices); `mailchat-vault.app.tar.gz` — the same `.app`, tarballed for scriptable installs |
-| v0.1.0 | Windows | x64 | `mailchat-vault_0.1.0_x64_en-US.msi` (WiX); `mailchat-vault_0.1.0_x64-setup.exe` (NSIS setup) |
+| v0.2.0 | Linux | x86_64 | `mailchat-vault_0.2.0_amd64.deb` — apt package, resolves its own runtime dependencies; `mailchat-vault_0.2.0_amd64.AppImage` — self-contained, bundles the app and its runtime (incl. WebKitGTK) |
+| v0.2.0 | macOS | universal — Apple Silicon (arm64) + Intel (x86_64) | `mailchat-vault_0.2.0_universal.dmg` — one dmg runs on both Mac kinds (the build is verified to contain both slices); `mailchat-vault.app.tar.gz` — the same `.app`, tarballed for scriptable installs (no version in the name) |
+| v0.2.0 | Windows | x64 | `mailchat-vault_0.2.0_x64_en-US.msi` (WiX); `mailchat-vault_0.2.0_x64-setup.exe` (NSIS setup) |
 
 ### Release status
 
-**v0.2.0 is tagged but not yet released.** The tag `v0.2.0` (commit
-`71ac2d4`, on `main`) exists. The release execution route is decided
-(2026-11-15, #80): **local native builds are the authorized route while
-GitHub-hosted runners cannot start** (an account payments/spending-limit
-failure killed the Release run on that tag, so no v0.2.0 release or draft
-exists) — Linux can proceed on any docker machine now, macOS/Windows wait
-on native hosts (#81); hosted workflows resume as the default once
-billing is restored. Publishing proceeds by either route through the
-[publish checklist in release.md](release.md#v020-publish-handoff-maintainer-checklist).
-Until a v0.2.0 release is published and smoke-gated, **v0.1.0 is the only
-installable release**. The honest per-release evidence record lives in
-[release.md](release.md) and the [support matrix](support-matrix.md).
+**v0.2.0 is the current published release and `latest`** (published
+2026-11-17, following the release execution-route decision, #80; the
+per-release evidence record lives in [release.md](release.md) and the
+[support matrix](support-matrix.md)). **v0.1.0** (2026-11-17) is the
+previous release and remains installable — the [one-line
+installer](#install-in-one-line) installs `latest`; pass
+`--version v0.1.0` to pin the older one.
 
 ## Minimum requirements
 
@@ -73,7 +114,7 @@ line per release artifact. After downloading an installer (and
 `SHA256SUMS`), verify it:
 
 ```sh
-gh release download v0.1.0 -p SHA256SUMS
+gh release download v0.2.0 -p SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS   # macOS: shasum -a 256 -c SHA256SUMS
 ```
 
@@ -82,7 +123,7 @@ and checking each file's sha256 against GitHub's own server-side asset
 digests, so a tampered download cannot pass:
 
 ```sh
-scripts/release/release-verify.sh v0.1.0
+scripts/release/release-verify.sh v0.2.0
 ```
 
 ## Limitations
@@ -106,7 +147,9 @@ status and evidence record):
 Auto-update is deferred by decision
 ([D11](decisions.md#d11-three-platform-release-with-honest-evidence)), so
 upgrading is manual: download the new version's installer and install it
-over the old one.
+over the old one. The [one-line installer](#install-in-one-line) does
+exactly that — re-running it with a newer release published upgrades in
+place, and the manual routes below are the equivalent without it.
 
 - **Linux** — `.deb`: `sudo apt install ./mailchat-vault_<v>_amd64.deb`
   over the previous install. AppImage: replace the old file with the new
