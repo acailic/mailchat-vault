@@ -1,0 +1,106 @@
+# Supply-chain workflow — staged here pending an owner move.
+#
+# This is the verbatim content intended for
+# .github/workflows/supply-chain.yml. It is committed at this path
+# because the automation token that produced this change lacks the
+# GitHub `workflows` permission (pushes creating or modifying files
+# under .github/workflows/ are refused), and that permission is an
+# account-level grant no repository change can make. Owner action,
+# recorded in docs/launch-checklist.md:
+#
+#   git mv docs/supply-chain.workflow.yml .github/workflows/supply-chain.yml
+#   git commit -m "ci(supply-chain): wire the deny/audit/sbom workflow"
+#
+# Nothing else changes: the three jobs below are complete and
+# syntax-validated (parsed with the same YAML toolchain as the repo's
+# other workflows' linting). Once moved, they still start no runners
+# until Actions billing is restored (#80/#102) — per D11, workflow YAML
+# is not evidence; only executed runs are.
+name: Supply chain
+
+# License/advisory gating, vulnerability audit, and SBOM generation
+# for the Cargo workspace (ticket P3·19). Three independent jobs:
+#
+#   deny  — cargo-deny check against deny.toml (the committed record:
+#           licenses allow-list, advisory gating, duplicate policy,
+#           allowed sources; every current exception is recorded there)
+#   audit — cargo-audit against the RustSec advisory DB
+#   sbom  — cargo-cyclonedx CycloneDX JSON of the workspace
+#           dependencies, uploaded as a workflow artifact; releases
+#           attach it alongside SHA256SUMS (docs/release.md → SBOM)
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: supply-chain-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+
+      - name: License / advisory / bans / sources gate
+        run: cargo deny --workspace check
+
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+
+      # RUSTSEC-2026-0459 (libsqlite3-sys bundled SQLite WAL page-size
+      # leak) is waived with full record in deny.toml's HIT RECORD:
+      # local vector needs a crafted db+wal pair this app never opens;
+      # fix = rusqlite 0.41 upgrade (follow-up task). Remove --ignore
+      # together with that upgrade. All warnings (unmaintained/unsound/
+      # yanked) stay visible.
+      - name: Vulnerability audit (RustSec advisory DB)
+        run: cargo audit --ignore RUSTSEC-2026-0459
+
+  sbom:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-cyclonedx
+        run: cargo install --locked cargo-cyclonedx
+
+      # cargo-cyclonedx writes one *.cdx.json next to each workspace
+      # crate's Cargo.toml (crates/vault-core/, src-tauri/); they are
+      # gitignored build outputs whose home is the release asset list
+      # (docs/release.md → SBOM).
+      - name: Generate workspace SBOM (CycloneDX JSON)
+        run: cargo cyclonedx --format json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cyclonedx
+          path: |
+            crates/vault-core/*.cdx.json
+            src-tauri/*.cdx.json
+          if-no-files-found: error

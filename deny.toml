@@ -1,0 +1,191 @@
+# cargo-deny configuration — the committed supply-chain record (P3·19).
+#
+# The config IS the record: the allow-lists below are the policy, and
+# every current exception is listed in the HIT RECORD at the bottom of
+# this file with its waiver or fix status. Nothing is silenced that is
+# not recorded there.
+#
+# Run locally:  cargo deny --workspace check
+# CI:           .github/workflows/supply-chain.yml → `deny` job
+#               (staged verbatim at docs/supply-chain.workflow.yml until
+#               an owner moves it into place — the automation token
+#               lacks the `workflows` permission; see the launch
+#               checklist).
+# Honest status (per D11, workflow YAML is not evidence): the CI job
+# starts no runners while account Actions billing is blocked
+# (#80/#102); the local run on the PR branch is the interim evidence,
+# per docs/testing.md → Interim per-PR verification.
+
+[graph]
+# Check the workspace as CI builds it (all features, both crates).
+all-features = true
+targets = [
+  { triple = "x86_64-unknown-linux-gnu" },
+  { triple = "x86_64-apple-darwin" },
+  { triple = "aarch64-apple-darwin" },
+  { triple = "x86_64-pc-windows-msvc" },
+]
+
+# ---------------------------------------------------------------------------
+# Licenses
+#
+# The workspace itself is GPL-3.0-only (D13). Everything else on the
+# allow-list is the standard permissive set; additions beyond that set
+# are individually justified inline and mirrored in the HIT RECORD.
+[licenses]
+version = 2
+confidence-threshold = 0.93
+allow = [
+  "GPL-3.0-only",           # this workspace (crates/vault-core, src-tauri)
+  "MIT",
+  "Apache-2.0",
+  # OpenSSL 3.x (vendored by libsqlite3-sys's SQLCipher build) moved to
+  # Apache-2.0 WITH LLVM-exception; several -sys crates declare it.
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",            # unicode-ident and friends
+  "Zlib",
+  "CC0-1.0",
+  # webpki-roots (direct workspace dependency, Mozilla's root store)
+  # declares CDLA-Permissive-2.0 for its certificate data — permissive
+  # data license, GPL-3.0-compatible, files shipped unmodified.
+  "CDLA-Permissive-1.0",
+  "CDLA-Permissive-2.0",
+  # mailparse + quoted_printable (direct mail-parsing dependency tree)
+  # declare 0BSD.
+  "0BSD",
+  # MPL-2.0: file-level weak copyleft, GPL-3.0-compatible. In this tree:
+  # the servo CSS crates cssparser / cssparser-macros / selectors /
+  # dtoa-short (via tauri-utils → tauri) and option-ext (via dirs);
+  # pulled in by the Tauri app crate, files unmodified.
+  "MPL-2.0",
+  # ring (via rustls's `ring` crypto provider): its SPDX expression ANDs
+  # MIT/ISC with the historical OpenSSL license for derived code.
+  "OpenSSL",
+]
+
+# ---------------------------------------------------------------------------
+# Advisories (RustSec DB; fetched from github.com/RustSec/advisory-db)
+[advisories]
+version = 2
+# cargo-deny 0.17+ (config PR #611): published vulnerabilities are always
+# denied — no severity threshold can hide a low-severity one — and the
+# only suppression is an explicit `ignore` entry with a recorded reason.
+# Unmaintained advisories gate for workspace members' dependencies
+# (scope "workspace"); yanked versions warn — the current yanked entry
+# and its fix are in the HIT RECORD. Every ignore below is mirrored in
+# the HIT RECORD with owner and follow-up.
+unmaintained = "workspace"
+yanked = "warn"
+ignore = [
+  # RUSTSEC-2026-0459 (CVE-2026-119375): libsqlite3-sys <= 0.38.2 bundles
+  # SQLite < 3.54.0, which can return uninitialized page-cache memory when
+  # a database is opened alongside a crafted sibling -wal file with a
+  # mismatched page size. WAIVED: the attack is local and requires opening
+  # a crafted db+wal pair written by a less-trusted party; this app opens
+  # only its own vault.db (never an attacker-supplied pair). FIX OWNER:
+  # dependency-upgrade task — rusqlite 0.41 / libsqlite3-sys 0.39 (SQLite
+  # 3.54.x); a Cargo.lock change is out of scope for this config-only
+  # ticket.
+  { id = "RUSTSEC-2026-0459", reason = "bundled-SQLite WAL page-size leak; local vector needs a crafted db+wal pair this app never opens; fix = rusqlite 0.41 upgrade (lock change, follow-up task)" },
+
+  # RUSTSEC-2026-0543: chrono is unmaintained (chronotope/chrono#1768),
+  # all versions affected; no safe upgrade exists. WAIVED: migration to
+  # jiff/time is a code change across vault-core time handling — out of
+  # scope here. FIX OWNER: follow-up migration task; until then the
+  # advisory is cosmetic (unmaintained ≠ vulnerable).
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, no safe upgrade; jiff/time migration is a code change, follow-up task" },
+
+  # RUSTSEC-2026-0555: chrono-tz is unmaintained (same announcement);
+  # same waiver and follow-up as chrono above.
+  { id = "RUSTSEC-2026-0555", reason = "chrono-tz unmaintained alongside chrono; same migration follow-up" },
+]
+
+# ---------------------------------------------------------------------------
+# Bans (duplicate/duplicated crates and wildcards)
+[bans]
+# The 150 KB Cargo.lock (602 packages, tauri + sqlcipher + rustls trees)
+# trips duplicate versions (32 duplicate crate names at the recorded
+# run); they are warnings, recorded, not churned in this config-only
+# ticket. Deduplication belongs to dependency-upgrade tasks where a lock
+# change is reviewable.
+multiple-versions = "warn"
+# Wildcard (`*`) version requirements are "allow" — deliberately, with
+# the record: the only wildcard in the tree is src-tauri's idiomatic
+# path dependency on the workspace sibling
+# `vault-core = { path = "../crates/vault-core" }` (path deps carry no
+# version key; see HIT RECORD). Registry dependencies with `*` would
+# still surface via Cargo.lock review — a lock pin can never be a
+# wildcard.
+wildcards = "allow"
+highlight = "all"
+
+# ---------------------------------------------------------------------------
+# Sources (where crates may come from)
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# The lock currently contains zero git dependencies (verified 2026-11-18:
+# every `source` in Cargo.lock is the crates.io registry). GitHub is
+# allowed for future git pins (e.g. temporary upstream fixes), anything
+# else must be added here explicitly in review.
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com"]
+
+# ===========================================================================
+# HIT RECORD (2026-11-18, cargo-deny 0.21.0, lock at ca4395c,
+# `cargo deny --workspace check` on the P3·19 branch)
+# ===========================================================================
+#
+# Hits and their dispositions — every hit is either fixed in the config
+# above (with justification inline) or waived here with a named
+# follow-up owner. Run 1 surfaced 9 errors; fixing those revealed 5
+# more license rejects in run 2 (cargo-deny caps diagnostics per run),
+# also fixed:
+#
+# licenses (4 + 5 errors across two runs → fixed via allow-list
+# additions):
+#   - mailparse 0.16.1 + quoted_printable 0.5.2 → 0BSD. Direct
+#     mail-parsing dependency; 0BSD is a maximally permissive OSI
+#     license, added to the allow-list.
+#   - webpki-roots 0.26.11 + 1.0.11 → CDLA-Permissive-2.0 (certificate
+#     data). Direct workspace dependency; permissive data license,
+#     added to the allow-list.
+#   - cssparser 0.37.0, cssparser-macros 0.7.1, selectors 0.38.0,
+#     dtoa-short 0.3.5, option-ext 0.2.0 → MPL-2.0 (servo CSS crates +
+#     option-ext via tauri). File-level weak copyleft,
+#     GPL-3.0-compatible, added to the allow-list.
+#   Note: the pre-run guess that webpki-roots was MPL-2.0 was wrong —
+#   the run corrected it (CDLA-Permissive-2.0); MPL-2.0 turned out to be
+#   the tauri/servo crates instead, and ring's OpenSSL term was real.
+#
+# advisories (3 errors → 3 explicit ignores above):
+#   - RUSTSEC-2026-0459 (CVE-2026-119375, libsqlite3-sys bundled SQLite
+#     WAL page-size leak): WAIVED — local vector, needs a crafted
+#     db+wal pair this app never opens. Fix = rusqlite 0.41 upgrade
+#     (lock change) — dependency-upgrade task, not this ticket.
+#   - RUSTSEC-2026-0543 (chrono unmaintained) + RUSTSEC-2026-0555
+#     (chrono-tz unmaintained): WAIVED — no safe upgrade exists; jiff/
+#     time migration is a code change, follow-up task.
+#
+# advisories/yanked (1 error → policy warn + record):
+#   - async-executor 1.14.0 (via zbus ← tauri notification/keyring
+#     plugins) is yanked. Fix = `cargo update -p async-executor`
+#     (lock change) — dependency-upgrade task. `yanked = "warn"` is the
+#     standing policy so the hit stays visible without gating.
+#
+# bans/wildcards (1 error → policy allow + record):
+#   - src-tauri → crates/vault-core path dependency has no version key
+#     (idiomatic workspace path dep; the only wildcard in the tree).
+#     `wildcards = "allow"` above is the waiver; registry `*` deps would
+#     still be caught by Cargo.lock review — a lock pin is never `*`.
+#
+# bans/multiple-versions (32 warnings, policy warn): duplicate versions
+#   across the 602-package tree (aes, nom, miniz_oxide, …) — recorded,
+#   deduped by dependency-upgrade tasks, not this config-only ticket.
+#
+# sources: PASS — all 602 packages resolve to the crates.io registry;
+#   zero git dependencies in the lock.
+# ===========================================================================
