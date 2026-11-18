@@ -1582,9 +1582,9 @@ label.field-check input { margin: 0; }
   background: transparent;
   border: none;
 }
+/* No outline here: the global :focus-visible rule (one accent ring for the
+ * whole app, per the focus-ring invariant) already covers this input. */
 .command-palette-inputrow input:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
   border-radius: var(--radius-s);
 }
 
@@ -1595,7 +1595,7 @@ label.field-check input { margin: 0; }
 
 .command-palette-section {
   padding: var(--sp-2) var(--sp-2) var(--sp-1);
-  font-size: 12px;
+  font-size: var(--text-xs);
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
