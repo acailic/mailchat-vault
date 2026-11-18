@@ -139,11 +139,14 @@ allow-git = ["https://github.com"]
 # `cargo deny --workspace check` on the P3·19 branch)
 # ===========================================================================
 #
-# First-run hits (9 errors) and their dispositions — every hit is either
-# fixed in the config above (with justification inline) or waived here
-# with a named follow-up owner:
+# Hits and their dispositions — every hit is either fixed in the config
+# above (with justification inline) or waived here with a named
+# follow-up owner. Run 1 surfaced 9 errors; fixing those revealed 5
+# more license rejects in run 2 (cargo-deny caps diagnostics per run),
+# also fixed:
 #
-# licenses (9 errors across two runs → fixed via allow-list additions):
+# licenses (4 + 5 errors across two runs → fixed via allow-list
+# additions):
 #   - mailparse 0.16.1 + quoted_printable 0.5.2 → 0BSD. Direct
 #     mail-parsing dependency; 0BSD is a maximally permissive OSI
 #     license, added to the allow-list.
