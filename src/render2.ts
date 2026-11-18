@@ -38,7 +38,7 @@ import {
   parseSnippet,
   splitTerms,
 } from "./viewmodel";
-import { buildMediaItem } from "./media";
+import { buildMediaChips, buildMediaItem } from "./media";
 import type {
   AttachmentSummary,
   ConversationContext,
@@ -99,7 +99,7 @@ export interface FlatResultsOptions {
 }
 
 /** The time-uncertainty marker shown instead of a fabricated timestamp. */
-export function timeLabel(hit: MessageSummary): string {
+export function timeLabel(hit: Pick<MessageSummary, "sent_at" | "time_confidence">): string {
   const base = formatSentAt(hit.sent_at ?? "");
   if (!hit.sent_at) return base;
   // Legacy-assumed dates stay visible but labeled (A04 honesty).
@@ -682,51 +682,11 @@ function exportPicker(el: HTMLElement, opts: Detail2Options): HTMLDetailsElement
   return picker;
 }
 
-/** Render the v2 reading pane: detail card + context thread + actions. */
-export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
-  const { ctx, entries } = opts;
-  const detail = ctx.anchor;
-  const terms = splitTerms(opts.queryText);
-
-  const card = document.createElement("article");
-  card.className = "detail-card";
-  card.dataset.messageId = String(detail.id);
-
-  const header = document.createElement("header");
-  const title = document.createElement("h2");
-  // The headline follows the rows' discipline: the display name, with
-  // the full "Name <address>" form one hover away. The exact address
-  // stays in the meta table below either way.
-  const displayAuthor = authorDisplayName(detail.author) || "unknown";
-  title.textContent = displayAuthor;
-  if (displayAuthor !== (detail.author || "unknown")) title.title = detail.author;
-  const actions = document.createElement("div");
-  actions.className = "header-actions";
-  // Utility actions are icon-only and equal in weight; Export… opens the
-  // picker. "Back to results" is not here: the swap layouts
-  // (medium/compact) own it in the reading toolbar, and the wide layout —
-  // where the results sit beside the pane — gets a plain Close instead
-  // (hidden by CSS whenever the toolbar's Back is showing).
-  actions.append(
-    iconButton(
-      "copy",
-      "copy-btn",
-      "Copy message",
-      "Copy the message text with provenance",
-      opts.onCopy,
-    ),
-    iconButton(
-      "link",
-      "copy-link-btn",
-      "Copy link",
-      `Copy the internal locator (${messageLink(detail.id)})`,
-      opts.onCopyLink,
-    ),
-    exportPicker(el, opts),
-    iconButton("close", "close-btn", "Close", "Close the reading pane (Esc)", opts.onClose),
-  );
-  header.append(title, actions);
-
+/** The technical meta table (dl) — every stored field with its raw
+ * form one hover away. It renders inside the Provenance fold: the
+ * reading surface above shows the editorial hierarchy, this table is
+ * the reference copy. */
+function metaTable(detail: ConversationContext["anchor"], ctx: ConversationContext): HTMLDListElement {
   const meta = document.createElement("dl");
   meta.className = "meta-table";
   const metaRow = (label: string, value: string, title?: string) => {
@@ -778,17 +738,109 @@ export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
     metaRow("original timestamp", detail.original_timestamp);
   }
   metaRow("message id", detail.external_id || String(detail.id));
+  return meta;
+}
+
+/** The reading surface's quiet meta row: date · source · conversation,
+ * small muted text with tabular numerals. Uncertain times keep their
+ * caveat and tooltip (A04 honesty — the same wording as the rows). */
+function metaHierarchyRow(detail: ConversationContext["anchor"]): HTMLDivElement {
+  const row = document.createElement("div");
+  row.className = "detail-meta";
+  const part = (text: string, title?: string) => {
+    const span = document.createElement("span");
+    span.textContent = text;
+    if (title) span.title = title;
+    return span;
+  };
+  const date = part(timeLabel(detail));
+  if (
+    detail.time_confidence === "legacy_assumed" ||
+    detail.time_confidence === "unresolved"
+  ) {
+    date.title = timeConfidenceDetail(detail.time_confidence);
+  }
+  const source = part(friendlySourceLabel(detail.source_label));
+  if (detail.source_label !== friendlySourceLabel(detail.source_label)) {
+    source.title = `Stored source: ${detail.source_label}`;
+  }
+  row.append(date, " · ", source);
+  if (detail.conversation_label) {
+    row.append(" · ", part(detail.conversation_label));
+  }
+  return row;
+}
+
+/** Render the v2 reading pane: detail card + context thread + actions. */
+export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
+  const { ctx, entries } = opts;
+  const detail = ctx.anchor;
+  const terms = splitTerms(opts.queryText);
+
+  // The attachment chips' expansion rides a same-message re-render (the
+  // era-chip discipline: state on the element, never a measurement).
+  const previousCard = el.querySelector<HTMLElement>("article.detail-card");
+  const carryChipsExpanded =
+    previousCard?.dataset.messageId === String(detail.id) &&
+    (previousCard.querySelector<HTMLElement>("ul.media-chips")?.dataset.expanded ?? "false") ===
+      "true";
+
+  const card = document.createElement("article");
+  card.className = "detail-card";
+  card.dataset.messageId = String(detail.id);
+
+  const header = document.createElement("header");
+  const title = document.createElement("h2");
+  // The headline follows the rows' discipline: the display name, with
+  // the full "Name <address>" form one hover away. The exact address
+  // stays in the meta table below either way.
+  const displayAuthor = authorDisplayName(detail.author) || "unknown";
+  title.textContent = displayAuthor;
+  if (displayAuthor !== (detail.author || "unknown")) title.title = detail.author;
+  const actions = document.createElement("div");
+  actions.className = "header-actions";
+  // Utility actions are icon-only and equal in weight; Export… opens the
+  // picker. "Back to results" is not here: the swap layouts
+  // (medium/compact) own it in the reading toolbar, and the wide layout —
+  // where the results sit beside the pane — gets a plain Close instead
+  // (hidden by CSS whenever the toolbar's Back is showing).
+  actions.append(
+    iconButton(
+      "copy",
+      "copy-btn",
+      "Copy message",
+      "Copy the message text with provenance",
+      opts.onCopy,
+    ),
+    iconButton(
+      "link",
+      "copy-link-btn",
+      "Copy link",
+      `Copy the internal locator (${messageLink(detail.id)})`,
+      opts.onCopyLink,
+    ),
+    exportPicker(el, opts),
+    iconButton("close", "close-btn", "Close", "Close the reading pane (Esc)", opts.onClose),
+  );
+  header.append(title, actions);
+
+  // Editorial meta hierarchy: the subject reads as a display line under
+  // the participant headline; date · source · conversation sit in one
+  // quiet muted row (metaHierarchyRow) above the body — the full
+  // technical dl moves into the Provenance fold.
+  const subject = document.createElement("p");
+  subject.className = "detail-subject";
+  subject.textContent = detail.subject;
+  const meta = metaHierarchyRow(detail);
 
   const body = document.createElement("div");
   body.className = "detail-body";
-  const bodyHeading = document.createElement("h3");
-  bodyHeading.textContent = "Message";
   const bodyText = document.createElement("div");
   bodyText.className = "body";
   const html = htmlOf(detail.raw_json);
   if (html === null) {
     appendSegments(bodyText, highlightSegments(detail.body, terms));
-    body.append(bodyHeading, bodyText);
+    body.append(bodyText);
   } else {
     // Rendered/Raw toggle. The stored HTML is presentation from an
     // untrusted sender: it is only ever placed into a sandboxed
@@ -837,11 +889,13 @@ export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
     renderedBtn.addEventListener("click", () => show(true));
     rawBtn.addEventListener("click", () => show(false));
     toggle.append(renderedBtn, rawBtn);
-    body.append(bodyHeading, toggle, bodyText);
+    body.append(toggle, bodyText);
     show(true);
   }
 
-  const sections: HTMLElement[] = [header, meta, body];
+  const sections: HTMLElement[] = [header];
+  if (detail.subject) sections.push(subject);
+  sections.push(meta, body);
 
   if (ctx.unverified_conversation) {
     const note = document.createElement("p");
@@ -855,6 +909,17 @@ export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
     media.className = "detail-media";
     const heading = document.createElement("h3");
     heading.textContent = "Attachments";
+    // The compact chip row: one line, fixed visible count, "+N more"
+    // expander. The full items (inline previews, explicit Save/Open)
+    // stay below — one action per chip, the rest one click further.
+    const chips = buildMediaChips(
+      detail.attachments,
+      {
+        onExport: opts.onExportMedia,
+        onOpenExternal: opts.onOpenExternalMedia,
+      },
+      carryChipsExpanded,
+    );
     const list = document.createElement("ul");
     list.className = "media-list";
     for (const attachment of detail.attachments) {
@@ -865,7 +930,7 @@ export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
         }),
       );
     }
-    media.append(heading, list);
+    media.append(heading, chips, list);
     sections.push(media);
   }
 
@@ -901,6 +966,9 @@ export function renderDetail2(el: HTMLElement, opts: Detail2Options): void {
   const provenanceSummary = document.createElement("summary");
   provenanceSummary.textContent = "Provenance";
   const provenanceBody = document.createElement("div");
+  // The full meta table (stored forms, certainty wording, ids) lives
+  // here — the reading surface above keeps only the editorial row.
+  provenanceBody.append(metaTable(detail, ctx));
   if (detail.occurrences.length > 0) {
     const occurrences = document.createElement("ul");
     occurrences.className = "provenance-list";
