@@ -2,16 +2,7 @@
 
 Mailchat Vault is one private, searchable archive for your email and your chats, on your own machine: drop in a Gmail Takeout export or a WhatsApp, Telegram, Signal, Discord, or Messenger export and find any message in seconds — fully offline, with no cloud service holding your messages.
 
-<!-- DEMO GIF — record this and replace the placeholder image below (owner action).
-     Total length 10-15 s; app window 1200 px wide (record at 2x if you can).
-     Scenes, in order:
-       1. Drop a Google Takeout .mbox (or its .zip) onto the app window - the drop zone highlights
-       2. Import progress - the bounded preview card, confirm, then the progress bar advancing
-       3. Type a query - the top hit opens in the reading pane with the match highlighted
-     Save as docs/screenshots/demo.gif and swap the image reference below
-     (recording recipe: docs/screenshots/README.md). -->
-
-[![Demo GIF placeholder - drop a Takeout export, import progress, search hit highlighted](docs/screenshots/demo-placeholder.svg)](docs/screenshots/README.md)
+[![Demo: the first-run card opens the import flow, an .mbox goes through the preview and confirm steps, then a search for "vault" returns four hits and the top hit opens in the reading pane with matches highlighted; synthetic fixture data, light theme](docs/screenshots/demo.gif)](docs/screenshots/README.md#demo-gif-readme-front-door)
 
 [![macOS download](https://img.shields.io/badge/macOS-download-blue)](https://github.com/acailic/mailchat-vault/releases/latest)
 [![Windows download](https://img.shields.io/badge/Windows-download-blue)](https://github.com/acailic/mailchat-vault/releases/latest)
