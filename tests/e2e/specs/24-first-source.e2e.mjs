@@ -154,9 +154,10 @@ export async function run(ctx) {
     const summary = await ui.importMbox(browser, ui.archiveMbox);
     assert.equal(summary.inserted, 8, "the fixture imports 8 messages");
     if (ctx.sqlite) {
-      // On-disk count gated on #271 (mid-session WAL visibility split —
-      // the import summary above already proves the 8 inserts app-side).
-      ctx.log("      (on-disk personal-vault count pending #271)");
+      // The personal vault on disk carries all 8 imports (the WAL guard
+      // keeps CLI reads coherent with the live app — #271).
+      const rows = await ctx.sqlite.query(db, "SELECT COUNT(*) AS n FROM archive_messages");
+      assert.equal(rows?.[0]?.n, 8, "8 imported rows in the personal vault on disk");
     }
     await ui.openView(browser, "workspace");
     await ui.waitForText(browser, "#status", "1–8 of 8");

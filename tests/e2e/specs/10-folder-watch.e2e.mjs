@@ -99,11 +99,10 @@ export async function run(ctx) {
       timeoutMsg: "folder never removed",
     });
     if (ctx.sqlite) {
-      // On-disk removal check gated on #271: mid-session writes stop
-      // reaching vault.db (the CLI sees a frozen WAL snapshot while the
-      // app serves fresh state). The UI-level removal above and the
-      // not-imported check below carry the contract until it lands.
-      ctx.log("      (on-disk watched_folders check pending #271)");
+      // The removal reached the vault: no watched folders remain on
+      // disk (the WAL guard keeps CLI reads coherent with the live app).
+      const folders = await ctx.sqlite.query(db, "SELECT path FROM watched_folders");
+      assert.equal(folders.length, 0, "watched folder removal reached vault.db");
     }
     await writeFile(path.join(watched, "third.mbox"), mail("w5", "Five"));
     await new Promise((r) => setTimeout(r, 4000));

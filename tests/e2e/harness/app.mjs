@@ -12,6 +12,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import net from "node:net";
 import { tmpdir, homedir } from "node:os";
+import { stopWalGuards } from "./sqlite.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { remote } from "webdriverio";
@@ -234,6 +235,9 @@ async function withSessionAttempt(options, fn, { keepData }) {
       }
     }
     killTree(driver);
+    // After the app tree is down, drop the WAL guard children (SIGKILL:
+    // an unclean close never unlinks -wal/-shm on its own).
+    stopWalGuards();
     if (failures.length === 0 && !keepData && !process.env.MAILCHAT_E2E_KEEP_DATA) {
       await rm(dataDir, { recursive: true, force: true }).catch(() => {});
     }

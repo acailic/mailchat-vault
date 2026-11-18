@@ -169,12 +169,16 @@ export async function run(ctx) {
       assert.equal(afterRetry[0].n, 1, "a retry maps to the same durable account");
 
       // The vault database carries the record (state, class, message,
-      // stamp) and keeps the entered configuration.
-      // On-disk error-record check gated on #271: the same connection
-      // that counted the account row one query earlier can return an
-      // empty set seconds later (mid-session WAL visibility split).
-      // The app-level retry/identity asserts above carry the contract.
-      ctx.log("      (on-disk imap error record check pending #271)");
+      // stamp) and keeps the entered configuration (the WAL guard keeps
+      // CLI reads coherent with the live app — #271).
+      const errRow = await ctx.sqlite.query(
+        db,
+        `SELECT last_error, last_error_at FROM source_instances WHERE kind = 'imap'`,
+      );
+      assert.ok(
+        errRow[0]?.last_error && errRow[0]?.last_error_at,
+        `the failure is recorded in the vault (last_error=${JSON.stringify(errRow[0])})`,
+      );
 
       // -----------------------------------------------------------------
       // 3. DNS: an unresolvable host gets its own actionable message.
@@ -213,9 +217,24 @@ export async function run(ctx) {
       const elapsed = Date.now() - started;
       assert.ok(elapsed < 110_000, `the connect stayed bounded (${elapsed} ms)`);
       assert.ok(!timeoutLine.includes("os error"), "no raw errno in the timeout line");
-      // On-disk class check gated on #271 (mid-session WAL visibility
-      // split — the UI event line above already carries the class).
-      ctx.log("      (on-disk timeout class check pending #271)");
+      // The classified failure reached the vault too (the WAL guard
+      // keeps CLI reads coherent with the live app — #271). The exact
+      // class depends on the environment's route to the blackhole
+      // (timeout vs instant refusal) — what the contract pins is that
+      // a CLASS is recorded and the message is user-worded, never a
+      // raw errno.
+      const timeoutRow = await ctx.sqlite.query(
+        db,
+        `SELECT last_error_class, last_error FROM source_instances WHERE kind = 'imap'`,
+      );
+      assert.ok(
+        timeoutRow[0]?.last_error_class,
+        `a failure class is recorded in the vault (${JSON.stringify(timeoutRow[0])})`,
+      );
+      assert.ok(
+        !/os error/i.test(String(timeoutRow[0]?.last_error ?? "")),
+        "no raw errno in the recorded failure line",
+      );
       await saveScreenshot(browser, "26-timeout-classified.png");
     },
     // Session 1's data dir must survive for the restart assertions below.
@@ -252,8 +271,15 @@ export async function run(ctx) {
     }
     await saveScreenshot(browser, "26-after-restart.png");
 
-    // On-disk restart-survival check gated on #271 (the same
-    // visibility split; the app-side restart asserts above passed).
-    ctx.log("      (on-disk restart class check pending #271)");
+    // The recorded failure survived the restart in the vault (the WAL
+    // guard keeps CLI reads coherent with the live app — #271).
+    const restartRow = await ctx.sqlite.query(
+      db,
+      `SELECT last_error FROM source_instances WHERE kind = 'imap'`,
+    );
+    assert.ok(
+      restartRow[0]?.last_error,
+      "the failure record survived the restart on disk",
+    );
   });
 }

@@ -124,13 +124,18 @@ export async function run(ctx) {
     const emlStatus = await ui.search(browser, "quokka");
     assert.equal(ui.totalFromStatus(emlStatus, "filtered"), 1, "one quokka hit");
     if (ctx.sqlite) {
-      // File-level confirmation is gated on #271: mid-session, writes
-      // after the seed stop reaching vault.db (the CLI sees a frozen
-      // WAL snapshot while the app's own reads serve the new rows).
-      // The app-level contract above (preview kind, ingest summary,
-      // stats, search) already proves the .eml went through the mail
-      // path; the on-disk row assert returns with the issue.
-      ctx.skip("on-disk .eml row check pending #271 (app-level asserts passed above)");
+      // File-level confirmation: the .eml mail row lives in the canonical
+      // table (the WAL guard keeps CLI reads coherent with the live app
+      // — see harness/sqlite.mjs and issue #271).
+      const onDisk = await ctx.sqlite.query(
+        db,
+        "SELECT COUNT(*) AS n FROM archive_messages WHERE body LIKE '%quokka%'",
+      );
+      assert.equal(
+        onDisk?.[0]?.n,
+        1,
+        "the .eml quokka mail row lives in vault.db",
+      );
     }
   });
 }

@@ -225,12 +225,11 @@ export async function run(ctx) {
     const pausedRows = await ctx.sqlite.query(
       db,
       `SELECT excluded FROM source_instances WHERE id = 'e2e-imap-credless'`,
-    ).catch(() => null);
-    // On-disk exclusion flag gated on #271 (the row is CLI-seeded and
-    // mid-session visibility is split); the app-side pause UI asserts
-    // above carry the contract.
-    ctx.log(
-      `      (on-disk exclusion flag pending #271 — read: ${JSON.stringify(pausedRows)})`,
+    );
+    assert.equal(
+      pausedRows[0].excluded,
+      1,
+      "the pause flag persisted in the vault DB",
     );
     await browser.execute(() =>
       document.querySelector("#sources-list")?.scrollIntoView({ block: "center" }),

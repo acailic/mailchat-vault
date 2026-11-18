@@ -142,12 +142,16 @@ export async function run(ctx) {
       "the RoundSummary wire shape over the live IPC",
     );
 
-    // The jobs panel labels the round for an end user.
+    // The jobs panel labels the round for an end user. Wait for the
+    // FINISHED line: the label can land a beat before the job's done
+    // state reconciles (the running entry reads "… — 1/1 (100%) ·
+    // sources synced"), which under a loaded suite starves an instant
+    // match.
     await ui.openView(browser, "activity");
-    const label = await ui.waitForText(browser, "#jobs-list", "IMAP sync (all sources)", {
-      timeoutMsg: "the jobs panel never showed the imap_sync_all label",
+    const label = await ui.waitForText(browser, "#jobs-list", "IMAP sync (all sources) — done", {
+      timeoutMsg: "the jobs panel never showed the finished round",
     });
-    assert.matches(label, /IMAP sync \(all sources\) — done/, "the panel entry shows the finished round");
+    assert.ok(!label.includes("%"), "the finished entry carries no progress tail");
     await browser.execute(() =>
       document.querySelector("#jobs-list")?.scrollIntoView({ block: "center" }),
     );
@@ -218,11 +222,15 @@ export async function run(ctx) {
     assert.equal(byId["e2e-imap-credless"].excluded, false);
 
     await ipc(browser, "source_set_excluded", { sourceId: "e2e-imap-excluded", excluded: false });
-    // On-disk flag check gated on #271: mid-session writes can stop
-    // reaching vault.db (frozen WAL snapshot for outside connections
-    // while the app serves fresh state). The UI-side exclusion checks
-    // above carry the contract; this read is timing-flaky by class.
-    ctx.log("      (on-disk re-include flag check pending #271)");
+    if (ctx.sqlite) {
+      // The re-include reached the vault (the WAL guard keeps CLI reads
+      // coherent with the live app — see harness/sqlite.mjs, #271).
+      const flag = await ctx.sqlite.query(
+        db,
+        "SELECT excluded FROM source_instances WHERE id = 'e2e-imap-excluded'",
+      );
+      assert.equal(flag?.[0]?.excluded, 0, "re-include flag reached vault.db");
+    }
 
     // Round 3: both sources now included and credless → both reported
     // as no_credentials; the excluded list is empty.

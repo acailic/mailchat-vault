@@ -252,13 +252,13 @@ export async function run(ctx) {
       // mails and their files are already inside the backup).
       await ui.seedDemo(browser);
       if (sqlite) {
+        // The demo seed's growth is visible on disk too (the WAL guard
+        // keeps CLI reads coherent with the live app — #271).
         const rows = await sqlite.query(db, "SELECT COUNT(*) AS n FROM archive_messages");
         originalMessages = rows[0].n;
-        // Post-backup growth read gated on #271 (mid-session visibility
-        // split can serve the pre-seed count); restore proceeds with the
-        // count the app itself reported.
-        ctx.log(
-          `      [vault-backup] post-seed count read gated (#271): ${originalMessages} vs ${backupMessages}`,
+        assert.ok(
+          originalMessages > backupMessages,
+          `the demo seed grew the archive on disk (${originalMessages} > ${backupMessages})`,
         );
       }
 

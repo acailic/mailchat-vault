@@ -164,14 +164,32 @@ export async function run(ctx) {
       "imap:mail.test:993:credless@h.invalid",
       "credless@h.invalid",
     ));
-    // Row-title/tooltip/sync-aria contract gated on #271: the row is
-    // seeded through a direct SQL connection, and mid-session the app's
-    // readers can miss CLI-committed rows (the same WAL visibility split
-    // the archive specs hit — the refresh never shows the row, so the
-    // title wait starves). The title rewrite itself ("username · host",
-    // stored label as tooltip) is pinned by main.test.ts accountTitle
-    // tests; re-enable this block once #271 lands.
-    ctx.log("      (sources-row identity checks pending #271)");
+    // The row lists with the user-known identity: "username · host"
+    // as the title, the stored connector label only as the tooltip,
+    // and the per-row actions aria-named after that title (the WAL
+    // guard keeps the app's readers and the CLI seed on one epoch —
+    // #271 — so the refresh shows the row).
+    await ui.openView(browser, "sources");
+    await (await browser.$("#sources-refresh")).click();
+    const tailRow = await ui.waitForText(
+      browser,
+      "#sources-list",
+      "credless@h.invalid · mail.test",
+      { timeoutMsg: "the seeded IMAP row never appeared with its identity title" },
+    );
+    assert.ok(
+      !tailRow.includes("imap:mail.test:993"),
+      "the raw connector key is not the row title",
+    );
+    const tailAria = await browser.execute(() => {
+      const btn = document.querySelector("#sources-list .account-sync-btn");
+      return btn?.getAttribute("aria-label") ?? "";
+    });
+    assert.includes(
+      tailAria,
+      "credless@h.invalid",
+      "the row action names the source the user knows",
+    );
     await browser.execute(() =>
       document.querySelector("#sources-list")?.scrollIntoView({ block: "center" }),
     );
