@@ -2878,11 +2878,14 @@ describe("first-run state and the isolated sample archive (U02)", () => {
     await vi.waitFor(() => expect($("#first-run").getAttribute("hidden")).not.toBeNull());
   });
 
-  it("the guided CTA leads with importing the first archive", async () => {
+  it("the guided CTA leads with the drop zone and a secondary file picker", async () => {
     tauri.handlers.set("stats", () => ({ total: 0, by_source: [] }));
     await boot();
     await vi.waitFor(() => expect($("#first-run").getAttribute("hidden")).toBeNull());
-    expect($("#first-run-import-btn").textContent).toBe("Import your first archive…");
+    // The hero drop zone is the single call to action; the button is the
+    // secondary route (P0·02) — same destination either way.
+    expect($("#first-run-drop").className).toContain("first-run-hero");
+    expect($("#first-run-import-btn").textContent).toBe("Pick a file instead…");
     // The CTA routes to the import section and focuses its picker.
     ($("#first-run-import-btn") as HTMLElement).click();
     await vi.waitFor(() =>
