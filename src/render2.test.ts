@@ -107,7 +107,8 @@ describe("flat results", () => {
     // The meta line shows the display name; the full address stays in
     // the title attribute.
     const meta = main.querySelector(".meta") as HTMLElement;
-    expect(meta.textContent).toContain("Mailchat Vault · ");
+    expect(meta.querySelector(".hit-author")?.textContent).toBe("Mailchat Vault");
+    expect(meta.textContent).toContain("Mailchat Vault ");
     expect(meta.textContent).not.toContain("demo@mailchat-vault.local");
     expect(meta.getAttribute("title")).toBe(
       "Mailchat Vault <demo@mailchat-vault.local>",
