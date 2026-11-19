@@ -22,7 +22,9 @@ use vault_core::message::{InsertOutcome, NewMessage};
 use vault_core::person_timeline::{
     PersonLinkMatchState, PersonTimelineRequest, PersonTimelineSourceCount,
 };
-use vault_core::storage::{NewPersonIdentityLink, PersonAnchorKind, Storage};
+use vault_core::storage::{
+    NewPersonIdentityLink, PersonAnchorKind, PersonIdentityCandidatesRequest, Storage,
+};
 use vault_core::Error;
 
 /// The canonical source-instance id a legacy import under `namespace`
@@ -519,4 +521,176 @@ fn unknown_person_and_malformed_cursors_are_refused() {
         }),
         Err(Error::InvalidQuery(_))
     ));
+}
+
+/// The candidate listing (the picker's source view) and the person
+/// timeline agree on what every linked identity matches: per source,
+/// the listing's stable-key and name-only candidates carry the same
+/// matched counts, owners, and ambiguity marking the timeline's
+/// identity rows report — and unlinked candidates of the same sources
+/// stay ownerless.
+#[test]
+fn candidate_listing_agrees_with_the_timeline_identities_per_source() {
+    let storage = Storage::open_in_memory().unwrap();
+    // The interleaved fixture, compressed: mail under three author
+    // forms of one address, WhatsApp under the verbatim name "Ana"
+    // (plus its lowercase spelling and another person), Telegram
+    // under the same display name — a different identity.
+    insert_at(
+        &storage,
+        "mbox",
+        "m1",
+        "ANA <Ana@Example.COM>",
+        "2026-01-15T12:00:00Z",
+        "mail, folded author",
+    );
+    insert_at(
+        &storage,
+        "mbox",
+        "m2",
+        "Ana <ana@example.com>",
+        "2026-03-02T09:00:00Z",
+        "mail one",
+    );
+    insert_at(
+        &storage,
+        "mbox",
+        "m3",
+        "ana@example.com",
+        "2026-06-01T08:00:00Z",
+        "mail two, bare address",
+    );
+    insert_at(
+        &storage,
+        "whatsapp-family",
+        "w1",
+        "Ana",
+        "2026-02-20T10:30:00Z",
+        "whatsapp one",
+    );
+    insert_at(
+        &storage,
+        "whatsapp-family",
+        "w2",
+        "Ana",
+        "2026-05-10T16:45:00Z",
+        "whatsapp two",
+    );
+    insert_at(
+        &storage,
+        "whatsapp-family",
+        "w3",
+        "ana",
+        "2026-05-11T01:00:00Z",
+        "lowercase display name",
+    );
+    insert_at(
+        &storage,
+        "telegram-work",
+        "t1",
+        "Ana",
+        "2026-04-15T18:00:00Z",
+        "telegram one",
+    );
+
+    let person = storage.create_person("Ana Ilic").unwrap();
+    let mail = instance_for(&storage, "mbox");
+    let whatsapp = instance_for(&storage, "whatsapp-family");
+    let telegram = instance_for(&storage, "telegram-work");
+    storage
+        .link_person_identity(&person.id, &mail_link(&mail, "ana@example.com"))
+        .unwrap();
+    storage
+        .link_person_identity(&person.id, &name_link(&whatsapp, "Ana"))
+        .unwrap();
+    // Telegram's "Ana" deliberately stays unlinked: the same display
+    // name in another source is a different, still-linkable identity.
+
+    let page = storage
+        .person_timeline(&PersonTimelineRequest {
+            person_id: person.id.clone(),
+            limit: None,
+            cursor: None,
+        })
+        .unwrap();
+
+    let listing_of = |instance: &str| {
+        storage
+            .person_identity_candidates(&PersonIdentityCandidatesRequest {
+                source_instance_id: instance.to_string(),
+                limit: None,
+            })
+            .unwrap()
+    };
+
+    // Mail: one stable-key candidate folding all three author forms —
+    // the same count, owner, and non-ambiguity as the timeline's mail
+    // identity row.
+    let mail_listing = listing_of(&mail);
+    assert_eq!(mail_listing.total, 1);
+    let mail_candidate = &mail_listing.candidates[0];
+    let mail_identity = page
+        .identities
+        .iter()
+        .find(|i| i.source_instance_id == mail)
+        .unwrap();
+    assert_eq!(mail_candidate.anchor_kind, mail_identity.anchor_kind);
+    assert_eq!(mail_candidate.anchor_value, mail_identity.anchor_value);
+    assert_eq!(
+        mail_candidate.matched_messages,
+        mail_identity.matched_messages
+    );
+    assert_eq!(mail_candidate.current_owner.as_ref(), Some(&person));
+    assert!(!mail_candidate.ambiguous);
+    assert_eq!(mail_identity.match_state, PersonLinkMatchState::Confirmed);
+    assert_eq!(mail_candidate.matched_messages, 3);
+
+    // WhatsApp: the linked "Ana" candidate agrees with the timeline's
+    // identity row, while the verbatim "ana" stays a separate
+    // ambiguous, unlinked candidate of the same source.
+    let whatsapp_listing = listing_of(&whatsapp);
+    assert_eq!(whatsapp_listing.total, 2);
+    let ana = whatsapp_listing
+        .candidates
+        .iter()
+        .find(|c| c.anchor_value == "Ana")
+        .unwrap();
+    let whatsapp_identity = page
+        .identities
+        .iter()
+        .find(|i| i.source_instance_id == whatsapp)
+        .unwrap();
+    assert_eq!(ana.matched_messages, whatsapp_identity.matched_messages);
+    assert_eq!(ana.current_owner.as_ref(), Some(&person));
+    assert!(ana.ambiguous);
+    assert_eq!(
+        whatsapp_identity.match_state,
+        PersonLinkMatchState::Inferred
+    );
+    assert_eq!(ana.matched_messages, 2);
+    let lowercase = whatsapp_listing
+        .candidates
+        .iter()
+        .find(|c| c.anchor_value == "ana")
+        .unwrap();
+    assert_eq!(lowercase.matched_messages, 1);
+    assert!(lowercase.current_owner.is_none());
+    assert!(lowercase.ambiguous);
+
+    // Telegram: the same display name is a different identity —
+    // present as a candidate of its own source, ambiguous, unowned,
+    // and absent from the person's timeline identities.
+    let telegram_listing = listing_of(&telegram);
+    assert_eq!(telegram_listing.total, 1);
+    let telegram_candidate = &telegram_listing.candidates[0];
+    assert_eq!(telegram_candidate.anchor_kind, PersonAnchorKind::AuthorName);
+    assert_eq!(telegram_candidate.matched_messages, 1);
+    assert!(telegram_candidate.ambiguous);
+    assert!(telegram_candidate.current_owner.is_none());
+    assert!(
+        page.identities
+            .iter()
+            .all(|i| i.source_instance_id != telegram),
+        "an unlinked identity never rides the person's timeline"
+    );
 }

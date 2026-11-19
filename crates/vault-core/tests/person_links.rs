@@ -22,7 +22,8 @@
 use vault_core::backup::{self, BackupOptions, RestoreOptions};
 use vault_core::message::NewMessage;
 use vault_core::storage::{
-    NewPersonIdentityLink, PersonAnchorKind, PersonLinkOp, PersonLinkOperation, Storage,
+    NewPersonIdentityLink, PersonAnchorKind, PersonIdentityCandidatesRequest, PersonLinkOp,
+    PersonLinkOperation, Storage,
 };
 use vault_core::Error;
 
@@ -1003,4 +1004,340 @@ fn person_deletion_removes_organization_only_and_keeps_the_audit_ledger() {
         "the ledger is an audit record, not a live association"
     );
     assert_eq!(history[0].operation, PersonLinkOperation::Link);
+}
+
+// ---------------------------------------------------------------------
+// Candidate identity listing (the linking picker's source view)
+// ---------------------------------------------------------------------
+
+/// The listing folds every author form that derives one address into
+/// a single stable-key candidate whose count is exactly the preview's
+/// matched-message count, while name-only authors stay separate,
+/// verbatim, ambiguous candidates.
+#[test]
+fn candidate_listing_folds_address_forms_and_marks_name_only_authors() {
+    let storage = Storage::open_in_memory().unwrap();
+    // Mail: every author form that folds to ana@example.com, plus a
+    // lookalike address that is a different identity.
+    insert_one(
+        &storage,
+        "mbox",
+        "m1",
+        "Ana <ana@example.com>",
+        "bracketed form",
+    );
+    insert_one(
+        &storage,
+        "mbox",
+        "m2",
+        "Ana <ana@example.com>",
+        "bracketed form again",
+    );
+    insert_one(&storage, "mbox", "m3", "ana@example.com", "bare form");
+    insert_one(
+        &storage,
+        "mbox",
+        "m4",
+        "ANA <Ana@Example.COM>",
+        "bracketed, different case",
+    );
+    insert_one(
+        &storage,
+        "mbox",
+        "m5",
+        "ana@example.com.co",
+        "lookalike domain",
+    );
+    // Chat: display-name-only authors — "Ana" twice, its lowercase
+    // spelling once, and another person.
+    insert_one(&storage, "telegram-work", "t1", "Ana", "chat one");
+    insert_one(&storage, "telegram-work", "t2", "Ana", "chat two");
+    insert_one(&storage, "telegram-work", "t3", "ana", "lowercase name");
+    insert_one(&storage, "telegram-work", "t4", "Bob", "other person");
+
+    let mail = instance_for(&storage, "mbox");
+    let chat = instance_for(&storage, "telegram-work");
+
+    let mail_listing = storage
+        .person_identity_candidates(&PersonIdentityCandidatesRequest {
+            source_instance_id: mail.clone(),
+            limit: None,
+        })
+        .unwrap();
+    assert_eq!(mail_listing.source_instance_id, mail);
+    assert_eq!(mail_listing.source_label, "mbox");
+    assert_eq!(mail_listing.total, 2, "two addresses, two identities");
+    assert_eq!(mail_listing.candidates.len(), 2);
+
+    let ana = mail_listing
+        .candidates
+        .iter()
+        .find(|c| c.anchor_value == "ana@example.com")
+        .unwrap();
+    assert_eq!(ana.anchor_kind, PersonAnchorKind::StableKey);
+    assert_eq!(ana.display_label, "ana@example.com");
+    assert!(!ana.ambiguous, "a stable key is address-level evidence");
+    assert!(
+        ana.current_owner.is_none(),
+        "nothing is linked in this fixture"
+    );
+    // The listing's count is exactly the preview's count for the same
+    // anchor — the picker's preview reads naturally against it.
+    let person = storage.create_person("Ana Ilic").unwrap();
+    let preview = storage
+        .person_link_preview(&[PersonLinkOp::Link {
+            person_id: &person.id,
+            link: mail_link(&mail, "ana@example.com"),
+        }])
+        .unwrap();
+    assert_eq!(ana.matched_messages, preview.entries[0].matched_messages);
+    assert_eq!(
+        ana.matched_messages, 4,
+        "every form folding to the address counts as one identity"
+    );
+
+    let lookalike = mail_listing
+        .candidates
+        .iter()
+        .find(|c| c.anchor_value == "ana@example.com.co")
+        .unwrap();
+    assert_eq!(lookalike.anchor_kind, PersonAnchorKind::StableKey);
+    assert_eq!(lookalike.matched_messages, 1);
+    assert!(!lookalike.ambiguous);
+
+    // Name-only authors: one verbatim candidate per distinct author
+    // string, all marked ambiguous.
+    let chat_listing = storage
+        .person_identity_candidates(&PersonIdentityCandidatesRequest {
+            source_instance_id: chat.clone(),
+            limit: None,
+        })
+        .unwrap();
+    assert_eq!(chat_listing.total, 3);
+    let by_value: std::collections::HashMap<&str, _> = chat_listing
+        .candidates
+        .iter()
+        .map(|c| (c.anchor_value.as_str(), c))
+        .collect();
+    for (value, matched, ambiguous) in [("Ana", 2u64, true), ("ana", 1, true), ("Bob", 1, true)] {
+        let candidate = by_value.get(value).unwrap();
+        assert_eq!(candidate.anchor_kind, PersonAnchorKind::AuthorName);
+        assert_eq!(candidate.anchor_value, value, "name-only stays verbatim");
+        assert_eq!(candidate.display_label, value);
+        assert_eq!(candidate.matched_messages, matched);
+        assert_eq!(
+            candidate.ambiguous, ambiguous,
+            "a display name is ambiguous evidence"
+        );
+        assert!(candidate.current_owner.is_none());
+    }
+
+    // The listing is a pure read: nothing was linked by listing.
+    assert!(storage
+        .person_identity_links(&person.id)
+        .unwrap()
+        .is_empty());
+    assert_eq!(storage.organization_revision().unwrap(), 0);
+    assert_eq!(storage.stats().unwrap().total, 9);
+}
+
+/// Owner attribution is per anchor and per source: a linked candidate
+/// carries its person, the same display name in another source never
+/// inherits the owner, and unlinking frees the candidate again.
+#[test]
+fn candidate_listing_attributes_current_owners_per_source() {
+    let storage = Storage::open_in_memory().unwrap();
+    insert_one(&storage, "mbox", "m1", "Ana <ana@example.com>", "mail body");
+    insert_one(&storage, "telegram-work", "t1", "Bob", "work chat");
+    insert_one(&storage, "telegram-family", "f1", "Bob", "family chat");
+
+    let mail = instance_for(&storage, "mbox");
+    let work = instance_for(&storage, "telegram-work");
+    let family = instance_for(&storage, "telegram-family");
+
+    let ana = storage.create_person("Ana Ilic").unwrap();
+    let bob_boss = storage.create_person("Bob (colleague)").unwrap();
+    storage
+        .link_person_identity(&ana.id, &mail_link(&mail, "ana@example.com"))
+        .unwrap();
+    storage
+        .link_person_identity(&bob_boss.id, &name_link(&work, "Bob"))
+        .unwrap();
+
+    let owner_of = |listing: &vault_core::storage::PersonIdentityCandidatesPage,
+                    anchor_kind: PersonAnchorKind,
+                    anchor_value: &str| {
+        listing
+            .candidates
+            .iter()
+            .find(|c| c.anchor_kind == anchor_kind && c.anchor_value == anchor_value)
+            .unwrap_or_else(|| panic!("candidate {anchor_value:?} missing"))
+            .current_owner
+            .clone()
+    };
+
+    // Linked candidates carry exactly their person.
+    let mail_listing = storage
+        .person_identity_candidates(&PersonIdentityCandidatesRequest {
+            source_instance_id: mail.clone(),
+            limit: None,
+        })
+        .unwrap();
+    assert_eq!(
+        owner_of(
+            &mail_listing,
+            PersonAnchorKind::StableKey,
+            "ana@example.com"
+        )
+        .as_ref(),
+        Some(&ana)
+    );
+
+    // The same display name in another source never inherits the
+    // owner — a shared name is not evidence of identity.
+    let work_listing = storage
+        .person_identity_candidates(&PersonIdentityCandidatesRequest {
+            source_instance_id: work.clone(),
+            limit: None,
+        })
+        .unwrap();
+    assert_eq!(
+        owner_of(&work_listing, PersonAnchorKind::AuthorName, "Bob").as_ref(),
+        Some(&bob_boss)
+    );
+    let family_listing = storage
+        .person_identity_candidates(&PersonIdentityCandidatesRequest {
+            source_instance_id: family.clone(),
+            limit: None,
+        })
+        .unwrap();
+    assert!(
+        owner_of(&family_listing, PersonAnchorKind::AuthorName, "Bob").is_none(),
+        "the family Bob stays unowned until the user links it there"
+    );
+
+    // Unlinking frees the candidate again — reversible, and the
+    // archived rows never changed.
+    let link_id = storage.person_identity_links(&bob_boss.id).unwrap()[0]
+        .id
+        .clone();
+    storage
+        .unlink_person_identity(&bob_boss.id, &link_id)
+        .unwrap();
+    let work_listing = storage
+        .person_identity_candidates(&PersonIdentityCandidatesRequest {
+            source_instance_id: work,
+            limit: None,
+        })
+        .unwrap();
+    assert!(owner_of(&work_listing, PersonAnchorKind::AuthorName, "Bob").is_none());
+    assert_eq!(storage.stats().unwrap().total, 3);
+}
+
+/// The listing is bounded per source instance: the bound defaults and
+/// clamps, `total` carries the full count, and the order is
+/// deterministic. Unknown source instances are refused.
+#[test]
+fn candidate_listing_is_bounded_deterministic_and_refuses_unknown_sources() {
+    let storage = Storage::open_in_memory().unwrap();
+    // Seven name-only authors; "ada" and "bo" tie at one message each
+    // so the value tiebreak is exercised. The bounding fixture is one
+    // source instance only.
+    for (author, count) in [
+        ("gus", 7u32),
+        ("fay", 6),
+        ("eli", 5),
+        ("dee", 4),
+        ("cy", 3),
+        ("bo", 1),
+        ("ada", 1),
+    ] {
+        for message in 0..count {
+            insert_one(
+                &storage,
+                "telegram-work",
+                &format!("m{author}-{message}"),
+                author,
+                "chat body",
+            );
+        }
+    }
+    let work = instance_for(&storage, "telegram-work");
+
+    let request = |limit: Option<u32>| PersonIdentityCandidatesRequest {
+        source_instance_id: work.clone(),
+        limit,
+    };
+
+    // Bounded: the three biggest identities, most messages first.
+    let bounded = storage
+        .person_identity_candidates(&request(Some(3)))
+        .unwrap();
+    assert_eq!(bounded.limit, 3);
+    assert_eq!(bounded.total, 7);
+    assert_eq!(
+        bounded
+            .candidates
+            .iter()
+            .map(|c| (c.anchor_value.as_str(), c.matched_messages))
+            .collect::<Vec<_>>(),
+        vec![("gus", 7), ("fay", 6), ("eli", 5)],
+        "matched count descending, then anchor value ascending"
+    );
+
+    // Default bound: everything fits, limit reports the default.
+    let full = storage.person_identity_candidates(&request(None)).unwrap();
+    assert_eq!(
+        full.limit,
+        vault_core::storage::PERSON_CANDIDATES_DEFAULT_LIMIT
+    );
+    assert_eq!(full.candidates.len(), 7);
+
+    // Clamped bounds: 0 floors to 1, absurd values cap at the max.
+    let floored = storage
+        .person_identity_candidates(&request(Some(0)))
+        .unwrap();
+    assert_eq!(floored.limit, 1);
+    assert_eq!(floored.candidates.len(), 1);
+    assert_eq!(floored.candidates[0].anchor_value, "gus");
+    let capped = storage
+        .person_identity_candidates(&request(Some(100_000)))
+        .unwrap();
+    assert_eq!(
+        capped.limit,
+        vault_core::storage::PERSON_CANDIDATES_MAX_LIMIT
+    );
+    assert_eq!(capped.candidates.len(), 7);
+
+    // Deterministic: the same request returns the same page, ties
+    // ("ada"/"bo", one message each) break by anchor value ascending.
+    assert_eq!(
+        storage
+            .person_identity_candidates(&request(Some(3)))
+            .unwrap(),
+        bounded
+    );
+    assert_eq!(
+        full.candidates
+            .iter()
+            .map(|c| c.anchor_value.as_str())
+            .collect::<Vec<_>>(),
+        vec!["gus", "fay", "eli", "dee", "cy", "ada", "bo"],
+        "one deterministic order for the whole source instance"
+    );
+
+    // Unknown and empty source instances are refused, not silently
+    // listed empty.
+    for bad in ["no-such-instance", "  "] {
+        assert!(
+            matches!(
+                storage.person_identity_candidates(&PersonIdentityCandidatesRequest {
+                    source_instance_id: bad.to_string(),
+                    limit: None,
+                }),
+                Err(Error::InvalidQuery(_))
+            ),
+            "source {bad:?} must be refused"
+        );
+    }
 }
