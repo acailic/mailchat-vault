@@ -12,7 +12,11 @@
 //! 3. **Summarize** (RAG): a short answer synthesized from *only* the top
 //!    search-result rows — never the whole archive. This is the product's
 //!    privacy promise in LLM mode: only the question and the returned rows
-//!    leave the machine, and only when an API key is configured.
+//!    leave the machine, and only when an API key is configured. The
+//!    retrieval set is folded by its stored SimHash fingerprints first
+//!    (P2.14 near-dup 5/5): near-duplicate cluster members collapse into
+//!    one numbered context block — the representative's passage plus a
+//!    copy-count note — so the passage budget goes to distinct evidence.
 //!
 //! The provider is any Anthropic-compatible `/v1/messages` endpoint (default:
 //! the z.ai GLM endpoint), configured purely through environment variables;
@@ -30,6 +34,7 @@
 //! the machine before that approval. There is no translate round trip in
 //! v2: an outbound translate request would itself be an unapproved byte.
 
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicU64;
 use std::sync::Mutex;
@@ -988,8 +993,15 @@ const SUMMARY_SYSTEM_PROMPT: &str =
      - Every factual sentence ends with a [k] citing a listed message that supports it; a sentence no listed message supports is omitted.\n\
      - If the messages do not answer the question, say so plainly and suggest better search terms.";
 
-/// One numbered, truncated context block per message.
-fn context_block(msg: &Message, index: usize) -> String {
+/// One numbered, truncated context block per message. `copies` is the
+/// near-duplicate cluster size the block's message represents
+/// (representative included): a representative standing for `copies >
+/// 1` near-identical messages carries a `+N near-identical copies`
+/// note on its header line, so the model knows one passage stands for
+/// N − 1 additional copies and need not expect them as their own
+/// blocks. A standalone message (`copies == 1`) renders byte-identical
+/// to the pre-fold block, so exact-prompt tests hold.
+fn context_block(msg: &Message, index: usize, copies: u32) -> String {
     let mut body: String = msg.body.chars().take(SUMMARY_BODY_LIMIT).collect();
     if msg.body.chars().count() > SUMMARY_BODY_LIMIT {
         body.push('…');
@@ -1004,7 +1016,11 @@ fn context_block(msg: &Message, index: usize) -> String {
     } else {
         &msg.sent_at
     };
-    format!("[{index}] author: {author} · {date}\n{body}")
+    let mut header = format!("[{index}] author: {author} · {date}");
+    if copies > 1 {
+        header.push_str(&format!(" · +{} near-identical copies", copies - 1));
+    }
+    format!("{header}\n{body}")
 }
 
 /// Prompt order for the summary context blocks, given `n` ranked
@@ -1041,39 +1057,70 @@ pub struct SynthesisPayload {
     pub user: String,
 }
 
+/// The retrieval set after the near-duplicate fold (P2.14, near-dup
+/// 5/5): one entry per cluster representative — `(rank position in
+/// `results`, cluster size counting the representative)` — in rank
+/// order. The clustering itself is [`crate::search2::fold_near_duplicate_ids`],
+/// the same public fold the search page uses; this module never
+/// reimplements fingerprint or Hamming logic. An empty fingerprint map
+/// (or no stored fingerprints, the pre-migration archive shape)
+/// returns the input positions unchanged, each of size 1.
+fn folded_window(results: &[Message], fingerprints: &HashMap<i64, u64>) -> Vec<(usize, u32)> {
+    let ids: Vec<i64> = results.iter().map(|m| m.id).collect();
+    crate::search2::fold_near_duplicate_ids(&ids, fingerprints)
+}
+
 /// Build the exact synthesis prompts over the top `top` of `results`
 /// (truncated, in [`lim_order`] placement); `None` when there are no
-/// results — nothing would be sent. When retrieval returned more than
-/// `top`, one line stating the dropped count is appended after the
+/// results — nothing would be sent. The retrieval set is first folded
+/// by `fingerprints` (the stored SimHash fingerprints the caller read
+/// for exactly these results): near-duplicate cluster members collapse
+/// into their highest-ranked representative, whose block carries a
+/// `+N near-identical copies` note, and the fold runs **before** the
+/// top-`top` cut — before `take`, before the [`lim_order`] placement —
+/// so the freed slots go to distinct messages. Numbering (and with it
+/// every citation `[n]`) follows rank over the folded list, so
+/// citations point at representatives by construction; an empty
+/// fingerprint map keeps the prompts byte-identical to the unfolded
+/// form. When the folded list is longer than the window, one line
+/// stating the dropped count of distinct matches is appended after the
 /// context blocks (counts only — no dropped content leaves the
-/// machine), so the model can say that more results exist. When
-/// `collected` is non-empty, up to [`SUMMARY_LINK_LIMIT`] `url ·
-/// author · date` lines are appended after that note and the system
-/// prompt gains a rule for describing the links; with no collected
-/// links both prompts are built exactly as before.
+/// machine; copies folded into a shown representative are already
+/// counted by their copy note, not by this line), so the model can say
+/// that more results exist. When `collected` is non-empty, up to
+/// [`SUMMARY_LINK_LIMIT`] `url · author · date` lines are appended
+/// after that note and the system prompt gains a rule for describing
+/// the links; with no collected links both prompts are built exactly
+/// as before.
 pub fn build_synthesis_payload(
     question: &str,
     results: &[Message],
     top: usize,
     collected: &[CollectedLink],
+    fingerprints: &HashMap<i64, u64>,
 ) -> Option<SynthesisPayload> {
     if results.is_empty() {
         return None;
     }
-    let top_messages: Vec<&Message> = results.iter().take(top).collect();
-    let contexts: String = lim_order(top_messages.len())
+    let folded = folded_window(results, fingerprints);
+    let window: Vec<(&Message, u32)> = folded
+        .iter()
+        .take(top)
+        .map(|&(position, copies)| (&results[position], copies))
+        .collect();
+    let contexts: String = lim_order(window.len())
         .into_iter()
-        .map(|i| context_block(top_messages[i], i + 1))
+        .map(|i| context_block(window[i].0, i + 1, window[i].1))
         .collect::<Vec<_>>()
         .join("\n\n");
     let mut user =
         format!("Question: {question}\n\nMessages (numbered by relevance):\n\n{contexts}");
-    if results.len() > top_messages.len() {
-        let further = results.len() - top_messages.len();
+    if folded.len() > window.len() {
+        let further = folded.len() - window.len();
         user.push_str(&format!(
             "\n\nNote: {further} further matching messages exist beyond the {} shown; \
              you may say that more results exist.",
-            top_messages.len()
+            window.len()
         ));
     }
     let mut system = SUMMARY_SYSTEM_PROMPT.to_string();
@@ -1109,9 +1156,12 @@ pub fn build_synthesis_payload(
 /// Step 3 of the pipeline: synthesize a short answer over the top `top`
 /// results. Only those rows (truncated) are sent — the privacy guarantee.
 /// Skipped entirely when there are no results. The prompts come from
-/// [`build_synthesis_payload`], the same builder the v2 preview uses.
-/// When retrieval returned more than `top`, the success arm carries one
-/// honest note in [`Summarized.notes`] (the established channel into
+/// [`build_synthesis_payload`], the same builder the v2 preview uses;
+/// `fingerprints` (the stored SimHash fingerprints of exactly these
+/// results) drive its near-duplicate fold, so forwarded-copy clusters
+/// spend one context block instead of `top`. When retrieval returned
+/// more than `top`, the success arm carries one honest note in
+/// [`Summarized.notes`] (the established channel into
 /// `AskOutcome.notes` in the UI) stating the dropped count.
 pub fn summarize_results(
     llm: &dyn Llm,
@@ -1119,8 +1169,10 @@ pub fn summarize_results(
     results: &[Message],
     top: usize,
     collected: &[CollectedLink],
+    fingerprints: &HashMap<i64, u64>,
 ) -> Summarized {
-    let Some(payload) = build_synthesis_payload(question, results, top, collected) else {
+    let Some(payload) = build_synthesis_payload(question, results, top, collected, fingerprints)
+    else {
         return Summarized {
             answer: None,
             notes: Vec::new(),
@@ -1290,6 +1342,12 @@ pub fn ask_with_semantic_draft(
         limit,
     )?;
     let results = hybrid.results;
+    // The stored fingerprints of exactly the retrieval set feed the
+    // near-duplicate fold inside the payload builder: forwarded-copy
+    // clusters collapse into one context block and the freed slots go
+    // to distinct evidence (P2.14, near-dup 5/5).
+    let retrieval_ids: Vec<i64> = results.iter().map(|m| m.id).collect();
+    let fingerprints = storage.message_fingerprints(&retrieval_ids)?;
     let collected = if planned.plan.extract_links {
         crate::extract::extract_links(&results)
     } else {
@@ -1297,7 +1355,14 @@ pub fn ask_with_semantic_draft(
     };
     let (answer, summary_notes) = match llm {
         Some(llm) => {
-            let s = summarize_results(llm, question, &results, summarize_top, &collected);
+            let s = summarize_results(
+                llm,
+                question,
+                &results,
+                summarize_top,
+                &collected,
+                &fingerprints,
+            );
             (s.answer, s.notes)
         }
         None => (None, Vec::new()),
@@ -1537,8 +1602,10 @@ pub struct PreparedAskOutcome {
     /// The exact payload a consented generation would send; `None` when
     /// nothing would be sent (no results).
     pub payload: Option<SynthesisPayload>,
-    /// Message ids of the payload window, rank order (citation `[n]` →
-    /// `window_ids[n − 1]`).
+    /// Message ids of the payload window, rank order over the
+    /// near-duplicate-folded list — citation `[n]` →
+    /// `window_ids[n − 1]`; a folded cluster contributes its
+    /// representative only.
     pub window_ids: Vec<i64>,
     /// `archive_revision` the approval is bound to.
     pub archive_revision: u64,
@@ -1628,13 +1695,27 @@ pub fn prepare_scoped_ask(
         return Err(AskV2Error::Cancelled);
     }
     progress(3, 4, "building the exact payload preview");
+    // The stored fingerprints of exactly the retrieval set drive the
+    // near-duplicate fold inside the payload builder (P2.14, near-dup
+    // 5/5): forwarded-copy clusters collapse into one context block.
     // The local plan never extracts links, so the payload is built with
     // no collected-links section.
-    let payload = build_synthesis_payload(question, &results, summarize_top, &[]);
+    let retrieval_ids: Vec<i64> = results.iter().map(|m| m.id).collect();
+    let fingerprints = storage
+        .message_fingerprints(&retrieval_ids)
+        .map_err(|e| AskV2Error::Vault(e.to_string()))?;
+    let payload = build_synthesis_payload(question, &results, summarize_top, &[], &fingerprints);
     let archive_revision = storage
         .archive_revision()
         .map_err(|e| AskV2Error::Vault(e.to_string()))?;
-    let window_ids: Vec<i64> = results.iter().take(summarize_top).map(|m| m.id).collect();
+    // The citation window follows the same folded list the payload
+    // numbered its blocks over, so a citation `[n]` names the
+    // representative the model saw as `[n]` — never a folded copy.
+    let window_ids: Vec<i64> = folded_window(&results, &fingerprints)
+        .into_iter()
+        .take(summarize_top)
+        .map(|(position, _)| results[position].id)
+        .collect();
     let prepared = registry.register(
         endpoint,
         question,
@@ -2165,7 +2246,7 @@ mod tests {
             body: "x".repeat(SUMMARY_BODY_LIMIT + 10),
             raw_json: "{}".into(),
         };
-        let block = context_block(&msg, 3);
+        let block = context_block(&msg, 3, 1);
         assert!(block.starts_with("[3] author: unknown · date unknown\n"));
         let body_line = block.lines().nth(1).unwrap();
         assert_eq!(body_line.chars().count(), SUMMARY_BODY_LIMIT + 1); // + ellipsis
@@ -2175,7 +2256,7 @@ mod tests {
     #[test]
     fn summarize_skips_when_no_results() {
         let llm = MockLlm::with_replies(Vec::<String>::new());
-        let s = summarize_results(&llm, "q", &[], DEFAULT_SUMMARIZE_TOP, &[]);
+        let s = summarize_results(&llm, "q", &[], DEFAULT_SUMMARIZE_TOP, &[], &HashMap::new());
         assert_eq!(s.answer, None);
         assert!(llm.prompts().is_empty(), "no LLM call without results");
     }
@@ -2252,7 +2333,14 @@ mod tests {
     fn summary_prompt_orders_blocks_lost_in_the_middle() {
         let msgs: Vec<Message> = (0..8).map(lim_msg).collect();
         let llm = MockLlm::with_replies(["summary"]);
-        let s = summarize_results(&llm, "vault?", &msgs, DEFAULT_SUMMARIZE_TOP, &[]);
+        let s = summarize_results(
+            &llm,
+            "vault?",
+            &msgs,
+            DEFAULT_SUMMARIZE_TOP,
+            &[],
+            &HashMap::new(),
+        );
         assert_eq!(s.answer.as_deref(), Some("summary"));
         let user = &llm.prompts()[0].1;
 
@@ -2277,7 +2365,7 @@ mod tests {
         for (n, expected) in [(1usize, vec![1usize]), (2, vec![1, 2]), (3, vec![1, 3, 2])] {
             let msgs: Vec<Message> = (0..n).map(lim_msg).collect();
             let llm = MockLlm::with_replies(["summary"]);
-            summarize_results(&llm, "vault?", &msgs, n, &[]);
+            summarize_results(&llm, "vault?", &msgs, n, &[], &HashMap::new());
             let user = &llm.prompts()[0].1;
             assert_eq!(marker_order(user, n), expected, "n={n}");
         }
@@ -2287,7 +2375,7 @@ mod tests {
     fn summary_prompt_truncates_top_rows_before_permuting() {
         let msgs: Vec<Message> = (0..5).map(lim_msg).collect();
         let llm = MockLlm::with_replies(["summary"]);
-        summarize_results(&llm, "vault?", &msgs, 3, &[]);
+        summarize_results(&llm, "vault?", &msgs, 3, &[], &HashMap::new());
         let user = &llm.prompts()[0].1;
 
         // Exactly the top-3 ranked rows are sent, then permuted (1,3,2).
@@ -2312,7 +2400,7 @@ mod tests {
         // further matches — counts only, never the dropped content.
         let msgs: Vec<Message> = (0..14).map(lim_msg).collect();
         let llm = MockLlm::with_replies(["summary"]);
-        summarize_results(&llm, "vault?", &msgs, 6, &[]);
+        summarize_results(&llm, "vault?", &msgs, 6, &[], &HashMap::new());
         let user = &llm.prompts()[0].1;
         assert!(
             user.contains("8 further matching messages exist beyond the 6 shown"),
@@ -2331,7 +2419,8 @@ mod tests {
             })
             .collect();
         let collected = extract_links(&link_msgs);
-        let payload = build_synthesis_payload("vault?", &link_msgs, 6, &collected).unwrap();
+        let payload =
+            build_synthesis_payload("vault?", &link_msgs, 6, &collected, &HashMap::new()).unwrap();
         let note_at = payload
             .user
             .find("further matching messages")
@@ -2357,7 +2446,7 @@ mod tests {
         for n in [5usize, 8usize] {
             let msgs: Vec<Message> = (0..n).map(lim_msg).collect();
             let llm = MockLlm::with_replies(["summary"]);
-            summarize_results(&llm, "vault?", &msgs, 8, &[]);
+            summarize_results(&llm, "vault?", &msgs, 8, &[], &HashMap::new());
             let user = &llm.prompts()[0].1;
             assert!(
                 !user.contains("further matching messages"),
@@ -2371,7 +2460,7 @@ mod tests {
         // Dropped: the honest note rides the established notes channel.
         let msgs: Vec<Message> = (0..11).map(lim_msg).collect();
         let llm = MockLlm::with_replies(["summary"]);
-        let s = summarize_results(&llm, "vault?", &msgs, 8, &[]);
+        let s = summarize_results(&llm, "vault?", &msgs, 8, &[], &HashMap::new());
         assert_eq!(s.answer.as_deref(), Some("summary"));
         assert_eq!(
             s.notes,
@@ -2382,7 +2471,7 @@ mod tests {
         // Everything fits: no note.
         let msgs: Vec<Message> = (0..8).map(lim_msg).collect();
         let llm = MockLlm::with_replies(["summary"]);
-        let s = summarize_results(&llm, "vault?", &msgs, 8, &[]);
+        let s = summarize_results(&llm, "vault?", &msgs, 8, &[], &HashMap::new());
         assert!(
             s.notes.is_empty(),
             "nothing dropped, notes must stay empty: {:?}",
@@ -2391,7 +2480,7 @@ mod tests {
 
         // A failed summary keeps its failure note only.
         let failing = MockLlm::failing("provider exploded");
-        let s = summarize_results(&failing, "vault?", &msgs, 8, &[]);
+        let s = summarize_results(&failing, "vault?", &msgs, 8, &[], &HashMap::new());
         assert_eq!(s.notes.len(), 1);
         assert!(s.notes[0].contains("LLM summary failed"));
     }
@@ -2400,7 +2489,14 @@ mod tests {
     fn summary_prompt_header_says_numbered_by_relevance() {
         let msgs: Vec<Message> = (0..2).map(lim_msg).collect();
         let llm = MockLlm::with_replies(["summary"]);
-        summarize_results(&llm, "vault?", &msgs, DEFAULT_SUMMARIZE_TOP, &[]);
+        summarize_results(
+            &llm,
+            "vault?",
+            &msgs,
+            DEFAULT_SUMMARIZE_TOP,
+            &[],
+            &HashMap::new(),
+        );
         let user = &llm.prompts()[0].1;
         assert!(
             user.contains("Messages (numbered by relevance):"),
@@ -2417,7 +2513,7 @@ mod tests {
         let msgs = vec![link_msg(1, "ana", "see https://example.com/a")];
         let collected = extract_links(&msgs);
         let llm = MockLlm::with_replies(["summary"]);
-        let s = summarize_results(&llm, "collect links", &msgs, 8, &collected);
+        let s = summarize_results(&llm, "collect links", &msgs, 8, &collected, &HashMap::new());
         assert_eq!(s.answer.as_deref(), Some("summary"));
         let user = &llm.prompts()[0].1;
         assert!(
@@ -2441,7 +2537,7 @@ mod tests {
         let msgs = vec![link_msg(1, "ana", &body)];
         let collected = extract_links(&msgs);
         let llm = MockLlm::with_replies(["summary"]);
-        summarize_results(&llm, "q", &msgs, 8, &collected);
+        summarize_results(&llm, "q", &msgs, 8, &collected, &HashMap::new());
         let user = &llm.prompts()[0].1;
         assert!(user.contains("https://example.com/49"), "{user}");
         assert!(!user.contains("https://example.com/50"), "{user}");
@@ -2451,7 +2547,7 @@ mod tests {
     fn summary_without_links_is_unchanged() {
         let msgs = vec![lim_msg(0)];
         let llm = MockLlm::with_replies(["summary"]);
-        summarize_results(&llm, "vault?", &msgs, 8, &[]);
+        summarize_results(&llm, "vault?", &msgs, 8, &[], &HashMap::new());
         assert!(!llm.prompts()[0].0.contains("describe what the links are"));
         assert!(!llm.prompts()[0].1.contains("Collected links"));
     }
@@ -2946,6 +3042,7 @@ mod tests {
             &hybrid.results,
             DEFAULT_SUMMARIZE_TOP,
             &[],
+            &HashMap::new(),
         );
         assert_eq!(summarized.answer.as_deref(), Some("summary [1]."));
         let user = &llm.prompts()[1].1;
@@ -2963,9 +3060,9 @@ mod tests {
     #[test]
     fn payload_preview_equals_what_summarize_sends() {
         let msgs: Vec<Message> = (0..3).map(lim_msg).collect();
-        let payload = build_synthesis_payload("vault?", &msgs, 2, &[]).unwrap();
+        let payload = build_synthesis_payload("vault?", &msgs, 2, &[], &HashMap::new()).unwrap();
         let llm = MockLlm::with_replies(["summary"]);
-        let s = summarize_results(&llm, "vault?", &msgs, 2, &[]);
+        let s = summarize_results(&llm, "vault?", &msgs, 2, &[], &HashMap::new());
         assert_eq!(s.answer.as_deref(), Some("summary"));
         // The preview and the wire use the same builder: identical bytes.
         assert_eq!(llm.prompts().len(), 1);
@@ -2974,7 +3071,7 @@ mod tests {
             (payload.system.as_str(), payload.user.as_str())
         );
         // No results → no payload.
-        assert!(build_synthesis_payload("q", &[], 8, &[]).is_none());
+        assert!(build_synthesis_payload("q", &[], 8, &[], &HashMap::new()).is_none());
     }
 
     #[test]

@@ -1574,8 +1574,22 @@ fn run_ask(
     };
     let (answer, summary_notes) = match &backend {
         Some(backend) => {
-            let summarized =
-                llm::summarize_results(backend, question, &results, summarize_top, &collected);
+            // The stored fingerprints of exactly the retrieval set feed
+            // the near-duplicate fold inside the payload builder:
+            // forwarded-copy clusters collapse into one context block
+            // and the freed slots go to distinct evidence (P2.14).
+            let ids: Vec<i64> = results.iter().map(|m| m.id).collect();
+            let fingerprints = vault
+                .with_read(|s| s.message_fingerprints(&ids))
+                .map_err(|e| e.to_string())?;
+            let summarized = llm::summarize_results(
+                backend,
+                question,
+                &results,
+                summarize_top,
+                &collected,
+                &fingerprints,
+            );
             (summarized.answer, summarized.notes)
         }
         None => (None, Vec::new()),

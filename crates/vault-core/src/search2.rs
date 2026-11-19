@@ -1925,7 +1925,8 @@ impl Storage {
         let hits = if hits.is_empty() {
             hits
         } else {
-            let fingerprints = page_fingerprints(&tx, &hits)?;
+            let ids: Vec<i64> = hits.iter().map(|hit| hit.id).collect();
+            let fingerprints = fingerprints_for(&tx, &ids)?;
             fold_near_duplicate_hits(hits, &fingerprints)
         };
 
@@ -1943,6 +1944,21 @@ impl Storage {
             next_cursor,
         })
     }
+
+    /// The stored SimHash fingerprints for exactly these message ids —
+    /// the standalone read behind the Ask retrieval fold (P2.14,
+    /// near-dup 5/5): the caller folds its ranked retrieval set with
+    /// [`fold_near_duplicate_ids`] so near-duplicate copies collapse
+    /// into one context block. Ids with no row — messages archived
+    /// before the fingerprint write (P2.12) — are absent from the map
+    /// and therefore never fold; the search page fold reads the same
+    /// table inside its own page snapshot instead.
+    pub fn message_fingerprints(&self, ids: &[i64]) -> Result<std::collections::HashMap<i64, u64>> {
+        if ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        fingerprints_for(&self.conn, ids)
+    }
 }
 
 /// Near-duplicate fold threshold: two stored SimHash fingerprints
@@ -1952,54 +1968,50 @@ impl Storage {
 /// (P2.14) treat 3 as the match cutoff.
 const NEAR_DUPLICATE_HAMMING: u32 = 3;
 
-/// The stored SimHash fingerprints for exactly this page's message
-/// ids, read inside the page's own read snapshot (one bounded IN-list
-/// lookup; the page size is clamped to 200). Messages archived before
-/// the fingerprint migration carry no row — they are absent from the
-/// map, so they neither fold nor absorb.
-fn page_fingerprints(
-    tx: &Connection,
-    hits: &[MessageSummary],
-) -> Result<std::collections::HashMap<i64, u64>> {
-    let mut fingerprints = std::collections::HashMap::with_capacity(hits.len());
-    let placeholders = vec!["?"; hits.len()].join(", ");
+/// The stored SimHash fingerprints for exactly the given message ids,
+/// read inside one bounded IN-list lookup (a page or an Ask retrieval
+/// window is clamped far below any SQLite bound). Messages archived
+/// before the fingerprint migration carry no row — they are absent
+/// from the map, so they neither fold nor absorb.
+fn fingerprints_for(tx: &Connection, ids: &[i64]) -> Result<std::collections::HashMap<i64, u64>> {
+    let mut fingerprints = std::collections::HashMap::with_capacity(ids.len());
+    let placeholders = vec!["?"; ids.len()].join(", ");
     let mut stmt = tx.prepare(&format!(
         "SELECT message_id, simhash64 FROM message_fingerprints \
          WHERE message_id IN ({placeholders})"
     ))?;
-    let ids = hits.iter().map(|hit| hit.id);
-    let mut rows = stmt.query(rusqlite::params_from_iter(ids))?;
+    let mut rows = stmt.query(rusqlite::params_from_iter(ids.iter().copied()))?;
     while let Some(row) = rows.next()? {
         fingerprints.insert(row.get::<_, i64>(0)?, row.get::<_, i64>(1)? as u64);
     }
     Ok(fingerprints)
 }
 
-/// One pass in result order: the first hit of a near-duplicate group
-/// stands as its representative, and every later hit whose fingerprint
-/// sits within [`NEAR_DUPLICATE_HAMMING`] bits of an already-kept
-/// representative folds into it — carrying
-/// [`cluster_count`](MessageSummary::cluster_count) and
-/// [`cluster_member_ids`](MessageSummary::cluster_member_ids) on the
-/// representative for a later UI to expand.
+/// The shared near-duplicate fold decision (P2.14): one pass over the
+/// ranked positions — the first hit of a near-duplicate group stands as
+/// its representative, and every later hit whose fingerprint sits
+/// within [`NEAR_DUPLICATE_HAMMING`] bits of an already-kept
+/// representative folds into it. Returns `(input position, input
+/// positions folded into it)` per representative, in input (rank)
+/// order.
 ///
 /// A later hit compares only against kept representatives, never
 /// against other folded members, so folding never chains transitively.
-/// A hit without a stored fingerprint passes through untouched and
-/// never absorbs others. Representatives keep their exact ranking —
-/// folded rows only disappear from the returned page — and the fold is
-/// per page by design: the cluster fields describe this result set,
-/// not an archive-wide cluster.
-fn fold_near_duplicate_hits(
-    hits: Vec<MessageSummary>,
+/// A hit without a stored fingerprint is kept but neither folds nor
+/// absorbs others. The two consumers shape this decision each their own
+/// way: [`fold_near_duplicate_hits`] writes it onto result summaries,
+/// and [`fold_near_duplicate_ids`] is the message-list form the Ask
+/// retrieval fold takes (near-dup 5/5).
+fn near_duplicate_clusters(
+    ids: &[i64],
     fingerprints: &std::collections::HashMap<i64, u64>,
-) -> Vec<MessageSummary> {
-    let mut kept: Vec<MessageSummary> = Vec::with_capacity(hits.len());
+) -> Vec<(usize, Vec<usize>)> {
+    let mut kept: Vec<(usize, Vec<usize>)> = Vec::with_capacity(ids.len());
     // (index into `kept`, fingerprint) per representative.
     let mut representatives: Vec<(usize, u64)> = Vec::new();
-    for hit in hits {
-        let Some(&fingerprint) = fingerprints.get(&hit.id) else {
-            kept.push(hit);
+    for (position, &id) in ids.iter().enumerate() {
+        let Some(&fingerprint) = fingerprints.get(&id) else {
+            kept.push((position, Vec::new()));
             continue;
         };
         let folded_into = representatives
@@ -2010,17 +2022,66 @@ fn fold_near_duplicate_hits(
             })
             .map(|&(index, _)| index);
         match folded_into {
-            Some(index) => {
-                kept[index].cluster_count += 1;
-                kept[index].cluster_member_ids.push(hit.id);
-            }
+            Some(index) => kept[index].1.push(position),
             None => {
                 representatives.push((kept.len(), fingerprint));
-                kept.push(hit);
+                kept.push((position, Vec::new()));
             }
         }
     }
     kept
+}
+
+/// One pass in result order: the first hit of a near-duplicate group
+/// stands as its representative, and every later hit whose fingerprint
+/// sits within [`NEAR_DUPLICATE_HAMMING`] bits of an already-kept
+/// representative folds into it — carrying
+/// [`cluster_count`](MessageSummary::cluster_count) and
+/// [`cluster_member_ids`](MessageSummary::cluster_member_ids) on the
+/// representative for a later UI to expand. The fold decision itself is
+/// [`near_duplicate_clusters`]; representatives keep their exact
+/// ranking — folded rows only disappear from the returned page — and
+/// the fold is per page by design: the cluster fields describe this
+/// result set, not an archive-wide cluster.
+fn fold_near_duplicate_hits(
+    hits: Vec<MessageSummary>,
+    fingerprints: &std::collections::HashMap<i64, u64>,
+) -> Vec<MessageSummary> {
+    let ids: Vec<i64> = hits.iter().map(|hit| hit.id).collect();
+    let clusters = near_duplicate_clusters(&ids, fingerprints);
+    let mut hits: Vec<Option<MessageSummary>> = hits.into_iter().map(Some).collect();
+    let mut folded: Vec<MessageSummary> = Vec::with_capacity(clusters.len());
+    for (position, members) in clusters {
+        let mut representative = hits[position]
+            .take()
+            .expect("each kept position is taken once");
+        representative.cluster_count = 1 + members.len() as u32;
+        representative.cluster_member_ids = members.iter().map(|&p| ids[p]).collect();
+        folded.push(representative);
+    }
+    folded
+}
+
+/// The near-duplicate fold over one ranked message-id list — the same
+/// one-pass decision [`Storage::search_archive`] folds its result page
+/// with, shaped for callers that hold ranked messages rather than
+/// result summaries (the Ask retrieval set, P2.14 near-dup 5/5).
+/// Returns `(rank position, cluster size)` per representative, in rank
+/// order: the cluster size counts the representative plus every
+/// lower-ranked near-duplicate folded into it (`1` = stands alone).
+/// Callers number context blocks and citations over this list, so
+/// copies never spend passage slots and citations point at
+/// representatives. Ids without a stored fingerprint (the
+/// pre-migration archive shape) pass through unfolded, each of cluster
+/// size 1.
+pub fn fold_near_duplicate_ids(
+    ids: &[i64],
+    fingerprints: &std::collections::HashMap<i64, u64>,
+) -> Vec<(usize, u32)> {
+    near_duplicate_clusters(ids, fingerprints)
+        .into_iter()
+        .map(|(position, members)| (position, 1 + members.len() as u32))
+        .collect()
 }
 
 impl Storage {
