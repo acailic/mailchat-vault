@@ -575,6 +575,13 @@ export function keyStoreNote(store: SettingsView["key_store"]): string {
   return "";
 }
 
+/** The Settings version readout line: the build-stamped version the
+ * `app_version` IPC returned from the running app (never a frontend
+ * constant, so dev and packaged builds each show their own). */
+export function versionReadout(version: string): string {
+  return `Version ${version.trim()}`;
+}
+
 /** Apply a theme choice to the document (idempotent). "system" clears
  * the explicit theme so the prefers-color-scheme media query in the
  * design tokens decides; explicit light/dark pin the token palette.

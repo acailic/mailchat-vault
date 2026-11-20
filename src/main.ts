@@ -120,6 +120,7 @@ import {
   prefillForKind,
   uniqueProviderId,
   validateProviderForm,
+  versionReadout,
   ENV_ANTHROPIC_KEY_ID,
   ENV_ZAI_KEY_ID,
   LOCAL_ID,
@@ -321,6 +322,7 @@ const consentText = document.querySelector<HTMLElement>("#consent-text")!;
 const consentAllowButton = document.querySelector<HTMLButtonElement>("#consent-allow-btn")!;
 const consentLocalButton = document.querySelector<HTMLButtonElement>("#consent-local-btn")!;
 const settingsNote = document.querySelector<HTMLElement>("#settings-note")!;
+const appVersionEl = document.querySelector<HTMLElement>("#app-version")!;
 const mediaUsagePanel = document.querySelector<HTMLElement>("#media-usage")!;
 const mediaStoreStatus = document.querySelector<HTMLElement>("#media-store-status")!;
 const mediaRefreshButton = document.querySelector<HTMLButtonElement>("#media-refresh-btn")!;
@@ -1726,6 +1728,19 @@ async function saveSettings(): Promise<void> {
   } finally {
     settingsSaveGeneralButton.disabled = false;
     settingsSaveAiButton.disabled = false;
+  }
+}
+
+/** The Settings version readout: the build-stamped version straight
+ * from the running app (`app_version`), never a frontend constant —
+ * a dev build and a packaged build each show their own. Fails quiet:
+ * the line stays hidden rather than surfacing an error banner. */
+async function loadAppVersion(): Promise<void> {
+  try {
+    appVersionEl.textContent = versionReadout(await ipc.appVersion());
+    appVersionEl.hidden = false;
+  } catch {
+    appVersionEl.hidden = true;
   }
 }
 
@@ -4500,4 +4515,5 @@ void refreshEmbedStatus();
 void refreshWatchStatus();
 void refreshAutoSync();
 void refreshAccounts();
+void loadAppVersion();
 void loadSettings();

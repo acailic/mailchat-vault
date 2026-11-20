@@ -354,6 +354,10 @@ beforeEach(() => {
   // Notifications boot fail-closed (silent until settings load), so every
   // notify test needs the settings round-trip to resolve.
   tauri.handlers.set("settings_get", () => viewWith());
+  // The Settings version readout reads the build-stamped version from
+  // the app itself; the default is deliberately not the real 0.2.0 so a
+  // hardcoded frontend string could never satisfy the assertions.
+  tauri.handlers.set("app_version", () => "9.9.9");
   // Canonical source instances (id ↔ display label) for the v2 source
   // filter; import scopes for the import-scope chip.
   tauri.handlers.set("sources_list", () => [
@@ -4726,6 +4730,26 @@ describe("settings screen", () => {
     await boot();
     await vi.waitFor(() => expect($("#env-info").textContent).toContain("ANTHROPIC_BASE_URL"));
     expect($("#env-info").textContent).toContain("Settings file problem");
+  });
+
+  it("shows the running app's version from the app_version IPC", async () => {
+    tauri.handlers.set("app_version", () => "9.8.7");
+    await boot();
+    await vi.waitFor(() => expect($("#app-version").textContent).toBe("Version 9.8.7"));
+    expect($("#app-version").hidden).toBe(false);
+  });
+
+  it("keeps the version readout hidden when app_version fails", async () => {
+    tauri.handlers.set("app_version", () => Promise.reject(new Error("boom")));
+    await boot();
+    // The probe ran and failed quiet: no readout, no error banner, and
+    // the rest of Settings still renders.
+    await vi.waitFor(() =>
+      expect(tauri.calls.some((c) => c.cmd === "app_version")).toBe(true),
+    );
+    expect($("#app-version").hidden).toBe(true);
+    expect($("#settings-note").classList.contains("error")).toBe(false);
+    await vi.waitFor(() => expect(rowIds()).toEqual(["zai"]));
   });
 
   it("adds provider rows with unique ids and per-kind prefills", async () => {
