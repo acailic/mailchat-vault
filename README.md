@@ -1,6 +1,19 @@
 # Mailchat Vault
 
+<!-- Canonical positioning block: the single source lives in
+     docs/landing.md (search "positioning-block"); the Product Hunt
+     first comment quotes it too. The quote below is verified byte for
+     byte by scripts/check-positioning.mjs (npm run check:docs) — edit
+     every copy in one change. -->
+<!-- positioning-block:start -->
 Mailchat Vault is one private, searchable archive for your email and your chats, on your own machine: drop in a Gmail Takeout export or a WhatsApp, Telegram, Signal, Discord, or Messenger export and find any message in seconds — fully offline, with no cloud service holding your messages.
+
+- Email and chats in one archive: `.mbox`/`.eml` files and IMAP/Gmail sync, plus WhatsApp, Telegram, Signal, Discord, and Messenger exports.
+- Full-text search with highlighted hits, filters, and conversation context, fully offline.
+- Free and open source (GPL-3.0-only), with installers for Linux, macOS, and Windows.
+
+Local-first privacy: search stays on this device.
+<!-- positioning-block:end -->
 
 [![Demo: the first-run card opens the import flow, an .mbox goes through the preview and confirm steps, then a search for "vault" returns four hits and the top hit opens in the reading pane with matches highlighted; synthetic fixture data, light theme](docs/screenshots/demo.gif)](docs/screenshots/README.md#demo-gif-readme-front-door)
 
@@ -65,6 +78,7 @@ Captured from the running app with synthetic demo data in the light theme by the
 | [Specification set](docs/README.md) | Product plan, UX spec, architecture, contracts, roadmap, decisions |
 | [Download & install](docs/download.md) | Installer matrix, minimum requirements, checksum verification, limitations, upgrades |
 | [Releases](docs/release.md) | Installers, smoke tests, checksums, publishing |
+| [Product Hunt launch pack](docs/launch/product-hunt/README.md) | Listing copy, gallery images with regeneration recipes, maker first comment, demo video script |
 
 ## Quickstart
 

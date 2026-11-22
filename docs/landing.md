@@ -5,12 +5,38 @@
      Keep the promise, the comparison table, and the single CTA in sync with
      the README front door. Strategy and monetization material stays outside
      the repository (see docs/README.md). -->
+<!-- Canonical positioning block - the single source for the one-liner,
+     the three bullets, and the privacy claim. README.md and
+     docs/launch/product-hunt/first-comment.md quote it verbatim between
+     positioning-block markers; scripts/check-positioning.mjs
+     (npm run check:docs) enforces byte-for-byte equality. Edit all
+     copies in one change. -->
+<!-- positioning-block:start
+Mailchat Vault is one private, searchable archive for your email and your chats, on your own machine: drop in a Gmail Takeout export or a WhatsApp, Telegram, Signal, Discord, or Messenger export and find any message in seconds — fully offline, with no cloud service holding your messages.
+
+- Email and chats in one archive: `.mbox`/`.eml` files and IMAP/Gmail sync, plus WhatsApp, Telegram, Signal, Discord, and Messenger exports.
+- Full-text search with highlighted hits, filters, and conversation context, fully offline.
+- Free and open source (GPL-3.0-only), with installers for Linux, macOS, and Windows.
+
+Local-first privacy: search stays on this device.
+positioning-block:end -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="Mailchat Vault - one private, searchable archive for your email and chats, fully offline on your own machine. Free and open source.">
 <title>Mailchat Vault — your email and chats, one private archive on your machine</title>
+<!-- Social cards. og:image reuses the committed branded card
+     public/social-preview.png (1280×640, matches twitter:card =
+     summary_large_image). Owner deploy step: host the image next to this
+     page and set og:image to the absolute URL on the deploy domain
+     (https://<deploy-domain>/social-preview.png) - social scrapers cannot
+     resolve a relative path. The committed relative value keeps the file
+     self-contained until the owner sets the deployed URL. -->
+<meta property="og:title" content="Mailchat Vault — your email and chats, one private archive on your machine">
+<meta property="og:description" content="Mailchat Vault - one private, searchable archive for your email and chats, fully offline on your own machine. Free and open source.">
+<meta property="og:image" content="social-preview.png">
+<meta name="twitter:card" content="summary_large_image">
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
@@ -69,10 +95,11 @@
 <main>
   <h1>Mailchat&nbsp;Vault</h1>
   <p class="promise">
-    One private, searchable archive for your email and your chats, on your own
-    machine: drop in a Gmail Takeout export or a WhatsApp, Telegram, Signal,
-    Discord, or Messenger export and find any message in seconds — fully
-    offline, with no cloud service holding your messages.
+    Mailchat Vault is one private, searchable archive for your email and
+    your chats, on your own machine: drop in a Gmail Takeout export or a
+    WhatsApp, Telegram, Signal, Discord, or Messenger export and find any
+    message in seconds — fully offline, with no cloud service holding
+    your messages.
   </p>
   <a class="cta" href="https://github.com/acailic/mailchat-vault/releases/latest">Download for macOS, Windows, or Linux</a>
   <p class="cta-note">Free and open source (GPL-3.0-only). Linux, macOS, and Windows installers with checksums.</p>

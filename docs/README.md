@@ -25,6 +25,7 @@ Hands-on guides sit alongside the specification set:
 | [Support matrix](support-matrix.md) | Current capability and claim status with evidence links, plus open go-public blockers |
 | [Security](security.md) | What the opt-in at-rest encryption (SQLCipher) does and does not protect: memory, swap, pre-migration backups, key custody |
 | [Landing page](landing.md) | Deploy-ready public landing copy: the README's one-sentence promise and comparison table with a single call to action — one self-contained file with no external assets, paste into any static host |
+| [Product Hunt launch pack](launch/product-hunt/README.md) | Launch listing pack: tagline and description, gallery images (1270×760, synthetic data, regenerable via committed ffmpeg recipes), maker first comment, demo video script, owner upload steps |
 
 ## Reading order
 
